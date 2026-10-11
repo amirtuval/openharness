@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { API_VERSION_PREFIX, ApiErrorBodySchema, SessionUsageSchema } from '@openharness/protocol'
-import type { Session, SessionId, SessionUsage, UserUsage } from '@openharness/protocol'
+import {
+  API_VERSION_PREFIX,
+  ApiErrorBodySchema,
+  SessionUsageSchema,
+  WEB_SEARCH_TOOL_NAME,
+  type Session,
+  type SessionId,
+  type SessionUsage,
+  type UserUsage,
+} from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 import type { SessionStore } from '@openharness/session'
-
-import { WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
 
 import { createBundledRegistry } from './catalog/registry'
 import { asUser, createTestApp, waitForIdle, type TestContext } from './test-support'

@@ -1505,8 +1505,8 @@ function searchSpan(result: ModelRequestResult): { readonly searches?: number } 
  * that nothing of ours ran it: the crash rule leaves it alone (`./tools`), and the request
  * carries it through `agent.opaque_content` instead of through this pair (`./context`).
  *
- * The query is the model's own argument as the step reported it, and the result's content is
- * the reading of what the search found — the same text a provider switch replays — beside the
+ * The call's `input` is what the step said the search asked for (`./model`), and the result's
+ * content is the reading of what it found — the same text a provider switch replays — beside the
  * normalized `sources` a client renders as the reply's citations.
  */
 async function storeProviderSearch(
@@ -1514,9 +1514,7 @@ async function storeProviderSearch(
   sources: readonly Source[],
   append: (events: AppendableEvent[]) => Promise<StoredEvent[]>,
 ): Promise<void> {
-  const [call] = await append([
-    agentToolUse(search.name, { query: search.query }, 'allow', 'provider'),
-  ])
+  const [call] = await append([agentToolUse(search.name, search.input, 'allow', 'provider')])
   if (call === undefined) {
     return
   }

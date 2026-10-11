@@ -11,7 +11,6 @@ import {
 import { InMemorySessionStore } from '@openharness/session'
 import type { RetryPolicy } from '@openharness/brain'
 
-import { createProviderFetch } from './catalog/provider-fetch'
 import { createBundledRegistry } from './catalog/registry'
 import { LocalScheduler } from './scheduler'
 import { createTurnTools, TEST_TOOL_NAME } from './tools'

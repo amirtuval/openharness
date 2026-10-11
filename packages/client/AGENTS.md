@@ -331,9 +331,13 @@ which a Refresh button should surface to the user rather than retry in a loop.
 session's totals and `usage.me({ from, to, tz })` for the caller's own, by model and by day.
 Both are owner-scoped server-side (another user's session is a 404, and there is no id in the
 per-user path), and both answer **cost** — computed by the server from the log's tokens and its
-vendored prices, `null` for a model nobody prices. Both also carry `searches`, how many
-`web_search` calls the covered log holds (epic #303, #305): a count and never a price, because
-the operator pays the search provider and no rate for that is in this repository.
+vendored prices, `null` for a model nobody prices. Both also carry `searches`, how many web
+searches the covered log holds (epic #303, #305; #335): the `web_search` calls a log stored in
+the operator-key era carries, and the searches each request's own span counted — a
+provider-executed search leaves no call of ours to pair with a result, so the span that spent it
+holds the number. It is a count and never a price, because a search now runs on the chat's own
+model key, inside the request the user already paid for, and no rate for one is in this
+repository.
 
 The transcript carries the same numbers for a screen that is already following a session, which
 is why a client rarely needs either route:
@@ -720,6 +724,13 @@ running })` reads it off the call's `evaluated_permission`, whether a result has
   lands — the same rule the log's other per-request records follow — and an MCP call the client
   never saw the request for (it joined mid-request) still reads `source: 'mcp'` from the event's
   own type (`toolCallSource`), rather than being taken for a built-in.
+- **A provider-executed search keeps its pages, and says it was the provider's.** A `web_search`
+  the provider ran inside the request is stored as a call like any other (#335), `source:
+  'provider'` folded from the span's own offer or read off the call for one the client joined
+  late, and its result carries the citations the provider returned as `TranscriptToolCall.sources`
+  — the protocol's `Source` list (a URL, a title, the passage it was quoted for), which a line
+  shows beneath the query and which no other tool's result has. The sources are part of a call's
+  identity too (`isSameToolCall`), so a re-fold does not pass one search's pages off as another's.
 - **The words are the client's.** `toolStatusLabel` ("waiting for you", "execution lost"),
   `toolCallSummary` (a URL, a query, a task count, a question, else the first string value) and
   `formatToolInput` are the same in both frontends, and so are the notices:
@@ -736,10 +747,13 @@ running })` reads it off the call's `evaluated_permission`, whether a result has
 override applied over the caller's choices, which is what a composer shows for a chat that
 follows one) and `put(body)` is `PUT /v1/me/tools`, which merges per tool — `builtin` and `mcp`
 being separate maps, so a write to one never drops the other. Both answer the effective list —
-one entry per tool, with `source`, `policy`, `default_policy` and `available`, and `mcp_server`
-for a remote one — and the fake client backs both (a registered set of three built-ins, a seeded
-`toolSettings`, a `toolsAvailable` over which of them this fake deployment registers, and a
-`mcpTools` list of the remote pairs it offers).
+one entry per tool, with `source`, `policy`, `default_policy` and `available` (`reason` beside an
+unavailable one that knows why, #335), and `mcp_server` for a remote one. The provider-native
+`web_search` is listed like any other even though no registry backs it (#335), its `available`
+turning on the chat's model; the fake client backs both (a registered set of three built-ins —
+`web_search` among them, the native one restated as the shape rather than the engine, #335 — a
+seeded `toolSettings`, a `toolsAvailable` over which of them this fake deployment registers, and
+a `mcpTools` list of the remote pairs it offers).
 
 ## The pause (epic #303, X6; issues #309, #310)
 
@@ -1226,7 +1240,8 @@ records and their clearing, a rewind dropping the calls it covers, and the todo 
 `readTodoList`'s rule — plus the MCP pairs: the fold under the offered name with `source: 'mcp'`
 and the server, the pairing by `mcp_tool_use_id`, an orphan result dropped, an MCP call read as
 `mcp` with no request record at all, its `ask` default waiting, and a remote `web_search` not
-counted as one). `src/client.test.ts` holds `client.tools`' two routes — a remote entry read and
+counted as one — and the provider-executed search: the pages it keeps as `sources`, the
+`provider` source it is stamped with, and the count that includes it, #335). `src/client.test.ts` holds `client.tools`' two routes — a remote entry read and
 a policy written through the `mcp` map included — and the fake's own `tools` store is in
 `src/testing/fake.test.ts`.
 

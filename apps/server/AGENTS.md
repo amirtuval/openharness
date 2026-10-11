@@ -173,9 +173,6 @@ itself is a `session.context_summary` with reason `manual`.
 | `OPENHARNESS_CLEAR_THRESHOLD`             | `0.5`                            | the soft share of the chat model's budget at which old tool results are cleared before anything is summarized (#331), below `OPENHARNESS_COMPACTION_THRESHOLD`; a fraction in `0..1`, and the default needs no setting |
 | `OPENHARNESS_TODO_NUDGE`                  | off                              | `1` nudges the model to write a todo list before its first tool call (#331); off by default, because the benefit is small and a line on every session's first request is not free                                      |
 | `OPENHARNESS_MAX_TOOL_STEPS`              | `50` (the brain's)               | the most model requests one turn may make (epic #303, X2); past it the turn ends with a `tool_steps_exhausted_error` notice and goes idle, and a value below `1` fails the boot                                        |
-| `OPENHARNESS_SEARCH_PROVIDER`             | `brave`                          | which search API `web_search` is served by (epic #303, #305): `brave` is the one this build has an adapter for, and a name it has none for fails the boot                                                              |
-| `OPENHARNESS_SEARCH_API_KEY`              | —                                | the operator's key for that provider; it is what turns `web_search` **on**, and with no key the tool is not registered at all. Never printed, never stored, never in a result                                          |
-| `OPENHARNESS_SEARCH_DAILY_LIMIT`          | `50`                             | how many searches one user gets per day, counted by UTC day from the log; `0` keeps the tool registered and answers every call with the limit notice; a negative value fails the boot                                  |
 | `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                                                                                                |
 | `OPENHARNESS_TRACING`                     | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                                                                                                                                          |
 | `OPENHARNESS_TRACE_SAMPLE_RATE`           | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)                                                                                                                              |
@@ -607,13 +604,12 @@ CRUD, and the store's mode methods (`@openharness/session`) hold the rows.
 
 The brain's tool loop — the model asks for a tool, the brain runs it and sends the result back —
 is `@openharness/brain`'s (`packages/brain/AGENTS.md` has the loop itself, and the pause that
-half of it does for the user) and the tools themselves are `@openharness/hands`' (the three
-built-ins are documented there). The server's half is four modules: `tools.ts` — which tools a
-process registers, which models may be offered them, and how many requests a turn may make —
-`searches.ts`, where the operator's search key and the per-user daily allowance come from
-(#305), `tool-settings.ts`, the per-user choices over them (#307), and `pausing.ts`, the
-`ask_user` tool every deployment gets and the checks a `user.tool_confirmation` passes before it
-is stored (#309).
+half of it does for the user) and the tools themselves are `@openharness/hands`' (the built-ins
+are documented there). The server's half is three modules: `tools.ts` — which tools a process
+registers, which models may be offered them, and how many requests a turn may make —
+`tool-settings.ts`, the per-user choices over them (#307), and `pausing.ts`, the `ask_user` tool
+every deployment gets and the checks a `user.tool_confirmation` passes before it is stored
+(#309).
 
 - **`ask_user` ships with every deployment** (epic #303, #309). It is the one built-in the
   server itself provides: a model that needs a decision asks the user for one, the turn ends
@@ -625,11 +621,13 @@ is stored (#309).
   every process, whatever model it runs — a URL the model chose, read through `safeFetch`, and
   the model's own task list. Which of them a request is really offered is the per-user settings'
   (`tool-settings.ts`): a tool a user turned off is left out of the offer entirely.
-- **`web_search` is registered only where an operator configured a search API.** With no
-  `OPENHARNESS_SEARCH_API_KEY` there is no provider to call, so the tool does not exist, the
-  model is offered no search — a smaller offer, not a broken one — and a user's stored setting
-  for it reads as `available: false`. The rest of the search section below is about what happens
-  when there is one.
+- **`web_search` is not registered here at all (#335).** It is a **provider-native** tool: the
+  brain attaches the chat model's own provider's search tool to the request and the provider runs
+  the search inside it, so there is no key to configure, no adapter to call and no tool of ours to
+  register — `@openharness/brain`'s `native-search.ts` decides per request whether the model has
+  one. What the server holds is the tool's **settings** row, listed like any other even though no
+  `ToolDefinition` backs it, and the `reason` a user sees when their chat's model has no provider
+  search tool. The subsection below is the whole of the server's half.
 - **The one test tool is behind the test model.** An `echo` tool (its input echoed back) is
   registered when `OPENHARNESS_TEST_MODEL=mock`, which is what lets the e2e suite drive a whole
   tool turn through the real server, scheduler, brain, store and log. The mock model calls it on
@@ -662,46 +660,47 @@ is stored (#309).
   `tool_loop_stuck_error`, which the frontends draw as the notice the step limit gets
   (`@openharness/client`'s `stuckNotice`).
 - **Nothing secret reaches a tool's result or the log.** A turn's per-user values are the host's
-  to resolve — `TurnToolOptions.resolveToolSecrets`, which is where the operator's search key
-  travels and where #311's MCP tokens will arrive — and `@openharness/hands` scrubs whatever it
-  resolved out of everything a tool returns before it is stored.
+  to resolve — `TurnToolOptions.resolveToolSecrets`, which #335 leaves unset because nothing
+  needs one (the operator's search key of #305 was the only value that travelled through it) —
+  and `@openharness/hands` scrubs whatever it resolved out of everything a tool returns before
+  it is stored.
 
-### The operator's search key, and the daily allowance (#305)
+### Provider-native web search (#335)
 
-`web_search` is served by **one search API the operator pays for**, so two things are the
-server's and only the server's:
+`web_search` is served by the chat's own model provider, inside the model request, so everything
+#305 made the server's — the operator's key, the search API the operator paid for, the per-user
+daily allowance — is gone. What is left is one settings row and a per-model availability answer:
 
-- **The key** (`OPENHARNESS_SEARCH_API_KEY`, a secret like any other and never printed) is held
-  by the resolver `createTurnTools` builds: it answers `{ openharness_search_api_key }` for the
-  session's owner, per step, and `@openharness/hands` reads no environment variable — which is
-  what keeps the key out of the package that could hand it to a model. The registry scrubs it
-  out of every result, so a tool that echoed it back would store `[REDACTED]`.
-- **The allowance** is `searches.ts`: `createSearchAllowance({ store, dailyLimit })` counts the
-  user's `web_search` calls from the log — `SessionStore.listToolUses`, the same read the usage
-  route makes, one day wide — and `remaining(ownerId)` is what the resolver asks first.
-  **Withholding the key is how the cap is enforced**: over the allowance the resolver answers
-  `{}`, so the tool replies
-  `Search limit reached: this account has used all N of its web searches for today.` That is the
-  one reason a registered search tool is ever handed no key — it is registered only when a key
-  was configured — and it is why the limit is stated by the tool rather than by a `deny` the
-  model could not tell from a user's refusal.
-- **The day is UTC.** A cap is enforced inside a turn, where no request named a zone, and a
-  user's zone is not stored anywhere; UTC is the same default the usage route answers with when
-  a caller names none. A reader who passes no `tz` sees exactly the day the cap counts.
-- **A step is checked once.** `resolveToolSecrets` is asked per tool step, so the count is read
-  before the step's calls run — and a step whose model asked for three searches at once is
-  checked once, which can put a day at most a step's worth of calls over its limit. A model that
-  asks for many searches in one step is rare, and the bound is the step budget either way.
+- **The settings row is declared, not registered.** `createTurnRegistry` builds no `web_search`
+  tool, and the settings routes list the name anyway because the brain's
+  `NATIVE_TOOL_DECLARATIONS` declares it (`{ name: 'web_search', permission: 'allow' }`), which
+  is what keeps a user's stored `builtin.web_search` — written in the operator-key era — applying
+  unchanged. A tool listed as available must still be one a chat can really offer, which is the
+  one thing the declaration and the registry's tools both answer.
+- **Availability depends on the chat's model.** `GET /v1/me/tools` takes an optional `?model_id=`,
+  and the native tool is `available` only when its provider has a search tool: `modelSearches`,
+  which knows the three fixed families and the one named-credential case a model id alone decides.
+  A read that names no model makes no claim about one, so it lists the tool as available — the
+  same answer the listing gave before the field existed. An unavailable one carries
+  `reason: 'This model has no web search.'` (`MODEL_CANNOT_SEARCH`), so a settings screen can say
+  why rather than draw a dead switch.
+- **`ask` is refused, and a stored one reads as `allow`.** A provider-executed search has no
+  moment at which this build could pause and ask — it runs inside the request, before any call of
+  ours exists — so `PUT /v1/me/tools` refuses `ask` on `web_search` outright (a 400 naming the
+  reason), and a `builtin.web_search` a user stored as `ask` before #335 is read as `allow` in a
+  turn rather than offering a switch that could never ask. A `deny`, and turning it off, are
+  honoured: the tool is left out of the request entirely, which is the only meaning left when
+  there is nothing of ours to refuse.
 
-The tools are wired in `main.ts` — `createTurnRegistry({ config, kind, searchTransport })` builds
-the one registry (the built-ins, `web_search` when a search API is configured, the test `echo`
-tool under the mock model), and `createTurnTools({ config, kind, registry, searchTransport,
-allowance, store })` turns it into the turn's options, building the registry itself when no
-`tools` override is passed — and reach a turn through the scheduler and `SessionRunner` as one
-`TurnToolOptions` object whose field names are `RunTurnOptions`' own, so the runner spreads it
-over unchanged. The same registry goes into `createApp` as `tools` (literally
-`turnTools.tools`), which is what the settings routes read: a tool the settings screen calls
-available is one a chat can really call.
+The tools are wired in `main.ts` — `createTurnRegistry({ kind })` builds the one registry (the
+built-ins, and the test `echo` tool under the mock model), and `createTurnTools({ config, kind,
+registry, tools: turnRegistry, store, mcp })` turns it into the turn's options (`registry` is
+the model registry that answers which models can call tools; `createTurnTools` builds the
+registry itself when no `tools` override is passed) — and reach a turn through the scheduler and
+`SessionRunner` as one `TurnToolOptions` object whose field names are `RunTurnOptions`' own, so
+the runner spreads it over unchanged. The same registry goes into `createApp` as `tools`
+(literally `turnTools.tools`), which is what the settings routes read: a tool the settings screen
+calls available is one a chat can really call.
 
 ### The per-user tool settings (#307; the remote half: #312)
 
@@ -947,13 +946,17 @@ prices each request with the registry's rates, and assembles the totals and the 
   `input_tokens` these totals carry is the **uncached** input — the counters are disjoint, which
   is what makes the per-counter pricing correct — because the brain normalizes each provider
   family into them at the model seam (epic #277, K2; `packages/brain/src/model.ts`).
-- **Searches are counted and never priced** (epic #303, #305). Every usage answer carries
-  `searches` beside its totals: how many `web_search` calls the covered log holds — the call and
-  its successful result, which is the same rule `listToolUses` reads by. The session route
-  counts them in the one log it already reads; the user route makes a second windowed read
-  (`listToolUses`) beside the model requests, and groups the calls by the reader's local day
-  exactly as the requests are. The operator's search plan's rates are not in this repository, so
-  the number is a count and no money is claimed for it.
+- **Searches are counted and never priced** (epic #303, #305; #335). Every usage answer carries
+  `searches` beside its totals, and the log holds two kinds of them: the `web_search` **calls** a
+  log stored in the operator-key era carries, which count when their result exists and is not an
+  error (the rule `listToolUses` reads by), and the searches each request's own
+  `span.model_request_end` counted, which is where a **provider-executed** search is — it leaves
+  no call of ours to pair with a result, so the span that spent it holds the number. The session
+  route counts both in the one log it already walks; the user route makes the calls' own windowed
+  read (`listToolUses`) beside the model requests, and groups them by the reader's local day
+  exactly as the requests are. Neither is priced — a provider-native search runs on the user's own
+  model key, and #305's operator plan is gone — so the number is a count and no money is claimed
+  for it.
 - **The per-session route** is owner-scoped (another user's session is the store's
   `SessionNotFoundError`, which `app.onError` maps to the 404) and reads that session's whole
   log. **The per-user route** has no id in its path — it is always the caller — and is **one
@@ -1744,11 +1747,10 @@ before the instance stops serving it (#151).
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                                                                                                                                                                                                                                                      | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                                                                                                                                                                                                                                                                                    |
 | `createContextCompactionResolver`, `ContextCompactionDeps`                                                                                                                                                                                                                                                                                                     | the per-owner compaction resolver (epic #277 C3; #282): the session owner's stored threshold, summary model and pass limit, resolved per request over `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's budgets                                                                                                                                                                                        |
 | `createReasoningSupportResolver`                                                                                                                                                                                                                                                                                                                               | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                                                                                                                                                                                                                                                                                |
-| `createTurnRegistry`, `createTurnTools`, `TurnRegistryOptions`, `TurnToolsOptions`, `TurnToolOptions`                                                                                                                                                                                                                                                          | the registry a process runs with — `ask_user` and the built-ins of #305 for every process, plus `web_search` where a search API is configured and the test `echo` tool under `OPENHARNESS_TEST_MODEL=mock` — and the tools a turn is handed: that registry, the settings resolver (#307), the support gate, the search-key resolver and the step budget                                                    |
+| `createTurnRegistry`, `createTurnTools`, `TurnRegistryOptions`, `TurnToolsOptions`, `TurnToolOptions`                                                                                                                                                                                                                                                          | the registry a process runs with — `ask_user` and the built-ins of #305 for every process, and the test `echo` tool under `OPENHARNESS_TEST_MODEL=mock` (the provider-native `web_search` is no tool of ours, so nothing is registered for it, #335) — and the tools a turn is handed: that registry, the settings resolver (#307), the support gate and the step budget                                                                    |
 | `askUserTool`, `assertConfirmations`, `rememberAlwaysApprovals`, `withAlwaysApprovals`, `isConfirmation`, `PausingDeps`, `RememberDeps`, `AlwaysApproval`                                                                                                                                                                                                      | the pause's server half (epic #303, X6; #309; the remote pair: #312): the `ask_user` tool every deployment registers, the checks a `user.tool_confirmation` passes (a call of this session is waiting — built-in or remote — the answers fit its questions, the extensions make sense for it), and the stored policy an `always` approval writes (a built-in's `enabled`+`policy`, a remote tool's policy) |
 | `effectiveTools`, `toolSettingEntries`, `toolDecisions`, `createToolSettingsResolver`, `listToolSettings`, `ToolSettingsDeps`                                                                                                                                                                                                                                  | the per-user tool settings (epic #303, X4; #307; the remote half: #312): the effective answer, as the wire's entries, as the brain's decisions, the resolver `runTurn` is handed, and the listing a route makes (a mode's override and the owner's in-force MCP servers included)                                                                                                                          |
 | `createMcpToolProvider`, `McpToolProviderOptions`, `DEFAULT_MCP_TOOL_CACHE_TTL_MS`, `DEFAULT_MCP_LISTING_TIMEOUT_MS`                                                                                                                                                                                                                                           | the remote tools a request may offer (#312): the listing — the in-force servers, their tools as `createMcpTool` definitions, a short cache keyed per user and server, and a failure per server that could not be listed — as the brain's `McpToolProvider`                                                                                                                                                 |
-| `createSearchAllowance`, `SearchAllowance`, `SearchAllowanceOptions`                                                                                                                                                                                                                                                                                           | the per-user daily search allowance (#305): how many `web_search` calls a user has left today, counted from the log by UTC day — the value the tool wiring withholds the operator's key on                                                                                                                                                                                                                 |
 | `createTestToolRegistry`, `testEchoTool`, `TEST_TOOL_NAME`, `TEST_TOOL_DESCRIPTION`                                                                                                                                                                                                                                                                            | the test `echo` tool, and the registry that holds it alone — test-only, behind the mock model                                                                                                                                                                                                                                                                                                              |
 | `createToolSupportResolver`                                                                                                                                                                                                                                                                                                                                    | the per-model tool gate: whether a model can call tools, read from models.dev's `tool_call` (epic #303, X2)                                                                                                                                                                                                                                                                                                |
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                                                                                                                                                                                                                                                        | the provider HTTP client: egress-proxy aware, 5 s deadline (catalogue + credential checks)                                                                                                                                                                                                                                                                                                                 |
@@ -1799,7 +1801,7 @@ src/
   local-day.ts        local calendar days: the zone a request named, the day of an instant, and
                         the UTC window a range's days span (#247)
   usage.ts            what a session or a user spent: the log priced on read (#247), and the
-                        searches it holds counted (#305)
+                        searches it holds counted (#305; the provider-native ones: #335)
   catalog/
     catalog.ts          ModelCatalog: per-provider fetch, join, filter, cache, fallback (#90)
     adapters.ts         the fixed provider endpoint table and each provider's payload shape
@@ -1837,10 +1839,8 @@ src/
   mock-model.ts         the deterministic test model and its markers
   tools.ts              the tools a turn may offer (epic #303; the built-ins are #305): the
                         registry the process runs with — `ask_user` everywhere, the built-ins,
-                        the test `echo` tool behind the mock — the support gate, the operator's
-                        search key resolved per step, and the turn's options
-  searches.ts           the per-user daily search allowance (#305): how many searches are left
-                        today, counted from the log
+                        the test `echo` tool behind the mock — the support gate, and the turn's
+                        options (a provider-native `web_search` is none of these, #335)
   pausing.ts            the pause (epic #303, X6; #309): the `ask_user` tool every deployment
                         registers, and the checks a `user.tool_confirmation` passes before it is
                         stored
@@ -2173,12 +2173,13 @@ parallel with each other.
   and a known model with no window (both `undefined`, the brain's 32,768-token fallback), and
   the bundled snapshot answering a real window for a real model.
 - `tools.test.ts` (epic #303; the built-ins are #305; the per-user settings are #307) — the
-  server's half of the tool loop: that every deployment is offered `web_fetch` and `todo_write`,
-  that `web_search` appears only where a search API is configured, that the test `echo` tool
-  rides ahead of them under the mock model, that it echoes while refusing an input its schema
-  rejects, that the gate is wired to the registry, that the operator's key reaches a step while
-  the allowance lasts and is withheld once it is gone (another user's day unaffected), and that
-  the settings resolver reads the owner's stored choices through the store (#307).
+  server's half of the tool loop: that every deployment is offered `ask_user` beside `web_fetch`
+  and `todo_write`, that the native `web_search` is in the settings answer without being in the
+  registry (#335), that the test `echo` tool rides ahead of the built-ins under the mock model,
+  that it echoes while refusing an input its schema rejects, that the support gate and the
+  settings resolver are wired to the registry and the store, that a deployment which configured
+  no secret resolves none (#335 leaves `resolveToolSecrets` unset), and that the settings
+  resolver reads the owner's stored choices through the store (#307).
 - `mcp-tools.test.ts` (epic #303, X10; #312) — the remote half of the loop over HTTP, against a
   stub MCP server on loopback: a registered server's tools listed and offered under their
   model-facing name (the span recording the source and the server, the model shown the server's
@@ -2204,11 +2205,12 @@ session` remembered for the chat and `remember: always` written to the user's se
   tools **from the next request**, a `deny` is recorded on the call and answered without running
   the tool, and an `ask` pauses the turn — the call stored with `evaluated_permission: ask`,
   nothing run, and the idle naming it `requires_action` (#309) — the model being the scripted
-  one, extended for this issue to emit tool calls.
-- `searches.test.ts` (epic #303, #305) — the daily allowance on the in-memory store: the whole
-  limit for a user who has not searched, a count that follows the log and stops at zero, a
-  failed call not counting, midnight UTC giving the allowance back, one user's day never
-  another's, and a limit of zero.
+  one, extended for this issue to emit tool calls. Its native half (#335) is `web_search`'s: the
+  listing read with a chat's `?model_id=`, available for a model whose provider can search and
+  carrying `reason: 'This model has no web search.'` for one whose cannot (a read that names no
+  model leaving it available), the provider-native tool recorded on the span of a request that
+  was really offered it, and a write of `ask` on it refused with the reason rather than stored as
+  a switch that can never ask.
 - `catalog/tool-support.test.ts` (epic #303, X2) — the tool gate on its own: `false` only for the
   model the registry marks unable to call tools, `undefined` for one it knows is callable and for
   one it does not know at all, an id it cannot read, a named credential reading its type's

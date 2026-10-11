@@ -3,6 +3,7 @@ import {
   PROVIDER_IDS,
   CREDENTIAL_TYPES,
   WEB_SEARCH_TOOL_NAME,
+  type JsonValue,
   type ModelUsage,
   type ProviderId,
   type Source,
@@ -26,6 +27,7 @@ import type { LanguageModel, ModelMessage, ToolSet } from 'ai'
 import { streamText } from 'ai'
 
 import { azureBaseUrl, azureFetch } from './azure-fetch'
+import { asJsonObject } from './tools'
 import { bedrockRuntimeBaseUrl } from './bedrock'
 import { isOwnershipError } from './errors'
 import { openAICompatibleBaseUrl, openAICompatibleFetch } from './openai-compatible-fetch'
@@ -885,8 +887,15 @@ export interface ModelOpaquePart {
 export interface ModelSearchCall {
   /** The tool's name, as the model called it: `web_search`. */
   readonly name: string
-  /** What was searched for, as the step's call or answer reported it. */
-  readonly query: string
+  /**
+   * The arguments the call carried, as the log stores them.
+   *
+   * Anthropic's call is `{ query }`, and OpenAI's and xAI's calls carry nothing at all — their
+   * query (or the page a `openPage` action opened) is on the answer — so this is what the step
+   * said either way, and the one field differs by provider. A call that said nothing is `{}`,
+   * which the log holds like any other argumentless call.
+   */
+  readonly input: Record<string, JsonValue>
   /** What the search found, written out — the titles, URLs and cited passages. */
   readonly text: string
   /** Whether the provider reported the search itself as failed. */
@@ -1220,15 +1229,34 @@ function collectedParts(
   readonly searchCalls: readonly ModelSearchCall[]
 } {
   const collectedParts = [...collected.values()]
+  // Each search is read as the pair it arrived as: what the call asked and what the answer said
+  // it was are two halves of one fact, and a provider may put it on either end.
+  const searches = new Map<string, { input: Record<string, JsonValue>; text: string }>()
+  for (const part of collectedParts) {
+    if (part.type !== 'tool-call' || part.payload?.toolName !== WEB_SEARCH_TOOL_NAME) {
+      continue
+    }
+    const id = String(part.payload.toolCallId)
+    const result = collected.get(toolResultKey(id))
+    const pair = result === undefined ? [part] : [part, result]
+    const subject = searchSubjectOf(pair)
+    searches.set(id, {
+      input: searchInputOf(pair),
+      // What a request that may not have the part replays instead: what was searched and found,
+      // written out. The step's citations are what any of its searches found.
+      text: searchText(subject, sources),
+    })
+  }
   const parts = collectedParts.map((part) => {
     const metadata = part.providerMetadata ?? part.metadata
+    const id = part.payload === undefined ? undefined : String(part.payload.toolCallId)
     return {
       type: part.type,
-      // A search result is what a request that may not have the part replays instead, and the
-      // step's sources are what it found — the step is the unit a provider switch converts.
+      // Only the answer carries the reading: a request that cannot have the parts replays a
+      // result's text, and rendering the call it answers on top of it would say it twice.
       text:
-        part.type === 'tool-result'
-          ? searchText(searchQueryOf(collectedParts), sources)
+        part.type === 'tool-result' && id !== undefined
+          ? (searches.get(id)?.text ?? part.text)
           : part.text,
       ...(part.payload === undefined ? {} : { payload: part.payload }),
       ...(Object.keys(metadata).length === 0 ? {} : { providerMetadata: metadata }),
@@ -1237,11 +1265,12 @@ function collectedParts(
   const searchCalls = collectedParts
     .filter((part) => part.type === 'tool-call' && part.payload?.toolName === WEB_SEARCH_TOOL_NAME)
     .map((part) => {
-      const result = collected.get(toolResultKey(String(part.payload?.toolCallId)))
+      const id = String(part.payload?.toolCallId)
+      const result = collected.get(toolResultKey(id))
       return {
         name: WEB_SEARCH_TOOL_NAME,
-        query: searchQueryOf([part]),
-        text: searchText(searchQueryOf(collectedParts), sources),
+        input: searches.get(id)?.input ?? {},
+        text: searches.get(id)?.text ?? '',
         isError: result?.isError === true,
       }
     })
@@ -1249,37 +1278,66 @@ function collectedParts(
 }
 
 /**
- * The query a step's provider-executed search ran, as far as the step says.
+ * What a step's provider-executed search asked for, as far as the step says.
  *
- * Anthropic puts it on the call (`{ query }`), OpenAI and xAI on the answer (`action.query`, or
- * `action.queries` when it expanded one into several) — one helper so the reading says what was
- * searched whichever end carried it.
+ * Anthropic puts the query on the call (`{ query }`), OpenAI and xAI on the answer
+ * (`action.query`, `action.queries` when one became several, or the `url` of an `openPage`) —
+ * one helper so the reading says what was asked whichever end carried it. Empty when the step
+ * says nothing, which is a provider whose report this build does not read.
  */
-function searchQueryOf(parts: readonly CollectedPart[]): string {
+function searchSubjectOf(parts: readonly CollectedPart[]): string {
+  const input = searchInputOf(parts)
+  return typeof input.query === 'string' ? input.query : (stringOf(input.url) ?? '')
+}
+
+/** A value as a non-empty string, or `undefined`. */
+function stringOf(value: JsonValue | undefined): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * The arguments a step's provider-executed search is recorded as having carried (#335).
+ *
+ * The call's own when it carried any — Anthropic's `{ query }` — and otherwise what the answer
+ * says the search was: the query, the queries, or the page an `openPage` action opened. A call
+ * whose step says none of it is `{}`, which is honest: the log records what the model asked,
+ * and this provider's wire format does not put it on the call.
+ */
+function searchInputOf(parts: readonly CollectedPart[]): Record<string, JsonValue> {
   for (const part of parts) {
     const input = asRecord(part.payload?.input)
-    if (typeof input?.query === 'string' && input.query.length > 0) {
-      return input.query
+    if (input !== null && Object.keys(input).length > 0) {
+      return jsonObjectOf(input)
     }
     const output = asRecord(part.payload?.output)?.value
     const action = asRecord(asRecord(output)?.action) ?? asRecord(output)
-    if (typeof action?.query === 'string' && action.query.length > 0) {
-      return action.query
+    const query = stringOf(action?.query as JsonValue | undefined)
+    if (query !== undefined) {
+      return { query }
     }
     const queries = action?.queries
     if (Array.isArray(queries) && typeof queries[0] === 'string') {
-      return queries.join(', ')
+      return { query: queries.join(', ') }
+    }
+    const url = stringOf(action?.url as JsonValue | undefined)
+    if (url !== undefined) {
+      return { url }
     }
   }
-  return ''
+  return {}
+}
+
+/** A record as the JSON object the protocol stores, dropping anything that is not JSON. */
+function jsonObjectOf(value: Record<string, unknown>): Record<string, JsonValue> {
+  return asJsonObject(value) ?? {}
 }
 
 /** What a step's search found, written out — the text a switched provider is shown instead. */
-function searchText(query: string, sources: readonly Source[]): string {
+function searchText(subject: string, sources: readonly Source[]): string {
   if (sources.length === 0) {
     return ''
   }
-  const head = query.length === 0 ? 'Web search results' : `Web search results for "${query}"`
+  const head = subject.length === 0 ? 'Web search results' : `Web search results for "${subject}"`
   const lines = sources.map((source, index) => {
     const citation = source.title === undefined ? source.url : `${source.title} — ${source.url}`
     return source.cited_text === undefined
@@ -1358,15 +1416,6 @@ function isErrorPart(part: unknown): boolean {
   // `tool-result` at runtime (Anthropic's search errors do), but its own part type does not
   // declare the field.
   return asRecord(part)?.isError === true
-}
-
-/** What a failed provider-executed call is reported as, as the text of its result. */
-function errorTextOf(error: unknown): string {
-  const record = asRecord(error)
-  const code = record?.errorCode
-  return typeof code === 'string' && code.length > 0
-    ? `The provider's search failed: ${code}`
-    : 'The provider’s search failed.'
 }
 
 /** A value as JSON, or `null` for one that cannot be — what the SDK's own converter falls to. */

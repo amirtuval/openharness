@@ -929,7 +929,7 @@ this: …`), and an `ask_user` call has its answers written as its result — va
 | which tools a request offers, and what a call may do | `toolSettings` on `runTurn`: the per-request decisions #307 stores per user and a mode overrides; a disabled tool is left out of the offer, and an `ask` is the pause of #309                                                             |
 | a call waiting on the user                           | `./pausing`: `awaitingUser` is the question ("which calls wait?"), `confirmationOutcome`/`answerConfirmations` are what a `user.tool_confirmation` does, and `resolveWaiting` is what a message or an interrupt does instead              |
 | a tool that always asks (rather than a policy)       | `ASK_USER_TOOL_NAME` in `./pausing`'s `waitsForUser`: a call to `ask_user` waits whatever the policy says, because the user's answers are its result. A remote MCP tool asks through its own `ask` default (#312) on the same path        |
-| per-user values a tool needs                         | `resolveToolSecrets` on `runTurn` (asked per step with the owner); #311's MCP tokens arrive here (the operator's search key of #305 went with #335)                                                                                         |
+| per-user values a tool needs                         | `resolveToolSecrets` on `runTurn` (asked per step with the owner); an MCP server's token (#311) is the kind of value that would arrive here (the operator's search key of #305 went with #335)                                                |
 | MCP tools                                            | built (#312): `mcpTools` on `runTurn` lists the chat's in-force servers' tools per request, `runToolStep` writes the MCP pair, and every reader goes through `@openharness/protocol`'s one tool-call abstraction (`./mcp`)                |
 | tool results in the context                          | the two rules above (X9, #306): a result's cap comes from `ToolDefinition.maxResultTokens` and the tool name in the log, and old results are cleared rather than summarized. A remote MCP tool's result is a result like any other (#312) |
 
@@ -1703,6 +1703,22 @@ lost`.
   mid-turn and a model switch of the same provider both leave the assistant turn without a
   reasoning part, while the step's parts stay in the log — plus a step that produced nothing
   opaque storing no event and building the request it built before #334.
+- `native-search.test.ts` — the provider-native search rules on their own (X14; #335): which
+  family a model id and credential type make (Anthropic's newest tool on a direct Claude and the
+  basic one on Vertex, OpenAI's and xAI's own on the models that have one, none on the models and
+  providers that do not, and the one named-credential case a model id alone decides), the
+  per-request bound, the settings that withhold the tool (off, or `deny`, with a stored `ask`
+  read as `allow`), the declaration the settings are keyed by, and the narrow reading of a
+  provider's 4xx that names the tool.
+- `search-loop.test.ts` — the same, driven through `runTurn` (X14; #335), which is what a
+  **request** carries: the tool attached to a Claude's offer and recorded on the span as
+  `source: 'provider'` (and absent, or withheld by the settings, on a model that cannot search),
+  a search the provider ran stored as the readable pair beside its `sources` and counted on the
+  span, the provider's own call and answer sent back on the next request, a turn the provider
+  paused continued rather than re-run, a provider switch replaying the results as plain text
+  rather than as the provider's own content, a refusal dropping the tool for one retry (and
+  `search_rejected` recorded on the refused span) with a failure that is not about the tool left
+  to the ordinary paths, and the crash rule leaving a provider-executed call alone.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
   scripts what each model request answers with — text **and tool calls**, whose arguments travel
   as JSON text the way a provider sends them — records the prompts, and can act mid-stream

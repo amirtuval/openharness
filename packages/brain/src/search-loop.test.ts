@@ -78,6 +78,16 @@ function scriptedSearch() {
   }
 }
 
+/**
+ * A failure in the shape a provider's refusal arrives in: a message, and the status the SDK's
+ * own error carries. A bare `Error` is what the classifier reads for the retry verdict.
+ */
+function rejectedTool(statusCode: number, message: string): Error {
+  const failure: Error & { statusCode?: number } = new Error(message)
+  failure.statusCode = statusCode
+  return failure
+}
+
 /** A `ToolSettings` that turns `web_search` off, or names it without saying anything. */
 function settingsFor(webSearch: { enabled: boolean; permission: 'allow' | 'deny' }): ToolSettings {
   return { [WEB_SEARCH_TOOL_NAME]: webSearch }
@@ -203,12 +213,15 @@ describe('a search the provider ran inside a request (#335)', () => {
           text: '',
           payload: { toolCallId: 'srvtoolu_1', toolName: 'web_search' },
         },
-        {
-          type: 'tool-result',
-          text: expect.stringContaining('The architecture — https://example.test/architecture'),
-        },
+        { type: 'tool-result' },
       ],
     })
+    // The result part carries the reading a request that cannot have it replays instead: what
+    // was searched and found, in prose — and the provider's own payload beside it.
+    expect(JSON.stringify(opaque[0])).toContain(
+      'The architecture — https://example.test/architecture',
+    )
+    expect(JSON.stringify(opaque[0])).toContain('ENCRYPTED-RESULT')
 
     // The readable pair: the call the model made, and the answer a reader and a client see.
     const calls = toolUses(log, WEB_SEARCH_TOOL_NAME)
@@ -281,6 +294,57 @@ describe('a search the provider ran inside a request (#335)', () => {
     })
     expect(parts[1]).toMatchObject({ toolCallId: 'srvtoolu_1', output: { type: 'json' } })
     expect(JSON.stringify(parts[1])).toContain('ENCRYPTED-RESULT')
+  })
+
+  it('reads what was searched from the answer, for a provider whose call says nothing', async () => {
+    // OpenAI's and xAI's wire formats put nothing on the call: the query — or the page an
+    // `openPage` action opened — is on the answer, so the readable call is built from both ends.
+    const { store, sessionId } = await newSession([message('look it up')])
+    const { factory } = mockModel({
+      providerTools: [
+        {
+          id: 'ws_1',
+          name: WEB_SEARCH_TOOL_NAME,
+          input: {},
+          output: { action: { type: 'search', query: 'the query', queries: ['the query'] } },
+        },
+      ],
+      sources: [{ url: 'https://example.test/a', title: 'T' }],
+      text: ['Found it.'],
+    })
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([echo()]),
+    })
+
+    const calls = toolUses(await logOf(store, sessionId), WEB_SEARCH_TOOL_NAME)
+    expect(calls[0]).toMatchObject({ input: { query: 'the query' } })
+
+    // A call that opened a page instead carries the URL it opened, which is what the line shows.
+    const opened = await newSession([message('look it up')])
+    const { factory: pageModel } = mockModel({
+      providerTools: [
+        {
+          id: 'ws_2',
+          name: WEB_SEARCH_TOOL_NAME,
+          input: {},
+          output: { action: { type: 'openPage', url: 'https://example.test/page' } },
+        },
+      ],
+      sources: [{ url: 'https://example.test/page', title: 'The page' }],
+      text: ['Read it.'],
+    })
+    await runTurn(opened.sessionId, {
+      store: opened.store,
+      model: pageModel,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([echo()]),
+    })
+    const [read] = toolUses(await logOf(opened.store, opened.sessionId), WEB_SEARCH_TOOL_NAME)
+    expect(read).toMatchObject({ input: { url: 'https://example.test/page' } })
   })
 
   it('continues the same turn when the provider paused it', async () => {
@@ -363,11 +427,7 @@ describe('a provider that refuses the search tool (#335)', () => {
   it('retries the request without it once, and records that on the span', async () => {
     const { store, sessionId } = await newSession([message('look it up')])
     const { factory, calls } = mockModel(
-      {
-        failWith: Object.assign(new Error('tools.0.web_search_20260318: Extra inputs'), {
-          statusCode: 400,
-        }),
-      },
+      { failWith: rejectedTool(400, 'tools.0.web_search_20260318: Extra inputs') },
       { text: ['Answered without searching.'] },
     )
 
@@ -397,7 +457,7 @@ describe('a provider that refuses the search tool (#335)', () => {
   it('does not retry a failure that is not about the tool', async () => {
     const { store, sessionId } = await newSession([message('look it up')])
     const { factory, calls } = mockModel({
-      failWith: Object.assign(new Error('the model does not exist'), { statusCode: 400 }),
+      failWith: rejectedTool(400, 'the model does not exist'),
     })
 
     const outcome = await runTurn(sessionId, {

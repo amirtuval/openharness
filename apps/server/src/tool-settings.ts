@@ -1,19 +1,17 @@
 import type { NativeToolDeclaration, ToolSettings, ToolSettingsResolver } from '@openharness/brain'
 import { NATIVE_TOOL_DECLARATIONS, modelSearches } from '@openharness/brain'
 import type { ToolDefinition, ToolRegistry } from '@openharness/hands'
-import type {
-  McpServer,
-  ModeId,
-  ModeToolOverride,
-  ToolPermission,
-  ToolSettingEntry,
-  UserId,
-  UserToolSettings,
-} from '@openharness/protocol'
 import {
   DEFAULT_MCP_TOOL_PERMISSION,
   mcpToolOfferedName,
+  type McpServer,
+  type ModeId,
+  type ModeToolOverride,
   type PutToolSettingsRequest,
+  type ToolPermission,
+  type ToolSettingEntry,
+  type UserId,
+  type UserToolSettings,
 } from '@openharness/protocol'
 import type { SessionStore } from '@openharness/session'
 

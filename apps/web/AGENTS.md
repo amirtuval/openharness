@@ -524,12 +524,16 @@ disagree.
 
 - **`tool-call.tsx` is one call's compact line**: the status mark, the tool's name, the shared
   `toolCallSummary` (a URL, a query, a task count, a question) and the status words, behind a
-  Radix `Collapsible` that opens to the pretty-printed input and whatever the call answered. It
-  takes an `action` slot for #310's approval prompt — drawn **outside** the trigger, so its
-  buttons are not nested in a button — and badges `source: 'mcp'` (#312), with the server in the
-  badge's `title` and on the row as `data-server`; the name is already the model-facing
-  `<server>__<tool>` spelling, so no second word of chrome is spent on it. The whole line is the
-  extension point: a new caller passes props rather than reaching for a store.
+  Radix `Collapsible` that opens to the pretty-printed input, whatever the call answered, and —
+  for a provider-executed search — the pages the search found (`call.sources`) as a `ToolSources`
+  block: the title as the link, the URL under it, and the passage it was cited for, under
+  `data-slot="tool-sources"` (#335). The pages are drawn in the disclosure rather than on the
+  compact line — a search finds five, and five lines of chrome per call is what the disclosure
+  exists to avoid. It takes an `action` slot for #310's approval prompt — drawn **outside** the
+  trigger, so its buttons are not nested in a button — and badges `source: 'mcp'` (#312), with the
+  server in the badge's `title` and on the row as `data-server`; the name is already the
+  model-facing `<server>__<tool>` spelling, so no second word of chrome is spent on it. The whole
+  line is the extension point: a new caller passes props rather than reaching for a store.
 - **`MessageList` groups consecutive calls into one `role="group"` block** — a run of one stays
   the bare line it already is — and renders them from `transcriptEntries(messages, summaries,
 toolCalls)`, the client's one merge, so a call draws where its event sits.
@@ -541,7 +545,8 @@ toolCalls)`, the client's one merge, so a call draws where its event sits.
   catalog entry's `tool_call === false`), and what the newest request shortened or cleared. All
   four are the client's sentences.
 - **the chat header** carries `N searches` beside the cost, the same count the usage routes
-  report, read off the calls the transcript already holds.
+  report, read off the calls the transcript already holds — a provider-executed search is a
+  `web_search` call in the transcript like any other, so it is counted here too (#335).
 - **Settings → Tools** is one row per tool: on/off, the permission (with the tool's own
   declaration named as the default), and an unavailable tool listed rather than hidden.
   `hooks/use-tools.ts` reads it and merges one write; the fake backs the route. Its **remote MCP
