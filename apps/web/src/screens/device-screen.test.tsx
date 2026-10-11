@@ -35,7 +35,10 @@ describe('DeviceScreen', () => {
     expect(mockAuthClient.device).toHaveBeenCalledWith({ query: { user_code: USER_CODE } })
     expect(screen.getByText('Does this code match your terminal?')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Approve' }))
+    // `findBy`, not `getBy`: the code and the sentence above are drawn while the verification
+    // is still in flight, and the buttons appear only once it answers — a `getBy` here is a
+    // race a loaded runner loses (the same trap `AGENTS.md` names).
+    await user.click(await screen.findByRole('button', { name: 'Approve' }))
 
     expect(mockAuthClient.device.approve).toHaveBeenCalledWith({ userCode: USER_CODE })
     expect(await screen.findByText('Approved')).toBeInTheDocument()
