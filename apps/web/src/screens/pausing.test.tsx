@@ -77,7 +77,12 @@ describe('a paused chat (#303, #310)', () => {
         expect.objectContaining({
           type: 'agent.tool_result',
           is_error: false,
-          content: [{ type: 'text', text: 'Which environment should I deploy to?: staging\nGo ahead?: Yes' }],
+          content: [
+            {
+              type: 'text',
+              text: 'Which environment should I deploy to?: staging\nGo ahead?: Yes',
+            },
+          ],
         }),
       ]),
     )
