@@ -151,10 +151,14 @@ function of<T extends StoredEvent>(log: readonly StoredEvent[], type: string): T
  * rather than reported.
  */
 async function pausedRemoteCall(person: Person, sessionId: string): Promise<AgentMcpToolUseEvent> {
+  // The last log the wait looked at, so a timeout says what it saw instead of only what it
+  // wanted — `describe` is synchronous, and the log is read inside the poll.
+  let seen = 'nothing read yet'
   return await waitFor(
     `session ${sessionId} to pause on a remote call`,
     async () => {
       const log = await readLog(person.client, sessionId)
+      seen = typesOf(log).join(', ')
       const idle = of(log, EVENT_TYPES.sessionStatusIdle).at(-1)
       if (
         idle?.type !== EVENT_TYPES.sessionStatusIdle ||
@@ -164,12 +168,7 @@ async function pausedRemoteCall(person: Person, sessionId: string): Promise<Agen
       }
       return of<AgentMcpToolUseEvent>(log, EVENT_TYPES.agentMcpToolUse)[0]
     },
-    {
-      describe: async () => {
-        const log = await readLog(person.client, sessionId)
-        return typesOf(log).join(', ')
-      },
-    },
+    { describe: () => seen },
   )
 }
 

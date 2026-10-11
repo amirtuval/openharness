@@ -289,10 +289,12 @@ export interface AnswerConfirmationsOptions {
   /** The confirmations the log holds, keyed by the call each answers. */
   readonly confirmations: ReadonlyMap<EventId, UserToolConfirmationEvent>
   /**
-   * The tools a call may be run with — the deployment's registry, or `undefined` for a host
-   * that registers none. An approved call is run through **this** registry rather than a
-   * request's offer: the user has answered for that tool, and the offer decides what a model
-   * may ask for, not whether an answer the user gave is honoured.
+   * The tools a call may be run with — the deployment's registry with the request's remote MCP
+   * tools in it, or `undefined` for a host that registers none. An approved call is run through
+   * **this** registry rather than a request's offer: the user has answered for that tool, and
+   * the offer decides what a model may ask for, not whether an answer the user gave is honoured.
+   * It is the combined one because an approved remote call has to be runnable (#312) — and one
+   * whose server has since been removed is answered by this registry's own "not registered".
    */
   readonly registry: ToolRegistry | undefined
   /** The per-user values the host resolved for this turn (X4). */
