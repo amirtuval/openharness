@@ -21,6 +21,7 @@ import {
   readTodoList,
   toolCallInput,
   toolCallOfferedName,
+  toolCallSource,
   toolResultCallId,
   toolResultIsError,
 } from '@openharness/protocol'
@@ -1303,6 +1304,9 @@ function conversationAfter(
 ): BuiltConversation {
   const messages: ConversationMessage[] = []
   const toolNames = toolNamesOf(events)
+  // The provider-executed calls the log holds, by id (#335): neither they nor their answers
+  // belong in a request — the step's opaque content carries them — so both are skipped below.
+  const provider = providerCallIds(events)
   // Every call the user's answers have settled, by the event id that names it (#309). A call with
   // no result is one still waiting on the user: the turn that made it paused instead of asking
   // again (turn.ts), so a request never carries it, and this is what keeps that true here — a
@@ -1387,6 +1391,15 @@ function conversationAfter(
         // A tool call or its answer, whichever pair it belongs to (#312): the request builder
         // reads them through the one abstraction so a remote call is a call like any other.
         if (isToolCallEvent(event)) {
+          if (toolCallSource(event) === 'provider') {
+            // A call the provider ran inside its own request (epic #303, X14; #335). It is **not**
+            // part of the request this builds: the provider's own call and answer are in the
+            // step's `agent.opaque_content`, and replaying both would send the same call twice —
+            // once as a `tool_use` of ours and once as the `server_tool_use` the provider
+            // recognizes, which the provider refuses. The pair is a record for a reader; this is
+            // where the request is told so.
+            break
+          }
           flushAnswers()
           assistant ??= { seq: event.seq, text: '', calls: [], parts: [] }
           assistant.calls.push({
@@ -1406,6 +1419,12 @@ function conversationAfter(
           }
         } else if (isToolResultEvent(event)) {
           const callId = toolResultCallId(event)
+          if (provider.has(callId)) {
+            // The answer to a provider-executed call (X14; #335): like the call, it is already in
+            // the step's opaque content, and a `tool_result` for a `tool_use` the request does
+            // not carry is what every provider refuses.
+            break
+          }
           closeAssistant()
           answers ??= { index: messages.length, seq: event.seq, parts: [] }
           const raw = textOf(event.content)
@@ -1468,6 +1487,17 @@ function answeredCalls(events: readonly StoredEvent[]): Set<string> {
     }
   }
   return answered
+}
+
+/** The provider-executed calls the log holds, by id (epic #303, X14; #335). */
+function providerCallIds(events: readonly StoredEvent[]): Set<string> {
+  const provider = new Set<string>()
+  for (const event of events) {
+    if (isToolCallEvent(event) && toolCallSource(event) === 'provider') {
+      provider.add(event.id)
+    }
+  }
+  return provider
 }
 
 /**

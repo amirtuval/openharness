@@ -2,8 +2,10 @@ import {
   PROVIDERS as SHARED_PROVIDERS,
   PROVIDER_IDS,
   CREDENTIAL_TYPES,
+  WEB_SEARCH_TOOL_NAME,
   type ModelUsage,
   type ProviderId,
+  type Source,
 } from '@openharness/protocol'
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock'
 import { createAnthropic } from '@ai-sdk/anthropic'
@@ -845,9 +847,16 @@ export interface ModelToolCall {
  * reasoning item or `reasoning_content`; what the brain stores is the part, unchanged.
  */
 export interface ModelOpaquePart {
-  /** The AI SDK assistant-part type this was collected as: `reasoning`, the only one today. */
-  readonly type: 'reasoning'
-  /** The block's text, as streamed — `''` for a block whose text the provider withheld. */
+  /** The AI SDK assistant-part type this was collected as. */
+  readonly type: 'reasoning' | 'tool-call' | 'tool-result'
+  /**
+   * The block's text, as streamed — `''` for a block whose text the provider withheld, and for
+   * a tool part, whose content is its {@link ModelOpaquePart.payload}.
+   *
+   * A provider-executed **search result** is the exception: it is stored with a written-out
+   * reading of what was searched and found, because that text is what a request that may not
+   * have the part replays instead (`./opaque`).
+   */
   readonly text: string
   /**
    * The provider's metadata for the block, merged over the fragments it arrived on, exactly as
@@ -855,6 +864,33 @@ export interface ModelOpaquePart {
    * the provider's client reads it under.
    */
   readonly providerMetadata?: Record<string, unknown>
+  /**
+   * The part's own data, for a part that is more than text — a provider-executed tool call's
+   * `toolCallId`, `toolName` and arguments, or its result's `toolCallId`, `toolName` and output
+   * (epic #303, X14; issue #335). Absent for a reasoning block.
+   */
+  readonly payload?: Record<string, unknown>
+}
+
+/**
+ * // extension: one web search the provider ran inside a request, as the log records it
+ * (epic #303, X14; issue #335).
+ *
+ * A provider-executed search is not a call of ours — there is nothing for the registry to run
+ * and no result event the loop answers — so the turn writes the readable pair itself
+ * (`agent.tool_use` with `source: 'provider'` and the `agent.tool_result` that answers it) from
+ * this, and a client draws the line every other tool call gets. What goes back to the provider
+ * is never this: it is the opaque content, exactly as it arrived.
+ */
+export interface ModelSearchCall {
+  /** The tool's name, as the model called it: `web_search`. */
+  readonly name: string
+  /** What was searched for, as the step's call or answer reported it. */
+  readonly query: string
+  /** What the search found, written out — the titles, URLs and cited passages. */
+  readonly text: string
+  /** Whether the provider reported the search itself as failed. */
+  readonly isError: boolean
 }
 
 /**
@@ -886,6 +922,47 @@ export interface ModelRequestResult {
    * provider could read back.
    */
   readonly opaque: readonly ModelOpaquePart[]
+  /**
+   * // extension: the web sources this step's reply cites, normalized (epic #303, X14;
+   * issue #335).
+   *
+   * The AI SDK delivers a citation as a `source` part for every provider that has one —
+   * Anthropic's text-block citations and search results, OpenAI's `url_citation` annotations,
+   * Gemini's grounding chunks — so this is that stream folded into the protocol's one list. A
+   * step that cited nothing reports none, and the list is the step's own: a client shows a
+   * reply's sources beside it, not beside the conversation.
+   */
+  readonly sources: readonly Source[]
+  /**
+   * // extension: the searches the provider ran inside this request, in the order the stream
+   * carried them (epic #303, X14; issue #335).
+   *
+   * The readable half of {@link ModelRequestResult.opaque}'s tool parts: what the turn stores
+   * as the `web_search` call and its answered result, so a client and a transcript can draw the
+   * search without reading a provider's payload. Empty for a request that ran none, which is
+   * every request of a log stored before #335.
+   */
+  readonly searchCalls: readonly ModelSearchCall[]
+  /**
+   * // extension: how many web searches the provider ran inside this request (epic #303, X14;
+   * issue #335).
+   *
+   * The provider's own report where it makes one (Anthropic counts them under its usage's
+   * `server_tool_use.web_search_requests`), and otherwise the number of provider-executed
+   * search calls the stream carried — which is the same thing counted from the only other place
+   * it is visible. A request that searched not at all reports `0`.
+   */
+  readonly searches: number
+  /**
+   * // extension: the provider paused the turn itself and it should be continued (epic #303,
+   * X14; issue #335).
+   *
+   * Anthropic's `pause_turn`, which is what its server-side search loop ends with when it hits
+   * its own limit: the turn is not over, and the answer is to send the paused assistant content
+   * back unchanged as the next request. The AI SDK folds the reason into `stop`, so the raw one
+   * is what this reads (`rawFinishReason`). Always `false` for every other provider.
+   */
+  readonly paused: boolean
   /** Token counts, or {@link ZERO_MODEL_USAGE} when the request never reported any. */
   readonly usage: ModelUsage
   /** Why the request failed, or `undefined` when it succeeded. */
@@ -906,12 +983,15 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
   const failures: unknown[] = []
   const stepUsages: ModelUsage[] = []
   const toolCalls: ModelToolCall[] = []
-  // The step's reasoning, by the id the provider streams it under: a block is opened by
-  // `reasoning-start`, extended by its deltas, and closed by `reasoning-end` — and the
-  // metadata that makes it replayable (a signature, an item id) may arrive on any of the three
-  // (epic #303, X13; #334). A Map, so the order the blocks were opened in is the order they are
-  // reported in, which is the order the provider produced them.
-  const opaque = new Map<string, ReasoningBlock>()
+  const sources: Source[] = []
+  // The step's opaque parts, by the id the provider streams each under: a reasoning block by
+  // its own id, a provider-executed call and its answer by the call's id (epic #303, X13; #334;
+  // #335). The metadata that makes a block replayable (a signature, an item id) may arrive on
+  // any of its fragments, and a tool result's does too. A Map, so the order the parts were
+  // opened in is the order they are reported in, which is the order the provider produced them.
+  const opaque = new Map<string, CollectedPart>()
+  let searches = 0
+  let paused = false
   let aborted = false
   let text = ''
   const result = streamText({
@@ -952,25 +1032,101 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
         text += part.text
         await params.onTextDelta?.(part.text)
       } else if (part.type === 'tool-call') {
-        toolCalls.push({
-          toolCallId: part.toolCallId,
-          name: part.toolName,
-          input: part.input,
+        if (part.providerExecuted === true) {
+          // A call the provider ran itself inside this request (epic #303, X14; #335) — the only
+          // one this build attaches is `web_search`. It is **not** a call of ours: nothing here
+          // runs it, and what the loop owes the provider is the call back, exactly as it
+          // arrived, which is what the opaque entry is for.
+          opaque.set(part.toolCallId, {
+            type: 'tool-call',
+            text: '',
+            metadata: {},
+            payload: {
+              toolCallId: part.toolCallId,
+              toolName: part.toolName,
+              input: part.input,
+            },
+            providerMetadata: part.providerMetadata,
+          })
+          if (part.toolName === WEB_SEARCH_TOOL_NAME) {
+            searches += 1
+          }
+        } else {
+          toolCalls.push({
+            toolCallId: part.toolCallId,
+            name: part.toolName,
+            input: part.input,
+          })
+        }
+      } else if (part.type === 'tool-result') {
+        // The answer to a provider-executed call, matched by the call id rather than by a flag:
+        // the AI SDK marks the call as provider-executed and not the result, and a result whose
+        // call we never saw is not one of ours to replay.
+        const call = opaque.get(part.toolCallId)
+        if (call?.type !== 'tool-call') {
+          continue
+        }
+        opaque.set(part.toolCallId, {
+          ...call,
+          type: 'tool-result',
+          payload: {
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            output: toolOutputOf(part.output),
+          },
+          ...(isErrorPart(part) ? { isError: true } : {}),
+          ...(part.providerMetadata === undefined
+            ? {}
+            : { providerMetadata: part.providerMetadata }),
         })
+      } else if (part.type === 'tool-error') {
+        // The same answer, reported by the SDK's other part: a provider-executed call that
+        // failed. Anthropic's `web_search_tool_result_error` is this one.
+        const call = opaque.get(part.toolCallId)
+        if (call?.type === 'tool-call') {
+          opaque.set(part.toolCallId, {
+            ...call,
+            type: 'tool-result',
+            payload: {
+              toolCallId: part.toolCallId,
+              toolName: part.toolName,
+              output: { type: 'error-text', value: errorTextOf(part.error) },
+            },
+            isError: true,
+            ...(part.providerMetadata === undefined
+              ? {}
+              : { providerMetadata: part.providerMetadata }),
+          })
+        }
+      } else if (part.type === 'source') {
+        // One citation, in the AI SDK's own normalized shape — the same part every provider that
+        // cites emits (epic #303, X14; #335). A document source is not a web one and is not
+        // carried: `Source` is about what a reply got from the web.
+        if (part.sourceType === 'url') {
+          sources.push(sourceOf(part))
+        }
       } else if (
         part.type === 'reasoning-start' ||
         part.type === 'reasoning-delta' ||
         part.type === 'reasoning-end'
       ) {
-        const open = opaque.get(part.id) ?? { text: '', metadata: {} }
+        const key = `reasoning:${part.id}`
+        const open = opaque.get(key) ?? { type: 'reasoning' as const, text: '', metadata: {} }
         if (part.type === 'reasoning-delta') {
           open.text += part.text
         }
         mergeProviderMetadata(open.metadata, part.providerMetadata)
-        opaque.set(part.id, open)
+        opaque.set(key, open)
       } else if (part.type === 'abort') {
         aborted = true
       } else if (part.type === 'finish-step') {
+        // The provider's own count of the searches it ran, where it makes one (Anthropic's
+        // `server_tool_use.web_search_requests`); the step's calls are the fallback for the
+        // providers that report none.
+        searches = Math.max(searches, searchesOf(part.usage))
+        // The raw stop reason, which is the only place `pause_turn` survives: the AI SDK folds
+        // it into `stop` (epic #303, X14; #335).
+        paused ||= part.rawFinishReason === 'pause_turn'
         // The model's own report for one step, read as it arrives: the SDK's `result.usage`
         // below is an *accumulation* over these, so a step is the most truthful place to read
         // the counts from — each one is what the provider reported, not a sum this process
@@ -994,6 +1150,10 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
       text,
       toolCalls,
       opaque: [],
+      sources: [],
+      searchCalls: [],
+      searches: 0,
+      paused: false,
       usage: ZERO_MODEL_USAGE,
       error: undefined,
       aborted: true,
@@ -1008,6 +1168,10 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
       text,
       toolCalls,
       opaque: [],
+      sources: [],
+      searchCalls: [],
+      searches: 0,
+      paused: false,
       usage: ZERO_MODEL_USAGE,
       error: failure,
       aborted: false,
@@ -1019,31 +1183,209 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
         // total is the only report there is.
         toModelUsage(await result.usage)
       : stepUsages.reduce(addModelUsage)
+  const collected = collectedParts(opaque, sources)
   return {
     text,
     toolCalls,
-    opaque: collectedParts(opaque),
+    opaque: collected.parts,
+    sources,
+    searchCalls: collected.searchCalls,
+    searches,
+    paused,
     usage,
     error: undefined,
     aborted: false,
   }
 }
 
-/** One reasoning block being collected, as its fragments arrive. */
-interface ReasoningBlock {
+/** One part of a step being collected, as its fragments may arrive across several stream parts. */
+interface CollectedPart {
+  type: 'reasoning' | 'tool-call' | 'tool-result'
   text: string
   readonly metadata: Record<string, unknown>
+  /** The part's own data, for a tool part (#335). */
+  readonly payload?: Record<string, unknown>
+  readonly providerMetadata?: Record<string, unknown>
+  /** Whether a provider-executed call's answer reported a failure (#335). */
+  readonly isError?: boolean
 }
 
-/** The reasoning blocks one request collected, in the order the provider opened them. */
+/**
+ * The step's parts, in the order the provider produced them, with each provider-executed search
+ * result given the reading a request that cannot have it replays instead.
+ *
+ * The reading is built here rather than at capture time because it needs the step's **sources**,
+ * which arrive as parts of their own and may precede the result they belong to: "searched for X"
+ * plus the titles and URLs found, and the passage each was cited for. It is the fallback a
+ * provider switch uses (`./opaque`), never what the provider that produced the search is handed.
+ */
 function collectedParts(
-  collected: ReadonlyMap<string, ReasoningBlock>,
-): readonly ModelOpaquePart[] {
-  return [...collected.values()].map(({ text, metadata }) => ({
-    type: 'reasoning' as const,
-    text,
-    ...(Object.keys(metadata).length === 0 ? {} : { providerMetadata: metadata }),
-  }))
+  collected: ReadonlyMap<string, CollectedPart>,
+  sources: readonly Source[],
+): {
+  readonly parts: readonly ModelOpaquePart[]
+  readonly searchCalls: readonly ModelSearchCall[]
+} {
+  const collectedParts = [...collected.values()]
+  const parts = collectedParts.map((part) => {
+    const metadata = part.providerMetadata ?? part.metadata
+    return {
+      type: part.type,
+      // A search result is what a request that may not have the part replays instead, and the
+      // step's sources are what it found — the step is the unit a provider switch converts.
+      text:
+        part.type === 'tool-result'
+          ? searchText(searchQueryOf(collectedParts), sources)
+          : part.text,
+      ...(part.payload === undefined ? {} : { payload: part.payload }),
+      ...(Object.keys(metadata).length === 0 ? {} : { providerMetadata: metadata }),
+    }
+  })
+  const searchCalls = collectedParts
+    .filter((part) => part.type === 'tool-call' && part.payload?.toolName === WEB_SEARCH_TOOL_NAME)
+    .map((part) => {
+      const result = collected.get(String(part.payload?.toolCallId))
+      return {
+        name: WEB_SEARCH_TOOL_NAME,
+        query: searchQueryOf([part]),
+        text: searchText(searchQueryOf(collectedParts), sources),
+        isError: result?.isError === true,
+      }
+    })
+  return { parts, searchCalls }
+}
+
+/**
+ * The query a step's provider-executed search ran, as far as the step says.
+ *
+ * Anthropic puts it on the call (`{ query }`), OpenAI and xAI on the answer (`action.query`, or
+ * `action.queries` when it expanded one into several) — one helper so the reading says what was
+ * searched whichever end carried it.
+ */
+function searchQueryOf(parts: readonly CollectedPart[]): string {
+  for (const part of parts) {
+    const input = asRecord(part.payload?.input)
+    if (typeof input?.query === 'string' && input.query.length > 0) {
+      return input.query
+    }
+    const output = asRecord(part.payload?.output)?.value
+    const action = asRecord(asRecord(output)?.action) ?? asRecord(output)
+    if (typeof action?.query === 'string' && action.query.length > 0) {
+      return action.query
+    }
+    const queries = action?.queries
+    if (Array.isArray(queries) && typeof queries[0] === 'string') {
+      return queries.join(', ')
+    }
+  }
+  return ''
+}
+
+/** What a step's search found, written out — the text a switched provider is shown instead. */
+function searchText(query: string, sources: readonly Source[]): string {
+  if (sources.length === 0) {
+    return ''
+  }
+  const head = query.length === 0 ? 'Web search results' : `Web search results for "${query}"`
+  const lines = sources.map((source, index) => {
+    const citation = source.title === undefined ? source.url : `${source.title} — ${source.url}`
+    return source.cited_text === undefined
+      ? `${index + 1}. ${citation}`
+      : `${index + 1}. ${citation}\n   ${source.cited_text}`
+  })
+  return `${head}:\n${lines.join('\n')}`
+}
+
+/**
+ * One `source` stream part as the protocol's citation.
+ *
+ * A cited passage only some providers give: Anthropic puts it in the part's own provider
+ * metadata (`anthropic.citedText`), under whichever key the request's family files it — read
+ * without naming the family, because this module does not know it and the field is the same
+ * wherever it is.
+ */
+function sourceOf(
+  part: { readonly url: string; readonly title?: string } & {
+    readonly providerMetadata?: unknown
+  },
+): Source {
+  const cited = citedTextOf(part.providerMetadata)
+  return {
+    url: part.url,
+    ...(part.title === undefined || part.title.length === 0 ? {} : { title: part.title }),
+    ...(cited === undefined ? {} : { cited_text: cited }),
+  }
+}
+
+/** The first `citedText` a source part's provider metadata carries, whichever family's it is. */
+function citedTextOf(providerMetadata: unknown): string | undefined {
+  const metadata = asRecord(providerMetadata)
+  if (metadata === null) {
+    return undefined
+  }
+  for (const value of Object.values(metadata)) {
+    const cited = asRecord(value)?.citedText
+    if (typeof cited === 'string' && cited.length > 0) {
+      return cited
+    }
+  }
+  return undefined
+}
+
+/**
+ * How many web searches one step's own usage report counts, or `0` when it counts none.
+ *
+ * Only Anthropic reports one, under `server_tool_use.web_search_requests` in the raw usage the
+ * SDK keeps beside its normalized counts; the other providers' steps are counted from the calls
+ * the stream carried instead.
+ */
+function searchesOf(usage: unknown): number {
+  const raw = asRecord(asRecord(usage)?.raw)
+  const serverToolUse = asRecord(raw?.server_tool_use)
+  return asCount(serverToolUse?.web_search_requests) ?? 0
+}
+
+/**
+ * A provider-executed tool result's output, in the shape the AI SDK's message parts carry it.
+ *
+ * The stream gives the raw value (Anthropic's array of `{ url, title, pageAge, encryptedContent }`
+ * for a search); what goes back out is the part's own output object, which is what the provider's
+ * prompt converter validates. A string is `text` and everything else `json`, exactly as the SDK's
+ * own response conversion writes it.
+ */
+function toolOutputOf(output: unknown): Record<string, unknown> {
+  return typeof output === 'string'
+    ? { type: 'text', value: output }
+    : { type: 'json', value: jsonValueOf(output) }
+}
+
+/** Whether a provider-executed tool result reported a failure. */
+function isErrorPart(part: unknown): boolean {
+  // Read off the value rather than the type: the AI SDK's provider tools emit `isError` on a
+  // `tool-result` at runtime (Anthropic's search errors do), but its own part type does not
+  // declare the field.
+  return asRecord(part)?.isError === true
+}
+
+/** What a failed provider-executed call is reported as, as the text of its result. */
+function errorTextOf(error: unknown): string {
+  const record = asRecord(error)
+  const code = record?.errorCode
+  return typeof code === 'string' && code.length > 0
+    ? `The provider's search failed: ${code}`
+    : 'The provider’s search failed.'
+}
+
+/** A value as JSON, or `null` for one that cannot be — what the SDK's own converter falls to. */
+function jsonValueOf(value: unknown): unknown {
+  if (value === undefined) {
+    return null
+  }
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown
+  } catch {
+    return null
+  }
 }
 
 /**

@@ -67,9 +67,16 @@ export function toolCallPermission(call: ToolCallEvent): ToolPermission {
   return call.evaluated_permission
 }
 
-/** Where the call's tool comes from. */
+/**
+ * Where the call's tool comes from.
+ *
+ * An MCP call is `mcp` by the event's own type; a built-in one is whatever the call recorded
+ * (epic #303, X14; issue #335) — `builtin` for a tool this build ran, `provider` for one the
+ * model's own provider ran inside the request, which is the difference between a call the
+ * crash rule and the step limit apply to and one they cannot.
+ */
 export function toolCallSource(call: ToolCallEvent): ToolSource {
-  return isMcpToolCall(call) ? 'mcp' : 'builtin'
+  return isMcpToolCall(call) ? 'mcp' : (call.source ?? 'builtin')
 }
 
 /** The MCP server a call's tool belongs to, by name — or `undefined` for a built-in tool. */

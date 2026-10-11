@@ -1052,7 +1052,10 @@ describe('clearing old results before summarizing (epic #303, X9; #306)', () => 
     expect(spans[0]).toMatchObject({
       model: CHAT_MODEL,
       cleared: { results: 1, tokens: 1_000 },
-      tools: [{ name: 'fetch', source: 'builtin' }],
+      tools: [
+        { name: 'fetch', source: 'builtin' },
+        { name: 'web_search', source: 'provider' },
+      ],
     })
     // The stored answer is untouched: replay, the transcript and a later summary still read it.
     const stored = events.find((event) => event.type === 'agent.tool_result')

@@ -143,6 +143,16 @@ export const ToolSettingEntrySchema = z.object({
    * built-in tool, and for a stored setting that names no tool this or any server offers.
    */
   mcp_server: z.string().min(1).optional(),
+  /**
+   * // extension: why this tool is `available: false`, as a sentence a reader is shown (#335).
+   *
+   * `available: false` has more than one cause, and a settings screen owes the reader the one
+   * that applies: a tool this deployment does not register at all, and `web_search` on a model
+   * whose provider has no native search tool, are different sentences. Absent when the tool is
+   * available, and absent when nothing can be said about it — a stored setting for a tool
+   * nothing offers has no cause to name.
+   */
+  reason: z.string().min(1).optional(),
 })
 
 export type ToolSettingEntry = z.infer<typeof ToolSettingEntrySchema>
@@ -173,6 +183,17 @@ export type ListToolSettingsResponse = z.infer<typeof ListToolSettingsResponseSc
  */
 export const ListToolSettingsQuerySchema = z.object({
   mode_id: ModeIdSchema.optional(),
+  /**
+   * // extension: the model the chat runs, so the read can say whether a tool the provider has
+   * to supply is available *on it* (#335).
+   *
+   * A model id (`provider/model`), the same spelling the session carries. Only `web_search`
+   * uses it: that tool is the chat model's own provider's, so whether it can be offered at all
+   * depends on the model, and a settings screen that did not say so would show a switch that
+   * cannot do anything. A read that names no model answers as it always did — nothing is
+   * claimed about a model nobody named.
+   */
+  model_id: z.string().min(1).optional(),
 })
 
 export type ListToolSettingsQuery = z.infer<typeof ListToolSettingsQuerySchema>

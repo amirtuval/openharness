@@ -11,7 +11,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
 import { combineTools, resolveMcpTools, type McpOfferedTool, type McpToolProvider } from './mcp'
-import { eventTypes, logOf, message, newSession, spanStartOf } from './testing/harness'
+import {
+  NATIVE_SEARCH_TOOL,
+  eventTypes,
+  logOf,
+  message,
+  newSession,
+  spanStartOf,
+} from './testing/harness'
 import type { MockModel, PromptMessage } from './testing/mock-model'
 import { mockModel, readPrompt, resolveTestCredential } from './testing/mock-model'
 import { runTurn } from './turn'
@@ -250,10 +257,11 @@ describe('a remote call in the loop', () => {
     expect(spanStartOf(of(log, EVENT_TYPES.modelRequestStart)[0]).tools).toEqual([
       { name: 'echo', source: 'builtin' },
       { name: 'notes__search', source: 'mcp', server: 'notes' },
+      NATIVE_SEARCH_TOOL,
     ])
     // The model is shown the parameters the remote server really takes.
     const offered = offeredOf(model, 0)
-    expect(offered.map((tool) => tool.name)).toEqual(['echo', 'notes__search'])
+    expect(offered.map((tool) => tool.name)).toEqual(['echo', 'notes__search', 'web_search'])
     expect(offered[1]?.inputSchema).toMatchObject({ properties: { query: { type: 'string' } } })
   })
 
@@ -270,6 +278,7 @@ describe('a remote call in the loop', () => {
     const log = await logOf(store, sessionId)
     expect(spanStartOf(of(log, EVENT_TYPES.modelRequestStart)[0]).tools).toEqual([
       { name: 'echo', source: 'builtin' },
+      NATIVE_SEARCH_TOOL,
     ])
   })
 })
@@ -393,6 +402,7 @@ describe('a server that cannot be listed', () => {
     expect(eventTypes(log)).toContain(EVENT_TYPES.agentMessage)
     expect(spanStartOf(of(log, EVENT_TYPES.modelRequestStart)[0]).tools).toEqual([
       { name: 'echo', source: 'builtin' },
+      NATIVE_SEARCH_TOOL,
     ])
   })
 
@@ -458,8 +468,12 @@ describe('a server that cannot be listed', () => {
       tools: createToolRegistry([echoTool]),
       mcpTools: provider,
     })
-    expect(offeredOf(model, 0).map((tool) => tool.name)).toEqual(['echo', 'notes__search'])
-    expect(offeredOf(model, 1).map((tool) => tool.name)).toEqual(['echo'])
+    expect(offeredOf(model, 0).map((tool) => tool.name)).toEqual([
+      'echo',
+      'notes__search',
+      'web_search',
+    ])
+    expect(offeredOf(model, 1).map((tool) => tool.name)).toEqual(['echo', 'web_search'])
   })
 })
 
@@ -585,6 +599,7 @@ describe('a step that called both kinds', () => {
     const log = await logOf(store, sessionId)
     expect(spanStartOf(of(log, EVENT_TYPES.modelRequestStart)[0]).tools).toEqual([
       { name: 'echo', source: 'builtin' },
+      NATIVE_SEARCH_TOOL,
     ])
   })
 })
