@@ -12,6 +12,7 @@ import {
   providerName,
   searchCount,
   selectManualCompaction,
+  selectMcpFailure,
   selectSessionUsage,
   sessionCost,
   stepLimitNotice,
@@ -317,7 +318,9 @@ export function ChatScreen({
   // sentence and the server it names are the client's own reading, so the page and the terminal
   // say the same thing — and the generic turn error is skipped for it, because saying it twice
   // would be one line about a failed turn and another about a tool source that is missing.
-  const mcpFailure = mcpFailureNotice(error)
+  // The transcript's own record rather than the newest error (#313): the turn carries on without
+  // the server, so the reply that clears `lastError` must not take the notice with it.
+  const mcpFailure = mcpFailureNotice(selectMcpFailure(view.transcript))
   const mcpNotice: Notice | null =
     mcpFailure === null
       ? null
@@ -504,7 +507,7 @@ export function ChatScreen({
    * every key to every mounted handler.
    */
   const reconnectMcp = useCallback((): void => {
-    const failure = mcpFailureNotice(session.getState().transcript.lastError)
+    const failure = mcpFailureNotice(selectMcpFailure(session.getState().transcript))
     if (failure === null) return
     void (async () => {
       try {

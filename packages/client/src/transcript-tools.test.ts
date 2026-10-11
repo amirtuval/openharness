@@ -7,6 +7,7 @@ import {
   makeAgentToolResult,
   makeAgentToolUse,
   makeModelRequestStart,
+  makeSessionError,
   makeSessionRewind,
   makeStatusIdle,
   makeStatusRunning,
@@ -22,6 +23,7 @@ import {
   selectClearedToolResults,
   selectConfirmation,
   selectConfirmations,
+  selectMcpFailure,
   selectSearchCount,
   selectToolCalls,
   selectTranscriptEntries,
@@ -524,5 +526,96 @@ describe('the reader’s decisions in the transcript (#303, #309; #310)', () => 
     })
 
     expect(onlyCall([call, result]).status).toBe('dismissed')
+  })
+})
+
+describe('an MCP failure the turn survived (#303, X10; #313)', () => {
+  const FAILURE = 'The MCP server "notes" could not be used: it is down. This chat continues.'
+
+  /** A log with one MCP failure and then whatever else. */
+  const log = (...rest: readonly StreamEvent[]): readonly StreamEvent[] => [
+    makeUserMessage('hello', { seq: 1 }),
+    makeSessionError({
+      seq: 2,
+      error: {
+        type: 'mcp_connection_failed_error',
+        message: FAILURE,
+        retry_status: { type: 'terminal' },
+      },
+    }),
+    ...rest,
+  ]
+
+  it('keeps it rather than letting the reply that follows clear it', () => {
+    const state = reduce(log(makeAgentMessage('Hi!', { seq: 3 }), makeStatusIdle({ seq: 4 })))
+
+    // `lastError` is the turn's, and the turn recovered: the reply cleared it. The failure is
+    // kept anyway, because a tool source that is missing is not a failed turn.
+    expect(state.lastError).toBeNull()
+    expect(selectMcpFailure(state)).toEqual({
+      type: 'mcp_connection_failed_error',
+      message: FAILURE,
+      retryStatus: 'terminal',
+      seq: 2,
+    })
+  })
+
+  it('keeps the newest one, and only an MCP failure sets one', () => {
+    const later = reduce(
+      log(
+        makeSessionError({
+          seq: 5,
+          error: {
+            type: 'mcp_authentication_failed_error',
+            message: 'The MCP server "git" could not be used: the token was refused.',
+            retry_status: { type: 'terminal' },
+          },
+        }),
+      ),
+    )
+    expect(selectMcpFailure(later)?.message).toContain('"git"')
+
+    // An ordinary error leaves it exactly as it was.
+    const other = reduce(
+      log(
+        makeSessionError({
+          seq: 6,
+          error: {
+            type: 'tool_steps_exhausted_error',
+            message: 'That was a lot of steps.',
+            retry_status: { type: 'terminal' },
+          },
+        }),
+      ),
+    )
+    expect(selectMcpFailure(other)?.type).toBe('mcp_connection_failed_error')
+  })
+
+  it('is nothing at all for a log with no MCP failure', () => {
+    expect(
+      selectMcpFailure(
+        reduce([makeUserMessage('hello', { seq: 1 }), makeAgentMessage('Hi!', { seq: 2 })]),
+      ),
+    ).toBeNull()
+  })
+
+  it('goes with the branch a rewind takes back', () => {
+    const covered = reduce(
+      log(
+        makeSessionRewind({ seq: 7, supersedes: { from_seq: 1, to_seq: 6 } }),
+        makeUserMessage('hello again', { seq: 8 }),
+      ),
+    )
+    expect(selectMcpFailure(covered)).toBeNull()
+
+    // A rewind that does not reach it leaves the notice alone.
+    const untouched = reduce(
+      log(
+        makeAgentMessage('Hi!', { seq: 3 }),
+        makeUserMessage('more', { seq: 4 }),
+        makeSessionRewind({ seq: 5, supersedes: { from_seq: 4, to_seq: 4 } }),
+      ),
+    )
+    expect(selectMcpFailure(untouched)?.seq).toBe(2)
   })
 })

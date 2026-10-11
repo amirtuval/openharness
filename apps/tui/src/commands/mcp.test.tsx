@@ -226,10 +226,10 @@ describe('the servers screen', () => {
 })
 
 /** Wait for something about the fake, without the frame in the way. */
-async function waitFor(condition: () => boolean): Promise<void> {
+async function waitFor(condition: () => Promise<boolean> | boolean): Promise<void> {
   const started = Date.now()
   for (;;) {
-    if (condition()) return
+    if (await condition()) return
     if (Date.now() - started > 5000) {
       throw new Error('the condition never held')
     }

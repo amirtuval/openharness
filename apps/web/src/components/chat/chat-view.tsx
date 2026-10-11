@@ -122,6 +122,7 @@ export function ChatView({
     usage,
     status,
     lastError,
+    mcpFailure: storedMcpFailure,
     loadingHistory,
     requestError,
     deleted,
@@ -180,7 +181,10 @@ export function ChatView({
   // chat goes on without that server's tools, and the one thing a reader can do about it is
   // reconnect it — so it is drawn with that action rather than as the generic red banner. The
   // words and the server the message names come from the client's `mcpFailureNotice`.
-  const mcpFailure = mcpFailureNotice(lastError)
+  // The MCP failure is the transcript's own record rather than `lastError` (#313): the turn
+  // carries on without the server, so the reply that clears `lastError` must not take the notice
+  // with it. See `selectMcpFailure`.
+  const mcpFailure = mcpFailureNotice(storedMcpFailure)
   // Dismissing it hides that one message: a later turn's failure is a different sentence and is
   // shown again, because a reader who dismissed one notice did not ask to never hear of MCP.
   const [dismissedMcp, setDismissedMcp] = useState<string | null>(null)

@@ -1,6 +1,7 @@
 import {
   createTranscript,
   searchCount,
+  selectMcpFailure,
   selectSessionUsage,
   type Client,
   type ClearedToolResults,
@@ -9,6 +10,7 @@ import {
   type TranscriptContext,
   type TranscriptError,
   type TranscriptManualCompaction,
+  type TranscriptMcpFailure,
   type TranscriptMessage,
   type TranscriptSummarizing,
   type TranscriptSummary,
@@ -100,6 +102,13 @@ export interface SessionView {
   readonly status: SessionStatus
   /** The latest `session.error` in the log, until a reply supersedes it. */
   readonly lastError: TranscriptError | null
+  /**
+   * The newest MCP server a turn could not use, or `null` (epic #303, X10; #313).
+   *
+   * Its own field rather than a read of `lastError`: the turn carries on without that server, so
+   * the reply that clears the error must not take the notice with it.
+   */
+  readonly mcpFailure: TranscriptMcpFailure | null
   /** The `seq` the transcript has folded in: where a resumed stream would pick up. */
   readonly lastSeq: number
   /** The history is still being loaded. */
@@ -371,6 +380,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
     usage: selectSessionUsage(state),
     status: state.status,
     lastError: state.lastError,
+    mcpFailure: selectMcpFailure(state),
     lastSeq: state.lastSeq,
     loadingHistory,
     requestError,

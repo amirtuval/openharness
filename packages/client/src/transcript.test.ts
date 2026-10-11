@@ -112,6 +112,7 @@ describe('reduceTranscript', () => {
       messages: [],
       status: 'idle',
       lastError: null,
+      mcpFailure: null,
       lastSeq: 0,
       deleted: false,
       model: null,
