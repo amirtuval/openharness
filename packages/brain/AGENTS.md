@@ -4,7 +4,8 @@ The stateless brain: the harness loop that drives a session.
 
 A turn is one call to `runTurn`. It reads the session log, streams a reply from the model, and
 appends what happened — user events claimed, a span around every model request, the chunks of
-the reply as they arrive, the reply itself, the status transitions and any error. It remembers nothing between turns and knows nothing about
+the reply as they arrive, the reply itself, the tool calls the model made and the answers they
+came back with, the status transitions and any error. It remembers nothing between turns and knows nothing about
 scheduling, ownership, HTTP or Postgres: it is handed a `SessionStore`, a model factory, a
 credential resolver and an abort signal. Every model request is made with a credential the
 resolver answered — the session owner's own provider key, never one from the environment (epic
@@ -53,11 +54,14 @@ src/
   log.ts                reading the log, and the questions the loop asks of it
   context.ts            ContextStrategy: the log as model messages — the latest summary, the
                         history it covers, the trimmed tail (K1), the capped newest item (K6) —
-                        and the real size of the next request (K2)
-  summarize.ts          the compaction engine: the trigger, the cut rule, the chunked passes and
-                        the summary event (epic #277, C2; #279)
+                        the cut rule and the items it reads, the caps on a tool result and the
+                        clearing of old ones (X9, #306), and the real size of the next request (K2)
+  summarize.ts          the compaction engine: the trigger, the cut rule, the chunked passes, the
+                        summary event (epic #277, C2; #279) and the tool-work prompt (#306)
   manual.ts             the manual half: whether a `/compact [instructions]` request is still
                         waiting for an answer, read off the log (epic #277, K8; #283)
+  pausing.ts            the pause: the calls the user has to answer, the one confirmation that
+                        answers them, and what each answer means (#309)
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
   reasoning.ts          the reasoning effort: per provider, gated by the injected resolver
@@ -69,6 +73,10 @@ src/
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
+  tools.ts              the loop's tool half: what a request offers, what the settings say, how
+                        one step's calls are stored, run and answered (epic #303, #304; the
+                        per-user settings and the mode's override: #307; `ask` and the
+                        approvals a chat remembers: #309)
   events.ts             the events the loop appends, built in one place
   validate.ts           the protocol check every appended event passes
   testing/
@@ -83,57 +91,67 @@ emits what that reaches.
 
 ### `@openharness/brain`
 
-| export                                                                                                                                                                                                                                            | what it is                                                                                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `runTurn(sessionId, options)`                                                                                                                                                                                                                     | run one turn; resolves to a `TurnOutcome`                                                                                                                                                                                                                                                                                  |
-| `RunTurnOptions`                                                                                                                                                                                                                                  | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry? }`                                                                                                                                                                                                       |
-| `TurnOutcome`, `TurnOutcomeKind`                                                                                                                                                                                                                  | `{ outcome: 'idle' \| 'noop' \| 'interrupted' \| 'error' }`                                                                                                                                                                                                                                                                |
-| `ResolvedMode`, `ModeResolver`                                                                                                                                                                                                                    | a mode as the host resolved it — id, name, model, effort, prompt addition — and where a request's mode comes from (#245, M6)                                                                                                                                                                                               |
-| `ContextStrategy`, `ContextStrategyOptions`, `ContextStrategyResult`                                                                                                                                                                              | `(events, { model, system }) => { messages, truncated? }` — the messages, and what the strategy had to cap to fit (epic #277, K6)                                                                                                                                                                                          |
-| `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                                                                                                                                         | the default strategy: the conversation, summarized where the log says so (#277 K1), trimmed to a token budget resolved per model, with an oversized newest item capped (K6)                                                                                                                                                |
-| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                                                                                                                                     | its defaults                                                                                                                                                                                                                                                                                                               |
-| `estimateTokens(text)`                                                                                                                                                                                                                            | the chars/4 estimate the budget is measured in                                                                                                                                                                                                                                                                             |
-| `OMISSION_MARKER(tokens)`                                                                                                                                                                                                                         | the `[… N tokens omitted …]` a capped item carries where its middle was (K6)                                                                                                                                                                                                                                               |
-| `estimateNextRequestTokens(options)`, `NextRequestSizeOptions`, `ContextSizeBaseline`, `promptTokensOf(usage)`                                                                                                                                    | how big the next request will be (K2): the previous request's real prompt size plus an estimate for what is new, falling back to chars/4 when the previous request cannot be a baseline                                                                                                                                    |
-| `estimateContextSize(events, options)`, `ContextSizeOptions`, `isUsableContextSizeBaseline`, `latestContextSummary(events)`, `capItemText(text, budget)`                                                                                          | the same measurement, taken off a whole log: the baseline request, the text new since it, and — when there is none — the visible history (epic #277, K2; C2). `latestContextSummary` is the summary in force (K1); `capItemText` is the head-and-tail cut K6 applies                                                       |
-| `summarizeContext(options)`, `SummarizeContextOptions`, `SummarizeResult`                                                                                                                                                                         | the compaction engine (epic #277, C2; #279): the trigger, the cut, the passes and the `session.context_summary` it writes — and the `guidance` a manual run folds into the prompt and the `summarySeq` a caller records (K8; #283)                                                                                         |
-| `pendingManualCompaction(events)`, `PendingCompaction`                                                                                                                                                                                            | the manual half (epic #277, K8; #283): the newest `session.compact` no `session.compaction` answers yet, read off the log — what makes `/compact` idempotent while one is pending and lets the turn loop pick one up                                                                                                       |
-| `compactionOutcome(outcome, record)`, `CompactionOutcomeRecord`                                                                                                                                                                                   | the brain's `session.compaction` event: what came of a manual request, echoing the guidance used (#283)                                                                                                                                                                                                                    |
-| `resolveContextCompaction(config)`, `ContextCompactionConfig`, `ResolvedContextCompaction`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_MAX_SUMMARY_PASSES`                                                                                          | how the engine is configured and the defaults it fills in: the threshold (0.7), the summary model (`null` = the chat's), the pass limit (3), the per-model budgets and output ceilings, and the cut rule                                                                                                                   |
-| `summarizeContext(options)`, `SummarizeContextOptions`, `SummarizeResult`                                                                                                                                                                         | the compaction engine (epic #277, C2; #279): the trigger, the cut, the passes and the `session.context_summary` it writes                                                                                                                                                                                                  |
-| `resolveContextCompaction(config)`, `ContextCompactionConfig`, `ResolvedContextCompaction`, `ContextCompactionResolver`, `ContextCompactionOption`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_MAX_SUMMARY_PASSES`                                  | how the engine is configured and the defaults it fills in: the threshold (0.7), the summary model (`null` = the chat's), the pass limit (3), the per-model budgets and output ceilings, and the cut rule — and the option a host passes: one config, or a resolver the loop asks per request with the session owner (#282) |
-| `cutAtUserBoundary(items, tailTokens)`, `ContextCutRule`, `ContextCutItem`                                                                                                                                                                        | K12's one replaceable function: where history may be cut — the default keeps a recent tail and never splits a turn (#276 replaces it)                                                                                                                                                                                      |
-| `SUMMARY_SIZE_RATIO`, `RECENT_TAIL_RATIO`, `OVERFLOW_RECENT_TAIL_RATIO`, `SUMMARY_ITEM_CAP_RATIO`, `SUMMARY_SLICE_RATIO`, `SUMMARY_SIZE_BUDGET_RATIO`, `SUMMARY_INPUT_MARGIN`, `MIN_SLICE_TOKENS`, `MIN_SUMMARY_TOKENS`, `SUMMARY_PROMPT_VERSION` | the engine's numbers and the version of the summary prompt it records (K5/K6/K7)                                                                                                                                                                                                                                           |
-| `ModelCredential`                                                                                                                                                                                                                                 | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }`, `{ type: 'openai_compatible', apiKey, baseUrl }`, `{ type: 'bedrock', accessKeyId, secretAccessKey, sessionToken?, region }` or `{ type: 'vertex', project, location, serviceAccount }` — one request's credential                            |
-| `VertexModelCredential`                                                                                                                                                                                                                           | the Vertex shape on its own: the project, the location, and the service-account key document as text                                                                                                                                                                                                                       |
-| `credentialSecrets(credential)`                                                                                                                                                                                                                   | every secret a credential carries, for redaction — a Bedrock credential has three, a Vertex one its private key PEM                                                                                                                                                                                                        |
-| `ResolveCredential`                                                                                                                                                                                                                               | `(name) => Promise<ModelCredential \| null>` — where it comes from                                                                                                                                                                                                                                                         |
-| `ModelFactory`                                                                                                                                                                                                                                    | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                                                                                                                                                                          |
-| `providerModelFactory`, `createProviderModelFactory(options)`                                                                                                                                                                                     | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly, and the egress `fetch` a host injects (#270)                                                                                                                                                                             |
-| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                                                                                                                               | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                                                                                                                                                                                   |
-| `redactSecrets(text, secrets)`                                                                                                                                                                                                                    | `redactSecret` for a credential that carries more than one secret                                                                                                                                                                                                                                                          |
-| `BEDROCK_SERVICE`, `bedrockRuntimeBaseUrl(region)`, `bedrockControlPlaneUrl(region, path)`                                                                                                                                                        | the SigV4 service both Bedrock hosts are signed for, and the two AWS hosts a region derives                                                                                                                                                                                                                                |
-| `BEDROCK_FOUNDATION_MODELS_PATH`, `BEDROCK_INFERENCE_PROFILES_PATH`                                                                                                                                                                               | the two control-plane paths the server's save-time check and catalogue read (models, and inference profiles, #274)                                                                                                                                                                                                         |
-| `signBedrockRequest(credential, url, input?)`, `SignedBedrockRequest`, `BedrockRequestInput`                                                                                                                                                      | one SigV4-signed Bedrock request, returned rather than sent — what the server's save-time check and catalogue read use                                                                                                                                                                                                     |
-| `openAICompatibleFetch`, `createOpenAICompatibleFetch(options)`, `openAICompatibleBaseUrl(baseUrl)`                                                                                                                                               | the custom endpoint's `fetch` (safeFetch under the streaming-safe limits, with the self-host `allowPrivate` option, #249) and the base URL it normalizes                                                                                                                                                                   |
-| `isVertexModelId(id)`, `isVertexAnthropicModel(id)`                                                                                                                                                                                               | which Vertex ids this build can serve, and which of them the Anthropic client builds — the same rule the server's catalogue filters with (#251)                                                                                                                                                                            |
-| `SafeFetch`, `ProviderFetch`, `SafeProviderFetchOptions`, `createSafeProviderFetch(options)`                                                                                                                                                      | the one guarded `fetch` the two URL-typed types are built from                                                                                                                                                                                                                                                             |
-| `providerOf(modelId)`                                                                                                                                                                                                                             | the provider of a `provider/model` id: the part before the first slash                                                                                                                                                                                                                                                     |
-| `isUsableCredential(credential)`                                                                                                                                                                                                                  | whether a resolved credential is a key at all (a blank one is not)                                                                                                                                                                                                                                                         |
-| `missingCredentialMessage(provider)`                                                                                                                                                                                                              | the `session.error` sentence for a provider with no key                                                                                                                                                                                                                                                                    |
-| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                                                                                                                                                                                              | the credential scrubbed out of provider error text                                                                                                                                                                                                                                                                         |
-| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`                                                                                                                                                                          | one model request, as text, usage, error and abort                                                                                                                                                                                                                                                                         |
-| `ProviderOptions`                                                                                                                                                                                                                                 | the AI SDK's per-provider options for one call, read off `streamText`                                                                                                                                                                                                                                                      |
-| `PROVIDER_REASONING`, `CREDENTIAL_TYPE_REASONING`, `planReasoning`, `ReasoningPlan`, `ReasoningSupportFor`, `requestedReasoningEffort`                                                                                                            | `low \| medium \| high` in each provider's — and named credential type's — own option, gated by the injected resolver, and what the log asks a request for (#252)                                                                                                                                                          |
-| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                                                                                                                                                                                         | what a request reported → the protocol's four counters, always integers                                                                                                                                                                                                                                                    |
-| `classifyModelError(error)`, `ModelErrorClassification`                                                                                                                                                                                           | retryable or not, and the `session.error` type that says so                                                                                                                                                                                                                                                                |
-| `isRetryableModelError(error)`                                                                                                                                                                                                                    | the same answer, when only the boolean is wanted                                                                                                                                                                                                                                                                           |
-| `isClaimConflictError(error)`                                                                                                                                                                                                                     | whether the store refused a claim another owner had taken                                                                                                                                                                                                                                                                  |
-| `isOwnershipError(error)`                                                                                                                                                                                                                         | a fenced write or a claim conflict: the log is somebody else's (D9)                                                                                                                                                                                                                                                        |
-| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`                                                                                                                                                                               | how failures are retried                                                                                                                                                                                                                                                                                                   |
-| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                                                                                                                                                                                        | the delay, and the sleep that honors an abort                                                                                                                                                                                                                                                                              |
-| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`                                                                                                                                                                            | `3`, `500`, `8000`                                                                                                                                                                                                                                                                                                         |
-| `PACKAGE_NAME`, `DEPENDENCIES`                                                                                                                                                                                                                    | the package name, and the edges that must resolve through built output                                                                                                                                                                                                                                                     |
+| export                                                                                                                                                                                                                                            | what it is                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runTurn(sessionId, options)`                                                                                                                                                                                                                     | run one turn; resolves to a `TurnOutcome`                                                                                                                                                                                                                                                                                                                                                      |
+| `RunTurnOptions`                                                                                                                                                                                                                                  | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry?, tools?, toolSettings?, toolSupportFor?, resolveToolSecrets?, maxToolSteps? }`                                                                                                                                                                                               |
+| `runToolStep(options)`, `ToolStepOptions`                                                                                                                                                                                                         | one step's tool calls (epic #303, X2; #307): the permission read off the request's settings, the calls stored, run concurrently through the registry and answered in call order                                                                                                                                                                                                                |
+| `repairLostExecutions(events, append)`, `lostExecutions(events)`, `pendingToolUse(events)`                                                                                                                                                        | the crash rule (X3): the calls the log holds with no answer **and no user waiting on them**, and the `execution lost` results a brain that inherited them writes — never running them again                                                                                                                                                                                                    |
+| `awaitingUser(events)`, `answeredWaiting(events)`, `confirmationsByCall(events)`, `sessionApprovedTools(events)`, `waitsForUser(permission, registered, name)`, `malformedQuestion(call)`                                                         | the pause, read off the log (epic #303, X6; #309): the calls with no result that wait on the user, the ones the user has answered, the newest confirmation per call, the tools this chat has been told to allow, whether a call is one the user must answer, and what is wrong with an `ask_user` call's questions                                                                             |
+| `answerConfirmations(options)`, `confirmationOutcome(call, confirmation, recovered)`, `resolveWaiting(options)`, `denied(message)`, `executionLost(name)`, `RESOLVED_BY_MESSAGE`                                                                  | what answers a paused call: the turn's one append for the calls the user answered (running an approved tool, writing the denial, or writing the answers), the resolution of a single confirmation, the results a message or an interrupt leaves, and the two sentences those are written with                                                                                                  |
+| `asToolInput(value)`                                                                                                                                                                                                                              | a model's arguments as the JSON object the log stores: anything JSON cannot carry is dropped, and a value that is not an object becomes `{}`                                                                                                                                                                                                                                                   |
+| `DEFAULT_MAX_TOOL_STEPS`                                                                                                                                                                                                                          | `50` — the model requests one turn may make before it ends with the step-limit notice (X2)                                                                                                                                                                                                                                                                                                     |
+| `offeredTools(registry)`, `toolSet(registry)`, `toolsFor(registry, supportFor, settings, modelId, credentialType)`                                                                                                                                | what a request's span records, the definitions the model is offered (with **no** `execute`, so the AI SDK never loops), and the registry this request may call from — the settings' disabled tools left out, `undefined` when that leaves none                                                                                                                                                 |
+| `ToolDecision`, `ToolSettings`, `ToolSettingsResolver`, `ToolSupportFor`, `ToolSecretResolver`                                                                                                                                                    | the injected seams around tools: the settings in force per request — an `enabled` and a `permission` per tool name, asked with the owner and the mode's override (#307) — whether a model can call tools at all (models.dev's `tool_call`), and where a turn's per-user values come from (#311)                                                                                                |
+| `TurnOutcome`, `TurnOutcomeKind`                                                                                                                                                                                                                  | `{ outcome: 'idle' \                                                                                                                                                                                                                                                                                                                                                                           | 'noop' \                     | 'interrupted' \                                                                                                                                 | 'error' }` |
+| `ResolvedMode`, `ModeResolver`                                                                                                                                                                                                                    | a mode as the host resolved it — id, name, model, effort, prompt addition, and the tool override it imposes (#245, M6; #307) — and where a request's mode comes from                                                                                                                                                                                                                           |
+| `ContextStrategy`, `ContextStrategyOptions`, `ContextStrategyResult`                                                                                                                                                                              | `(events, { model, system, tools? }) => { messages, truncated?, cleared? }` — the messages, what the strategy had to cap to fit (epic #277, K6) and the tool results it capped and cleared (epic #303, X9; #306). `tools` is the registry whose declarations carry the per-result cap                                                                                                          |
+| `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                                                                                                                                         | the default strategy: the conversation, summarized where the log says so (#277 K1), trimmed to a token budget resolved per model, with an oversized newest item capped (K6), a tool result capped to its tool's declaration (X9) and an old one cleared (X9)                                                                                                                                   |
+| `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                                                                                                                                     | its defaults                                                                                                                                                                                                                                                                                                                                                                                   |
+| `estimateTokens(text)`                                                                                                                                                                                                                            | the chars/4 estimate the budget is measured in                                                                                                                                                                                                                                                                                                                                                 |
+| `OMISSION_MARKER(tokens)`                                                                                                                                                                                                                         | the `[… N tokens omitted …]` a capped item carries where its middle was (K6)                                                                                                                                                                                                                                                                                                                   |
+| `estimateNextRequestTokens(options)`, `NextRequestSizeOptions`, `ContextSizeBaseline`, `promptTokensOf(usage)`                                                                                                                                    | how big the next request will be (K2): the previous request's real prompt size plus an estimate for what is new, falling back to chars/4 when the previous request cannot be a baseline                                                                                                                                                                                                        |
+| `estimateContextSize(events, options)`, `ContextSizeOptions`, `isUsableContextSizeBaseline`, `latestContextSummary(events)`, `capItemText(text, budget)`                                                                                          | the same measurement, taken off a whole log: the baseline request, the text new since it, and — when there is none — the visible history (epic #277, K2; C2) — with a tool result measured as the request will carry it, capped and cleared (X9; `options.tools` and `options.budget`). `latestContextSummary` is the summary in force (K1); `capItemText` is the head-and-tail cut K6 applies |
+| `summarizeContext(options)`, `SummarizeContextOptions`, `SummarizeResult`                                                                                                                                                                         | the compaction engine (epic #277, C2; #279): the trigger, the cut, the passes and the `session.context_summary` it writes                                                                                                                                                                                                                                                                      |
+| `pendingManualCompaction(events)`, `PendingCompaction`                                                                                                                                                                                            | the manual half (epic #277, K8; #283): the newest `session.compact` no `session.compaction` answers yet, read off the log — what makes `/compact` idempotent while one is pending and lets the turn loop pick one up                                                                                                                                                                           |
+| `compactionOutcome(outcome, record)`, `CompactionOutcomeRecord`                                                                                                                                                                                   | the brain's `session.compaction` event: what came of a manual request, echoing the guidance used (#283)                                                                                                                                                                                                                                                                                        |
+| `resolveContextCompaction(config)`, `ContextCompactionConfig`, `ResolvedContextCompaction`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_MAX_SUMMARY_PASSES`                                                                                          | how the engine is configured and the defaults it fills in: the threshold (0.7), the summary model (`null` = the chat's), the pass limit (3), the per-model budgets and output ceilings, and the cut rule                                                                                                                                                                                       |
+| `summarizeContext(options)`, `SummarizeContextOptions`, `SummarizeResult`                                                                                                                                                                         | the compaction engine (epic #277, C2; #279): the trigger, the cut, the passes and the `session.context_summary` it writes                                                                                                                                                                                                                                                                      |
+| `resolveContextCompaction(config)`, `ContextCompactionConfig`, `ResolvedContextCompaction`, `ContextCompactionResolver`, `ContextCompactionOption`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_MAX_SUMMARY_PASSES`                                  | how the engine is configured and the defaults it fills in: the threshold (0.7), the summary model (`null` = the chat's), the pass limit (3), the per-model budgets and output ceilings, and the cut rule — and the option a host passes: one config, or a resolver the loop asks per request with the session owner (#282)                                                                     |
+| `cutAtUserBoundary(items, tailTokens)`, `ContextCutRule`, `ContextCutItem`                                                                                                                                                                        | K12's one replaceable function: where history may be cut — the default keeps a recent tail, never splits a turn and never splits a tool call from its answer, steering or not (#306)                                                                                                                                                                                                           |
+| `conversationItems(events, afterSeq, cap)`, `toolResultCap(tools, budget)`, `ToolResultCap`                                                                                                                                                       | the visible conversation as cut items — messages, calls and results, a result naming the call it answers — measured as a request would carry it (X9); and the cap one result may cost, by tool (X9)                                                                                                                                                                                            |
+| `SUMMARY_SIZE_RATIO`, `RECENT_TAIL_RATIO`, `OVERFLOW_RECENT_TAIL_RATIO`, `SUMMARY_ITEM_CAP_RATIO`, `SUMMARY_SLICE_RATIO`, `SUMMARY_SIZE_BUDGET_RATIO`, `SUMMARY_INPUT_MARGIN`, `MIN_SLICE_TOKENS`, `MIN_SUMMARY_TOKENS`, `SUMMARY_PROMPT_VERSION` | the engine's numbers and the version of the summary prompt it records (`context-summary-v2` since #306; K5/K6/K7)                                                                                                                                                                                                                                                                              |
+| `TOOL_RESULT_BUDGET_RATIO`, `CLEARED_TOOL_RESULT(tokens)`                                                                                                                                                                                         | the share of the chat model's budget no single tool result may take (X9, #306), and what a cleared result's body is replaced by                                                                                                                                                                                                                                                                |
+| `ModelCredential`                                                                                                                                                                                                                                 | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }`, `{ type: 'openai_compatible', apiKey, baseUrl }`, `{ type: 'bedrock', accessKeyId, secretAccessKey, sessionToken?, region }` or `{ type: 'vertex', project, location, serviceAccount }` — one request's credential                                                                                                |
+| `VertexModelCredential`                                                                                                                                                                                                                           | the Vertex shape on its own: the project, the location, and the service-account key document as text                                                                                                                                                                                                                                                                                           |
+| `credentialSecrets(credential)`                                                                                                                                                                                                                   | every secret a credential carries, for redaction — a Bedrock credential has three, a Vertex one its private key PEM                                                                                                                                                                                                                                                                            |
+| `ResolveCredential`                                                                                                                                                                                                                               | `(name) => Promise<ModelCredential \                                                                                                                                                                                                                                                                                                                                                           | null>` — where it comes from |
+| `ModelFactory`                                                                                                                                                                                                                                    | `(modelId, credential) => LanguageModel` — how a `provider/model` becomes a model                                                                                                                                                                                                                                                                                                              |
+| `providerModelFactory`, `createProviderModelFactory(options)`                                                                                                                                                                                     | the `ModelFactory` hosts normally pass: the official AI SDK providers, the key passed explicitly, and the egress `fetch` a host injects (#270)                                                                                                                                                                                                                                                 |
+| `azureFetch`, `createAzureFetch(options)`, `azureBaseUrl(endpoint)`                                                                                                                                                                               | the Azure `fetch` (safeFetch under the streaming-safe limits) and the base URL it builds                                                                                                                                                                                                                                                                                                       |
+| `redactSecrets(text, secrets)`                                                                                                                                                                                                                    | `redactSecret` for a credential that carries more than one secret                                                                                                                                                                                                                                                                                                                              |
+| `BEDROCK_SERVICE`, `bedrockRuntimeBaseUrl(region)`, `bedrockControlPlaneUrl(region, path)`                                                                                                                                                        | the SigV4 service both Bedrock hosts are signed for, and the two AWS hosts a region derives                                                                                                                                                                                                                                                                                                    |
+| `BEDROCK_FOUNDATION_MODELS_PATH`, `BEDROCK_INFERENCE_PROFILES_PATH`                                                                                                                                                                               | the two control-plane paths the server's save-time check and catalogue read (models, and inference profiles, #274)                                                                                                                                                                                                                                                                             |
+| `signBedrockRequest(credential, url, input?)`, `SignedBedrockRequest`, `BedrockRequestInput`                                                                                                                                                      | one SigV4-signed Bedrock request, returned rather than sent — what the server's save-time check and catalogue read use                                                                                                                                                                                                                                                                         |
+| `openAICompatibleFetch`, `createOpenAICompatibleFetch(options)`, `openAICompatibleBaseUrl(baseUrl)`                                                                                                                                               | the custom endpoint's `fetch` (safeFetch under the streaming-safe limits, with the self-host `allowPrivate` option, #249) and the base URL it normalizes                                                                                                                                                                                                                                       |
+| `isVertexModelId(id)`, `isVertexAnthropicModel(id)`                                                                                                                                                                                               | which Vertex ids this build can serve, and which of them the Anthropic client builds — the same rule the server's catalogue filters with (#251)                                                                                                                                                                                                                                                |
+| `SafeFetch`, `ProviderFetch`, `SafeProviderFetchOptions`, `createSafeProviderFetch(options)`                                                                                                                                                      | the one guarded `fetch` the two URL-typed types are built from                                                                                                                                                                                                                                                                                                                                 |
+| `providerOf(modelId)`                                                                                                                                                                                                                             | the provider of a `provider/model` id: the part before the first slash                                                                                                                                                                                                                                                                                                                         |
+| `isUsableCredential(credential)`                                                                                                                                                                                                                  | whether a resolved credential is a key at all (a blank one is not)                                                                                                                                                                                                                                                                                                                             |
+| `missingCredentialMessage(provider)`                                                                                                                                                                                                              | the `session.error` sentence for a provider with no key                                                                                                                                                                                                                                                                                                                                        |
+| `redactSecret(text, secret)`, `REDACTED_PLACEHOLDER`                                                                                                                                                                                              | the credential scrubbed out of provider error text                                                                                                                                                                                                                                                                                                                                             |
+| `streamModelRequest(params)`, `ModelRequestParams`, `ModelRequestResult`                                                                                                                                                                          | one model request, as text, usage, error and abort                                                                                                                                                                                                                                                                                                                                             |
+| `ProviderOptions`                                                                                                                                                                                                                                 | the AI SDK's per-provider options for one call, read off `streamText`                                                                                                                                                                                                                                                                                                                          |
+| `PROVIDER_REASONING`, `CREDENTIAL_TYPE_REASONING`, `planReasoning`, `ReasoningPlan`, `ReasoningSupportFor`, `requestedReasoningEffort`                                                                                                            | `low \                                                                                                                                                                                                                                                                                                                                                                                         | medium \                     | high` in each provider's — and named credential type's — own option, gated by the injected resolver, and what the log asks a request for (#252) |
+| `toModelUsage(usage)`, `ZERO_MODEL_USAGE`                                                                                                                                                                                                         | what a request reported → the protocol's four counters, always integers                                                                                                                                                                                                                                                                                                                        |
+| `classifyModelError(error)`, `ModelErrorClassification`                                                                                                                                                                                           | retryable or not, and the `session.error` type that says so                                                                                                                                                                                                                                                                                                                                    |
+| `isRetryableModelError(error)`                                                                                                                                                                                                                    | the same answer, when only the boolean is wanted                                                                                                                                                                                                                                                                                                                                               |
+| `isClaimConflictError(error)`                                                                                                                                                                                                                     | whether the store refused a claim another owner had taken                                                                                                                                                                                                                                                                                                                                      |
+| `isOwnershipError(error)`                                                                                                                                                                                                                         | a fenced write or a claim conflict: the log is somebody else's (D9)                                                                                                                                                                                                                                                                                                                            |
+| `RetryPolicy`, `ResolvedRetryPolicy`, `resolveRetryPolicy(policy?)`                                                                                                                                                                               | how failures are retried                                                                                                                                                                                                                                                                                                                                                                       |
+| `backoffDelay(attempt, policy)`, `abortableSleep`, `Sleep`                                                                                                                                                                                        | the delay, and the sleep that honors an abort                                                                                                                                                                                                                                                                                                                                                  |
+| `DEFAULT_MAX_RETRIES`, `DEFAULT_BASE_DELAY_MS`, `DEFAULT_MAX_DELAY_MS`                                                                                                                                                                            | `3`, `500`, `8000`                                                                                                                                                                                                                                                                                                                                                                             |
+| `PACKAGE_NAME`, `DEPENDENCIES`                                                                                                                                                                                                                    | the package name, and the edges that must resolve through built output                                                                                                                                                                                                                                                                                                                         |
 | `log.ts`, `events.ts` and `validate.ts` are internal: they are how the loop is written, not what                                                                                                                                                  |
 | a host talks to.                                                                                                                                                                                                                                  |
 | **An edited message is not history.** A `session.rewind` (#238) restarts the session from the                                                                                                                                                     |
@@ -162,7 +180,10 @@ START — a fresh turn (idle, with something queued)
 
 LOOP — once per model request
   1. the signal aborted, or a queued user.interrupt ....... INTERRUPT
+  1b. a call the user has answered (#309) ................. answer it — run it, deny it, or write
+     the answers as its result — and carry on with what that owes
   2. nothing left to answer ............................... session.status_idle, return idle
+  2b. a call still waiting on the user (#309), and no message beside it .... PAUSE (below)
   3. re-read the session; its CURRENT model is this request's model (U3 — a user.message may
      have switched it, even mid-stream of the previous request), UNLESS the session follows a
      mode (#245, M6): the host resolves it as it is now and the resolved model is this
@@ -187,14 +208,21 @@ LOOP — once per model request
                                                              the log is re-read; a summarizer
                                                              that failed is recorded on its
                                                              span and changes nothing else
+  4b. the turn has made OPENHARNESS_MAX_TOOL_STEPS requests .... STEPS EXHAUSTED (below)
+  4c. a call the log holds with no answer .................. EXECUTION LOST (below)
   5. ... span.model_request_start { consumes: the queued user.message ids,
                                     model: the provider/model of the request,
                                     reasoning_effort: what the newest effort-carrying
                                     user.message asked for — else the mode's — and what was
                                     applied,
                                     mode: the mode the request ran under and its name then,
+                                    tools: the { name, source } of every tool this request
+                                    offered (#303 X1) — absent when it offered none,
                                     truncated: what the newest item had to be capped to, when it
-                                    was over the model's budget (#277 K6) }
+                                    was over the model's budget (#277 K6), and the tool results
+                                    it capped (epic #303, X9),
+                                    cleared: the old tool results whose bodies were replaced by a
+                                    placeholder so no summary was needed (X9) }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
   6. stream ............................................... stored event_start under a fresh
                                                              sevt_ id, then one stored
@@ -208,8 +236,66 @@ LOOP — once per model request
      ...................................................... session.usage
                                                              { the session's running totals,
                                                                per model (#247) }
-  9. another user.message arrived ......................... loop, from 1
- 10. otherwise ............................................ session.status_idle, return idle
+  9. the step called tools ................................ TOOL STEP (below), loop from 1
+ 10. another user.message arrived ......................... loop, from 1
+ 11. otherwise ............................................ session.status_idle, return idle
+
+TOOL STEP — one model request's calls, run and answered (epic #303, X2; #307)
+  each call's permission read off the request's settings ... else the tool's own declaration
+  ...................................................... agent.tool_use × N { name, input,
+                                                             evaluated_permission }
+                                                             (one append, before anything runs)
+  the calls run CONCURRENTLY through the registry .......... what the permission allowed; a
+                                                             refused call is answered without
+                                                             running, and one that waits on the
+                                                             user is not answered at all
+  ...................................................... agent.tool_result × N { tool_use_id,
+                                                             content, is_error }
+                                                             (one append, in CALL ORDER)
+  then loop from 1: the answers are what owes the next request
+
+  A result is `is_error: true` for everything that is not what the tool produced: a refusal
+  (`Permission to use <name> has been denied.`), a timeout, an interrupt
+  (`Interrupted by the user.`), the tool's own failure, or `execution lost`.
+
+STEPS EXHAUSTED — the turn has made OPENHARNESS_MAX_TOOL_STEPS model requests (X2)
+  ........................................... session.error
+                                               { type: tool_steps_exhausted_error,
+                                                 retry_status: terminal }
+  ........................................... session.status_idle, return error
+
+EXECUTION LOST — a call the log holds with no result, and no user waiting on it (X3)
+  ........................................... agent.tool_result
+                                               { is_error: true, "execution lost" }
+
+  Never re-run: the call may already have had an effect nobody recorded. It runs at the request
+  boundary, before any request is built, because an assistant turn whose calls have no answers
+  is a request providers refuse. A call the user has **not** answered yet is not one of these:
+  nothing is lost while the question is open, and a resumed brain keeps waiting (PAUSE).
+
+PAUSE — a call whose decision is "the user has to answer this" (epic #303, X6; #309)
+  the user has answered it (a `user.tool_confirmation` in the log)
+    ..................................... the approved tool runs, a denial is written, or the
+                                           answers become the `agent.tool_result` — one append,
+                                           in call order — and the loop carries on
+    the turn inherited an open turn, and the user *allowed* it
+    ..................................... agent.tool_result { is_error: true, "execution lost" }
+                                           — the approval is in the log and nobody knows
+                                           whether it ran, so it never runs again
+  nothing has answered it, and no message arrived
+    ..................................... session.status_idle
+                                           { stop_reason: { type: requires_action,
+                                                            event_ids: the calls } }
+    ..................................... return paused
+  a user.message arrived while it waited ... agent.tool_result × N { is_error: true,
+                                              "The user sent a message instead." }, then the
+                                              turn carries on with the message
+  an interrupt arrived while it waited ..... the same results, then INTERRUPT
+
+  A pause is a turn end, not a wait in the process: the calls are in the log, the session is
+  idle, and nothing is held open — no timer, no lease, no open request. That is what makes it
+  survive a restart (a resumed brain reads the same log and keeps waiting) and what makes the
+  `requires_action` stop reason the whole of what a client needs to draw the question.
 
 MISSING CREDENTIAL — the owner has no stored key for the model's provider (epic #65, A5)
   ........................................... session.error
@@ -360,17 +446,244 @@ Notes on the corners:
   the schema refused, and the session goes idle. The write path fails loudly rather than storing
   a row every reader rejects — see the model seam below for why that matters.
 
+## Tools (epic #303; #304)
+
+The model can act: a request may offer tools, and a step that calls one has its calls stored,
+run and answered before the next request is made. This package owns _when_; the tools
+themselves — their names, descriptions, input schemas, permissions and timeouts — and the
+running of one call are `@openharness/hands` (`createToolRegistry`, `execute`). Nothing else
+about the loop changes: every step is an ordinary model request with its own span, so replay,
+the transcript, usage and compaction see tools as one more thing the log holds.
+
+- **The AI SDK is given no `execute`.** `toolSet` hands `streamText` the definitions without
+  one, so the SDK stops after the step and reports the calls; a tool it could run is a tool it
+  runs itself, looping underneath the loop that owns the log — the second loop X2 forbids. The
+  brain then stores the call, runs it through the registry and makes the next request as its
+  own step. `streamModelRequest` returns the step's `toolCalls` beside its text.
+- **The call's identity is its event's.** `agent.tool_use`'s `id` is the call's id, the result
+  names it in `tool_use_id`, and that id is what the rebuilt request uses as the AI SDK's
+  `toolCallId` — so a call and its answer are one identity end to end, and a turn that finds a
+  call with no answer knows exactly which execution was lost. The provider's own id is
+  discarded.
+- **The settings are resolved once per request, before the offer is built** (#307). The host's
+  resolver is asked with the session's owner **and the tool override the request's mode
+  imposes**, and what comes back is a decision per tool name: `enabled` — whether the tool is in
+  the offer at all — and `permission` — what a call to it is evaluated under. Asking per request
+  rather than per call is what makes a disabled tool **absent from the request**: the model
+  cannot see it, so it cannot call it, and `span.model_request_start.tools` records only what
+  was really offered. It is also why a settings change, or a mode edit, applies from the next
+  request on — exactly like a model switch. The mode's override travels with the question rather
+  than being merged here, because the host holds both the mode row and the user's settings; a
+  mode decides on/off and never a permission.
+- **`evaluated_permission` is the decision the call was made under.** It is read off the
+  request's settings before the call is stored, so a setting changed later does not rewrite what
+  a call ran under. `deny` refuses the call without running it (`Permission to use <name> has
+been denied.`) — unless the name is one no tool carries, which is not a permission question at
+  all and gets the registry's own `No tool named <name> is registered.`; `ask` is the pause of
+  [#309](https://github.com/amirtuval/openharness/issues/309): the call is stored, nothing runs
+  it, and the turn ends `requires_action` until one `user.tool_confirmation` answers it — so a
+  setting nobody can honour never quietly becomes "run it" — and never reads as a denial the user
+  did not make. A host that injects no settings gets each tool's own `permission`, which for
+  every built-in is `allow` (#305) — the epic's "allow every registered tool" — while an MCP
+  tool's `ask` (#312) pauses through the same path rather than being silently allowed. A tool a
+  name nothing declares reads as `deny`.
+- **Several calls of one step run concurrently and are stored in call order.** The calls are
+  one append before anything runs (what the model asked for is in the log whatever happens
+  next), the executions are concurrent, and the results are one append in the order the model
+  made them — so three fetches cost one fetch's time and the log still reads as the model's
+  questions rather than as the order a network happened to answer.
+- **The limit is the turn's model requests, and it ends the turn with a notice.** `maxToolSteps`
+  (the server's `OPENHARNESS_MAX_TOOL_STEPS`, `DEFAULT_MAX_TOOL_STEPS` = 50 here) counts the
+  requests a turn makes; over it the turn writes `session.error
+{ type: tool_steps_exhausted_error, retry_status: terminal }` and goes idle. `session.error`
+  is the one event in the protocol that carries a sentence for the user, and `StopReason` has no
+  member for this (it stays `end_turn`, X1) — so the notice is what says "this ended because the
+  model looped" rather than a retry that would loop again.
+- **A tool is never re-run automatically (X3).** A brain that inherits a `agent.tool_use` with
+  no result answers it `execution lost` and lets the model decide; `repairLostExecutions` runs
+  at the request boundary. The one call it must not answer is one waiting on the user (#309) —
+  the seam its TSDoc names — because a question waiting for an answer has lost nothing.
+- **A tool's timeout is per call, and it is a race.** `hands` runs the call against its own
+  deadline and the turn's signal and reports whichever came first, so a tool that ignores the
+  signal cannot hold the turn open. An interrupt during a tool step answers the running calls
+  `Interrupted by the user.` and then ends the turn the way an interrupt always does.
+- **`ctx` is the whole world a tool gets.** The turn's signal, the resolved timeout, and the
+  per-user values the host resolved (`resolveToolSecrets`, asked once per step with the
+  session's owner) — the same injected-resolver seam as `resolveMode`. Nothing in `hands` reads
+  an environment variable or a database, and every value it is handed is scrubbed out of
+  whatever a tool returns before it is stored.
+- **Whether a model can call tools at all is the host's answer.** `toolSupportFor(modelId,
+credentialType)` — the server builds it from models.dev's `tool_call`; `false` means no tools
+  are offered and the request is built exactly as it was before tools existed, which is what
+  keeps a model that cannot call them working rather than failing on a rejected parameter.
+  `undefined` (a model the registry does not know) offers them, and so does no resolver at all:
+  a host that wired a registry meant it.
+- **The steering message that arrives during a tool step is the next request's.** The loop
+  continues into the following request with the calls' answers, and a queued `user.message` is
+  claimed by that request exactly as any steering message is.
+
+### Tools in the context strategy
+
+`conversationAfter` is where the log becomes messages, and tools are two shapes there: the
+assistant's `agent.message` and its `agent.tool_use` events become **one** assistant message
+(text parts first, then the calls), and the `agent.tool_result` events become one `tool`
+message whose parts name the calls they answer by id.
+
+- **An answer goes directly behind the turn that made the call**, even when the log put
+  something between them. It can: a steering message arrives while a tool runs, so the log
+  holds the call, then the user's message, then the answer — and a provider refuses an
+  assistant turn whose calls are not answered by the very next message. The strategy moves the
+  answer up rather than dropping it; a log that never interleaves is unaffected.
+- **The trimming unit is a turn** — a `user` message and everything that answers it, tool calls
+  and results included — so no cut can land between a call and its answer. Anything before the
+  first user message (a summary cut, a rewind that took the question back) is an orphan and goes
+  first. The item cap (K6) still shortens one block of text; a **tool result** is capped and
+  cleared by the rules below (X9) instead, so no single result can be what pushes a request over
+  its budget. A step of many capped results still can — the message that answers them is not one
+  block of text, and the safety net does not split it — and a provider that refuses such a request
+  ends the turn through the overflow path rather than with a request nobody can read.
+- **A log that never held a tool builds exactly the request it always did** — no parts, no tool
+  messages, the same strings — which is what keeps every session stored before #304 replaying
+  unchanged, and a log whose results are all inside their caps and inside the verbatim tail
+  builds exactly the request #304 built too.
+- **The compaction engine covers tool work and cannot split a pair either.** Its item list is
+  user messages, agent messages and both halves of every tool step (see below), and its cut —
+  at a user-message boundary, widened back over a call whose answer would otherwise be kept
+  without it — always leaves a tail that answers every call it carries.
+
+### What a tool result may cost a request (epic #303, X9; #306)
+
+A result is the one part of a request that can be arbitrarily large without anyone having
+written it, so it is sized twice, and **both are the request's alone**: the stored
+`agent.tool_result` keeps its body, and replay, the transcript and the summarizer still read it.
+
+- **A result inside the verbatim tail is capped (X9).** The cap is the smaller of what its tool
+  declares (`ToolDefinition.maxResultTokens`, `DEFAULT_TOOL_RESULT_TOKENS` = 4096 when it
+  declares none) and `TOOL_RESULT_BUDGET_RATIO` — a fifth of the chat model's history budget, so
+  a generous declaration cannot overrun a small model's window, and a result at the cap still
+  leaves the quarter the engine keeps verbatim its room. The text becomes a head and a tail with
+  `OMISSION_MARKER` between them, and every result the request capped is recorded in
+  `span.model_request_start.truncated.results` — `{ seq, tool, tokens_before, tokens_after }` per
+  result — so a client can show a notice. `truncated`'s `seq`/`tokens_before`/`tokens_after`
+  still describe the newest item the request shortened: the newest message when it had to be
+  capped (K6), and otherwise the newest result that was (X9).
+- **A result older than the verbatim tail is cleared, before anything is summarized (X9).** Its
+  body is replaced by `CLEARED_TOOL_RESULT(n)` — "result cleared, N tokens" — and the count and
+  the tokens are recorded on the span as `cleared: { results, tokens }`. Old tool output is what
+  a request can most afford to give up, and giving it up costs no model call: **clearing is the
+  first answer to a filling context**, which is why `estimateContextSize` measures the request
+  with the placeholder in it and a context it brings back under the threshold is never
+  summarized at all.
+- **"Old" is the K4 tail** — the recent quarter of the chat model's budget, cut at a
+  `user.message` boundary by the same rule the engine cuts with — so a context small enough to be
+  all tail clears nothing, and a result is cleared exactly when it is history the engine's cut
+  would have covered.
+- **The rules are derived, not recorded.** Both are computed from the log, the budget and the
+  registry's declarations, by one function (`resultPolicy`), which is what lets the measurement
+  the trigger takes build the same request the strategy is about to. A host that gives the
+  strategy a different budget from the engine's measures a slightly different request — the
+  server hands both the same `tokenBudgetFor` resolver (#246), which is what keeps the two one
+  answer.
+- **The cut items are measured the same way.** `conversationItems` counts a result at its cap
+  rather than at what the store holds, because a stored result that is unbounded would stretch
+  the tail walk over the whole history — and a history nobody can cut is a history nobody can
+  clear. The _text_ the summarizer is handed is still the stored one: a summary stands in for
+  what the tools said, so it has to be able to read it.
+
+### Pausing for the user (epic #303, X6; #309)
+
+A turn can end because it is waiting for the user, and `./pausing` is the whole of it: the
+question ("which calls wait?"), the one event that answers them, and what each answer means.
+It is deliberately not built-in-specific — an MCP tool that asks (`ask`, #312) pauses through
+exactly the same path — because a pause is a property of the log, not of a tool.
+
+- **Two things make a call wait.** The permission the loop evaluated it under (`ask`, which the
+  settings resolver answered or the tool's own declaration did), and a call to `ask_user` — the
+  built-in a model asks a question with, whose calls are answered by the user whatever the
+  policy says, because the user's answers **are** its result and its `run` never produces one.
+  Both are recorded the same way: the call's `evaluated_permission` is `ask`, so
+  `awaitingUser` — unanswered `agent.tool_use` with `evaluated_permission: ask` — is the whole
+  of "what is this session waiting for", and nothing is stored beside it. A name this
+  deployment's registry does not hold waits for nothing: no such tool can be called.
+- **A malformed question is not a pause.** An `ask_user` call whose input the protocol's schema
+  refuses is answered with an `is_error` result naming what was wrong (`Invalid input for
+ask_user: …`), so the model fixes it and asks again, rather than the turn pausing on questions
+  no client could render. The check is the protocol's own (`askUserInputProblems`), so the shape
+  the model is held to is the shape a client renders and an answer is validated against.
+- **The pause is a turn end.** The call is stored, nothing runs, and the turn writes
+  `session.status_idle { stop_reason: { type: 'requires_action', event_ids } }` where the ids
+  are the waiting calls' — the calls' own event ids. The turn resolves to `paused`, the session
+  is idle, and nothing is held open: no timer, no lease, no open request. That is what makes a
+  pause survive a restart (a resumed brain reads the same log, and `repairLostExecutions` leaves
+  a call the user has not answered alone) and what makes `requires_action` the whole of what a
+  client needs to draw the question or the approval prompt.
+- **One event answers it, and the server is the one that writes it** (epic #303, X1's rule that
+  a client never writes a tool result). `user.tool_confirmation` names the call, and
+  `./pausing`'s `answerConfirmations` turns it into the `agent.tool_result` the call is owed, in
+  one append and call order like any step: the approved tool runs through the **deployment's**
+  registry (the user has answered for that tool; an offer decides what a model may ask for, not
+  whether an answer is honoured), a denial is written with the user's own words (`The user denied
+this: …`), and an `ask_user` call has its answers written as its result — validated against
+  the questions the call asked, because the tool never runs.
+- **`remember` is the approval's memory, and the event is the record.** `once` (or absent)
+  answers that call. `session` allows every later call to the same tool in this chat: the turn
+  reads it back off the log every request (`sessionApprovedTools`, handed to the step as
+  `approved`), so a compaction cannot drop it, a replay rebuilds it exactly, and a
+  `session.rewind` past the confirmation takes it back with the branch it was on. `always` does
+  the same for this chat and leaves the user's stored policy set to `allow` — a write the server
+  makes on the append (#307). A remembered approval never waives `ask_user`: a question is still
+  a question.
+- **A call approved but never finished is `execution lost`** (X3). The log cannot say whether
+  the turn that took the confirmation got as far as running the tool, so a brain that
+  **inherits** an open turn answers it `execution lost` rather than running it again. The
+  distinguishing fact is the turn state at the moment the turn began: a turn that opened on an
+  idle session is the one the confirmation started and runs it, and one that took over somebody
+  else's does not. A denial, or answers, are written in either case — nothing runs for them, so
+  writing them again is not repeating anything.
+- **A message or an interrupt ends the waiting.** A `user.message` that arrives while calls wait
+  resolves every one of them — `resolveWaiting` writes one `is_error` result each, with
+  `RESOLVED_BY_MESSAGE` ("The user sent a message instead.") — and the turn carries on with the
+  message; an interrupt resolves them the same way and then ends the turn as an interrupt
+  always does.
+- **A session sitting on an answer looks idle.** A confirmation is not a queued user event, so
+  `getPendingUserEvents` does not list it and the turn state is `idle`; the loop's no-op guard
+  asks one targeted read for the newest tool event instead (a `user.tool_confirmation` there is
+  work, and `answeredWaiting` is the same question asked of a whole log). The route signals the
+  scheduler to start that turn, and a signal is a hint — so the store's work scan
+  (`@openharness/session`'s `findSessionsNeedingWork`) treats the answer as work too: a session
+  whose last turn ended `requires_action` and which holds a `user.tool_confirmation` naming one
+  of the calls it waits on is found by recovery, so a confirmation appended by an instance that
+  died before its turn started is picked up instead of stranding the chat.
+
+### The seams the rest of the epic plugs into
+
+| what                                                 | how                                                                                                                                                                                                                          |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a tool that runs                                     | `ToolDefinition` + `ToolRegistry.execute` in `@openharness/hands` (#305's `web_fetch`, `web_search`, `todo_write` live there)                                                                                                |
+| whether a model can call tools                       | `toolSupportFor` on `runTurn`; the server answers from models.dev's `tool_call`                                                                                                                                              |
+| which tools a request offers, and what a call may do | `toolSettings` on `runTurn`: the per-request decisions #307 stores per user and a mode overrides; a disabled tool is left out of the offer, and an `ask` is the pause of #309                                                |
+| a call waiting on the user                           | `./pausing`: `awaitingUser` is the question ("which calls wait?"), `confirmationOutcome`/`answerConfirmations` are what a `user.tool_confirmation` does, and `resolveWaiting` is what a message or an interrupt does instead |
+| a tool that always asks (rather than a policy)       | `ASK_USER_TOOL_NAME` in `./pausing`'s `waitsForUser`: a call to `ask_user` waits whatever the policy says, because the user's answers are its result. An MCP tool (#312) asks through its `ask` policy on the same path      |
+| per-user values a tool needs                         | `resolveToolSecrets` on `runTurn` (asked per step with the owner); the operator's search key arrives here (#305), and #311's MCP tokens will                                                                                 |
+| MCP tools                                            | `agent.mcp_tool_use` / `agent.mcp_tool_result` and a second source in the offered-tools record (#312); nothing in this loop is built-in-specific today besides `offeredTools`' `source`                                      |
+| tool results in the context                          | the two rules above (X9, #306): a result's cap comes from `ToolDefinition.maxResultTokens` and the tool name in the log, and old results are cleared rather than summarized. #312's MCP results join them by being results   |
+
 ## Extension points
 
-| what                                 | how                                                                                                                                                                                                                                                                      |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| how the log becomes messages         | `contextStrategy` on `runTurn`; the default reads the latest summary (#277 K1), trims to a token budget per model, and caps an oversized newest item (K6)                                                                                                                |
-| when history is summarized           | `compaction` on `runTurn`: one config, or a per-owner `ContextCompactionResolver` the loop asks at each request boundary — the threshold, the summary model, the pass limit, the per-model budgets and output ceilings, and the cut rule (#279; per-user controls: #282) |
-| how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`                                                                                                                                                                              |
-| where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5)                                                                                                                                                                         |
-| which models take a reasoning effort | which models take a reasoning effort                                                                                                                                                                                                                                     | `reasoningSupportFor` on `runTurn`: the levels a model takes, asked per request (#252) |
-| what a mode resolves to              | `resolveMode` on `runTurn`: the mode a chat follows, resolved per request (#245, M6)                                                                                                                                                                                     |
-| how failures are retried             | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                                                                                                                                                                                              |
+| what                                 | how                                                                                                                                                                                                                                                                                              |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| how the log becomes messages         | `contextStrategy` on `runTurn`; the default reads the latest summary (#277 K1), trims to a token budget per model, and caps an oversized newest item (K6)                                                                                                                                        |
+| when history is summarized           | `compaction` on `runTurn`: one config, or a per-owner `ContextCompactionResolver` the loop asks at each request boundary — the threshold, the summary model, the pass limit, the per-model budgets and output ceilings, and the cut rule (#279; per-user controls: #282)                         |
+| which tools a turn may call          | `tools` on `runTurn`: a `ToolRegistry` from `@openharness/hands`, or none at all (epic #303, X4); it is also the registry an approved call runs through once the user answers (#309)                                                                                                             |
+| what the settings say about a tool   | `toolSettings` on `runTurn`: the resolver #307's per-user settings and a mode's override live behind, asked per request with the owner and the override; each tool's own declaration when absent (X4). `ask` pauses the turn, and a `remember: session` approval is read back off the log (#309) |
+| which models may call tools          | `toolSupportFor` on `runTurn`: models.dev's `tool_call`, `false` meaning no tools are offered to that model (X2)                                                                                                                                                                                 |
+| what a tool is handed besides input  | `resolveToolSecrets` on `runTurn`: the per-user values the host resolved for the step (X4; #305's search key, #311's MCP tokens)                                                                                                                                                                 |
+| how many requests a turn may make    | `maxToolSteps` on `runTurn`: the deployment's `OPENHARNESS_MAX_TOOL_STEPS`, ending the turn with a notice past it (X2)                                                                                                                                                                           |
+| how `provider/model` becomes a model | `model` on `runTurn` (required): a `ModelFactory`; the server passes `providerModelFactory`                                                                                                                                                                                                      |
+| where the key comes from             | `resolveCredential` on `runTurn`: the owner's credential per provider, resolved per request (A5)                                                                                                                                                                                                 |
+| which models take a reasoning effort | which models take a reasoning effort                                                                                                                                                                                                                                                             | `reasoningSupportFor` on `runTurn`: the levels a model takes, asked per request (#252) |
+| what a mode resolves to              | `resolveMode` on `runTurn`: the mode a chat follows, resolved per request (#245, M6)                                                                                                                                                                                                             |
+| how failures are retried             | `retry` on `runTurn`: attempts, base delay, ceiling, and the `sleep` itself                                                                                                                                                                                                                      |
 
 `ContextStrategy` is called once per model request, with the log as that request sees it and the
 session's `{ model, system }`; it must be pure — the loop owns the store, and a strategy that
@@ -470,7 +783,8 @@ compaction is this one, its event is a `session.context_summary`, and nothing is
   is attempted too and answers `'skipped'` only when there is genuinely nowhere to cut. The
   request's `instructions` become `SummarizeContextOptions.guidance`, folded into the
   summarizer's instructions as the user's own; the base prompt is unchanged, so
-  `SUMMARY_PROMPT_VERSION` stays `context-summary-v1`. `runTurn` writes the `session.compaction`
+  `SUMMARY_PROMPT_VERSION` — `context-summary-v2` since #306 added the tool-work section — is
+  unchanged by guidance. `runTurn` writes the `session.compaction`
   outcome after the run — `summarized` (with `summary_seq`), `nothing_to_summarize` or `failed` —
   which is both the clear outcome a client shows and what makes the request no longer pending. An
   idle session is woken by the route's `signal`, runs a turn that answers the request and makes no
@@ -977,7 +1291,8 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   log (the baseline it finds, and the whole visible history when a summary has intervened).
   `turn.test.ts` holds the loop's half: the capped newest message reaching the request, and the
   record landing on the request's `span.model_request_start`.
-- `summarize.test.ts` — the compaction engine (#279), in two layers. The engine on its own
+- `summarize.test.ts` — the compaction engine (#279) and, since #306, the tool pairs and the
+  clearing around it, in two layers. The engine on its own
   (`summarizeContext` against a hand-built log, with exactly-sized messages so the arithmetic is
   the assertion): the cut lands where K4 says and the summary covers exactly the older messages
   (`covers.to_seq`, and the prompt the summarizer was sent); nothing to cut is `'skipped'` with
@@ -994,7 +1309,16 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   is the one #278 built, byte for byte), the retried request is built from the summary, a
   summarizer failure leaves the chat running with trimming, an overflow compacts and retries
   exactly once, a second overflow ends with the clear `exhausted` error and no third call, and an
-  overflow with nowhere to cut fails without a second request.
+  overflow with nowhere to cut fails without a second request. Its #306 cases are the tool pairs
+  and the clearing: `cutAtUserBoundary` widening past a steering message that sits between a call
+  and its answer, and answering 0 when the only boundary would split one; a result in a log item
+  measured at its cap rather than at what the store holds, and the tail walk that does not
+  stretch for one; a summary whose tail answers every call it carries, with the pair in the
+  request it bought; a call and its answer folded in the same pass even when a slice boundary
+  falls between them; and, at the loop, clearing the old results _instead of_ summarizing when
+  that is enough (no summary, the placeholder in the request, `cleared` on the span, the stored
+  answer whole) and summarizing when it is not (with the tool-work section in the prompt and
+  `context-summary-v2` on the event).
 - `manual.test.ts` — manual compaction (#283): `pendingManualCompaction` as a rule (nothing,
   a request pending, an outcome answering it, the newest of two that raced, a new request after
   an outcome), and the loop's half through `runTurn` — a `/compact [instructions]` answered below
@@ -1045,8 +1369,54 @@ Bearer` with a decoy environment, **no** `Authorization` header for a keyless en
   (`Invalid grant: account not found`), the metadata stub is never asked, no model request
   leaves the process, and a key Google cannot verify fails locally rather than falling back to
   anything.
+- `pausing.test.ts` — the pause (epic #303, X6; #309), in two layers. The pure half, on
+  hand-built logs: which calls wait (`awaitingUser`), the newest confirmation per call, the tools
+  a `remember: session` approval allows, which unanswered calls are lost rather than open, and
+  the predicate that makes a call wait (`waitsForUser`). The loop's half, driven through
+  `runTurn` against a real store: an `ask` policy pausing the turn and running the call once the
+  user allows it, a denial answered with the user's own words, `remember: once` remembered for
+  nothing beyond that call while `session` runs every later one (and is forgotten once an edit
+  rewinds past the confirmation), a step that runs what it may and pauses on what it may not, two
+  waiting calls answered one at a time and the ones nobody has answered left waiting, the same
+  pause read back from a replay of the log, `ask_user` pausing whatever the policy says with the
+  answers written as its result (and a denial, and answers that do not fit the questions, and a
+  malformed call answered instead of paused), a message and an interrupt resolving the waiting
+  calls, a resumed brain keeping waiting, and an approval nobody finished answered `execution
+lost`.
+- `tool-loop.test.ts` — the tool loop (epic #303, X2/X3/X4), driven through `runTurn` with a
+  real store, a scripted model that calls tools and local tools that record what ran: one call
+  in one step (the exact event order, the tools the span records, the request the answer buys
+  and the assistant/tool messages it is built from), two calls in one step (started together —
+  the scenario's own gate deadlocks if they are not — and stored in call order), a loop across
+  three steps, the step limit ending the turn with `tool_steps_exhausted_error` and every call
+  answered, a timeout, an interrupt during a call, a `deny` answered without running anything
+  and an `ask` pausing the turn (the pause itself, in every path, is `pausing.test.ts`),
+  the settings asked **once per request** with the owner and the mode's override, a disabled
+  tool left out of the offer (and every tool disabled meaning no offer at all, exactly as a
+  tools-less deployment builds it), the turn's resolved secrets scrubbed out of a tool's
+  answer, a model the support resolver rejects getting no tools at all, an unknown model
+  getting them, and a turn with no registry calling nothing. Two more
+  are the crash rule: a call with no result is answered `execution lost` and **not** run, with
+  the dead brain's span closed first when one was left open; and one is steering — a message
+  that arrives while a tool runs is claimed by the request after the step.
+- `context.test.ts` also holds the tool half of the strategy: a call and its answer as one
+  assistant turn and one `tool` message, an error result and an empty one, an answer moved
+  behind the turn that made the call when the log interleaved a steering message, a cut that
+  never lands between the two, and a log that never held a tool building exactly the request it
+  always did. Its #306 half is what a result may cost a request: a result capped to its tool's
+  declaration (head, tail and marker, with the record), to the fifth of the budget a generous
+  declaration may not exceed, and to the default for a tool — or a registry — that declares
+  nothing; an old result cleared to `result cleared, N tokens` with its pair still answered, an
+  error result the same, nothing cleared when the whole history is the tail; and the measure —
+  a call and its answer counted as part of the context (K2), and a cleared result counted as the
+  placeholder it became.
+- `tool-loop.test.ts`'s #306 case is the loop's own: an answer far over its tool's cap
+  (`maxResultTokens`) reaches the _second_ request as a head and a tail with the marker, the
+  stored `agent.tool_result` keeps every character, the call is still in front of it, and the
+  request's `span.model_request_start.truncated.results` names the result and what it cost.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
-  scripts what each model request answers with, records the prompts, and can act mid-stream
+  scripts what each model request answers with — text **and tool calls**, whose arguments travel
+  as JSON text the way a provider sends them — records the prompts, and can act mid-stream
   (abort, append a steering message) between two chunks. Its `apiCallError` is the failure
   shape a retry test needs — an `APICallError` the SDK's own retry classifier would act on, so
   a call-count assertion can actually fail (#117). Its `wrongSpecModel` is the one model

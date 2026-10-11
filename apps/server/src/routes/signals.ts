@@ -3,7 +3,9 @@ import type { PartitionSignalKind } from '@openharness/session'
 
 /**
  * What the scheduler is told after user input lands in a session's log: `interrupt` for a
- * `user.interrupt`, `work` for a `user.message`.
+ * `user.interrupt`, `work` for a `user.message` — and for a `user.tool_confirmation`, which is
+ * work of its own (epic #303, #309): a session sitting on an answer looks idle, and this signal
+ * is what starts the turn that runs the call the user approved.
  *
  * The interrupt is signalled first on purpose. A batch that carries both means "stop, then
  * answer this", and signalling `work` first would start a turn only to abort it.
@@ -20,7 +22,12 @@ export function signalKinds(events: readonly { readonly type: string }[]): Parti
   if (events.some((event) => event.type === EVENT_TYPES.userInterrupt)) {
     kinds.push('interrupt')
   }
-  if (events.some((event) => event.type === EVENT_TYPES.userMessage)) {
+  if (
+    events.some(
+      (event) =>
+        event.type === EVENT_TYPES.userMessage || event.type === EVENT_TYPES.userToolConfirmation,
+    )
+  ) {
     kinds.push('work')
   }
   return kinds

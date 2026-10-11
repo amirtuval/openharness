@@ -4,18 +4,20 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { DEFAULT_COMPACTION_THRESHOLD } from '@openharness/brain'
+import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_TOOL_STEPS } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
+
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
 import {
   DEFAULT_KEY_PROVIDER,
   DEFAULT_LOG_FORMAT,
   DEFAULT_PORT,
+  DEFAULT_SEARCH_DAILY_LIMIT,
   DEFAULT_SCHEDULER,
   DEFAULT_TRACE_SAMPLE_RATE,
   DEFAULT_TRACING,
@@ -39,6 +41,9 @@ const REQUIRED = {
   BETTER_AUTH_URL: 'http://localhost:3000',
   OPENHARNESS_SECRETS_KEY: 'b3Blbmhhcm5lc3MtdGVzdC1zZWNyZXRzLWtleS0zMmI=',
 }
+
+/** The operator's search key a test sets (epic #303, #305). A shape, never a real key. */
+const SEARCH_KEY = 'brave-test-key'
 
 /** A Cloud KMS key resource name, the shape `OPENHARNESS_KMS_KEY` takes (#150). Not a secret. */
 const KMS_KEY =
@@ -78,6 +83,8 @@ describe('readServerConfig', () => {
       trustedProxyHops: DEFAULT_TRUSTED_PROXY_HOPS,
       corsOrigins: [],
       maxConcurrentSessions: DEFAULT_MAX_CONCURRENT_SESSIONS,
+      maxToolSteps: DEFAULT_MAX_TOOL_STEPS,
+      search: null,
       drainTimeoutMs: DEFAULT_DRAIN_TIMEOUT_MS,
       instanceId: config.instanceId,
       partitions: DEFAULT_PARTITION_COUNT,
@@ -120,6 +127,7 @@ describe('readServerConfig', () => {
         OPENHARNESS_TRUSTED_PROXY_HOPS: '2',
         OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
         OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
+        OPENHARNESS_MAX_TOOL_STEPS: '7',
         OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
         SCHEDULER: 'postgres',
         OPENHARNESS_INSTANCE_ID: 'instance-a',
@@ -135,6 +143,9 @@ describe('readServerConfig', () => {
         OPENHARNESS_TRACING: 'cloud-trace',
         OPENHARNESS_TRACE_SAMPLE_RATE: '0.5',
         GOOGLE_CLOUD_PROJECT: 'openharness-dev',
+        OPENHARNESS_SEARCH_PROVIDER: 'brave',
+        OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY,
+        OPENHARNESS_SEARCH_DAILY_LIMIT: '25',
       }),
     )
 
@@ -158,6 +169,8 @@ describe('readServerConfig', () => {
       trustedProxyHops: 2,
       corsOrigins: ['http://a.test', 'http://b.test'],
       maxConcurrentSessions: 12,
+      maxToolSteps: 7,
+      search: { provider: 'brave', apiKey: SEARCH_KEY, dailyLimit: 25 },
       drainTimeoutMs: 250,
       instanceId: 'instance-a',
       partitions: 8,
@@ -185,6 +198,36 @@ describe('readServerConfig', () => {
 
     expect(config.deltaRetentionMs).toBe(0)
     expect(config.compactIntervalMs).toBe(0)
+  })
+
+  it('turns search on with a key, and refuses a provider without one', () => {
+    // A key alone names the one provider this build has an adapter for.
+    expect(readServerConfig(env({ OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY })).search).toEqual({
+      provider: 'brave',
+      apiKey: SEARCH_KEY,
+      dailyLimit: DEFAULT_SEARCH_DAILY_LIMIT,
+    })
+    // A provider named without a key is the configuration mistake it is: the operator asked for
+    // search and gave no way to authenticate, so the boot says which variable is missing.
+    expect(() => readServerConfig(env({ OPENHARNESS_SEARCH_PROVIDER: 'brave' }))).toThrow(
+      /OPENHARNESS_SEARCH_API_KEY/,
+    )
+    expect(() =>
+      readServerConfig(
+        env({ OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY, OPENHARNESS_SEARCH_PROVIDER: 'exa' }),
+      ),
+    ).toThrow(/OPENHARNESS_SEARCH_PROVIDER/)
+    // Zero is a limit: the tool stays configured and answers every call with the notice.
+    expect(
+      readServerConfig(
+        env({ OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY, OPENHARNESS_SEARCH_DAILY_LIMIT: '0' }),
+      ).search?.dailyLimit,
+    ).toBe(0)
+    expect(() =>
+      readServerConfig(
+        env({ OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY, OPENHARNESS_SEARCH_DAILY_LIMIT: '-1' }),
+      ),
+    ).toThrow(/OPENHARNESS_SEARCH_DAILY_LIMIT/)
   })
 
   it('refuses a retention window that is not a count of milliseconds', () => {
@@ -313,6 +356,15 @@ describe('readServerConfig', () => {
     expect(() => readServerConfig(env({ PORT: 'http' }))).toThrow(/PORT/)
     expect(() => readServerConfig(env({ PORT: '70000' }))).toThrow(/PORT/)
     expect(() => readServerConfig(env({ PORT: '-1' }))).toThrow(/PORT/)
+  })
+
+  it('refuses a tool-step budget below one (epic #303)', () => {
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_TOOL_STEPS: '0' }))).toThrow(
+      /OPENHARNESS_MAX_TOOL_STEPS/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_TOOL_STEPS: 'many' }))).toThrow(
+      /OPENHARNESS_MAX_TOOL_STEPS/,
+    )
   })
 
   it('refuses a concurrency limit below one', () => {

@@ -62,6 +62,14 @@ const storedSamples = {
     seq: 2,
     processed_at: null,
   },
+  'user.tool_confirmation': {
+    id: eventId(),
+    type: 'user.tool_confirmation',
+    seq: 3,
+    processed_at: '2026-03-15T10:00:00Z',
+    tool_use_id: eventId(),
+    result: 'allow',
+  },
   'agent.message': {
     id: eventId(),
     type: 'agent.message',
@@ -99,11 +107,30 @@ const storedSamples = {
       retry_status: { type: 'retrying' },
     },
   },
+  'agent.tool_use': {
+    id: eventId(),
+    type: 'agent.tool_use',
+    seq: 3,
+    processed_at: '2026-03-15T10:00:00Z',
+    name: 'echo',
+    input: { text: 'hi' },
+    evaluated_permission: 'allow',
+  },
+  'agent.tool_result': {
+    id: eventId(),
+    type: 'agent.tool_result',
+    seq: 4,
+    processed_at: '2026-03-15T10:00:00Z',
+    tool_use_id: eventId(),
+    content: text('hi'),
+    is_error: false,
+  },
   'span.model_request_start': {
     id: eventId(),
     type: 'span.model_request_start',
     seq: 8,
     processed_at: '2026-03-15T10:00:00Z',
+    tools: [{ name: 'echo', source: 'builtin' }],
   },
   'span.model_request_end': {
     id: eventId(),
@@ -230,8 +257,8 @@ describe('stored event schemas', () => {
   })
 
   it('rejects an unknown event type', () => {
-    // `agent.tool_use` is a real Anthropic event that v1 does not implement.
-    const unknown = { ...storedSamples['agent.message'], type: 'agent.tool_use' }
+    // `system.message` is a real Anthropic event that v1 does not implement.
+    const unknown = { ...storedSamples['agent.message'], type: 'system.message' }
     const parsed = StoredEventSchema.safeParse(unknown)
     expect(parsed.success).toBe(false)
     expect(parsed.error?.issues[0]?.code).toBe('invalid_union')
@@ -257,12 +284,18 @@ describe('stored event schemas', () => {
     )
   })
 
-  it('accepts the span fields a capped or summarizing request adds (epic #277)', () => {
-    // Both optional, so a session that never overflowed and never summarized keeps the span
-    // shape it always had — and one that did carries the record.
+  it('accepts the span fields a capped, cleared or summarizing request adds (#277; #303)', () => {
+    // All optional, so a session that never overflowed, never capped a tool result and never
+    // summarized keeps the span shape it always had — and one that did carries the record.
     const start = {
       ...storedSamples['span.model_request_start'],
-      truncated: { seq: 3, tokens_before: 40_000, tokens_after: 30_000 },
+      truncated: {
+        seq: 3,
+        tokens_before: 40_000,
+        tokens_after: 30_000,
+        results: [{ seq: 6, tool: 'web_fetch', tokens_before: 9_000, tokens_after: 2_000 }],
+      },
+      cleared: { results: 2, tokens: 12_000 },
       purpose: 'summary',
     }
     expect(StoredEventSchema.safeParse(start).success).toBe(true)
@@ -270,6 +303,25 @@ describe('stored event schemas', () => {
       StoredEventSchema.safeParse({
         ...storedSamples['span.model_request_start'],
         purpose: 'something-else',
+      }).success,
+    ).toBe(false)
+    // A capped tool result without a tool to name, or a count that is not a count, is refused:
+    // the record is what a client shows the user, and it has to say which result it was.
+    expect(
+      StoredEventSchema.safeParse({
+        ...storedSamples['span.model_request_start'],
+        truncated: {
+          seq: 3,
+          tokens_before: 40_000,
+          tokens_after: 30_000,
+          results: [{ seq: 6, tokens_before: 9_000, tokens_after: 2_000 }],
+        },
+      }).success,
+    ).toBe(false)
+    expect(
+      StoredEventSchema.safeParse({
+        ...storedSamples['span.model_request_start'],
+        cleared: { results: -1, tokens: 12_000 },
       }).success,
     ).toBe(false)
   })

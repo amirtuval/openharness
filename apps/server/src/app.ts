@@ -10,6 +10,7 @@ import {
 } from '@openharness/protocol'
 import { cors } from 'hono/cors'
 import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_SUMMARY_PASSES } from '@openharness/brain'
+import type { ToolRegistry } from '@openharness/hands'
 import {
   AgentNotFoundError,
   DuplicateMcpServerNameError,
@@ -42,6 +43,7 @@ import { createMcpFetch } from './mcp/fetch'
 import { createMcpServerService, type McpServerServiceOptions } from './mcp/service'
 import { registerMcpOAuthCallbackRoute, registerMcpServerRoutes } from './routes/mcp-servers'
 import { registerMeRoutes } from './routes/me'
+import { registerToolSettingsRoutes } from './routes/tool-settings'
 import { registerModeRoutes } from './routes/modes'
 import { registerModelRoutes } from './routes/models'
 import {
@@ -163,6 +165,15 @@ export interface AppOptions {
    * defaults to {@link DEFAULT_SESSION_RECHECK_MS}. Tests shorten it.
    */
   readonly sessionRecheckMs?: number
+  /**
+   * The tools this deployment registers (epic #303, X4; the built-ins are #305), or `undefined`
+   * for a process that registers none — which is a test's own app, since every deployment now
+   * registers the built-ins. `main.ts` builds it once (`createTurnRegistry`) and hands the same
+   * registry to the turn options and to the `/v1/me/tools` routes, so "a tool is available" and
+   * "a chat can call it" are one answer. A test injects a registry of its own to exercise the
+   * settings with a small, known set of tools.
+   */
+  readonly tools?: ToolRegistry
   /**
    * `OPENHARNESS_COMPACTION_THRESHOLD`: the server's own compaction trigger share (epic #277,
    * C2; #279). It is what a user who has not chosen one gets (C3, #282), so
@@ -459,6 +470,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       compactionThreshold: options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
       summaryMaxPasses: DEFAULT_MAX_SUMMARY_PASSES,
     },
+    tools: options.tools,
     revocations,
     revalidateSession,
     sessionUser,
@@ -497,6 +509,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   app.use(`${API_VERSION_PREFIX}/*`, guard)
 
   registerMeRoutes(app, deps)
+  registerToolSettingsRoutes(app, deps)
   registerAgentRoutes(app, deps)
   registerSessionRoutes(app, deps)
   registerUsageRoutes(app, deps)

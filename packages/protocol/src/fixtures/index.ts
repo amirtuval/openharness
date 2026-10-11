@@ -11,6 +11,8 @@ import { SUMMARY_MODEL_SAME_AS_CHAT } from '../index'
 import type {
   Agent,
   AgentMessageEvent,
+  AgentToolResultEvent,
+  AgentToolUseEvent,
   ContentDelta,
   ContextSummaryEvent,
   ContextSummaryProgressEvent,
@@ -44,8 +46,13 @@ import type {
   UserInterruptEvent,
   UserMessageEvent,
   UserPreferences,
+  UserToolConfirmationEvent,
+  UserToolSettings,
   GetPreferencesResponse,
+  ListToolSettingsResponse,
   PreferencesDefaults,
+  ToolInput,
+  ToolSettingEntry,
 } from '../index'
 
 /**
@@ -250,6 +257,7 @@ export function makeMode(overrides: Partial<Mode> = {}): Mode {
     model: 'anthropic/claude-sonnet-5',
     reasoning_effort: 'high',
     system_prompt_addition: 'Think step by step before answering.',
+    tools: null,
     created_at: fixtureTimestamp(),
     updated_at: fixtureTimestamp(),
   }
@@ -285,6 +293,46 @@ export function makeMcpServer(overrides: Partial<McpServer> = {}): McpServer {
 }
 
 /**
+ * A user's stored tool settings (epic #303, X4; #307): no choices at all, so every tool
+ * follows its own declaration — which is what a user who has never opened the settings screen
+ * reads.
+ *
+ * @param overrides fields to replace on the default settings
+ */
+export function makeUserToolSettings(overrides: Partial<UserToolSettings> = {}): UserToolSettings {
+  return { builtin: {}, ...overrides }
+}
+
+/**
+ * One entry of `GET /v1/me/tools`: `web_search`, registered and on, under the user's `allow`,
+ * which is also the tool's own declaration.
+ *
+ * @param overrides fields to replace on the default entry
+ */
+export function makeToolSettingEntry(overrides: Partial<ToolSettingEntry> = {}): ToolSettingEntry {
+  const entry: ToolSettingEntry = {
+    name: 'web_search',
+    source: 'builtin',
+    enabled: true,
+    policy: 'allow',
+    default_policy: 'allow',
+    available: true,
+  }
+  return { ...entry, ...overrides }
+}
+
+/**
+ * The `GET /v1/me/tools` response: one entry, registered and on.
+ *
+ * @param overrides fields to replace on the default entry
+ */
+export function makeListToolSettingsResponse(
+  overrides: Partial<ToolSettingEntry> = {},
+): ListToolSettingsResponse {
+  return { data: [makeToolSettingEntry(overrides)] }
+}
+
+/**
  * A model-catalog entry: `anthropic/claude-sonnet-5` as the provider's own list reports it,
  * `source: 'provider'`.
  *
@@ -304,6 +352,9 @@ export function makeModelEntry(overrides: Partial<ModelEntry> = {}): ModelEntry 
     // quarter of the window, 50k, is the cap — so the ceiling only ever takes less room). A
     // test that overrides the limits should override this too, or not care about it.
     context_budget: 150_000,
+    // A chat model the registry marks as tool-capable; pass `tool_call: false` for one it
+    // does not (epic #303, X2).
+    tool_call: true,
     source: 'provider',
   }
   return { ...entry, ...overrides }
@@ -383,6 +434,84 @@ export function makeAgentMessage(
     seq: takeSeq(),
     processed_at: fixtureTimestamp(),
     content: [{ type: 'text', text }],
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `agent.tool_use`: the model asking for a tool (epic #303, X1).
+ *
+ * The event's id **is** the call's id, so a test pairs it with the `agent.tool_result` built
+ * from the same event — {@link makeAgentToolResult} takes the `agent.tool_use` and names it.
+ *
+ * @param name the tool's name, as it was offered to the model
+ * @param input the arguments the model produced
+ * @param overrides fields to replace on the event, `id` included
+ */
+export function makeAgentToolUse(
+  name: string,
+  input: ToolInput,
+  overrides: Partial<AgentToolUseEvent> = {},
+): AgentToolUseEvent {
+  const event: AgentToolUseEvent = {
+    id: newEventId(),
+    type: 'agent.tool_use',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    name,
+    input,
+    evaluated_permission: 'allow',
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `agent.tool_result`: what a tool call produced (epic #303, X1).
+ *
+ * @param call the `agent.tool_use` this answers; its id becomes `tool_use_id`
+ * @param text the result body; becomes the single text block
+ * @param overrides fields to replace on the event
+ */
+export function makeAgentToolResult(
+  call: AgentToolUseEvent,
+  text: string,
+  overrides: Partial<AgentToolResultEvent> = {},
+): AgentToolResultEvent {
+  const event: AgentToolResultEvent = {
+    id: newEventId(),
+    type: 'agent.tool_result',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    tool_use_id: call.id,
+    content: [{ type: 'text', text }],
+    is_error: false,
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `user.tool_confirmation`: the user's answer to a call that was waiting on them
+ * (epic #303, X6; #309).
+ *
+ * The event names the call it answers — `makeAgentToolUse`'s event carries the call's id, so
+ * passing it here is what pairs the two, exactly as {@link makeAgentToolResult} does. The
+ * default is an approval for this call only; a test that answers an `ask_user` call adds
+ * `answers`, and one that remembers the answer adds `remember`.
+ *
+ * @param call the `agent.tool_use` this answers; its id becomes `tool_use_id`
+ * @param overrides fields to replace on the event
+ */
+export function makeToolConfirmation(
+  call: AgentToolUseEvent,
+  overrides: Partial<UserToolConfirmationEvent> = {},
+): UserToolConfirmationEvent {
+  const event: UserToolConfirmationEvent = {
+    id: newEventId(),
+    type: 'user.tool_confirmation',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    tool_use_id: call.id,
+    result: 'allow',
   }
   return { ...event, ...overrides }
 }

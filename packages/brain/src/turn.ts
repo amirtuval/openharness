@@ -2,6 +2,7 @@ import { EVENT_TYPES, newEventId } from '@openharness/protocol'
 import type {
   EventId,
   ModeId,
+  ModeToolOverride,
   ModelConfig,
   ReasoningEffort,
   SessionCompactionOutcome,
@@ -12,11 +13,16 @@ import type {
 } from '@openharness/protocol'
 import type { AppendableEvent, PartitionFence, SessionStore } from '@openharness/session'
 import { SessionNotFoundError } from '@openharness/session'
+import type { ToolRegistry } from '@openharness/hands'
 
 import type { LanguageModel } from 'ai'
 
 import type { ContextStrategy } from './context'
-import { DEFAULT_CONTEXT_STRATEGY, estimateContextSize } from './context'
+import {
+  DEFAULT_CONTEXT_STRATEGY,
+  DEFAULT_CONTEXT_TOKEN_BUDGET,
+  estimateContextSize,
+} from './context'
 import {
   agentMessage,
   compactionOutcome,
@@ -43,6 +49,14 @@ import {
   usageByModel,
   withRequestUsage,
 } from './log'
+import {
+  answerConfirmations,
+  answeredWaiting as answeredWaitingCalls,
+  awaitingUser,
+  confirmationsByCall,
+  resolveWaiting,
+  sessionApprovedTools,
+} from './pausing'
 import { pendingManualCompaction } from './manual'
 import type { ModelFactory, ResolveCredential } from './model'
 import {
@@ -56,6 +70,16 @@ import {
 } from './model'
 import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
 import { redactSecrets } from './redact'
+import type { ToolSecretResolver, ToolSettingsResolver, ToolSupportFor } from './tools'
+import {
+  DEFAULT_MAX_TOOL_STEPS,
+  lostExecutions,
+  offeredTools,
+  repairLostExecutions,
+  runToolStep,
+  toolSet,
+  toolsFor,
+} from './tools'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
 import type { ContextCompactionOption, SummarizeResult } from './summarize'
@@ -80,7 +104,7 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  * replay skips them and compaction can delete them later without changing what any reader sees.
  *
  * ```
- * no turn to run, nothing queued ................................ return noop
+ * no turn to run, nothing queued and nothing answered (X6) ..... return noop
  *
  * START (an inherited turn, `getTurnState` is not idle)
  *   an open span ................ span.model_request_end { error: brain_lost,
@@ -92,26 +116,99 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  *
  * LOOP (per model request)
  *   1. an aborted signal, or a queued user.interrupt ....... INTERRUPT
- *   2. no unanswered message left ........................... session.status_idle, return idle
- *   3. re-read the session; its CURRENT `model` (U3 — a `user.message` may have switched it,
+ *   1b. a call the user has answered (#309) ................ answer it — run it, deny it, or
+ *      write the answers — then carry on from 1 with its result
+ *   2. the turn has made OPENHARNESS_MAX_TOOL_STEPS requests . STEPS EXHAUSTED (below)
+ *   3. a call the log holds with no answer and no user waiting on it .. `execution lost` (X3)
+ *   3b. a call still waiting on the user (#309), no message beside it . PAUSE (below)
+ *   4. no unanswered message left ........................... session.status_idle, return idle
+ *   5. re-read the session; its CURRENT `model` (U3 — a `user.message` may have switched it,
  *      even while the previous request was streaming) is what this request runs, is recorded
  *      on its span and chooses the credential's provider. A session deleted meanwhile throws
  *      SessionNotFoundError and the turn stops, writing nothing (U5).
- *   4. no credential for the model's provider ............... session.error
+ *   6. no credential for the model's provider ............... session.error
  *                                                             { missing_provider_credential,
  *                                                               retry_status: exhausted }
  *                                                             session.status_idle
  *                                                             { consumes: the queued ids }
  *                                                             return error
- *   5. claim the queued user.message events; the claim is the append of the span start below
- *   6. ............. span.model_request_start { consumes, model }
- *   7. stream ....... stored event_start (one sevt_ id), then one stored event_delta per chunk
- *   8. text streamed ......... agent.message { supersedes: the chunk range }
+ *   7. claim the queued user.message events; the claim is the append of the span start below
+ *   7b. the request's tool settings resolved (#307): the host's resolver, asked with the
+ *      session's owner and the mode's override; a tool turned off drops out of the offer
+ *   8. ............. span.model_request_start { consumes, model,
+ *                                    tools: the { name, source } of every tool offered,
+ *                                    reasoning_effort, mode, truncated, cleared }
+ *   9. stream ....... stored event_start (one sevt_ id), then one stored event_delta per chunk
+ *  10. text streamed ......... agent.message { supersedes: the chunk range }
  *      no text ................................... (no message; the span end supersedes)
- *   9. .............................. span.model_request_end { model_usage }
- *                                     session.usage { the session's running totals, #247 }
- *  10. another user.message arrived .......................... loop from 1
- *  11. otherwise ............................................. session.status_idle, return idle
+ *  11. .............................. span.model_request_end { model_usage }
+ *                                      session.usage { the session's running totals, #247 }
+ *  12. the step called tools ................................ TOOL STEP (below), loop from 1
+ *  13. another user.message arrived .......................... loop from 1
+ *  14. otherwise ............................................. session.status_idle, return idle
+ *
+ * TOOL STEP — one model request's calls, run and answered (epic #303, X2; #307)
+ *   each call's permission read off the request's settings, else the tool's own declaration
+ *   ................. agent.tool_use × N { name, input, evaluated_permission }
+ *                      (one append, before anything runs: what the model asked for is in the
+ *                       log whatever happens next)
+ *   the calls run CONCURRENTLY through the registry — those the permission allowed; a refused
+ *   one is answered without running, and one that waits on the user is not answered at all
+ *   ................. agent.tool_result × N { tool_use_id, content, is_error }
+ *                      (one append, in CALL ORDER, whatever order they finished in)
+ *   then loop from 1: the answers are what owes the next request
+ *
+ *   A tool_result is `is_error: true` for everything that is not what the tool produced: a
+ *   refusal (`Permission to use <name> has been denied.`), a timeout, an interrupt
+ *   (`Interrupted by the user.`), the tool's own failure, or `execution lost` (below). A call
+ *   waiting on the user has none yet — see PAUSE.
+ *
+ * STEPS EXHAUSTED — the turn has made OPENHARNESS_MAX_TOOL_STEPS model requests (X2)
+ *   ........................................... session.error { tool_steps_exhausted_error,
+ *                                                 retry_status: terminal }
+ *   ........................................... session.status_idle, return error
+ *
+ *   A model that keeps calling tools is a loop, and this is what bounds it: the turn ends with
+ *   a sentence a reader can act on rather than through a retry that would run out again. The
+ *   session goes idle, so the next message starts a fresh turn with its own budget.
+ *
+ * EXECUTION LOST — a call the log holds with no result and no user waiting on it (X3)
+ *   ................. agent.tool_result { is_error: true, "execution lost" }
+ *
+ *   A brain that finds one inherited it: the process that made the call died before storing
+ *   its answer. The call is **never run again** — it may already have had an effect nobody
+ *   recorded, and doing it twice is worse than not knowing — so the model is told the
+ *   execution was lost and decides what to do about it. The one call this must not answer is
+ *   one the user has not answered yet (#309): nothing is lost while the question is open, and a
+ *   resumed brain keeps waiting.
+ *
+ *   This runs at the request boundary, before any request is built: an assistant turn whose
+ *   calls have no answers is a request providers refuse.
+ *
+ * PAUSE — a call whose decision is "the user has to answer this" (epic #303, X6; #309)
+ *   the user has answered it (a `user.tool_confirmation` in the log)
+ *     ..................................... run it, write the denial, or write the answers as
+ *                                           its `agent.tool_result` (one append, call order),
+ *                                           then loop from 1 — the result owes a request
+ *     the turn inherited an open turn, and the call is one the user *allowed*
+ *     ..................................... agent.tool_result { is_error: true, "execution
+ *                                           lost" }: the approval is in the log and nobody
+ *                                           knows whether it ran, so it never runs again
+ *   nothing has answered it, and no message arrived
+ *     ..................................... session.status_idle
+ *                                           { stop_reason: { type: requires_action,
+ *                                                            event_ids: the calls } }
+ *     ..................................... return paused
+ *   a user.message arrived while it waited
+ *     ..................................... agent.tool_result × N { is_error: true,
+ *                                           "The user sent a message instead." }, then loop
+ *                                           from 1 with the message
+ *   an interrupt arrived while it waited ..... the same results, then INTERRUPT
+ *
+ *   A pause is a turn end, not a wait in the process: the calls are in the log, the session is
+ *   idle, and nothing is held open. That is what makes it survive a restart — a resumed brain
+ *   reads the same log and keeps waiting — and what makes the `requires_action` stop reason the
+ *   whole of what a client needs to draw the question.
  *
  * MODEL FAILURE — no credential for the model's provider (epic #65, A5)
  *   The credential is resolved before the span start, so no span is opened for a request that
@@ -162,6 +259,12 @@ export type TurnOutcomeKind =
   | 'idle'
   /** There was nothing to do: no open turn and nothing queued. Nothing was written. */
   | 'noop'
+  /**
+   * The turn ended because it is waiting on the user (epic #303, X6; #309): the session is idle
+   * with `stop_reason: { type: 'requires_action' }`, and one `user.tool_confirmation` starts the
+   * turn that carries on. Nothing is retried and nothing is lost — the calls are in the log.
+   */
+  | 'paused'
   /** The turn was cut short by an interrupt, by `signal` or by a queued `user.interrupt`. */
   | 'interrupted'
   /**
@@ -248,6 +351,60 @@ export interface RunTurnOptions {
    * {@link ContextCompactionConfig}.
    */
   readonly compaction?: ContextCompactionOption
+  /**
+   * The tools this turn's requests may offer (epic #303, X4), or `undefined` for a chat with
+   * none — which is every host before #304, and every model whose registry entry says it cannot
+   * call tools.
+   *
+   * The registry is the host's: `@openharness/hands` runs a tool, and this package decides
+   * when. A call runs in-process, with the per-user values the host resolved
+   * ({@link RunTurnOptions.resolveToolSecrets}) and nothing else — no environment, no
+   * database — so the same registry serves two users without ever holding either's secret.
+   */
+  readonly tools?: ToolRegistry
+  /**
+   * The tool settings in force for this request (epic #303, X3/X4; the per-user settings and
+   * the mode's override: issue #307), asked **once per request** with the session's owner and
+   * the tool override the request's mode imposes.
+   *
+   * A resolver rather than a value for the reason the credential resolver is one: the settings
+   * belong to the session's owner and live in the host's store, and nothing in this package
+   * reads a database. Per request rather than per call, because the offered set has to exist
+   * before the request is built — a tool the user turned off is left out of the offer entirely
+   * — and because an edit then applies from the next request on, exactly as a model switch
+   * does. A host that injects none gets each tool's own declared permission. `allow` and `deny`
+   * are honoured; `ask` pauses the turn until the user answers (epic #303, #309), and a
+   * `remember: session` approval is read back off the log from then on.
+   */
+  readonly toolSettings?: ToolSettingsResolver
+  /**
+   * Whether a model can call tools at all (epic #303, X2), asked once per request with the
+   * credential type the request was resolved with — the same injected-resolver seam as
+   * `reasoningSupportFor`, and the server builds it from its models.dev snapshot
+   * (`tool_call`).
+   *
+   * `false` means no tools are offered and the request is built exactly as it was before tools
+   * existed; `undefined` — a model the registry does not know — means offer them. A host that
+   * injects no resolver at all is the same as one that knows nothing: every model may call
+   * tools, because a host that wired a registry meant it.
+   */
+  readonly toolSupportFor?: ToolSupportFor
+  /**
+   * Where the per-user values a tool may need come from (epic #303, X4), asked once per step
+   * with the session's owner — the same seam as {@link ModeResolver}.
+   *
+   * The server owns them (a service's key, an MCP server's token, #311); nothing here reads an
+   * environment variable or a store. Absent means there are none, and a tool is handed an empty
+   * map. A value resolved here is scrubbed out of whatever a tool returns before it is stored
+   * (`@openharness/hands`), so a tool cannot leak one into the log.
+   */
+  readonly resolveToolSecrets?: ToolSecretResolver
+  /**
+   * The most model requests one turn may make (epic #303, X2); {@link DEFAULT_MAX_TOOL_STEPS}
+   * when absent. A turn that reaches it ends with a `tool_steps_exhausted_error` notice and
+   * goes idle rather than retrying.
+   */
+  readonly maxToolSteps?: number
 }
 
 /**
@@ -269,6 +426,16 @@ export interface ResolvedMode {
   readonly reasoningEffort: ReasoningEffort | null
   /** Appended after the session's system prompt, or `null` for no addition. */
   readonly systemPromptAddition: string | null
+  /**
+   * Which built-in tools this mode forces on or off, or `null` for a mode that says nothing
+   * about tools (issue #307) — the host has the mode row, so it answers this from it.
+   *
+   * It is handed to {@link RunTurnOptions.toolSettings} with the owner rather than applied
+   * here, because a mode **overrides** a user's settings and the host is where both live: the
+   * loop never merges the two itself. A mode may not touch a permission, so nothing about a
+   * call's `evaluated_permission` depends on this field.
+   */
+  readonly toolOverride: ModeToolOverride | null
 }
 
 /**
@@ -316,6 +483,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   const { store, model, resolveCredential, signal, fence } = options
   const strategy = options.contextStrategy ?? DEFAULT_CONTEXT_STRATEGY
   const retry = resolveRetryPolicy(options.retry)
+  const maxSteps = options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS
   const writeOptions = fence === undefined ? undefined : { fence }
 
   // Read through a function: `signal.aborted` is a property TypeScript would otherwise treat
@@ -340,15 +508,46 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   }
   const queued = await store.getPendingUserEvents(sessionId)
   const turnState = await store.getTurnState(sessionId)
+  /**
+   * Whether the log holds a call the user has answered whose turn has not run yet (#309).
+   *
+   * A `user.tool_confirmation` is not a queued user event — the server writes it, processed —
+   * so a session a user has just answered looks idle to everything that reads the store's
+   * pending list. The newest tool event is the cheap test: between a confirmation and the turn
+   * it starts, nothing else writes one, so reading the newest of the three types answers it in
+   * one page instead of walking the log on every idle sweep.
+   */
+  const answeredWaiting = async (): Promise<boolean> => {
+    const page = await store.listEventsUnscoped(sessionId, {
+      types: [
+        EVENT_TYPES.agentToolUse,
+        EVENT_TYPES.agentToolResult,
+        EVENT_TYPES.userToolConfirmation,
+      ],
+      order: 'desc',
+      limit: 1,
+    })
+    return page.data[0]?.type === EVENT_TYPES.userToolConfirmation
+  }
+  /**
+   * Whether this turn took over an open turn rather than opening one (X3).
+   *
+   * It matters for exactly one decision (#309): a call the user approved but whose execution the
+   * log never recorded is answered `execution lost` by a turn that **inherited** someone else's —
+   * whatever it allowed may already have run — while a turn that opens on an idle session is the
+   * one the confirmation started, and runs it. Nothing in the log tells the two apart; the turn
+   * state at the moment this call began does.
+   */
+  const recovered = turnState.state !== 'idle'
   if (turnState.state === 'idle' && queued.length === 0) {
-    // An idle session with nothing queued is a no-op — unless a manual compaction is waiting
-    // (K8; #283). A `/compact` is not a user event, so it never shows up in `queued`: the log
-    // is the only place it lives, and reading it here is what lets an idle session compact
-    // without a message to answer. A host that wired no compaction never looks.
-    if (
-      options.compaction === undefined ||
-      pendingManualCompaction(await readLog(store, sessionId)) === null
-    ) {
+    // An idle session with nothing queued is a no-op — unless something waiting in the log owes
+    // this turn. Two things do, and neither is a user event, so neither shows up in `queued`:
+    // a manual compaction (K8; #283), and a call the user has just answered (epic #303, #309).
+    // A host that wired no compaction never looks for the first.
+    const compactionPending =
+      options.compaction !== undefined &&
+      pendingManualCompaction(await readLog(store, sessionId)) !== null
+    if (!compactionPending && !(await answeredWaiting())) {
       return { outcome: 'noop' }
     }
   }
@@ -390,8 +589,21 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   const pendingInterruptIds = async (): Promise<EventId[]> =>
     (await store.getPendingUserEvents(sessionId)).filter(isUserInterrupt).map((event) => event.id)
 
+  /**
+   * Answer the calls that are still waiting on the user, because the user did something else.
+   *
+   * A `user.message` that arrives while calls wait resolves them — the reader chose to say
+   * something rather than to answer — and so does an interrupt (epic #303, X6; #309). Either way
+   * the model is told what happened (`The user sent a message instead.`) rather than left with a
+   * call that never came back.
+   */
+  const releaseWaiting = async (): Promise<void> => {
+    await resolveWaiting({ calls: awaitingUser(await readLog(store, sessionId)), append })
+  }
+
   /** End the turn the way an interrupt does, whatever it interrupted. */
   const endInterrupted = async (partial?: PartialReply): Promise<TurnOutcome> => {
+    await releaseWaiting()
     const interrupts = await pendingInterruptIds()
     if (partial !== undefined) {
       // A request is open, so its span end is what ends the work the interrupt stopped — and
@@ -421,7 +633,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     }
     // Nothing was in flight: the turn ends on the interrupt, and its idle event carries the
     // claim on the interrupt events that arrived while nothing was running.
-    await append([statusIdle(interrupts)])
+    await append([statusIdle({ consumes: interrupts })])
     return { outcome: 'interrupted' }
   }
 
@@ -462,6 +674,11 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   // with a clear error rather than looping. Once **per turn**, not per request, is what bounds
   // it however many requests the turn makes.
   let overflowRetried = false
+  // The model requests this turn has made (epic #303, X2). A turn makes one per step — and a
+  // step that called a tool owes the next one — so a model that keeps calling tools would
+  // otherwise loop until it chose to stop. Counted per answered request: a retry is the same
+  // step made again, and `retry` is what bounds that.
+  let steps = 0
   // What the host wired, resolved below once per request: the one configuration for every
   // owner, or the resolver the per-user controls (C3, #282) live behind. Held unresolved here
   // because a resolver has to be asked with the owner, which the request boundary reads.
@@ -520,7 +737,81 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // both the engine and the trigger measure the context the strategy will build from it and
     // the two have to agree on what the prompt is.
     const requestSystem = withModePrompt(current.system, mode?.systemPromptAddition ?? null)
+    // How big the request this boundary is about to make is (K2/K6/X9), measured with the two
+    // numbers the strategy's own caps are read against: the chat model's history budget, from the
+    // same resolver the engine plans with (#246) — the strategy resolves its budget from the
+    // configuration it was built with, and the server hands both the same resolver, so the
+    // measurement and the request agree about what a result may cost and what is old enough to
+    // clear — and the registry, whose declarations carry the per-tool cap.
+    const contextBudget =
+      compaction === null
+        ? DEFAULT_CONTEXT_TOKEN_BUDGET
+        : (compaction.tokenBudgetFor?.(requestModel.id) ?? DEFAULT_CONTEXT_TOKEN_BUDGET)
+    const sizeOf = (events: readonly StoredEvent[]): number =>
+      estimateContextSize(events, {
+        model: requestModel.id,
+        system: requestSystem,
+        budget: contextBudget,
+        ...(options.tools === undefined ? {} : { tools: options.tools }),
+      })
     let read = await readLog(store, sessionId)
+    // ---- The user's answers, and the calls still waiting on them (epic #303, X6; #309).
+    //
+    // Three questions, all asked of the same log and settled in this order, because each one
+    // changes what the next means:
+    //
+    // 1. the calls the user has answered since the last request. They are answered here — the
+    //    tool runs, or the denial is written, or the answers become the result — because the
+    //    request below has to see a result for every call it is told about.
+    const confirmations = confirmationsByCall(read)
+    const answeredByUser = answeredWaitingCalls(read)
+    if (answeredByUser.length > 0) {
+      const secrets =
+        options.resolveToolSecrets === undefined
+          ? undefined
+          : await options.resolveToolSecrets(current.owner_id)
+      await answerConfirmations({
+        calls: answeredByUser,
+        confirmations,
+        registry: options.tools,
+        ...(secrets === undefined ? {} : { secrets }),
+        ...(signal === undefined ? {} : { signal }),
+        recovered,
+        append,
+      })
+      read = await readLog(store, sessionId)
+    }
+    // 2. The crash rule (X3): a call the log holds with no answer and no user waiting on it is
+    //    one this brain inherited — the turn that made it died before storing its result — so it
+    //    is answered with `execution lost` and the model decides what to do. **Never re-run**:
+    //    whatever the call did may already have happened, and doing it twice is worse than not
+    //    knowing. A call still waiting on the user is not one of these — nothing is lost, the
+    //    question is open — so it is answered by the user or not at all.
+    if (lostExecutions(read).length > 0) {
+      await repairLostExecutions(read, append)
+      read = await readLog(store, sessionId)
+    }
+    // 3. The calls still waiting on the user. Nothing times out and nothing is held open: the
+    //    session goes idle with `requires_action` naming them, and the pause survives a restart
+    //    by having been written down. A message that arrived while they waited — or an
+    //    interrupt, which the top of the loop already ended the turn on — resolves them instead,
+    //    and this turn carries on with the message.
+    const waiting = awaitingUser(read)
+    if (waiting.length > 0) {
+      if (claims.length === 0) {
+        await append([
+          statusIdle({
+            stopReason: {
+              type: 'requires_action',
+              event_ids: waiting.map((call) => call.id),
+            },
+          }),
+        ])
+        return { outcome: 'paused' }
+      }
+      await resolveWaiting({ calls: waiting, append })
+      read = await readLog(store, sessionId)
+    }
     // The manual request first (K8; #283). A `/compact [instructions]` is handled at a request
     // boundary — this one — whether or not a message is waiting beside it, because a summary
     // changes what every request after it is built from. `pendingManualCompaction` reads it off
@@ -531,16 +822,14 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     if (compaction !== null) {
       const manual = pendingManualCompaction(read)
       if (manual !== null) {
-        const sized = estimateContextSize(read, {
-          model: requestModel.id,
-          system: requestSystem,
-        })
+        const sized = sizeOf(read)
         const manualResult = await summarizeContext({
           chatModel: requestModel.id,
           reason: 'manual',
           events: read,
           system: requestSystem,
           estimatedTokens: sized,
+          ...(options.tools === undefined ? {} : { tools: options.tools }),
           config: compaction,
           guidance: manual.instructions,
           model,
@@ -576,6 +865,23 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         return { outcome: 'idle' }
       }
     }
+    if (steps >= maxSteps) {
+      // A request is due and the turn has no budget left for it (epic #303, X2). This is a
+      // notice, not a failure to retry: the model looped — every step's calls prompted another
+      // — and the log says so rather than the scheduler running the same loop again. The turn
+      // ends idle, so a message the user sends next starts a fresh turn with a fresh budget.
+      await append([
+        sessionError({
+          type: 'tool_steps_exhausted_error',
+          message:
+            `This turn reached its limit of ${maxSteps} model requests before the model ` +
+            'finished, so it was ended. Send a message to carry on.',
+          retry_status: { type: 'terminal' },
+        }),
+        statusIdle(),
+      ])
+      return { outcome: 'error' }
+    }
     // The credential this request is made with, asked for before anything is claimed. A
     // request that cannot be made opens no span — every span start is a real model request,
     // and this one has none — and streams nothing, so there is no chunk range to supersede.
@@ -591,7 +897,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           message: missingCredentialMessage(provider),
           retry_status: { type: 'exhausted' },
         }),
-        statusIdle(claims),
+        statusIdle({ consumes: claims }),
       ])
       return { outcome: 'error' }
     }
@@ -614,7 +920,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           message: error.message,
           retry_status: { type: 'exhausted' },
         }),
-        statusIdle(claims),
+        statusIdle({ consumes: claims }),
       ])
       return { outcome: 'error' }
     }
@@ -623,16 +929,14 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // the threshold share of the **chat** model's budget. Over it, older history is summarized
       // before the request — which is what keeps the provider from refusing it — and the log is
       // re-read so the prompt below is built from the summary, not the history it replaced.
-      const estimated = estimateContextSize(read, {
-        model: requestModel.id,
-        system: requestSystem,
-      })
+      const estimated = sizeOf(read)
       const outcome = await summarizeContext({
         chatModel: requestModel.id,
         reason: 'threshold',
         events: read,
         system: requestSystem,
         estimatedTokens: estimated,
+        ...(options.tools === undefined ? {} : { tools: options.tools }),
         config: compaction,
         model,
         resolveCredential,
@@ -686,12 +990,35 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     const context = strategy(answered, {
       model: requestModel,
       system: requestSystem,
+      // The registry, not `toolRegistry` below: a result an earlier step stored is capped and
+      // cleared by its tool's declaration whatever this request offers (X9).
+      ...(options.tools === undefined ? {} : { tools: options.tools }),
     })
+    // The tools this request offers (epic #303, X2/X4; #307), if any: a deployment with no
+    // registry has nothing to offer, a model the registry marks as tool-less gets none, and a
+    // user who turned every tool off gets none either — in each case the request is built
+    // exactly as it was before tools existed. The settings are resolved here, once per request
+    // and before the offer is built, because a disabled tool must not be in the offer at all;
+    // the mode the request follows rides along, since a mode may force tools on or off. A host
+    // that wired no resolver, or no registry, is never asked.
+    const toolSettings =
+      options.toolSettings === undefined || options.tools === undefined
+        ? undefined
+        : await options.toolSettings(current.owner_id, mode?.toolOverride ?? null)
+    const toolRegistry = toolsFor(
+      options.tools,
+      options.toolSupportFor,
+      toolSettings,
+      requestModel.id,
+      credential.type,
+    )
     const [start] = await append([
       spanStart(claims, requestModel.id, {
         ...(reasoning.record === undefined ? {} : { reasoningEffort: reasoning.record }),
         ...(mode === null ? {} : { mode }),
         ...(context.truncated === undefined ? {} : { truncated: context.truncated }),
+        ...(context.cleared === undefined ? {} : { cleared: context.cleared }),
+        ...(toolRegistry === undefined ? {} : { tools: offeredTools(toolRegistry) }),
       }),
     ])
     if (start === undefined) {
@@ -712,6 +1039,9 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     const result = await streamModelRequest({
       model: agentModel,
       messages,
+      // The definitions carry no `execute`: the SDK must stop after this step and hand the
+      // calls back, because the loop that stores the call and runs it is this one.
+      ...(toolRegistry === undefined ? {} : { tools: toolSet(toolRegistry) }),
       providerOptions: reasoning.providerOptions,
       signal,
       onTextDelta: async (text) => {
@@ -776,16 +1106,14 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           statusRescheduled(),
         ])
         const fresh = await readLog(store, sessionId)
-        const estimate = estimateContextSize(fresh, {
-          model: requestModel.id,
-          system: requestSystem,
-        })
+        const estimate = sizeOf(fresh)
         const outcome = await summarizeContext({
           chatModel: requestModel.id,
           reason: 'overflow',
           events: fresh,
           system: requestSystem,
           estimatedTokens: estimate,
+          ...(options.tools === undefined ? {} : { tools: options.tools }),
           config: compaction,
           model,
           resolveCredential,
@@ -875,8 +1203,37 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       }
       return await endInvalidEvent(error, start.id, range)
     }
-    // A request that answered gets a fresh retry budget; the next one is a new question.
+    // A request that answered gets a fresh retry budget; the next one is a new question, and it
+    // counts against the turn's budget of requests (X2).
     retriesUsed = 0
+    steps += 1
+
+    // The step's calls: resolved, stored, run concurrently and answered in call order
+    // (epic #303, X2/X4). They are what owes the next request, so the loop continues without
+    // waiting for anything else — and a turn that was interrupted while they ran ends the way
+    // an interrupt always does, with every call answered.
+    if (toolRegistry !== undefined && result.toolCalls.length > 0) {
+      const secrets =
+        options.resolveToolSecrets === undefined
+          ? undefined
+          : await options.resolveToolSecrets(current.owner_id)
+      await runToolStep({
+        calls: result.toolCalls,
+        registry: toolRegistry,
+        ...(toolSettings === undefined ? {} : { settings: toolSettings }),
+        // The tools this chat has already agreed to (#309): a `remember: session` approval is
+        // read back off the log it was written to, so a later call to that tool runs without
+        // asking again. It comes from the same read the request was built from.
+        approved: sessionApprovedTools(read),
+        ...(secrets === undefined ? {} : { secrets }),
+        ...(signal === undefined ? {} : { signal }),
+        append,
+      })
+      if (isAborted()) {
+        return await endInterrupted()
+      }
+      continue
+    }
 
     const arrived = await store.getPendingUserEvents(sessionId)
     if (arrived.length > 0) {

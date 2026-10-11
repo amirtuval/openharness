@@ -93,9 +93,12 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0023 a credential's public, per-type details (#249, #250, #251),
                         0024 the per-user modes, and the mode a session follows (#245, M6),
                         0025 the compaction controls on the per-user preferences (#282),
-                        0026 a user's remote MCP servers and their pending OAuth states
+                        0026 the index behind the per-user tool-call read (#305),
+                        0027 the per-user tool settings, and the tool override a mode carries (#307),
+                        0028 the index behind the paused-confirmation work scan (#309),
+                        0029 a user's remote MCP servers and their pending OAuth states
                           (#303, X10),
-                        0027 where a pending OAuth flow was started — `web` or `cli` (#311)
+                        0030 where a pending OAuth flow was started — `web` or `cli` (#311)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -103,45 +106,46 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 
 ### `@openharness/session`
 
-| export                                                                                                                                                                                                             | what it is                                                                                                                                                                                                                                                                                                                                |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SessionStore`                                                                                                                                                                                                     | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log) and `deleteSession` (the owner-scoped hard delete); since #122 the scheduler membership (`heartbeatInstance`, `listLiveInstances`, `removeInstance`) |
-| `UserPreferences`                                                                                                                                                                                                  | a user's stored preferences, `{ default_model: string \| null, theme, compaction_threshold: number \| null, summary_model, summary_max_passes: number \| null }` (#111, epic #116 U1; theme: #203; compaction: epic #277 C3, #282) — the vocabulary of `getPreferences`/`putPreferences`                                                  |
-| `AppendableEvent`, `AppendableStoredEvent`, `AppendableRewind`                                                                                                                                                     | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at` (plus an optional `id` the caller supplies), or a `session.rewind` input that names the message the session restarts from (#238)                                                                                                                                |
-| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                                                                                            | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                                                                                                                                                                                                                   |
-| `OwnerScope`                                                                                                                                                                                                       | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract)                                                                                                                                                                                                  |
-| `UnscopedListEventsOptions`                                                                                                                                                                                        | the filters of `listEventsUnscoped`, the brain's replay                                                                                                                                                                                                                                                                                   |
-| `CredentialStore`                                                                                                                                                                                                  | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                                                                                                                                                                                                                           |
-| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                                                                                     | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns                                                                                                                                                                                                                              |
-| `UpdateSessionRequest`                                                                                                                                                                                             | what `updateSession()` changes: the title, or nothing                                                                                                                                                                                                                                                                                     |
-| `Mode`                                                                                                                                                                                                             | a user's mode (#245, M6): a named preset of a model, a reasoning effort and a system-prompt addition — the vocabulary of the mode methods                                                                                                                                                                                                 |
-| `AppendEventsOptions`, `PartitionFence`                                                                                                                                                                            | the optional fence a brain attaches to a write                                                                                                                                                                                                                                                                                            |
-| `CompactOptions`                                                                                                                                                                                                   | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                                                                                                                                                                                                                                |
-| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                                                                                                 | leases over a partition, and the signals sent to its owner                                                                                                                                                                                                                                                                                |
-| `TurnState`, `TurnStateKind`                                                                                                                                                                                       | what `getTurnState()` answers                                                                                                                                                                                                                                                                                                             |
-| `ListModelRequestsOptions`, `ModelRequestUsage`                                                                                                                                                                    | the per-user usage read (#247): its `{ ownerId, from, to }` half-open UTC window, and one request as it answers it — the model, the usage and the instant it finished                                                                                                                                                                     |
-| `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                                                                                                  | subscription plumbing                                                                                                                                                                                                                                                                                                                     |
-| `AuthSessionId`                                                                                                                                                                                                    | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                                                                                                                                                                                                                         |
-| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                                                                                              | the in-memory implementation and its `{ now, partitionCount }` options                                                                                                                                                                                                                                                                    |
-| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                                                                                        | the in-memory credential store and its `{ now }` option                                                                                                                                                                                                                                                                                   |
-| `Clock`, `systemClock`, `timestampAt()`                                                                                                                                                                            | the injectable time source, and how an instant is written as a timestamp                                                                                                                                                                                                                                                                  |
-| `FencedError`, `FencedErrorDetails`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `DuplicateModeNameError`, `ModeLimitReachedError`, `isFencedError()`             | the typed failures a store raises, and what a fence reports                                                                                                                                                                                                                                                                               |
-| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE`, `DUPLICATE_MODE_NAME_ERROR_CODE`, `MODE_LIMIT_REACHED_ERROR_CODE` | the stable `code` of each error, for detection across bundles                                                                                                                                                                                                                                                                             |
-| `PACKAGE_NAME`                                                                                                                                                                                                     | this package's name; lets a dependent prove the import resolved                                                                                                                                                                                                                                                                           |
+| export                                                                                                                                                                                                             | what it is                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SessionStore`                                                                                                                                                                                                     | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log), `getToolSettings`/`putToolSettings` (the per-user tool choices, epic #303 X4; #307) and `deleteSession` (the owner-scoped hard delete); since #122 the scheduler membership (`heartbeatInstance`, `listLiveInstances`, `removeInstance`) |
+| `UserToolSettings`                                                                                                                                                                                                 | a user's stored tool choices, `{ builtin: Record<tool name, { enabled, policy }> }` (epic #303, X4; #307) — the vocabulary of `getToolSettings`/`putToolSettings`                                                                                                                                                                                                                                                              |
+| `UserPreferences`                                                                                                                                                                                                  | a user's stored preferences, `{ default_model: string \| null, theme, compaction_threshold: number \| null, summary_model, summary_max_passes: number \| null }` (#111, epic #116 U1; theme: #203; compaction: epic #277 C3, #282) — the vocabulary of `getPreferences`/`putPreferences`                                                                                                                                       |
+| `AppendableEvent`, `AppendableStoredEvent`, `AppendableRewind`                                                                                                                                                     | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at` (plus an optional `id` the caller supplies), or a `session.rewind` input that names the message the session restarts from (#238)                                                                                                                                                                                                                     |
+| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                                                                                            | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                                                                                                                                                                                                                                                                                                        |
+| `OwnerScope`                                                                                                                                                                                                       | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract)                                                                                                                                                                                                                                                                                       |
+| `UnscopedListEventsOptions`                                                                                                                                                                                        | the filters of `listEventsUnscoped`, the brain's replay                                                                                                                                                                                                                                                                                                                                                                        |
+| `CredentialStore`                                                                                                                                                                                                  | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                                                                                                                                                                                                                                                                                                                |
+| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                                                                                     | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns                                                                                                                                                                                                                                                                                                                   |
+| `UpdateSessionRequest`                                                                                                                                                                                             | what `updateSession()` changes: the title, or nothing                                                                                                                                                                                                                                                                                                                                                                          |
+| `Mode`                                                                                                                                                                                                             | a user's mode (#245, M6): a named preset of a model, a reasoning effort and a system-prompt addition — the vocabulary of the mode methods                                                                                                                                                                                                                                                                                      |
+| `AppendEventsOptions`, `PartitionFence`                                                                                                                                                                            | the optional fence a brain attaches to a write                                                                                                                                                                                                                                                                                                                                                                                 |
+| `CompactOptions`                                                                                                                                                                                                   | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                                                                                                                                                                                                                                                                                                                     |
+| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                                                                                                 | leases over a partition, and the signals sent to its owner                                                                                                                                                                                                                                                                                                                                                                     |
+| `TurnState`, `TurnStateKind`                                                                                                                                                                                       | what `getTurnState()` answers                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `ListModelRequestsOptions`, `ModelRequestUsage`                                                                                                                                                                    | the per-user usage read (#247): its `{ ownerId, from, to }` half-open UTC window, and one request as it answers it — the model, the usage and the instant it finished                                                                                                                                                                                                                                                          |
+| `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                                                                                                  | subscription plumbing                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `AuthSessionId`                                                                                                                                                                                                    | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                                                                                                                                                                                                                                                                                                              |
+| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                                                                                              | the in-memory implementation and its `{ now, partitionCount }` options                                                                                                                                                                                                                                                                                                                                                         |
+| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                                                                                        | the in-memory credential store and its `{ now }` option                                                                                                                                                                                                                                                                                                                                                                        |
+| `Clock`, `systemClock`, `timestampAt()`                                                                                                                                                                            | the injectable time source, and how an instant is written as a timestamp                                                                                                                                                                                                                                                                                                                                                       |
+| `FencedError`, `FencedErrorDetails`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `DuplicateModeNameError`, `ModeLimitReachedError`, `isFencedError()`             | the typed failures a store raises, and what a fence reports                                                                                                                                                                                                                                                                                                                                                                    |
+| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE`, `DUPLICATE_MODE_NAME_ERROR_CODE`, `MODE_LIMIT_REACHED_ERROR_CODE` | the stable `code` of each error, for detection across bundles                                                                                                                                                                                                                                                                                                                                                                  |
+| `PACKAGE_NAME`                                                                                                                                                                                                     | this package's name; lets a dependent prove the import resolved                                                                                                                                                                                                                                                                                                                                                                |
 
 ### `@openharness/session/postgres`
 
-| export                                                                                                                                                                                                   | what it is                                                                                                                           |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                                                                   | the durable implementation; `{ connectionString }` or `{ pool }`, plus options                                                       |
-| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                                                              | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB                                                      |
-| `PostgresCredentialStore`, `createPostgresCredentialStore(config, options?)`                                                                                                                             | the durable credential store; `{ connectionString }` or `{ pool }`, plus `now`                                                       |
-| `PostgresMcpServerStore`, `createPostgresMcpServerStore(config, options?)`                                                                                                                               | the durable MCP server store; `{ connectionString }` or `{ pool }`, plus `now` (#303, X10)                                           |
-| `PostgresCredentialStoreOptions`, `PostgresCredentialStoreConfig`                                                                                                                                        | its options, and the two ways to reach a DB                                                                                          |
-| `migrate(db, options?)`                                                                                                                                                                                  | applies `migrations/` — the log, Better Auth and `provider_credentials` — idempotently, in one locked transaction; returns the files |
-| `MigrateOptions`                                                                                                                                                                                         | `{ migrationsDir? }`, for a migrations directory that is not this package's                                                          |
-| `PostgresSchema`, `AgentsTable`, `ModesTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable`, `ProviderCredentialsTable`, `UserPreferencesTable` | the Kysely table types, for a caller that wants to query alongside the stores                                                        |
-| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`, `ModeRow`, `McpServerRow`, `McpServerMetadataRow`, `McpOAuthStateRow`                                                                          | the shapes a credential read has — with the sealed blob, and without — one row of `modes`, and the MCP server rows (#303, X10)       |
+| export                                                                                                                                                                                                                            | what it is                                                                                                                           |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                                                                                            | the durable implementation; `{ connectionString }` or `{ pool }`, plus options                                                       |
+| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                                                                                       | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB                                                      |
+| `PostgresCredentialStore`, `createPostgresCredentialStore(config, options?)`                                                                                                                                                      | the durable credential store; `{ connectionString }` or `{ pool }`, plus `now`                                                       |
+| `PostgresMcpServerStore`, `createPostgresMcpServerStore(config, options?)`                                                                                                                                                        | the durable MCP server store; `{ connectionString }` or `{ pool }`, plus `now` (#303, X10)                                           |
+| `PostgresCredentialStoreOptions`, `PostgresCredentialStoreConfig`                                                                                                                                                                 | its options, and the two ways to reach a DB                                                                                          |
+| `migrate(db, options?)`                                                                                                                                                                                                           | applies `migrations/` — the log, Better Auth and `provider_credentials` — idempotently, in one locked transaction; returns the files |
+| `MigrateOptions`                                                                                                                                                                                                                  | `{ migrationsDir? }`, for a migrations directory that is not this package's                                                          |
+| `PostgresSchema`, `AgentsTable`, `ModesTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable`, `ProviderCredentialsTable`, `UserPreferencesTable`, `UserToolSettingsTable` | the Kysely table types, for a caller that wants to query alongside the stores                                                        |
+| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`, `ModeRow`, `McpServerRow`, `McpServerMetadataRow`, `McpOAuthStateRow`                                                                                                   | the shapes a credential read has — with the sealed blob, and without — one row of `modes`, and the MCP server rows (#303, X10)       |
 
 This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
 and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
@@ -381,7 +385,9 @@ A turn is open when nothing closed it: the last status event is `session.status_
 `session.status_rescheduled`, and no `session.status_idle` follows. So a brain that inherits a
 session acts on anything other than `idle`: it closes `openSpan` if there is one
 (`span.model_request_end` with `error: { type: "brain_lost" }`, pointing at it) and runs the
-turn again. `findSessionsNeedingWork` treats both open states as work.
+turn again. `findSessionsNeedingWork` treats both open states as work — and, beside pending
+user events, a third case: a session whose last turn ended `requires_action` and which holds a
+`user.tool_confirmation` answering one of the calls it waits on (epic #303, X6; #309).
 
 **Usage reads** (#247) are the one place the contract asks a question of many sessions at
 once, and the reason it is a method rather than a caller's loop. `listModelRequests({ ownerId,
@@ -444,7 +450,12 @@ announcement.
 partition at that moment, once each; a signal nobody is listening for is dropped, because
 signals are a latency optimization and not a durable queue. No flow may depend on one
 arriving: a partition's new owner recovers by asking `findSessionsNeedingWork`, which reports
-the sessions with pending user events or an open turn, oldest first.
+the sessions with pending user events, an open turn, or a pause whose answer has landed
+(epic #303, X6; #309) — a session whose last turn ended `requires_action` and which now holds
+a `user.tool_confirmation` naming one of the calls it waits on, oldest first. That third case
+is what keeps a missed signal from stranding an answer: the server writes a confirmation
+processed, so it is not a queued user event and the session reads idle, and an instance that
+died before its turn began would otherwise leave the chat stuck until the next message.
 
 **Auth-session revocations are hints too** (epic #65, A2; issue #76).
 `notifyAuthSessionRevoked(authSessionId)` announces that a Better Auth session's row is gone —
@@ -470,6 +481,24 @@ throw, so a settings
 screen always has a value. `putPreferences` writes the value whole (one row per user, replaced
 in place; `{ default_model: null }` clears it), stamps `updated_at` from the injected clock,
 and answers what was stored. Both answers are deep-frozen, like a credential's.
+
+**Tool settings** (epic #303, X4; issue #307). `getToolSettings(userId)` and
+`putToolSettings(userId, settings)` are the per-user tool choices beside the log, keyed by
+`userId` like the preferences are. `UserToolSettings` is one value, `{ builtin }` — a map of
+tool name to `{ enabled, policy }` — where `enabled` says whether the tool may be offered at
+all and `policy` is the permission a call to it is evaluated under (`allow | ask | deny`). A
+tool the map does not carry follows **its own declared default**, so the map is a record of
+choices rather than a complete list, and a user who has never saved one reads
+`{ builtin: {} }`: no `null` and no throw, so the settings screen always has a value.
+`putToolSettings` writes the value whole (one row per user, replaced in place), stamps
+`updated_at` from the injected clock, and answers what was stored; both answers are
+deep-frozen, like a credential's. A **mode's** override of which tools are on is stored on the
+mode (`Mode.tools`) and is **not** this method's business: applying one over the other is the
+caller's — the server's resolver — and never the store's. `Mode.tools` carries both halves of
+that override — the built-in tools by name, and the user's remote MCP servers by id (#311) — and
+this package stores it as the protocol's one object, whichever keys it holds; **no migration**
+was needed for the MCP half, because it is another key inside the `tools jsonb` column `0027`
+already added (`{ builtin: … }` written before it still parses, with no `mcp_servers` key).
 
 **Modes** (#245, M6). `createMode`, `getMode`, `listModes`, `updateMode` and `deleteMode` are
 the per-user presets beside the log, keyed by `mode_id` and scoped by owner like the
@@ -593,7 +622,7 @@ it writes down as one JSON column each — so this package has no vault dependen
 
 Both implementations pass `runMcpServerStoreConformance`: `InMemoryMcpServerStore` (in
 `memory.ts`) and `PostgresMcpServerStore` (`@openharness/session/postgres`, on the `mcp_servers`
-and `mcp_oauth_states` tables, `0026`/`0027`).
+and `mcp_oauth_states` tables, `0029`/`0030`).
 
 ## The Postgres store
 
@@ -602,13 +631,15 @@ and `mcp_oauth_states` tables, `0026`/`0027`).
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Seventeen tables, all created by `migrations/`. Twelve are this package's: `agents`,
+**Schema.** Eighteen tables, all created by `migrations/`. Thirteen are this package's: `agents`,
 `sessions` (each with the `owner_id` an agent or session belongs to, `sessions` also with the
 `partitionOf` partition, the `status` the log's last status event implies, the effective
 `model jsonb`/`system` the session runs, the `mode` a chat follows (#245, M6), and the nullable
 agent snapshot columns beside them — `agent_id`, `agent_name`, `agent_model_id`, `agent_system`,
 all NULL together for a model-first session; #93), `modes` (a user's named presets: `name`
-unique per `owner_id`, the `model`, the effort and the prompt addition; #245, M6), `events` (`id`,
+unique per `owner_id`, the `model`, the effort, the prompt addition and the `tools jsonb` a
+mode's tool override holds — NULL for a mode that says nothing about tools (#307); #245, M6),
+`events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
 (session_id, seq)`, an index on `(session_id, seq)`, a partial index for queued user
 events and a partial index for the windowed usage read — `(session_id, processed_at) where
@@ -628,11 +659,14 @@ the public `details jsonb` its type publishes — NULL meaning none; see `0013`,
 `sealed_tokens` and `sealed_oauth_client` JSON columns, the public `header_names`/`tools` and
 the connection status; unique `(owner_id, name)`; #303, X10), `mcp_oauth_states` (one pending
 OAuth authorization per row, keyed by `state`, carrying the user the flow belongs to and where
-it was started (`client`), and cascading from `mcp_servers`; see `0026`/`0027`) and
+it was started (`client`), and cascading from `mcp_servers`; see `0029`/`0030`) and
 `user_preferences` (one row per user: the stored `default_model`, or NULL, the `theme`,
 `system` by default, and the three compaction controls — `compaction_threshold` NULL meaning
 the server's own, `summary_model` `same-as-chat` by default, `summary_max_passes` NULL meaning
-the engine's own; `on delete cascade` from `"user"`; see `0016`, `0019` and `0025`). Five are
+the engine's own; `on delete cascade` from `"user"`; see `0016`, `0019` and `0025`) and
+`user_tool_settings` (one row per user: the built-in tool choices as a `builtin jsonb` map of
+tool name to `{ enabled, policy }`, empty by default; `on delete cascade` from `"user"`; see
+`0027`). Five are
 **Better Auth's**, created by the same migrations and read and written by Better Auth itself
 (decision A1): `user`, `session`, `account`, `verification` and `deviceCode`.
 
@@ -824,6 +858,51 @@ default 'same-as-chat'` is a real column default instead, the rule `0019` uses: 
   The reader is total anyway: a row a hand edit left outside the protocol's shapes reads back as
   the default, so a preferences read cannot break.
 
+The built-in tools' usage read (epic #303, #305) added one:
+
+- **`0026_agent_tool_use_usage.sql` — the index behind `listToolUses`** (#305): a **partial**
+  index, `(session_id, processed_at) where type = 'agent.tool_use'`. Counting a user's daily
+  `web_search` calls (#305) narrows to the caller's sessions and then to a UTC day's window,
+  and `(session_id, seq)` (0003) seeks by position, not by time — so without this the read
+  would walk every event of every one of the caller's sessions, which is the cost the read
+  exists to remove. The same shape and the same reasoning as `0021`'s, one event type over.
+  Partial because only `agent.tool_use` rows are read that way, and idempotent because an
+  index is built, not migrated: a re-run leaves it (and the log) exactly as it was. **It keeps
+  the number 0026** — it is earlier in the tools stack than #307's file, which took `0027`
+  when the two met, because both branches wrote a `0026` from the same base.
+
+The per-user tool settings (epic #303, X4; issue #307) added one after it:
+
+- **`0027_tool_settings.sql` — the per-user tool settings, and a mode's tool override** (#307):
+  a `create table if not exists user_tool_settings` — `user_id` primary key, `builtin jsonb not
+null default '{}'`, `updated_at`, `on delete cascade` from `"user"` — and one
+  `alter table modes add column if not exists tools jsonb`. The choices live in **one `jsonb`
+  map** of tool name to `{ enabled, policy }` rather than a column or a row per tool, because
+  the tools a build registers are the host's and move with it (the built-ins of #305, an MCP
+  tool of #312), and the shape the column holds is the protocol's `UserToolSettingsSchema` —
+  the one place it is written. A tool **absent** from the map follows its own declared default,
+  so an absent row and an empty map both read as `{ builtin: {} }` and a user needs no row at
+  all. **A mode's `tools` takes NULL for every existing row**, which is not a guess: modes had
+  no tool override before this, so a chat on one followed its owner's settings and still does.
+  `user_id` is Better Auth's opaque text and takes no `collate "C"`; nothing orders by it.
+  Both statements are idempotent, so the runner can re-run the file. The mode override gained a
+  second half with #311 — `mcp_servers`, a server id → boolean map inside the same `tools` jsonb
+  — and took **no further migration**: the column already holds the protocol's one
+  `ModeToolOverride` object, so a mode stored before #311 (which has only `builtin`) still parses
+  and a mode stored after it holds both keys.
+
+Pausing for the user (epic #303, X6; issue #309) added the newest one:
+
+- **`0028_paused_confirmation_work.sql` — the index behind the paused-confirmation work scan**
+  (#309): a **partial** index, `(session_id) where type = 'user.tool_confirmation'`.
+  `findSessionsNeedingWork` gained a third case — a session whose last turn ended
+  `requires_action` and which holds a confirmation naming one of the calls it waits on — and
+  finding that confirmation narrows to one session and one event type. `(session_id, seq)`
+  (0003) seeks a session's log by position rather than by type, so without this the lookup
+  would walk every event of the session. Partial, like `0021`'s and `0026`'s, because only
+  `user.tool_confirmation` rows are ever read that way; only the session is needed, since the
+  scan asks "does this session have one?". Idempotent because an index is built, not migrated.
+
 The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:
 
 - **`0018_credential_key_provider.sql` — which provider wrapped a credential** (#150): one
@@ -974,11 +1053,21 @@ dependency table.
   The per-user usage read (#247) is in the suite too: the start/end pairing that names each
   request's model, the half-open window (`from` in, `to` out), owner scoping, the `model: null`
   a request nothing attributes gets, the `(session_id, seq)` order, a rewind's branch left out,
-  and the `RangeError` a window that is not one raises. The modes (#245, M6) are there as well:
+  and the `RangeError` a window that is not one raises. The per-user tool-call read (#305) is in
+  the suite beside it: a call its result answered, a failed call and one nothing answered both
+  left out, the `name` filter, owner scoping, the half-open window, the `(session_id, seq)`
+  order and the rewind rule. The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,
   a span's resolved `model`, and a `purpose: 'summary'` span projecting nothing (epic #277, C2).
+  The per-user tool settings (epic #303, X4; #307) are there too: no choices for a user who has
+  saved none, the round trip of a map of `{ enabled, policy }`, replace-in-place on a second
+  put, two users kept apart, and deep-frozen answers; and a mode's tool override — both halves
+  of it (#311's `mcp_servers` map beside `builtin`) carried on create, kept by an update that
+  omits it, cleared by an explicit `null`, and replaced whole by a new map, with an override
+  that has only `builtin` round-tripping to exactly that (the shape every mode stored before
+  #311 has).
 - `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
   durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
@@ -986,8 +1075,8 @@ dependency table.
   chunk another store appended delivered to this store's subscriber, a deleted session's rows
   really gone from `events`, `event_claims` and `event_supersessions` while another session's
   are untouched, its `session.deleted` announced to a different store's subscriber,
-  idempotent migrations (`0016`, `0017` and `0018` included — the tables and the column they
-  add are exercised after a re-run),
+  idempotent migrations (`0016`, `0017`, `0018`, `0026`, `0027` and `0028` included — the
+  tables, indexes and columns they add are exercised after a re-run),
   the #93 backfill over a session row written the pre-#93 way (the agent's model and system
   copied into the new columns, the row read back as the protocol's session), `close()` leaving
   a borrowed pool alone, the raw `events.processed_at` column staying `NULL`
@@ -998,7 +1087,8 @@ dependency table.
   row takes that user's agents, sessions, events and credentials and leaves the other user's
   alone. Since `owner_id` is a foreign key into `"user"`, the factory seeds the suite's owners
   (`ensureUsers`) on empty tables. The harness truncates every table this package owns,
-  `user_preferences` included, so preferences cannot leak between tests.
+  `user_preferences` and `user_tool_settings` included, so neither preferences nor tool choices
+  can leak between tests.
 - `postgres/no-updates.test.ts` scans this package's source (tests excluded) for the spellings
   a write back to `events` would use and fails on any of them; the patterns carry self-tests
   for what they must catch and must not, and the compaction delete's `WHERE` is asserted

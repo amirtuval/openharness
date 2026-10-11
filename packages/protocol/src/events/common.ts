@@ -20,6 +20,36 @@ export const EVENT_TYPES = {
   userInterrupt: 'user.interrupt',
   /** The agent's reply, as text blocks. */
   agentMessage: 'agent.message',
+  /**
+   * The agent asked for a tool.
+   *
+   * The event's own `id` is the call's id — the same identity trick `agent.message` uses for
+   * the chunks it replaces — and the `agent.tool_result` that answers it names that id in its
+   * `tool_use_id`. Written by the brain, never by a client: a tool is something the model
+   * asked for, and only the brain talks to the model. See {@link AgentToolUseEventSchema}.
+   */
+  agentToolUse: 'agent.tool_use',
+  /**
+   * What a tool call produced.
+   *
+   * Written by the brain, whatever came of the call — a result, a refusal, a timeout, a
+   * crash that lost the execution. A client never writes one (epic #303, X1): the loop owns
+   * the log, and a tool result is the loop's report of what it ran. See
+   * {@link AgentToolResultEventSchema}.
+   */
+  agentToolResult: 'agent.tool_result',
+  /**
+   * // extension: the user answered a call that was waiting on them (epic #303, X6; #309).
+   *
+   * One event answers every pause: an approval the settings demanded (`result`), or the
+   * answers to an `ask_user` call (`answers`). A client sends it; the server writes it, once
+   * it has checked that the call it names is really waiting, and the brain turns it into the
+   * `agent.tool_result` the call is owed — a client never writes a tool result. It is stored
+   * processed, not queued: the event itself is the record, so an approval survives compaction
+   * and replay and a rewind past it takes it back. See
+   * {@link UserToolConfirmationEventSchema}.
+   */
+  userToolConfirmation: 'user.tool_confirmation',
   /** The agent started working. */
   sessionStatusRunning: 'session.status_running',
   /** The agent finished its turn and is waiting for input. */
@@ -125,7 +155,10 @@ export type EventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]
 export const STORED_EVENT_TYPES = [
   EVENT_TYPES.userMessage,
   EVENT_TYPES.userInterrupt,
+  EVENT_TYPES.userToolConfirmation,
   EVENT_TYPES.agentMessage,
+  EVENT_TYPES.agentToolUse,
+  EVENT_TYPES.agentToolResult,
   EVENT_TYPES.sessionStatusRunning,
   EVENT_TYPES.sessionStatusIdle,
   EVENT_TYPES.sessionStatusRescheduled,

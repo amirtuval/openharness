@@ -46,6 +46,7 @@ import {
   type UserId,
   type UserPreferences,
   type UserTheme,
+  type UserToolSettings,
 } from '@openharness/protocol'
 
 import { type Clock, systemClock, timestampAt } from './clock'
@@ -108,8 +109,10 @@ import type {
   ListEventsOptions,
   ListModelRequestsOptions,
   ListSessionsOptions,
+  ListToolUsesOptions,
   ModelRequestUsage,
   OwnerScope,
+  ToolUseRecord,
   UnscopedListEventsOptions,
   PartitionFence,
   PartitionLease,
@@ -219,6 +222,14 @@ export class InMemorySessionStore implements SessionStore {
    */
   readonly #preferences = new Map<UserId, PreferencesRecord>()
 
+  /**
+   * The tool settings each user has saved, keyed by user id — the in-memory
+   * `user_tool_settings` table (epic #303, X4; issue #307). One entry per user who ever wrote
+   * one; a user who never did is absent, and reads as the protocol's default (`{ builtin: {} }`)
+   * rather than as an error.
+   */
+  readonly #toolSettings = new Map<UserId, ToolSettingsRecord>()
+
   constructor(options: InMemorySessionStoreOptions = {}) {
     this.#clock = options.now ?? systemClock
     this.#partitionCount = options.partitionCount ?? DEFAULT_PARTITION_COUNT
@@ -298,6 +309,7 @@ export class InMemorySessionStore implements SessionStore {
       model: input.model,
       reasoning_effort: input.reasoning_effort ?? null,
       system_prompt_addition: input.system_prompt_addition ?? null,
+      tools: input.tools ?? null,
       created_at: at,
       updated_at: at,
     }
@@ -342,6 +354,7 @@ export class InMemorySessionStore implements SessionStore {
         update.system_prompt_addition === undefined
           ? mode.system_prompt_addition
           : update.system_prompt_addition,
+      tools: update.tools === undefined ? mode.tools : update.tools,
       updated_at: timestampAt(this.#clock()),
     }
     this.#modes.set(modeId, updated)
@@ -521,6 +534,25 @@ export class InMemorySessionStore implements SessionStore {
     )
   }
 
+  // ---------------------------------------------------------- tool settings
+
+  getToolSettings(userId: UserId): Promise<UserToolSettings> {
+    const stored = this.#toolSettings.get(userId)
+    // No row is "no choice stored": the protocol's one shape, and every tool then follows its
+    // own declared default.
+    return resolved(deepFreeze({ builtin: stored?.builtin ?? {} }))
+  }
+
+  putToolSettings(userId: UserId, settings: UserToolSettings): Promise<UserToolSettings> {
+    // One value per user, replaced whole — the `user_tool_settings` row's `on conflict`
+    // decides the same in Postgres.
+    this.#toolSettings.set(userId, {
+      builtin: settings.builtin,
+      updatedAtMs: this.#clock(),
+    })
+    return resolved(deepFreeze({ builtin: settings.builtin }))
+  }
+
   // ----------------------------------------------------------------- events
 
   appendEvents(
@@ -647,6 +679,45 @@ export class InMemorySessionStore implements SessionStore {
       }
     }
     return resolved(requests)
+  }
+
+  listToolUses(options: ListToolUsesOptions): Promise<ToolUseRecord[]> {
+    const { fromMs, toMs } = usageWindowOf(options)
+    const calls: ToolUseRecord[] = []
+    const sessions = [...this.#sessions.values()]
+      .filter((record) => matchesOwner(record.session, options))
+      .sort((left, right) => compareIds(left.session.id, right.session.id))
+    for (const record of sessions) {
+      const ranges = this.#supersessions.get(record.session.id)
+      // Whether a call's result said it failed, keyed by the id the result names — the pair the
+      // Postgres read joins on `tool_use_id`. A call with no entry here was never answered.
+      const failed = new Map<EventId, boolean>()
+      for (const entry of record.events) {
+        if (entry.event.type === EVENT_TYPES.agentToolResult) {
+          failed.set(entry.event.tool_use_id, entry.event.is_error)
+        }
+      }
+      for (const entry of record.events) {
+        const event = entry.event
+        if (event.type !== EVENT_TYPES.agentToolUse) {
+          continue
+        }
+        const atMs = new Date(event.processed_at).getTime()
+        if (atMs < fromMs || atMs >= toMs || isSuperseded(event, ranges)) {
+          continue
+        }
+        // Only a call that was answered successfully counts: a refused, failed, interrupted or
+        // never-answered call did not do what it asked for.
+        if (failed.get(event.id) !== false) {
+          continue
+        }
+        if (options.name !== undefined && event.name !== options.name) {
+          continue
+        }
+        calls.push(deepFreeze({ name: event.name, processed_at: event.processed_at }))
+      }
+    }
+    return resolved(calls)
   }
 
   compact(options: CompactOptions): Promise<number> {
@@ -1033,7 +1104,15 @@ export class InMemorySessionStore implements SessionStore {
         !this.#claims.has(entry.event.id) &&
         !isSuperseded(entry.event, ranges),
     )
-    return pending || turnStateOf(record).state !== 'idle'
+    if (pending || turnStateOf(record).state !== 'idle') {
+      return true
+    }
+    // A pause whose answer has landed (#309): the last turn ended `requires_action`, and a
+    // `user.tool_confirmation` in the log names one of the calls it waits on. The server writes
+    // a confirmation processed — it is not a queued user event, and the session is idle — so
+    // nothing else would find it; without this the chat stays stuck until the next message.
+    const events = record.events.map((entry) => entry.event)
+    return answersPause(events, ranges)
   }
 
   /**
@@ -1266,6 +1345,17 @@ interface PreferencesRecord {
   readonly updatedAtMs: number
 }
 
+/**
+ * One user's stored tool settings, as the in-memory `user_tool_settings` row keeps them (epic
+ * #303, X4; issue #307): the built-in tools they have chosen for, by name.
+ */
+interface ToolSettingsRecord {
+  /** The tool choices, keyed by tool name; a tool absent follows its own declaration. */
+  readonly builtin: UserToolSettings['builtin']
+  /** When `putToolSettings` last wrote it, as the injected clock read it. */
+  readonly updatedAtMs: number
+}
+
 /** The fields the store assigns to an appended event. */
 interface AssignedEventFields {
   readonly id: EventId
@@ -1380,6 +1470,40 @@ function turnStateOf(record: SessionRecord): {
   }
   const openSpan = findOpenSpan(events)
   return { state: openSpan === null ? 'unfinished' : 'running', openSpan }
+}
+
+/**
+ * Whether the log answers a pause: the last turn ended `requires_action`, and a
+ * `user.tool_confirmation` names one of the calls it waits on.
+ *
+ * This is the work the scan would otherwise miss (#309). A confirmation is written by the
+ * server already processed — it is not a queued user event — and the turn that paused is over,
+ * so the session reads idle: the signal that starts the next turn is a hint, and an instance
+ * that died before its turn began (or one that was never listening) leaves the answer sitting
+ * in the log with nothing to pick it up. The scan asks the log here instead, so recovery does
+ * not depend on the signal. A confirmation a `session.rewind` covered is not one of these, and
+ * a call the pause named but did not confirm — or one no longer waiting — leaves the session
+ * waiting rather than busy.
+ */
+function answersPause(
+  events: readonly StoredEvent[],
+  ranges: readonly SupersessionRecord[] | undefined,
+): boolean {
+  const lastStatus = findLastStatusEvent(events)
+  if (
+    lastStatus === null ||
+    lastStatus.type !== EVENT_TYPES.sessionStatusIdle ||
+    lastStatus.stop_reason.type !== 'requires_action'
+  ) {
+    return false
+  }
+  const waiting = new Set(lastStatus.stop_reason.event_ids)
+  return events.some(
+    (event) =>
+      event.type === EVENT_TYPES.userToolConfirmation &&
+      waiting.has(event.tool_use_id) &&
+      !isSuperseded(event, ranges),
+  )
 }
 
 /** The last status event in a log, or `null` when the log has none. */

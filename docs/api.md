@@ -91,6 +91,8 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/me`                                        | the signed-in user                                                                              |
 | `GET`    | `/v1/me/preferences`                            | the caller's preferences — the default model, the web theme and the context settings            |
 | `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit               |
+| `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`     |
+| `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                  |
 | `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode                              |
 | `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                   |
 | `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                   |
@@ -142,7 +144,10 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | ---------------------------------- | ------------- | --------------------------------------------------------------------------------------- |
 | `user.message`                     | the client    | a message, until the brain claims it                                                    |
 | `user.interrupt`                   | the client    | stop the turn in flight                                                                 |
+| `user.tool_confirmation`           | the server    | // extension: the user answered a call that was waiting on them (#309)                  |
 | `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
+| `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                         |
+| `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
 | `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
 | `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
 | `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
@@ -188,6 +193,180 @@ the request's `span.model_request_start` records what it was asked for and what 
 `applied` is `null` when the model took none — an effort asked for and not applied — and the
 field is absent entirely for a session that never set one, which is every session stored
 before #252.
+
+### Tools (epic #303)
+
+A model request may be given tools. When it asks for one, the model's call is an event of its
+own and so is the loop's answer, so a replay shows exactly what was asked for, what ran, and
+what came back:
+
+```json
+{ "type": "agent.tool_use",    "id": "sevt_…", "seq": 4, "processed_at": "…",
+  "name": "web_fetch", "input": { "url": "https://example.com" },
+  "evaluated_permission": "allow" }
+{ "type": "agent.tool_result", "id": "sevt_…", "seq": 5, "processed_at": "…",
+  "tool_use_id": "sevt_…", "content": [{ "type": "text", "text": "…" }], "is_error": false }
+```
+
+- **The call's id is the event's id.** `agent.tool_result.tool_use_id` names the
+  `agent.tool_use` it answers, and a turn that finds a call with no result knows exactly which
+  execution was lost.
+- **Only the brain writes a result.** A client never does — a call the model made is answered
+  once, by the loop that ran it: with what the tool produced, or with an `is_error` result
+  saying why it did not run or did not finish (`Permission to use … has been denied.`,
+  `Tool … timed out`, `Interrupted by the user.`, or `execution lost` for a call a crashed turn
+  never ran).
+- **`evaluated_permission` is what the settings said about that call** — `allow`, `ask` or
+  `deny`, the same vocabulary Anthropic uses. `deny` refuses the call without running it, and
+  `ask` is the pause: the call is stored, nothing runs it, and the turn ends with nothing left
+  to do but wait for the user (see [Pausing for the user](#pausing-for-the-user-epic-303-x6-issue-309)).
+- **The tools a request offered are recorded on its span.** `span.model_request_start.tools`
+  is a `{ name, source }` per offered tool — `builtin` today, `mcp` with #312 — so the log says
+  what the model could have called, not only what it did. A request with no tools writes none.
+- **Input is not streamed and a result's content is text.** The call is stored when it is
+  complete, and a result carries text blocks. The loop itself is bounded: at most
+  `OPENHARNESS_MAX_TOOL_STEPS` model requests per turn (50 by default), after which the turn
+  ends with a `session.error` of type `tool_steps_exhausted_error` rather than retrying.
+- **A tool is never re-run.** A brain that inherits a call with no result writes an `is_error`
+  result for it and lets the model decide what to do next — except a call the user has not
+  answered yet, which is still open and simply keeps waiting.
+- **A model that cannot call tools is offered none.** `GET /v1/models` reports each model's
+  `tool_call`, and a model whose registry entry says `false` chats exactly as it did before
+  tools existed.
+
+The tools this build offers (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305))
+are `builtin` ones — a call's `input` is the JSON object below, and the result is text:
+
+| tool         | input                                                    | what it does                                                                                                                                                                                                                          |
+| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web_fetch`  | `{ "url": "https://…" }`                                 | GETs one `http`/`https` URL through the SSRF guard (every redirect hop re-checked) and answers its main content as Markdown. Text and JSON pass through; anything else is an error.                                                   |
+| `web_search` | `{ "query": "…", "count": 5 }`                           | One search of the deployment's search API, as titles, URLs and snippets. **Offered only where an operator configured a provider**; each user has a daily allowance of searches, and a call over it is an `is_error` result saying so. |
+| `todo_write` | `{ "todos": [{ "content": "…", "status": "pending" }] }` | Replaces the model's whole task list. The list is the newest successful call's own input — nothing is stored beside it — and `readTodoList` in `@openharness/protocol` reads it back out of a log.                                    |
+
+A `web_fetch` result **leads with the address it finally came from** and says the content is
+untrusted data from the web, not instructions: it is the one tool whose text arrives from a
+place nobody in this deployment chose, and the log records that the model was told so.
+
+#### Pausing for the user (epic #303, X6; issue #309)
+
+A turn can stop because it is waiting for you. Two things make a call wait: the user's policy
+for that tool is `ask`, or the model called **`ask_user`** — the one built-in every deployment
+registers, whose calls are answered by the user whatever the policy says, because your answers
+_are_ its result.
+
+```json
+// 1. the model asks for a tool it may not run on its own
+{ "type": "agent.tool_use", "id": "sevt_…", "seq": 4, "processed_at": "…",
+  "name": "web_fetch", "input": { "url": "https://example.com" },
+  "evaluated_permission": "ask" }
+// 2. nothing runs it, and the turn ends naming the call it waits on
+{ "type": "session.status_idle", "id": "sevt_…", "seq": 5, "processed_at": "…",
+  "stop_reason": { "type": "requires_action", "event_ids": ["sevt_…"] } }
+// 3. the user answers, with one event
+{ "type": "user.tool_confirmation", "tool_use_id": "sevt_…", "result": "allow" }
+// 4. the brain writes the call's result and carries on
+{ "type": "agent.tool_result", "id": "sevt_…", "seq": 7, "processed_at": "…",
+  "tool_use_id": "sevt_…", "content": [{ "type": "text", "text": "…" }], "is_error": false }
+```
+
+- **The pause is a turn end, not a wait in the process.** The session is `idle` with
+  `stop_reason: { "type": "requires_action", "event_ids": [ … ] }`, and the ids are the
+  `agent.tool_use` events waiting — the calls' own ids. Nothing is held open and nothing times
+  out: a pause waits until it is answered, and it survives a restart, because it is in the log
+  rather than in a process. A client draws the question or the approval prompt from that.
+- **`ask_user`'s questions.** One to four questions, each with a `question`, a `header` (at most
+  12 characters) and a `type`: `choice` (2–6 options of `label` + optional `description`, and
+  `multi_select`; the user may always answer "Other" in their own words), `text` (an optional
+  `placeholder`) or `confirm` (yes/no). A call whose questions are malformed is answered with an
+  `is_error` result the model can fix, rather than pausing on a question nobody could answer.
+
+```json
+// what the model asks
+{ "type": "agent.tool_use", "id": "sevt_…", "seq": 4, "processed_at": "…",
+  "name": "ask_user", "evaluated_permission": "ask",
+  "input": { "questions": [
+    { "question": "Which environment should I deploy to?", "header": "Environment",
+      "type": "choice", "options": [{ "label": "staging" },
+                                     { "label": "production", "description": "the live one" }] },
+    { "question": "Anything else I should know?", "header": "Notes", "type": "text" } ] } }
+// what the user answers
+{ "type": "user.tool_confirmation", "tool_use_id": "sevt_…", "result": "allow",
+  "answers": [
+    { "question": "Which environment should I deploy to?", "labels": ["staging"] },
+    { "question": "Anything else I should know?", "text": "the release is on Thursday" } ] }
+```
+
+- **The answer is the result.** `ask_user` never runs: the brain writes your answers as the
+  call's `agent.tool_result`, one line per question
+  (`Which environment should I deploy to?: staging`). A `deny` means you declined to answer.
+  The answers are validated against the questions the call asked — every question answered
+  exactly once, each answer of the type its question takes, and only the labels the question
+  offers — and one that does not fit is the protocol's 400 `invalid_request_error`, storing
+  nothing.
+- **One event answers every pause**, and it must name a call that is really waiting: a
+  confirmation for a call that already ran, for one the policy allowed outright, or for an id
+  this session does not have, is the same 400 and stores nothing. `allow` runs the call (or
+  carries its answers), `deny` refuses it, and `deny_message` says why —
+  `The user denied this: …`.
+- **`remember` is how long an approval lasts.** `once` (or the field left out) is this call;
+  `session` allows every later call of that tool in this chat — the confirmation event _is_ the
+  record, so it survives a reload and a compaction, and an edit that rewinds past it forgets it;
+  `always` does the same and writes your stored policy for that tool to `allow`, so the next
+  chat inherits it (see [Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)).
+  `remember` belongs to an approval and `answers` to a question: sending one where the other
+  belongs is a 400.
+- **A message or an interrupt ends the waiting.** A `user.message` that arrives while calls are
+  waiting resolves them all — each with an `is_error` result saying `The user sent a message
+instead.` — and the turn carries on with your message; an interrupt resolves them the same way
+  and ends the turn.
+- **A call waiting on you is not "execution lost".** A brain that takes over a session which
+  crashed while waiting keeps waiting; one that takes over a call you approved but which never
+  finished answers `execution lost` instead of running it again, because nobody can say whether
+  it ran.
+
+#### Per-user tool settings (epic #303, X4; issue #307)
+
+Which of those tools a chat may use is a **per-user choice**, stored beside the log and managed
+at `/v1/me/tools`:
+
+```json
+// GET /v1/me/tools            (optionally ?mode_id=<the mode the chat follows>)
+{ "data": [
+  { "name": "web_fetch",  "source": "builtin", "enabled": true, "policy": "allow",
+    "default_policy": "allow", "available": true },
+  { "name": "todo_write", "source": "builtin", "enabled": false, "policy": "ask",
+    "default_policy": "allow", "available": true },
+  { "name": "web_search", "source": "builtin", "enabled": true, "policy": "allow",
+    "default_policy": null, "available": false }
+] }
+
+// PUT /v1/me/tools            — merges per tool; a tool the body does not name keeps its setting
+{ "builtin": { "web_search": { "enabled": false, "policy": "ask" } } }
+```
+
+- **`enabled` is whether the tool is offered at all**, and `policy` is what a call to it is
+  evaluated under. A tool that is off is not in the request's offer — the model cannot see it —
+  so a user who turns every tool off gets the same request a deployment with no tools builds. A
+  tool that is on with `policy: "deny"` is offered, and every call to it is refused.
+- **A tool a user has never configured follows its own declared default**
+  (`default_policy`), which for every built-in tool is `allow` and for every MCP tool will be
+  `ask`. The settings are therefore a record of **choices**, not a complete list.
+- **A tool this deployment does not register is listed as `available: false`** — a
+  `web_search` whose operator key is missing, say — rather than hidden, and `default_policy` is
+  `null` for it: nothing here declares it. It is never offered, whatever `enabled` says. So the
+  `data` list is the deployment's tools — `web_fetch` and `todo_write` always, `web_search` and
+  the test `echo` where the deployment registered them — plus any tool the caller has a setting
+  for.
+- **A mode may override which built-in tools are on** (a `tools` field on the mode,
+  `{ "builtin": { "web_search": true } }` — a patch, so a tool it does not name follows the
+  user). The same field's `mcp_servers` map does the same for the user's **remote MCP servers**
+  (#311), by server id. It may **not** change a permission: a permission is the user's, because
+  "always allow" (#309) is remembered per tool. `GET /v1/me/tools?mode_id=…` answers as a chat
+  on that mode would see things, which is what a composer shows; a mode the caller does not own
+  is the same 404 every other mode read gives.
+- **A chat reads the settings from the next request on**, so flipping a switch, or the mode a
+  message switches to, applies to the next request the turn makes — the record of what a
+  request offered is its own `span.model_request_start.tools`.
 
 `session.usage` is the session's **running** totals, written by the brain in the same append as
 the `span.model_request_end` that closes a request which reported usage — so a client watching
@@ -246,7 +425,7 @@ rewind has superseded, then every event after `covers.to_seq`.
   "reason": "threshold",
   "tokens_before": 51200,
   "summary_model": "anthropic/claude-sonnet-5",
-  "prompt_version": "compact-v1",
+  "prompt_version": "context-summary-v2",
   "passes": 1
 }
 ```
@@ -254,7 +433,9 @@ rewind has superseded, then every event after `covers.to_seq`.
 `reason` is `threshold` (the context reached the share of the model's budget that triggers a
 summary), `overflow` (the provider refused a request as too long) or `manual` (the user asked
 for it). `tokens_before` is how full the context was, and `summary_model`, `prompt_version` and
-`passes` record what wrote the summary and how — with an optional `fallback_reason` when the
+`passes` record what wrote the summary and how — `prompt_version` is `context-summary-v2`, the
+prompt whose tool-work section accounts for the pages fetched, the searches made, the actions
+taken and the tool errors (#306) — — with an optional `fallback_reason` when the
 chat's own model summarized instead of the summary model the user chose (no credential for it,
 or it would have needed more passes than the limit allows). A `session.rewind` that reaches back
 before a summary supersedes it along with the rest of the tail it covered, so it disappears from
@@ -266,7 +447,10 @@ boundary, before the request: it measures the context the request is about to ma
 previous request's real prompt size plus an estimate of what is new, and compares it against
 `OPENHARNESS_COMPACTION_THRESHOLD` (default `0.7`) of the **chat** model's context budget. Over
 it, the older history is summarized with the recent quarter of the budget kept verbatim, cut at a
-`user.message` boundary so no turn is split. A provider that still refuses a request as too long
+`user.message` boundary so no turn is split — and never between a tool call and the result that
+answers it (X9), whatever arrived in between. A summarizer is never paid for on a context the old
+tool results' clearing brings back under the share: what it measures is the request the context
+strategy will build (#306). A provider that still refuses a request as too long
 gets one more attempt after a tighter compaction; if that fails too the turn ends with
 `session.error { retry_status: "exhausted" }` rather than looping — and the message says which
 of the three things happened, so an error never claims a compaction that the engine, finding
@@ -347,7 +531,8 @@ stored.
 **A message too big to send is shortened, never dropped.** If the newest message alone is over
 the chat model's budget, summarizing cannot help — that message has to stay verbatim — so the
 request carries it capped to a head and a tail with an `[… N tokens omitted …]` marker, and the
-request's `span.model_request_start` records it:
+request's `span.model_request_start` records it — together with the tool results the request
+capped (epic #303, X9) and the old ones it cleared:
 
 ```json
 {
@@ -357,13 +542,26 @@ request's `span.model_request_start` records it:
   "processed_at": "…",
   "consumes": ["sevt_…"],
   "model": "anthropic/claude-sonnet-5",
-  "truncated": { "seq": 41, "tokens_before": 40000, "tokens_after": 30000 }
+  "truncated": {
+    "seq": 41,
+    "tokens_before": 40000,
+    "tokens_after": 30000,
+    "results": [{ "seq": 38, "tool": "web_fetch", "tokens_before": 9000, "tokens_after": 2000 }]
+  },
+  "cleared": { "results": 2, "tokens": 12000 }
 }
 ```
 
-`seq` names the event whose text was cut, and the two counts bracket what it cost before and
-after — so a client can tell the user their message was shortened rather than let it silently
-disappear. The field is absent for every request whose newest message fits.
+`seq` names the newest event whose text was cut, and the two counts bracket what it cost before
+and after — so a client can tell the user their message was shortened rather than let it
+silently disappear. `results` lists every tool result the request capped: a result is cut to the
+smaller of what its tool declares and a fifth of the chat model's budget, and the log keeps the
+whole of it. `cleared` says how many old tool results — those older than the recent quarter of
+the budget the summary engine keeps verbatim — had their bodies replaced by
+`result cleared, N tokens`: clearing them is what the brain tries **before** summarizing, so a
+context that clearing alone brings back under the threshold needs no summary at all. All three
+fields are absent for a request that had to shorten and clear nothing, which is every session
+stored before #277 and #306.
 
 **The token counters are disjoint, and that is what `usage` prices.** `ModelUsage.input_tokens`
 is the **uncached** input (the way Anthropic's own `input_tokens` reads) and the two cache
@@ -695,7 +893,7 @@ caller holds at most `MAX_MODES_PER_USER` (20) of them; both refusals are the pr
 `my-default-model`, which resolves to the caller's stored `default_model` at request time — so
 a mode on it follows a changed default, and one with no default set is unavailable. `PUT`-style
 merging is a `POST /v1/me/modes/{mode_id}` update: omitted fields keep their stored value and
-`null` clears a nullable one (`reasoning_effort`, `system_prompt_addition`).
+`null` clears a nullable one (`reasoning_effort`, `system_prompt_addition`, `tools`).
 
 **A chat follows a mode or a plain model.** `Session.mode` is the mode a chat follows, or
 `null`; `POST /v1/sessions` takes a `mode` (the server stores the model it resolves to on the
@@ -709,6 +907,27 @@ no credential for its provider, or `my-default-model` with no default set — st
 it (`POST /v1/sessions`) or continuing one (`POST …/events`) is the `422`
 `mode_unavailable_error`, with a message naming the mode and what to do about it, and nothing is
 stored. A mode is stored even when its model is not usable yet: the key may come later.
+
+**A mode may also carry a tool override.** `Mode.tools` is
+`{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false } }` or `null`: an on/off
+patch applied over the user's own choices, so a `deep` mode can insist on `web_search`, do
+without `todo_write`, and leave `notes` (a remote MCP server) out of every chat that follows it.
+It decides **which** tools and **which MCP servers** a chat has, never what a call to one may do
+— permissions are the user's (see
+[Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)).
+
+- **`builtin`** is keyed by tool name and patches the user's `/v1/me/tools` choices.
+- **`mcp_servers`** (epic #303, X10; #311) is a sibling key, keyed by a remote MCP server's
+  `mcps_` id, and patches the server's own `enabled` field — the user's default. A server the map
+  does not name follows the user; a mode that names one turns it on or off for the chats that
+  follow it, live, from the next request on. It is **server granularity, never per MCP tool**:
+  which of a server's tools a request offers, and under which permission, is the server's own
+  listing and the user's settings, not a mode's.
+- **A mode naming a server the caller no longer has is simply ignored.** The mode routes store
+  the map as written and do not check the id against the servers present, so deleting an MCP
+  server neither fails nor rewrites the modes that named it — the entry just matches nothing.
+  The servers in force for a request are resolved as _the user's `enabled`, overridden by the
+  mode_, per request.
 
 **Every request records what it ran under.** `span.model_request_start.mode` is `{ id, name }`
 — the mode the request ran under and the name it had then — beside the `model` and
@@ -899,9 +1118,12 @@ curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
 - **A cap of twenty** `MAX_MCP_SERVERS_PER_USER`: every enabled server contributes its whole
   tool list to every request once tools land (#312), so the cap is a context budget as much as
   a row count. A duplicate name and the twenty-first server are the `409` a mode's are.
-- **`enabled` is the user default only.** A mode may later override which servers are on, at
-  server granularity — there is no per-tool switch — but that override is #307 and is
-  deliberately not modelled here.
+- **`enabled` is the user default, and a mode may override it** (#307/#311): `Mode.tools`'s
+  `mcp_servers` map turns a whole server on or off for every chat that follows the mode, at
+  server granularity — there is no per-tool switch. The servers **in force for a request** are
+  therefore the caller's `enabled` ones with the mode's patch over them; a mode that names a
+  server the caller no longer has is ignored rather than refused, so deleting a server leaves
+  such a mode untroubled. See [Modes](#modes).
 
 ## The model catalog
 
@@ -921,6 +1143,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "max_output_tokens": 65536,
       "cost": { "input": 0.3, "output": 2.5, "cache_read": 0.075, "cache_write": null },
       "context_budget": 983040,
+      "tool_call": true,
       "source": "provider"
     },
     {
@@ -931,6 +1154,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "max_output_tokens": null,
       "cost": null,
       "context_budget": 32768,
+      "tool_call": true,
       "source": "provider"
     },
     {
@@ -940,6 +1164,7 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
       "context_window": null,
       "max_output_tokens": null,
       "context_budget": 32768,
+      "tool_call": true,
       "source": "registry"
     }
   ],
@@ -959,6 +1184,10 @@ is the usual one; the optional `refresh=true` query parameter bypasses the serve
   neither a key nor any part of one appears in a response, an error or a log. `data` is sorted
   by provider, then name; the form stays free text regardless — the router accepts
   `provider/model` ids the catalog does not know yet.
+- **`tool_call` says whether the model can call tools** (epic #303, X2): models.dev's own flag,
+  read off the server's bundled snapshot, and `true` for a model the registry does not know. A
+  model marked `false` is offered no tools at all and chats exactly as it did before tools
+  existed; a client uses the field to say so before a chat starts (#308).
 - **`context_budget` is the budget the brain will trim a request to** (epic #277, K10; #246).
   Every entry carries it, resolved by the server with the very resolver the scheduler is handed
   — the model's `context_window` less room for the reply (`min(max_output_tokens, 25% of the
@@ -1064,8 +1293,8 @@ prices when the request is answered, and nothing about cost is ever written down
 session does not have to ask.
 
 ```
-GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, unpriced_requests, by_model }
-GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced_requests, by_model, by_day }
+GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, unpriced_requests, by_model, searches }
+GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced_requests, by_model, by_day, searches }
 ```
 
 ```json
@@ -1079,6 +1308,7 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   },
   "cost": 0.002792,
   "unpriced_requests": 0,
+  "searches": 1,
   "by_model": [
     {
       "model": "anthropic/claude-sonnet-5",
@@ -1108,6 +1338,12 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   million tokens, from the vendored models.dev snapshot (see `apps/server/AGENTS.md`).
 - **Cache tokens are priced separately.** `cache_read` and `cache_write` are their own rates at
   every provider that publishes them, not a fraction of the input rate.
+- **Searches are counted, and never priced** (epic #303, #305). `searches` is how many
+  `web_search` calls the covered log holds — the call and its successful result, so a refused,
+  failed or never-answered call is not one — and it is a **count**: the operator pays the search
+  provider, no rate for that is in this repository, and inventing one would be the estimate the
+  rest of this surface refuses to make. It is a sibling of the totals rather than a member of
+  them, and every per-day entry of `by_day` carries its own.
 - **Usage is broken down by model, never by mode.** A session may switch models mid-conversation
   (U3), so `by_model` is what separates the cheap requests from the expensive ones. The per-user
   route adds `by_day`; there is no third axis.

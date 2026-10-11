@@ -4,6 +4,7 @@ import { EventIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { ReasoningEffortRunSchema } from '../reasoning'
 import { ModeReferenceSchema } from '../resources/mode'
+import { ToolReferenceSchema } from '../tools'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 
 /**
@@ -66,11 +67,34 @@ export const SpanErrorSchema = z.object({
 export type SpanError = z.infer<typeof SpanErrorSchema>
 
 /**
- * // extension: what a request had to cut to fit (epic #277, K6).
+ * // extension: one tool result a request had to cap (epic #303, X9; #306).
  *
- * `tokens_before` is what the newest item cost, `tokens_after` what the truncated form costs, and
- * the difference is what the omission marker stands for. Both are the characters-per-token
- * estimate — the same measure the budget is checked with — not a provider's report.
+ * A tool result is capped before it enters a request — a head and a tail with an omission marker
+ * between them — to the smaller of the cap its tool declares and the share of the chat model's
+ * budget no single result may take. The stored `agent.tool_result` is never modified: this is
+ * what the *request* carried, and what the result cost before and after.
+ */
+export const ToolResultTruncationSchema = z.object({
+  /** The `seq` of the `agent.tool_result` whose text was shortened. */
+  seq: EventSeqSchema,
+  /** The tool the result came from — what the model called, not what it was asked. */
+  tool: z.string().min(1),
+  /** What the result cost before it was cut, in tokens. */
+  tokens_before: z.number().int().nonnegative(),
+  /** What the truncated result costs, in tokens. */
+  tokens_after: z.number().int().nonnegative(),
+})
+
+export type ToolResultTruncation = z.infer<typeof ToolResultTruncationSchema>
+
+/**
+ * // extension: what a request had to cut to fit (epic #277, K6; epic #303, X9).
+ *
+ * `tokens_before` is what the truncated item cost, `tokens_after` what the truncated form costs,
+ * and the difference is what the omission marker stands for. Both are the characters-per-token
+ * estimate — the same measure the budget is checked with — not a provider's report. `seq` names
+ * the newest item the request had to shorten: the newest message when it had to be capped (K6),
+ * and otherwise the newest tool result it capped (X9; `results` lists every one of them).
  */
 export const TruncationSchema = z.object({
   /** The `seq` of the event whose text was shortened — the newest item of the request. */
@@ -79,9 +103,36 @@ export const TruncationSchema = z.object({
   tokens_before: z.number().int().nonnegative(),
   /** What the truncated item costs, in tokens. */
   tokens_after: z.number().int().nonnegative(),
+  /**
+   * // extension: the tool results this request capped (epic #303, X9; #306).
+   *
+   * Absent when no tool result was over its cap, which is every request that called no tool and
+   * every log stored before #306 — so a reader that does not know the field sees exactly the
+   * record it always did. `seq`/`tokens_before`/`tokens_after` above describe the newest of
+   * these when no message had to be capped.
+   */
+  results: z.array(ToolResultTruncationSchema).optional(),
 })
 
 export type Truncation = z.infer<typeof TruncationSchema>
+
+/**
+ * // extension: the old tool results a request cleared, and what they cost (epic #303, X9; #306).
+ *
+ * A tool result older than the verbatim tail of the history — the recent quarter of the chat
+ * model's budget the compaction engine keeps in full (K4) — is not worth its tokens to a request
+ * that is running out of room, so its body is replaced by a placeholder before the history is
+ * summarized. The stored `agent.tool_result` keeps its body: replay, the transcript and the
+ * summarizer all still see what the tool said.
+ */
+export const ClearedResultsSchema = z.object({
+  /** How many tool results had their body replaced by a placeholder. */
+  results: z.number().int().nonnegative(),
+  /** What those results cost before they were cleared, in tokens. */
+  tokens: z.number().int().nonnegative(),
+})
+
+export type ClearedResults = z.infer<typeof ClearedResultsSchema>
 
 /**
  * // extension: why a request was made, when it is not the chat itself (epic #277, C2).
@@ -170,6 +221,27 @@ export const ModelRequestStartEventSchema = z.object({
    * session that never sent an oversized message keeps the span shape it always had.
    */
   truncated: TruncationSchema.optional(),
+  /**
+   * // extension: the old tool results this request cleared (epic #303, X9; #306).
+   *
+   * Before older history is summarized, the bodies of the tool results older than the verbatim
+   * tail are replaced by a placeholder — "result cleared, N tokens" — so a context that clearing
+   * alone brings back under the threshold needs no summary at all. The results are still in the
+   * log, in full; only the request carried the placeholder. Absent when the request cleared
+   * none, which is every request without an old tool result.
+   */
+  cleared: ClearedResultsSchema.optional(),
+  /**
+   * // extension: the tools this request offered the model (epic #303, X1).
+   *
+   * A name and where it comes from, per tool, recorded per request — so the log says what the
+   * model *could* have called, not merely what it did. A request built by a deployment with no
+   * tool registry offered nothing, and so does one on a model that cannot call tools; both
+   * write no `tools` at all, which is every request stored before #304. A request that offered
+   * tools and had the model call none still carries the list: the offer is what the span
+   * records, whatever came of it.
+   */
+  tools: z.array(ToolReferenceSchema).optional(),
   /**
    * // extension: a request the compaction engine made to write a summary (epic #277, C2).
    *

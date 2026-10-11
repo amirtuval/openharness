@@ -26,6 +26,7 @@
 /** This package's name; a cheap way for a dependent to prove the import resolved. */
 export const PACKAGE_NAME = '@openharness/protocol'
 
+export * from './ask-user'
 export * from './bedrock'
 export * from './common'
 export * from './credential-types'
@@ -40,3 +41,5 @@ export * from './providers'
 export * from './readonly'
 export * from './reasoning'
 export * from './resources'
+export * from './todo'
+export * from './tools'

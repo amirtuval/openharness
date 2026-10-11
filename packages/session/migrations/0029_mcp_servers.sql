@@ -1,4 +1,4 @@
--- 0026_mcp_servers.sql — a user's remote MCP servers, and their pending OAuth states
+-- 0029_mcp_servers.sql — a user's remote MCP servers, and their pending OAuth states
 -- (epic #303, X10).
 --
 -- A remote MCP server is a per-user resource like `provider_credentials` and `modes`: a URL,
@@ -26,9 +26,10 @@
 -- `status` are checked against the protocol's vocabularies, so a hand-edited row cannot read
 -- back as a shape no reader accepts.
 --
--- **Migration number.** 0026 is the next free number after `0025_user_preferences_compaction.sql`.
--- Every file runs on every `migrate()` in name order, so the numbers have to be unique and
--- ordered.
+-- **Migration number.** 0029 follows `0028_paused_confirmation_work.sql`, the newest file
+-- #311's stack phase wrote; `0027_mcp_oauth_state_client.sql` moved with it to `0030`, so the
+-- pair stays adjacent. Every file runs on every `migrate()` in name order, so the numbers have
+-- to be unique and ordered.
 
 create table if not exists mcp_servers (
   id text collate "C" primary key,

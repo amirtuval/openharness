@@ -526,16 +526,48 @@ if (target === null) {
       const files = await migrate(db)
       expect(files.length).toBeGreaterThan(0)
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
-      // `create table if not exists` (#111, #122), and `0018_credential_key_provider.sql`,
-      // `0019_user_preferences_theme.sql` and `0025_user_preferences_compaction.sql` one or
-      // more `add column if not exists` (#150, #203, #282): a re-run has to leave the tables
-      // and the columns working, which the store calls below prove.
+      // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
+      // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql` and
+      // `0027_tool_settings.sql` and `0030_mcp_oauth_state_client.sql` one or more
+      // `add column if not exists` (#150, #203, #282, #307, #311), and
+      // `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
+      // `0027_tool_settings.sql`, `0028_paused_confirmation_work.sql` and
+      // `0029_mcp_servers.sql` build an index or a table (#247, #305, #307, #309, #311): a
+      // re-run has to leave the tables, the indexes and the columns working, which the store
+      // calls below prove.
       expect(files).toContain('0016_user_preferences.sql')
       expect(files).toContain('0017_scheduler_instances.sql')
       expect(files).toContain('0018_credential_key_provider.sql')
       expect(files).toContain('0019_user_preferences_theme.sql')
       expect(files).toContain('0020_rewind_supersessions.sql')
+      expect(files).toContain('0021_model_request_end_usage.sql')
       expect(files).toContain('0025_user_preferences_compaction.sql')
+      // Both names exist since the tools stack met: #305's index keeps `0026` (it is earlier
+      // in the stack) and #307's settings file was renumbered to `0027` — the check that the
+      // numbers are unique and ordered is that both files are here, in this order.
+      expect(files).toContain('0026_agent_tool_use_usage.sql')
+      expect(files).toContain('0027_tool_settings.sql')
+      // `0028_paused_confirmation_work.sql` builds the fourth partial index on the log's event
+      // types (#309), and must come after the files the tools stack already numbered.
+      expect(files).toContain('0028_paused_confirmation_work.sql')
+      // #311's two files are numbered after `0028`, since pausing (#309) is beneath them in the
+      // stack: `0029_mcp_servers.sql` creates the two tables and `0030` adds the OAuth flow's
+      // `client` column, so the number that used to be `0026`/`0027` on the MCP branch moved —
+      // and the assertions below are what keeps the pair unique and ordered.
+      expect(files).toContain('0029_mcp_servers.sql')
+      expect(files).toContain('0030_mcp_oauth_state_client.sql')
+      expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
+        files.indexOf('0027_tool_settings.sql'),
+      )
+      expect(files.indexOf('0027_tool_settings.sql')).toBeLessThan(
+        files.indexOf('0028_paused_confirmation_work.sql'),
+      )
+      expect(files.indexOf('0028_paused_confirmation_work.sql')).toBeLessThan(
+        files.indexOf('0029_mcp_servers.sql'),
+      )
+      expect(files.indexOf('0029_mcp_servers.sql')).toBeLessThan(
+        files.indexOf('0030_mcp_oauth_state_client.sql'),
+      )
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()
@@ -722,6 +754,9 @@ if (target === null) {
       const theirSession = await store.createSession(theirAgent.id, { ownerId: OWNER_B })
       await credentials.upsert({ ...credentialInput(OWNER_A, 'a'), last4: 'aaaa' })
       await credentials.upsert({ ...credentialInput(OWNER_B, 'b'), last4: 'bbbb' })
+      await store.putToolSettings(OWNER_A, {
+        builtin: { web_search: { enabled: false, policy: 'deny' } },
+      })
 
       await sql`delete from "user" where id = ${OWNER_A}`.execute(db)
 
@@ -731,6 +766,9 @@ if (target === null) {
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toBeNull()
       expect(await credentials.get({ userId: OWNER_A, name: 'anthropic' })).toBeNull()
       expect(await credentials.list({ userId: OWNER_A })).toEqual([])
+      // The tool settings went with the user too (`0026`'s `on delete cascade`), reading back
+      // as no choices rather than as a stale row.
+      expect(await store.getToolSettings(OWNER_A)).toEqual({ builtin: {} })
       expect(await eventRows(session.id)).toEqual(new Map())
       // The other user is untouched, down to their own credential for the same provider.
       expect(await store.getAgent(theirAgent.id, { ownerId: OWNER_B })).not.toBeNull()
@@ -878,12 +916,14 @@ if (target === null) {
     // `"account"`, `"verification"`, `"deviceCode"`) are *not* truncated: the only rows in
     // them are the ones `ensureUsers` inserts per test, and a `"user"` row carries the
     // `owner_id`s everything else references. `user_preferences` is here so one test's
-    // preferences cannot leak into the next (#111), and `scheduler_instances` so one test's
-    // memberships cannot (#122).
+    // preferences cannot leak into the next (#111), `user_tool_settings` so one test's tool
+    // choices cannot (#307), `mcp_servers` and `mcp_oauth_states` so one test's remote MCP
+    // servers and their pending OAuth flows cannot (#303, X10; #311), and `scheduler_instances`
+    // so one test's memberships cannot (#122).
     await sql`truncate table
       events, event_claims, event_supersessions, sessions, agents, modes, partition_leases,
-      scheduler_instances, provider_credentials, user_preferences, mcp_oauth_states,
-      mcp_servers`.execute(db)
+      scheduler_instances, provider_credentials, user_preferences, user_tool_settings,
+      mcp_oauth_states, mcp_servers`.execute(db)
   }
 }
 

@@ -21,6 +21,7 @@ import type { AppEnv } from '../types'
 import { conflictError, notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import { requireUsableMode } from '../modes'
+import { assertConfirmations, isConfirmation, rememberAlwaysApprovals } from '../pausing'
 import { SSE_HEADERS, createSessionEventStream } from '../sse'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
@@ -74,10 +75,20 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     if (body.events.some((event) => event.type === EVENT_TYPES.sessionRewind)) {
       await requireIdleSession(deps, sessionId)
     }
+    // A `user.tool_confirmation` answers a call that is waiting on the user (epic #303, #309).
+    // The check is before anything is stored — and it is what makes the event's own promise
+    // true: every confirmation in this log names a call that was really waiting, so a reader
+    // never has to wonder whether one was acted on.
+    const confirmations = body.events.filter(isConfirmation)
+    const alwaysApproved = await assertConfirmations(deps, sessionId, ownerId, confirmations)
     // The store writes `processed_at: null` on every user event, which is what makes it
     // queued work rather than history: the brain claims it at the start of a turn. A rewind
     // it writes itself, processed as it lands — see `@openharness/session`.
     const stored = await deps.store.appendEvents(sessionId, body.events)
+    // An approval remembered `always` is also the user's stored policy for that tool (#307).
+    // The confirmation is this chat's record of the answer — the brain reads it back off the
+    // log — and this is what makes the next chat inherit it.
+    await rememberAlwaysApprovals(deps, ownerId, alwaysApproved)
     // A session is named after the first thing said in it — once, and never over a title the
     // caller supplied at creation. This is the only writer of `title` in the system.
     await nameSessionFromFirstMessage(deps.store, sessionId, body.events, ownerId)

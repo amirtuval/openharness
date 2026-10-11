@@ -12,6 +12,7 @@ import {
   encodeSeqCursor,
   isStoredEvent,
   newEventId,
+  newMcpServerId,
   partitionOf,
   SUMMARY_MODEL_SAME_AS_CHAT,
   type Agent,
@@ -29,6 +30,8 @@ import {
   type StreamEvent,
   type UserId,
   type UserPreferences,
+  type UserToolSettings,
+  UserToolSettingsSchema,
 } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
@@ -50,6 +53,7 @@ import type {
   AppendableEvent,
   AppendEventsOptions,
   ListModelRequestsOptions,
+  ListToolUsesOptions,
   PartitionLease,
   SessionStore,
 } from '../store'
@@ -147,7 +151,8 @@ import { type TestClock, createTestClock } from './clock'
  * - **subscriptions** — stored events in `seq` order, chunk delivery interleaved, isolation,
  *   unsubscribe, and the final `session.deleted` a deleted session's subscribers receive.
  * - **partition signals** — delivery, fan-out to a partition's listeners, and dropping.
- * - **findSessionsNeedingWork** — pending events and open turns, scoped to partitions.
+ * - **findSessionsNeedingWork** — pending events, open turns and a pause whose confirmation
+ *   has landed (#309), scoped to partitions.
  * - **partition leases** — acquire, renew (including through a lapse nobody took over), expiry
  *   at `expires_at`, steal after expiry, release.
  * - **scheduler membership** (#122) — a heartbeat recording an instance, the window that keeps
@@ -315,6 +320,62 @@ export function runSessionStoreConformance(
         const { store } = await setup()
         const mode = await store.createMode({ name: 'mine', model: 'my-default-model' }, OWNER_A)
         expect(mode.model).toBe('my-default-model')
+      })
+
+      it('carries the tool override a mode may set, and null when it sets none (#307)', async () => {
+        const { store } = await setup()
+        // The override's two halves: the built-in tools by name, and the user's MCP servers by
+        // id — a sibling key of `builtin`, never more entries in it (#311). A mode that names a
+        // server the user no longer has is stored as given and simply has no effect: nothing at
+        // this layer checks the id, which is what makes deleting a server leave such a mode
+        // alone.
+        const gone = newMcpServerId()
+        const override = {
+          builtin: { web_search: true, todo_write: false },
+          mcp_servers: { [newMcpServerId()]: true, [gone]: false },
+        }
+        const withTools = await store.createMode(modeInput('deep', { tools: override }), OWNER_A)
+        expect(withTools.tools).toEqual(override)
+        expectExact(ModeSchema, withTools, 'a mode with a tool override')
+        // An override without the MCP half is the mode saying nothing about servers — the shape
+        // every mode stored before #311 has.
+        const builtinOnly = await store.createMode(
+          modeInput('builtins', { tools: { builtin: { web_fetch: false } } }),
+          OWNER_A,
+        )
+        expect(builtinOnly.tools).toEqual({ builtin: { web_fetch: false } })
+        expect(builtinOnly.tools).not.toHaveProperty('mcp_servers')
+        // A mode that says nothing about tools has no override, not an empty one: the two mean
+        // different things, and only `null` means "follow the user's settings".
+        const plain = await store.createMode(
+          { name: 'plain', model: 'openai/gpt-4.1-mini' },
+          OWNER_A,
+        )
+        expect(plain.tools).toBeNull()
+        expect(await store.getMode(withTools.id, { ownerId: OWNER_A })).toEqual(withTools)
+
+        // An update that omits the override keeps it; one that sends `null` clears it; one
+        // that sends a map replaces it whole.
+        expect(
+          (await store.updateMode(withTools.id, { name: 'renamed' }, { ownerId: OWNER_A }))?.tools,
+        ).toEqual(override)
+        expect(
+          (
+            await store.updateMode(
+              withTools.id,
+              { tools: { builtin: { web_fetch: false } } },
+              {
+                ownerId: OWNER_A,
+              },
+            )
+          )?.tools,
+        ).toEqual({ builtin: { web_fetch: false } })
+        expect(
+          (await store.updateMode(withTools.id, { tools: null }, { ownerId: OWNER_A }))?.tools,
+        ).toBeNull()
+        expect(
+          await store.updateMode(plain.id, { tools: override }, { ownerId: OWNER_A }),
+        ).toMatchObject({ tools: override })
       })
 
       it('lists one owner’s modes oldest first, and nobody else’s', async () => {
@@ -941,6 +1002,79 @@ export function runSessionStoreConformance(
         expect(await store.getPreferences(OWNER_A)).toEqual({
           ...defaults,
           default_model: 'anthropic/claude-sonnet-5',
+        })
+      })
+    })
+
+    // ---------------------------------------------------------- tool settings
+
+    describe('tool settings (epic #303, X4; #307)', () => {
+      /** No choice stored: every tool follows its own declared default. */
+      const defaults: UserToolSettings = { builtin: {} }
+
+      it('reads no choices for a user who has saved none', async () => {
+        const { store } = await setup()
+        // No row is the absence of a choice, not an error: one shape for a settings screen, and
+        // one that says nothing about any tool.
+        expect(await store.getToolSettings(OWNER_A)).toEqual(defaults)
+        expect(await store.getToolSettings(OWNER_B)).toEqual(defaults)
+      })
+
+      it('round-trips a put through the read, as written', async () => {
+        const { store } = await setup()
+        const value: UserToolSettings = {
+          builtin: {
+            web_search: { enabled: true, policy: 'allow' },
+            web_fetch: { enabled: false, policy: 'deny' },
+            todo_write: { enabled: true, policy: 'ask' },
+          },
+        }
+        const stored = await store.putToolSettings(OWNER_A, value)
+        expect(stored).toEqual(value)
+        expect(await store.getToolSettings(OWNER_A)).toEqual(stored)
+        expectExact(UserToolSettingsSchema, stored, 'tool settings')
+      })
+
+      it('replaces the stored value in place on a second put', async () => {
+        const { store } = await setup()
+        await store.putToolSettings(OWNER_A, {
+          builtin: { web_search: { enabled: false, policy: 'deny' } },
+        })
+        const replaced = await store.putToolSettings(OWNER_A, {
+          builtin: { web_fetch: { enabled: true, policy: 'ask' } },
+        })
+        // One value per user: the second put is the whole map, so a tool the second one does
+        // not name is back to following its own declaration.
+        expect(await store.getToolSettings(OWNER_A)).toEqual(replaced)
+        expect(replaced.builtin).toEqual({ web_fetch: { enabled: true, policy: 'ask' } })
+      })
+
+      it('keeps two users’ tool settings apart', async () => {
+        const { store } = await setup()
+        await store.putToolSettings(OWNER_A, {
+          builtin: { web_search: { enabled: false, policy: 'deny' } },
+        })
+        expect(await store.getToolSettings(OWNER_B)).toEqual(defaults)
+        await store.putToolSettings(OWNER_B, {
+          builtin: { web_search: { enabled: true, policy: 'allow' } },
+        })
+        expect(await store.getToolSettings(OWNER_A)).toEqual({
+          builtin: { web_search: { enabled: false, policy: 'deny' } },
+        })
+      })
+
+      it('hands out deep-frozen values, so writing to one throws', async () => {
+        const { store } = await setup()
+        const stored = await store.putToolSettings(OWNER_A, {
+          builtin: { web_search: { enabled: true, policy: 'allow' } },
+        })
+        const read = await store.getToolSettings(OWNER_A)
+        expect(Object.isFrozen(stored)).toBe(true)
+        expect(Object.isFrozen(read)).toBe(true)
+        expect(() => Object.assign(read, { builtin: {} })).toThrow(TypeError)
+        // None of it reached the store.
+        expect(await store.getToolSettings(OWNER_A)).toEqual({
+          builtin: { web_search: { enabled: true, policy: 'allow' } },
         })
       })
     })
@@ -2460,6 +2594,132 @@ export function runSessionStoreConformance(
       })
     })
 
+    describe('tool calls in a window (epic #303, #305)', () => {
+      it('reads a call its result answered, with the name and the instant', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordToolUse(store, session.id, 'web_search')
+
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toEqual([{ name: 'web_search', processed_at: timestampAt(START_MS) }])
+      })
+
+      it('leaves out a call that failed and one nothing answered', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordToolUse(store, session.id, 'web_search', { isError: true })
+        // A call the brain stored and a crashed turn never ran: no result names it.
+        await append(store, session.id, [toolUse(newEventId(), 'web_search')])
+        await recordToolUse(store, session.id, 'web_search')
+
+        // Only the call that was answered successfully counts: a refused or failed call did not
+        // search, and a call nothing answered never ran.
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(1)
+      })
+
+      it('counts one tool’s calls when a name is named', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordToolUse(store, session.id, 'web_search')
+        await recordToolUse(store, session.id, 'web_fetch')
+        await recordToolUse(store, session.id, 'web_search', { isError: true })
+
+        const all = await store.listToolUses(
+          toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+        )
+        expect(all.map((call) => call.name)).toEqual(['web_search', 'web_fetch'])
+        const searches = await store.listToolUses({
+          ...toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+          name: 'web_search',
+        })
+        expect(searches.map((call) => call.name)).toEqual(['web_search'])
+      })
+
+      it('is owner-scoped: another user’s calls are never in the answer', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await recordToolUse(store, session.id, 'web_search')
+        const theirs = await store.createSession(null, {
+          ownerId: OWNER_B,
+          model: { id: MODEL_ID },
+        })
+        await recordToolUse(store, theirs.id, 'web_search')
+        await recordToolUse(store, theirs.id, 'web_search')
+
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(1)
+        expect(
+          await store.listToolUses(toolWindow(OWNER_B, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(2)
+      })
+
+      it('reads the half-open window, and every session of the owner in log order', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const other = await store.createSession(null, { ownerId: OWNER_A, model: { id: MODEL_ID } })
+        await recordToolUse(store, session.id, 'web_search')
+        clock.advance(SECOND)
+        await recordToolUse(store, other.id, 'web_search')
+        clock.advance(SECOND)
+        await recordToolUse(store, session.id, 'web_search')
+
+        // `from` is in the window and `to` is not: the third call, at exactly `to`, is out.
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS, START_MS + 2 * SECOND)),
+        ).toHaveLength(2)
+        // Ordered by `(session_id, seq)`, so a session's calls are grouped rather than
+        // interleaved by time — whichever order the two sessions were created in.
+        const expected =
+          session.id < other.id
+            ? [timestampAt(START_MS), timestampAt(START_MS + SECOND)]
+            : [timestampAt(START_MS + SECOND), timestampAt(START_MS)]
+        expect(
+          (await store.listToolUses(toolWindow(OWNER_A, START_MS, START_MS + 2 * SECOND))).map(
+            (call) => call.processed_at,
+          ),
+        ).toEqual(expected)
+      })
+
+      it('does not read a call a rewind replaced (#238)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const { events } = await completeTurn(store, session.id, 'hello')
+        await recordToolUse(store, session.id, 'web_search')
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toHaveLength(1)
+
+        const message = events[0]
+        if (message === undefined) {
+          throw new Error('the turn stored no message')
+        }
+        await append(store, session.id, [rewindTo(message.seq)])
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toEqual([])
+      })
+
+      it('rejects a window it cannot read', async () => {
+        const { store } = await setup()
+        expect(
+          await thrownBy(() => store.listToolUses(toolWindow(OWNER_A, START_MS + 1, START_MS))),
+        ).toBeInstanceOf(RangeError)
+        expect(
+          await thrownBy(() =>
+            store.listToolUses({
+              ownerId: OWNER_A,
+              from: new Date(Number.NaN),
+              to: new Date(START_MS),
+            }),
+          ),
+        ).toBeInstanceOf(RangeError)
+      })
+    })
+
     // --------------------------------------------------------- reading the log
 
     describe('reading the log', () => {
@@ -2826,6 +3086,35 @@ export function runSessionStoreConformance(
         await append(store, unfinished.id, [statusRunning()])
         const partitions = [partitionOf(running.id), partitionOf(unfinished.id)]
         expect(await store.findSessionsNeedingWork(partitions)).toEqual([running.id, unfinished.id])
+      })
+
+      it('finds a paused session once a confirmation answers one of its calls (#309)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const call = newEventId()
+        await append(store, session.id, [statusRunning(), toolUse(call, 'ask_user')])
+        await append(store, session.id, [statusPausedFor([call])])
+        // Waiting on the user is not work: nothing has answered the call yet.
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+        // The confirmation the server stored, with no signal to the scheduler, is the work.
+        await append(store, session.id, [userToolConfirmation(call)])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
+      })
+
+      it('leaves a paused session waiting when a confirmation names another call (#309)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const waiting = newEventId()
+        const other = newEventId()
+        await append(store, session.id, [
+          statusRunning(),
+          toolUse(waiting, 'web_fetch'),
+          toolUse(other, 'todo_write'),
+        ])
+        await append(store, session.id, [statusPausedFor([waiting])])
+        // A confirmation for a call the pause did not name answers nothing it waits on.
+        await append(store, session.id, [userToolConfirmation(other)])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
       })
 
       it('leaves out sessions with nothing to do', async () => {
@@ -3315,6 +3604,19 @@ function statusIdleFor(consumes: EventId[]): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusIdle, stop_reason: { type: 'end_turn' }, consumes }
 }
 
+/** A `session.status_idle` that paused on `eventIds`, as the brain ends a turn waiting on the user (#309). */
+function statusPausedFor(eventIds: EventId[]): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionStatusIdle,
+    stop_reason: { type: 'requires_action', event_ids: eventIds },
+  }
+}
+
+/** A `user.tool_confirmation` answering a waiting call — the event the server writes (#309). */
+function userToolConfirmation(callId: EventId): AppendableEvent {
+  return { type: EVENT_TYPES.userToolConfirmation, tool_use_id: callId, result: 'allow' }
+}
+
 /** A `session.status_rescheduled` to append. */
 function statusRescheduled(): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusRescheduled }
@@ -3437,6 +3739,50 @@ async function recordModelRequest(
 /** A `listModelRequests` query for `ownerId`, over the half-open window `[fromMs, toMs)`. */
 function usageWindow(ownerId: UserId, fromMs: number, toMs: number): ListModelRequestsOptions {
   return { ownerId, from: new Date(fromMs), to: new Date(toMs) }
+}
+
+/** The same window, for the tool-call read (epic #303, #305). */
+function toolWindow(ownerId: UserId, fromMs: number, toMs: number): ListToolUsesOptions {
+  return { ownerId, from: new Date(fromMs), to: new Date(toMs) }
+}
+
+/**
+ * An `agent.tool_use` under an id the test chose, so the result that answers it can name it —
+ * the store mints an id otherwise, and a call and its result are one identity (epic #303, X1).
+ */
+function toolUse(id: EventId, name: string): AppendableEvent {
+  return {
+    id,
+    type: EVENT_TYPES.agentToolUse,
+    name,
+    input: {},
+    evaluated_permission: 'allow',
+  }
+}
+
+/** The `agent.tool_result` that answers a call, successfully or as a failure. */
+function toolResult(callId: EventId, isError: boolean): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentToolResult,
+    tool_use_id: callId,
+    content: [{ type: 'text', text: isError ? 'failed' : 'ok' }],
+    is_error: isError,
+  }
+}
+
+/** A tool call and the result that answers it, appended as the brain appends the pair. */
+async function recordToolUse(
+  store: SessionStore,
+  sessionId: SessionId,
+  name: string,
+  options: { readonly isError?: boolean } = {},
+): Promise<{ call: EventId; result: EventId }> {
+  const call = newEventId()
+  const stored = await append(store, sessionId, [
+    toolUse(call, name),
+    toolResult(call, options.isError ?? false),
+  ])
+  return { call, result: stored[1]?.id ?? call }
 }
 
 /** An `event_start` chunk previewing `id`. */

@@ -136,9 +136,15 @@ export const FAKE_SESSION_TOKEN = 'fake_session_token'
  * the same split `GET /v1/models` makes server-side, so a test writes the limits and the fake
  * reports the budget a real server would. Pass `context_budget` to pin one instead.
  */
-export type FakeModelEntry = Omit<ModelEntry, 'context_budget'> & {
+export type FakeModelEntry = Omit<ModelEntry, 'context_budget' | 'tool_call'> & {
   /** The budget to report; the server's rule over the limits when absent. */
   readonly context_budget?: number | undefined
+  /**
+   * Whether the model can call tools (epic #303): `true` when absent, the same
+   * never-hide-a-usable-model default the server applies to a model its registry does not know.
+   * Pass `false` for a model that cannot, which is what a screen saying so (#308) reads.
+   */
+  readonly tool_call?: boolean | undefined
 }
 
 /**
@@ -148,16 +154,19 @@ export type FakeModelEntry = Omit<ModelEntry, 'context_budget'> & {
  * real resolver answers `undefined` there and the brain falls back.
  */
 function withContextBudget(entry: FakeModelEntry): ModelEntry {
-  if (entry.context_budget !== undefined) {
-    return { ...entry, context_budget: entry.context_budget }
+  // The tool verdict is stamped first, so every path through the budget arithmetic carries it:
+  // `tool_call` is why this cannot just spread the entry in each branch.
+  const stamped = { ...entry, tool_call: entry.tool_call ?? true }
+  if (stamped.context_budget !== undefined) {
+    return { ...stamped, context_budget: stamped.context_budget }
   }
-  const window = entry.context_window
+  const window = stamped.context_window
   if (window === null || window <= 0) {
-    return { ...entry, context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET }
+    return { ...stamped, context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET }
   }
-  const maxOutput = entry.max_output_tokens
+  const maxOutput = stamped.max_output_tokens
   return {
-    ...entry,
+    ...stamped,
     context_budget: contextTokenBudget({
       contextWindow: window,
       ...(maxOutput === null ? {} : { maxOutput }),
@@ -720,14 +729,33 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           throw rewindRefused(outcome.refusal)
         }
       }
+      // A `user.tool_confirmation` answers a call that is waiting on the user (epic #303,
+      // #309). The fake's brain never pauses — it answers every message in one turn — so no
+      // call in it is ever waiting, and the server's 400 for exactly that is the honest answer.
+      const hasConfirmation = request.data.events.some(
+        (input) => input.type === EVENT_TYPES.userToolConfirmation,
+      )
+      if (hasConfirmation) {
+        throw new ApiError(
+          400,
+          `nothing in session ${brain.session.id} is waiting on the user, so there is nothing to confirm`,
+          { type: 'invalid_request_error' },
+        )
+      }
       // The mode the chat will be on after the batch, and its refusal (#245, M6): checked
       // before anything is stored, exactly where the events route checks it — a batch that
       // continues on a mode whose model cannot be used is refused with nothing stored.
       const modeAfter = resultingFakeMode(brain.session.mode, request.data.events)
       const resolvedMode = modeAfter === null ? null : requireUsableMode(modeAfter)
-      const stored: UserEvent[] = request.data.events.flatMap((input) =>
-        input.type === EVENT_TYPES.sessionRewind ? [] : [brain.appendUserEvent(input)],
-      )
+      const stored: UserEvent[] = request.data.events.flatMap((input) => {
+        if (
+          input.type === EVENT_TYPES.sessionRewind ||
+          input.type === EVENT_TYPES.userToolConfirmation
+        ) {
+          return []
+        }
+        return [brain.appendUserEvent(input)]
+      })
       if (resolvedMode === null) {
         brain.session.mode = null
       } else {
@@ -1047,6 +1075,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         model: request.data.model,
         reasoning_effort: request.data.reasoning_effort ?? null,
         system_prompt_addition: request.data.system_prompt_addition ?? null,
+        // The tool override a mode may carry (#307); a mode that names none has none.
+        tools: request.data.tools ?? null,
         created_at: timestamp,
         updated_at: timestamp,
       })
@@ -1122,6 +1152,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           request.data.system_prompt_addition === undefined
             ? mode.system_prompt_addition
             : request.data.system_prompt_addition,
+        // The tool override a mode may carry (#307): an update that says nothing keeps it.
+        tools: request.data.tools === undefined ? mode.tools : request.data.tools,
         updated_at: now().toISOString(),
       })
       modes.set(modeId, updated)

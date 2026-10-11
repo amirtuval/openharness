@@ -1,4 +1,4 @@
--- 0027_mcp_oauth_state_client.sql — where a pending MCP OAuth flow was started (#311).
+-- 0030_mcp_oauth_state_client.sql — where a pending MCP OAuth flow was started (#311).
 --
 -- A pending OAuth authorization is completed by a **browser**, not by an API caller: the CLI
 -- `oh` starts the flow by opening the authorization URL in the system browser, and that browser
@@ -16,7 +16,7 @@
 -- too, so a reader that ignores the column answers exactly as the server did before #311. There
 -- is nothing else to backfill, and `if not exists` keeps a re-run leaving every row as it was.
 --
--- **Migration number.** 0027 is the next free number after `0026_mcp_servers.sql`. Every file
+-- **Migration number.** 0030 follows `0029_mcp_servers.sql`, the table it alters. Every file
 -- runs on every `migrate()` in name order, so the numbers have to be unique and ordered.
 
 alter table mcp_oauth_states

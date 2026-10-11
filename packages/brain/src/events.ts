@@ -1,5 +1,6 @@
 import type { AppendableEvent } from '@openharness/session'
 import type {
+  ClearedResults,
   ContextSummaryCovers,
   ContextSummaryReason,
   EventId,
@@ -11,7 +12,12 @@ import type {
   SessionError,
   SessionModelUsage,
   SpanError,
+  StopReason,
   Supersedes,
+  TextBlock,
+  ToolInput,
+  ToolPermission,
+  ToolReference,
   Truncation,
 } from '@openharness/protocol'
 import { EVENT_TYPES } from '@openharness/protocol'
@@ -35,22 +41,41 @@ export function statusRunning(): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusRunning }
 }
 
+/** What the idle event that closes a turn carries besides its type. */
+export interface StatusIdleOptions {
+  /**
+   * The queued user events the turn is ending on, when no other event did.
+   *
+   * That is the `user.interrupt` events (P4): an interrupt that arrived with no model request
+   * running — before the turn opened, between two requests, or during a backoff — has no span
+   * start to claim it, so the `session.status_idle` that ends the turn does. It is also the
+   * `user.message` events of a request that could not be made for lack of a provider credential
+   * (epic #65, A5): that turn opens no span, so this idle event claims them — left queued, the
+   * scheduler would run the same failing turn again. Omitted when the list is empty: a turn that
+   * ends on its own claims nothing.
+   */
+  readonly consumes?: readonly EventId[]
+  /**
+   * Why the turn stopped, when it is not `end_turn`.
+   *
+   * The pause is the one case (epic #303, X6; #309): the turn ended because calls are waiting
+   * on the user, and the stop reason names them. Omitted for every other ending, `end_turn`
+   * included — a stop reason no reader has to look for is one the log does not carry.
+   */
+  readonly stopReason?: StopReason
+}
+
 /**
  * The agent finished its turn. Closes one, whatever the reason.
  *
- * `consumes` claims the queued user events the turn is ending on, when no other event did.
- * That is the `user.interrupt` events (P4): an interrupt that arrived with no model request
- * running — before the turn opened, between two requests, or during a backoff — has no span
- * start to claim it, so the `session.status_idle` that ends the turn does. It is also the
- * `user.message` events of a request that could not be made for lack of a provider credential
- * (epic #65, A5): that turn opens no span, so this idle event claims them — left queued, the
- * scheduler would run the same failing turn again. Omitted when the list is empty: a turn that
- * ends on its own claims nothing.
+ * `consumes` claims the queued user events the turn is ending on; `stop_reason` says why it
+ * ended when that is not `end_turn` — the pause, which names the calls the user has to answer.
  */
-export function statusIdle(consumes?: readonly EventId[]): AppendableEvent {
+export function statusIdle(options: StatusIdleOptions = {}): AppendableEvent {
+  const { consumes, stopReason } = options
   return {
     type: EVENT_TYPES.sessionStatusIdle,
-    stop_reason: { type: 'end_turn' },
+    stop_reason: stopReason ?? { type: 'end_turn' },
     ...(consumes === undefined || consumes.length === 0 ? {} : { consumes: [...consumes] }),
   }
 }
@@ -102,7 +127,7 @@ export function spanStart(
   model: string,
   options: SpanStartOptions = {},
 ): AppendableEvent {
-  const { reasoningEffort, mode, truncated, purpose } = options
+  const { reasoningEffort, mode, truncated, cleared, purpose, tools } = options
   return {
     type: EVENT_TYPES.modelRequestStart,
     consumes: [...consumes],
@@ -110,7 +135,9 @@ export function spanStart(
     ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
     ...(mode === undefined ? {} : { mode: { id: mode.id, name: mode.name } }),
     ...(truncated === undefined ? {} : { truncated }),
+    ...(cleared === undefined ? {} : { cleared }),
     ...(purpose === undefined ? {} : { purpose }),
+    ...(tools === undefined || tools.length === 0 ? {} : { tools: [...tools] }),
   }
 }
 
@@ -133,11 +160,25 @@ export interface SpanStartOptions {
    */
   readonly truncated?: Truncation
   /**
+   * The old tool results this request cleared, and what they cost (epic #303, X9; #306), or
+   * `undefined` when it cleared none. The strategy answers it — the results are still whole in
+   * the log — and the loop records it here, so a reader can tell that the model was not given
+   * an answer that is in the log.
+   */
+  readonly cleared?: ClearedResults
+  /**
    * Why this request was made, when it is not the chat's own (epic #277, C2): `'summary'` marks
    * a request the compaction engine made. Omitted for every ordinary request, and the field the
    * size accounting reads to refuse a summary request as a baseline (K2).
    */
   readonly purpose?: ModelRequestPurpose
+  /**
+   * The tools this request offered the model (epic #303, X1), or `undefined` when it offered
+   * none — a deployment with no registry, a model that cannot call tools, or a request the
+   * compaction engine made. The offer is what the span records, so a step that called nothing
+   * still says what it could have called.
+   */
+  readonly tools?: readonly ToolReference[]
 }
 
 /**
@@ -331,6 +372,55 @@ export function agentMessage(id: EventId, text: string, supersedes?: Supersedes)
     id,
     content: [{ type: 'text', text }],
     ...(supersedes === undefined ? {} : { supersedes }),
+  }
+}
+
+/**
+ * The model asked for a tool — one event per call (epic #303, X1).
+ *
+ * The store assigns the id, which **is** the call's id: `agentToolResult` names it in
+ * `tool_use_id`, and a recovering brain pairs a call with its answer by it. `input` is the
+ * arguments the model produced, already coerced to the JSON object the protocol stores
+ * ({@link ToolInput}); `permission` is what the policy in force said about this call.
+ *
+ * @param name the tool's name, as it was offered to the model
+ * @param input the arguments, as a JSON object
+ * @param permission what the policy in force said about this call
+ */
+export function agentToolUse(
+  name: string,
+  input: ToolInput,
+  permission: ToolPermission,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentToolUse,
+    name,
+    input,
+    evaluated_permission: permission,
+  }
+}
+
+/**
+ * What a tool call produced — always written, by the loop that ran it (epic #303, X1).
+ *
+ * A result the model should read as a failure is `isError: true` with the reason as its text:
+ * a refusal under a `deny` policy, a timeout, an interrupt, the tool's own failure, or the
+ * `execution lost` a turn that died before running the call leaves for its successor (X3).
+ *
+ * @param toolUseId the `agent.tool_use` this answers — its event id
+ * @param content the blocks the model is shown
+ * @param isError whether the call failed
+ */
+export function agentToolResult(
+  toolUseId: EventId,
+  content: readonly TextBlock[],
+  isError: boolean,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentToolResult,
+    tool_use_id: toolUseId,
+    content: [...content],
+    is_error: isError,
   }
 }
 

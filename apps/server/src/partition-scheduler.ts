@@ -17,6 +17,7 @@ import {
 } from '@openharness/session'
 
 import type { ResolveSessionCredential } from './credentials'
+import type { TurnToolOptions } from './tools'
 import { PassQueue, type PassContext } from './pass-queue'
 import { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
 import type { SessionScheduler, StopSchedulerOptions, StopSessionOptions } from './scheduler'
@@ -149,6 +150,8 @@ export interface PostgresPartitionSchedulerOptions {
   readonly reasoningSupportFor?: ReasoningSupportFor
   /** What a mode resolves to, passed to every turn (#245, M6). */
   readonly resolveMode?: ModeResolver
+  /** The tools a turn may offer, and the loop's decisions about them (epic #303, X4). */
+  readonly tools?: TurnToolOptions
   /**
    * Called when a pass rejects, and when a background tick fails. Never throws.
    *
@@ -273,6 +276,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
             ? {}
             : { reasoningSupportFor: options.reasoningSupportFor }),
           ...(options.resolveMode === undefined ? {} : { resolveMode: options.resolveMode }),
+          ...(options.tools === undefined ? {} : { tools: options.tools }),
         }),
       ...(options.maxConcurrentSessions === undefined
         ? {}

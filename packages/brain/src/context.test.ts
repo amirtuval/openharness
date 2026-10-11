@@ -1,3 +1,5 @@
+import { DEFAULT_TOOL_RESULT_TOKENS, createToolRegistry, textResult } from '@openharness/hands'
+import type { ToolRegistry } from '@openharness/hands'
 import { newEventId } from '@openharness/protocol'
 import type {
   ContextSummaryEvent,
@@ -7,7 +9,9 @@ import type {
   StoredEvent,
 } from '@openharness/protocol'
 import { FIXTURE_MODEL_USAGE } from '@openharness/protocol/fixtures'
+import type { ModelMessage } from 'ai'
 import { describe, expect, it } from 'vitest'
+import { z } from 'zod'
 
 import { TEST_MODEL_ID, TEST_SYSTEM } from './testing/harness'
 
@@ -257,8 +261,9 @@ describe('createContextStrategy', () => {
 
   it('never opens the history with a reply', () => {
     // Dropping whole turns from a log that starts with a user message keeps that shape, so this
-    // is the defensive half of the rule: a history whose oldest kept message is a reply (a log
-    // that opens with one) has it dropped too, leaving the question it was answering.
+    // is the defensive half of the rule: a history whose oldest message is a reply (a log that
+    // opens with one — a summary cut, or a rewind that took the question back) drops it, budget
+    // or no budget, and keeps the turns that follow whole.
     const strategy = createContextStrategy({ tokenBudget: 25 })
     const events = [
       agentMessage(1, 'b'.repeat(40)),
@@ -267,7 +272,14 @@ describe('createContextStrategy', () => {
       userMessage(4, 'e'.repeat(4)),
     ]
 
-    expect(strategy(events, { model: MODEL, system: null }).messages).toEqual([
+    const messages = strategy(events, { model: MODEL, system: null }).messages
+    expect(messages[0]?.role).toBe('user')
+    // The orphan goes; the turn behind it stays, because a turn is the unit (since #304) and
+    // [c, d] is well inside the budget — dropping it would lose a question and its answer to
+    // keep four characters.
+    expect(messages).toEqual([
+      { role: 'user', content: 'c'.repeat(40) },
+      { role: 'assistant', content: 'd'.repeat(40) },
       { role: 'user', content: 'e'.repeat(4) },
     ])
   })
@@ -669,5 +681,362 @@ describe('estimateContextSize (epic #277, K2; C2)', () => {
     expect(
       estimateContextSize([userMessage(1, 'abcd')], { model: TEST_MODEL_ID, system: TEST_SYSTEM }),
     ).toBe(estimateTokens(TEST_SYSTEM) + 1)
+  })
+})
+
+/** A tool call, as the log stores one (epic #303). */
+function toolUse(seq: number, name: string, input: Record<string, unknown> = {}): StoredEvent {
+  const event: StoredEvent = {
+    id: newEventId(),
+    type: 'agent.tool_use',
+    seq,
+    processed_at: '2026-03-15T10:00:00.000Z',
+    name,
+    input: input as never,
+    evaluated_permission: 'allow',
+  }
+  return event
+}
+
+/** An answer to a tool call, as the log stores one. */
+function toolResult(
+  seq: number,
+  call: StoredEvent,
+  text: string,
+  options: { readonly isError?: boolean } = {},
+): StoredEvent {
+  const event: StoredEvent = {
+    id: newEventId(),
+    type: 'agent.tool_result',
+    seq,
+    processed_at: '2026-03-15T10:00:00.000Z',
+    tool_use_id: call.id,
+    content: [{ type: 'text', text }],
+    is_error: options.isError === true,
+  }
+  return event
+}
+
+describe('the context of a tool step (epic #303)', () => {
+  it('turns a call and its answer into an assistant turn and a tool message', () => {
+    const strategy = createContextStrategy()
+    const call = toolUse(3, 'echo', { text: 'hi' })
+    const events = [
+      userMessage(1, 'do it'),
+      agentMessage(2, 'On it.'),
+      call,
+      toolResult(4, call, 'hi'),
+    ]
+
+    const { messages } = strategy(events, { model: MODEL, system: null })
+
+    expect(messages).toEqual([
+      { role: 'user', content: 'do it' },
+      // The text it streamed and the call it made are one assistant turn, text first.
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'On it.' },
+          { type: 'tool-call', toolCallId: call.id, toolName: 'echo', input: { text: 'hi' } },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: call.id,
+            toolName: 'echo',
+            output: { type: 'text', value: 'hi' },
+          },
+        ],
+      },
+    ])
+  })
+
+  it('answers a call with an error result, and one that said nothing at all', () => {
+    const strategy = createContextStrategy()
+    const failed = toolUse(3, 'echo')
+    const empty = toolUse(5, 'echo')
+    const events = [
+      userMessage(1, 'go'),
+      failed,
+      toolResult(4, failed, 'Permission to use echo has been denied.', { isError: true }),
+      empty,
+      toolResult(6, empty, ''),
+    ]
+
+    const { messages } = strategy(events, { model: MODEL, system: null })
+
+    // A text block no provider accepts is reported as the sentence a model can read instead.
+    expect(messages.at(-1)).toEqual({
+      role: 'tool',
+      content: [
+        {
+          type: 'tool-result',
+          toolCallId: empty.id,
+          toolName: 'echo',
+          output: { type: 'text', value: '(no output)' },
+        },
+      ],
+    })
+    expect(messages[2]).toMatchObject({
+      content: [
+        { output: { type: 'error-text', value: 'Permission to use echo has been denied.' } },
+      ],
+    })
+  })
+
+  it('puts an answer behind the turn that made the call, whatever the log interleaved', () => {
+    // A steering message arrives while the tool runs, so the log holds the call, then the
+    // user's message, then the answer — and a provider refuses an assistant turn whose calls
+    // are not answered by the very next message.
+    const strategy = createContextStrategy()
+    const call = toolUse(3, 'echo', { text: 'x' })
+    const events = [
+      userMessage(1, 'go'),
+      call,
+      userMessage(4, 'also this'),
+      toolResult(5, call, 'x'),
+    ]
+
+    const { messages } = strategy(events, { model: MODEL, system: null })
+
+    expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'tool', 'user'])
+  })
+
+  it('never cuts between a call and its answer', () => {
+    // A budget that fits only the newest turn: the trimming drops the oldest turn whole, so
+    // the call and the answer that follow it stay together.
+    const strategy = createContextStrategy({ tokenBudget: 4 })
+    const call = toolUse(3, 'echo', { text: 'x' })
+    const events = [
+      userMessage(1, 'a'.repeat(40)),
+      agentMessage(2, 'b'.repeat(40)),
+      userMessage(3, 'go'),
+      call,
+      toolResult(5, call, 'x'),
+    ]
+
+    const { messages } = strategy(events, { model: MODEL, system: null })
+
+    expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'tool'])
+  })
+
+  it('leaves a log that never held a tool exactly as it was', () => {
+    // The regression guard for replay: a session stored before tools existed builds the same
+    // request it always did — no parts, no tool messages, the same strings.
+    const strategy = createContextStrategy()
+    const events = [userMessage(1, 'hello'), agentMessage(2, 'hi')]
+
+    expect(strategy(events, { model: MODEL, system: null }).messages).toEqual([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+    ])
+  })
+})
+
+/** A registry holding one tool, with the result cap a test declares for it (X9). */
+function registryWith(name: string, maxResultTokens?: number): ToolRegistry {
+  return createToolRegistry([
+    {
+      name,
+      description: 'A test tool.',
+      inputSchema: z.object({}),
+      permission: 'allow',
+      ...(maxResultTokens === undefined ? {} : { maxResultTokens }),
+      run: () => textResult(''),
+    },
+  ])
+}
+
+/** The text each `tool` message of a built request carries, in order. */
+function toolResultTextsOf(messages: readonly ModelMessage[]): string[] {
+  return messages
+    .filter((message) => message.role === 'tool')
+    .flatMap((message) =>
+      (
+        message.content as readonly {
+          readonly output: { readonly type: string; readonly value?: unknown }
+        }[]
+      ).map((part) => (typeof part.output.value === 'string' ? part.output.value : '')),
+    )
+}
+
+describe('sizing a tool result in a request (epic #303, X9; #306)', () => {
+  it('caps a result to its tool’s declaration, head and tail around the marker', () => {
+    const strategy = createContextStrategy()
+    const call = toolUse(2, 'fetch')
+    const body = `HEAD${'a'.repeat(4_000 - 8)}TAIL`
+    const events = [userMessage(1, 'go'), call, toolResult(3, call, body)]
+
+    const { messages, truncated } = strategy(events, {
+      model: MODEL,
+      system: null,
+      tools: registryWith('fetch', 100),
+    })
+
+    // The result keeps its place — the call stays answered — and carries a head and a tail.
+    const carried = toolResultTextsOf(messages)[0] ?? ''
+    expect(carried.startsWith('HEAD')).toBe(true)
+    expect(carried.endsWith('TAIL')).toBe(true)
+    expect(carried).toMatch(/\[… \d+ tokens omitted …\]/)
+    // Inside the cap it was given, and not much inside it: the marker is what took the rest.
+    expect(estimateTokens(carried)).toBeLessThanOrEqual(100)
+    expect(estimateTokens(carried)).toBeGreaterThan(90)
+    // What was cut is recorded for the span, and the tool is named on it.
+    expect(truncated).toEqual({
+      seq: 3,
+      tokens_before: 1_000,
+      tokens_after: estimateTokens(carried),
+      results: [
+        { seq: 3, tool: 'fetch', tokens_before: 1_000, tokens_after: estimateTokens(carried) },
+      ],
+    })
+  })
+
+  it('caps to the share of the model’s budget a declaration may not exceed', () => {
+    // A 1,000-token budget: a fifth of it is 200, whatever the tool claims.
+    const strategy = createContextStrategy({ tokenBudget: 1_000 })
+    const call = toolUse(2, 'fetch')
+    const events = [userMessage(1, 'go'), call, toolResult(3, call, 'a'.repeat(4_000))]
+
+    const { messages, truncated } = strategy(events, {
+      model: MODEL,
+      system: null,
+      tools: registryWith('fetch', 100_000),
+    })
+
+    const carried = toolResultTextsOf(messages)[0] ?? ''
+    expect(estimateTokens(carried)).toBeLessThanOrEqual(200)
+    expect(estimateTokens(carried)).toBeGreaterThan(190)
+    expect(truncated?.results?.[0]?.tokens_after).toBe(estimateTokens(carried))
+  })
+
+  it('gives a tool that declares no cap the default, and a name it does not hold too', () => {
+    const call = toolUse(2, 'fetch')
+    const events = [userMessage(1, 'go'), call, toolResult(3, call, 'a'.repeat(20_000))]
+
+    for (const tools of [registryWith('fetch'), registryWith('other')]) {
+      const { truncated } = createContextStrategy()(events, { model: MODEL, system: null, tools })
+      expect(truncated?.results?.[0]).toMatchObject({ tool: 'fetch' })
+      expect(truncated?.results?.[0]?.tokens_after).toBeGreaterThan(4_000)
+      expect(truncated?.results?.[0]?.tokens_after).toBeLessThanOrEqual(DEFAULT_TOOL_RESULT_TOKENS)
+    }
+    // A request built by a host that wired no registry caps the same way.
+    const { truncated } = createContextStrategy()(events, { model: MODEL, system: null })
+    expect(truncated?.results?.[0]?.tokens_after).toBeLessThanOrEqual(DEFAULT_TOOL_RESULT_TOKENS)
+  })
+
+  it('leaves a result inside its cap exactly as the tool answered', () => {
+    const call = toolUse(2, 'fetch')
+    const events = [userMessage(1, 'go'), call, toolResult(3, call, 'short answer')]
+
+    const { messages, truncated, cleared } = createContextStrategy()(events, {
+      model: MODEL,
+      system: null,
+      tools: registryWith('fetch', 100),
+    })
+
+    expect(toolResultTextsOf(messages)).toEqual(['short answer'])
+    expect(truncated).toBeUndefined()
+    expect(cleared).toBeUndefined()
+  })
+
+  it('clears a result older than the verbatim tail, and reports what it cost', () => {
+    // A 200-token budget: the tail is 50 tokens and a result may cost 40. The newest turn is
+    // 50 tokens on its own, so the tail starts at it — and everything before it, the call and
+    // the long answer that follow the first message, is old.
+    const strategy = createContextStrategy({ tokenBudget: 200 })
+    const call = toolUse(2, 'fetch')
+    const fresh = toolUse(5, 'fetch')
+    const events = [
+      userMessage(1, 'a'.repeat(60)),
+      call,
+      toolResult(3, call, 'b'.repeat(400)),
+      userMessage(4, 'q'.repeat(200)),
+      fresh,
+      toolResult(6, fresh, 'c'.repeat(80)),
+    ]
+
+    const { messages, cleared, truncated } = strategy(events, { model: MODEL, system: null })
+
+    // The old body is what it cost, and the fresh one is untouched.
+    expect(toolResultTextsOf(messages)).toEqual(['result cleared, 100 tokens', 'c'.repeat(80)])
+    expect(cleared).toEqual({ results: 1, tokens: 100 })
+    expect(truncated).toBeUndefined()
+    // Both pairs are intact: each call is in an assistant message of its own.
+    const turns = messages.filter(
+      (message) => message.role === 'assistant' && Array.isArray(message.content),
+    )
+    expect(turns).toHaveLength(2)
+  })
+
+  it('clears an error result the same way, keeping it an error', () => {
+    const strategy = createContextStrategy({ tokenBudget: 200 })
+    const call = toolUse(2, 'fetch')
+    const events = [
+      userMessage(1, 'a'.repeat(60)),
+      call,
+      toolResult(3, call, 'b'.repeat(400), { isError: true }),
+      userMessage(4, 'q'.repeat(200)),
+    ]
+
+    const { messages, cleared } = strategy(events, { model: MODEL, system: null })
+
+    expect(cleared).toEqual({ results: 1, tokens: 100 })
+    expect(messages.find((message) => message.role === 'tool')?.content).toEqual([
+      {
+        type: 'tool-result',
+        toolCallId: call.id,
+        toolName: 'fetch',
+        output: { type: 'error-text', value: 'result cleared, 100 tokens' },
+      },
+    ])
+  })
+
+  it('clears nothing when the whole history is inside the verbatim tail', () => {
+    const strategy = createContextStrategy({ tokenBudget: 20_000 })
+    const call = toolUse(2, 'fetch')
+    const events = [
+      userMessage(1, 'go'),
+      call,
+      toolResult(3, call, 'b'.repeat(400)),
+      userMessage(4, 'and this'),
+    ]
+
+    const { cleared } = strategy(events, { model: MODEL, system: null })
+
+    expect(cleared).toBeUndefined()
+  })
+
+  it('counts a tool call and its answer as part of the context (K2)', () => {
+    const call = toolUse(2, 'fetch', { url: 'https://example.test/' })
+    const events = [userMessage(1, 'go'), call, toolResult(3, call, 'z'.repeat(400))]
+
+    const withCall = estimateContextSize(events, { model: MODEL.id, system: null })
+    const withoutCall = estimateContextSize([events[0]!], { model: MODEL.id, system: null })
+
+    // The arguments the model wrote and the text its answer carried are both counted: a step
+    // that fetched a page is not free.
+    expect(withCall - withoutCall).toBeGreaterThan(100)
+    expect(withoutCall).toBe(estimateTokens('go'))
+  })
+
+  it('measures a cleared result as the placeholder it became (X9)', () => {
+    const call = toolUse(2, 'fetch')
+    const events = [
+      userMessage(1, 'a'.repeat(60)),
+      call,
+      toolResult(3, call, 'z'.repeat(4_000)),
+      userMessage(4, 'q'.repeat(200)),
+    ]
+
+    // A budget whose tail the result falls outside of: the request carries a placeholder.
+    const small = estimateContextSize(events, { model: MODEL.id, system: null, budget: 200 })
+    // A budget wide enough to hold everything: the same result counts in full.
+    const large = estimateContextSize(events, { model: MODEL.id, system: null, budget: 100_000 })
+
+    expect(large - small).toBeGreaterThan(900)
   })
 })

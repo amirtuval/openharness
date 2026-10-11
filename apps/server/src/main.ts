@@ -39,6 +39,7 @@ import { ModelCatalog } from './catalog/catalog'
 import { createMaxOutputResolver, createTokenBudgetResolver } from './catalog/context-budget'
 import { createProviderFetch } from './catalog/provider-fetch'
 import { createReasoningSupportResolver } from './catalog/reasoning-support'
+import { createSearchAllowance } from './searches'
 import { createContextCompactionResolver } from './context-compaction'
 import { createModeResolver } from './modes'
 import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
@@ -53,6 +54,7 @@ import {
   type ProviderCredentialValidator,
 } from './provider-validation'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
+import { createTurnRegistry, createTurnTools, type TurnToolOptions } from './tools'
 
 /**
  * Starting the server: the environment, the store, sign-in, the scheduler, the app, and the
@@ -260,6 +262,30 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // applies whatever this answers.
   const resolveMode = createModeResolver({ store, credentials })
 
+  // The tools a turn may offer (epic #303, X4; the built-ins are #305, the per-user settings
+  // are #307 and the pause is #309): `ask_user`, `web_fetch` and `todo_write` for every
+  // deployment, `web_search` where an operator configured a search API, and the test `echo`
+  // tool behind `OPENHARNESS_TEST_MODEL=mock`. Which models may call tools at all comes from
+  // the same registry, as `models.dev`'s `tool_call`. The registry is built once here and
+  // handed to both readers — the turn options and the `/v1/me/tools` routes (`createApp`) — so
+  // a tool the settings screen calls available is one a chat can really call.
+  // The search request goes out through the server's egress, like every provider call (#270);
+  // the fixed endpoint and the operator's key are the only things it carries.
+  const searchTransport = createProviderFetch()
+  const turnRegistry = createTurnRegistry({ config, kind: resolvedModel.kind, searchTransport })
+  const turnTools = createTurnTools({
+    config,
+    kind: resolvedModel.kind,
+    searchTransport,
+    registry,
+    tools: turnRegistry,
+    allowance:
+      config.search === null
+        ? undefined
+        : createSearchAllowance({ store, dailyLimit: config.search.dailyLimit }),
+    store,
+  })
+
   const scheduler = createScheduler(
     config,
     store,
@@ -269,6 +295,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     contextCompaction,
     reasoningSupportFor,
     resolveMode,
+    turnTools,
     logger,
   )
   // Compaction is the store's, not a scheduler's: it deletes superseded chunks whoever ran the
@@ -333,6 +360,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     },
     catalog,
     registry,
+    // The tools `/v1/me/tools` reports on: the same registry the turn options were built from.
+    tools: turnRegistry,
     // The preferences response reports it as the default a user who has not chosen a compaction
     // share follows (C3, #282).
     compactionThreshold: config.compactionThreshold,
@@ -470,6 +499,7 @@ function createScheduler(
   contextCompaction: ContextCompactionOption,
   reasoningSupportFor: ReasoningSupportFor,
   resolveMode: ModeResolver,
+  tools: TurnToolOptions | undefined,
   logger: Logger,
 ): SessionScheduler {
   const onError = (error: unknown, sessionId: SessionId | undefined): void => {
@@ -487,6 +517,7 @@ function createScheduler(
       compaction: contextCompaction,
       reasoningSupportFor,
       resolveMode,
+      ...(tools === undefined ? {} : { tools }),
       instanceId: config.instanceId,
       partitions: config.partitions,
       ttlMs: config.leaseTtlMs,
@@ -508,6 +539,7 @@ function createScheduler(
     compaction: contextCompaction,
     reasoningSupportFor,
     resolveMode,
+    ...(tools === undefined ? {} : { tools }),
     maxConcurrentSessions: config.maxConcurrentSessions,
     drainTimeoutMs: config.drainTimeoutMs,
     partitionCount: config.partitions,

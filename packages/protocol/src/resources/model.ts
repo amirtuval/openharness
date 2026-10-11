@@ -92,6 +92,19 @@ export const ModelEntrySchema = z.object({
    */
   context_budget: z.number().int().positive(),
   /**
+   * // extension: whether the model can call tools (epic #303, X2).
+   *
+   * The registry's `tool_call` — models.dev's own flag — read off the bundled models.dev
+   * snapshot, and **true** for a model the registry knows nothing about: an unfamiliar model is
+   * offered tools rather than quietly denied them, the same "never hide a usable model"
+   * principle the chat filter follows (C2). A model the registry marks as tool-less is the one
+   * case that is `false`, and the brain offers it no tools at all.
+   *
+   * A client uses it to say so before a chat starts (#308); nothing about a session changes
+   * with it, and a model that cannot call tools chats exactly as it did before tools existed.
+   */
+  tool_call: z.boolean(),
+  /**
    * // extension: where this entry's listing came from — `provider` when the provider's own
    * list carried it, `registry` when it came from the registry alone (C3).
    */

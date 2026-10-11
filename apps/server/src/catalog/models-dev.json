@@ -1,5 +1,5 @@
 {
-  "snapshot_date": "2026-10-09",
+  "snapshot_date": "2026-10-10",
   "source": "https://models.dev/api.json",
   "providers": {
     "anthropic": {
@@ -232,7 +232,8 @@
         "chatgpt-image-latest": {
           "name": "chatgpt-image-latest",
           "contextWindow": 0,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "gpt-5.4": {
           "name": "GPT-5.4",
@@ -261,6 +262,7 @@
           "name": "GPT-3.5-turbo",
           "contextWindow": 16385,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.5,
             "output": 1.5,
@@ -282,6 +284,7 @@
           "name": "text-embedding-3-small",
           "contextWindow": 8191,
           "maxOutput": 1536,
+          "toolCall": false,
           "cost": {
             "input": 0.02,
             "output": 0
@@ -346,6 +349,7 @@
           "name": "gpt-image-2",
           "contextWindow": 0,
           "maxOutput": 0,
+          "toolCall": false,
           "cost": {
             "input": 5,
             "output": 30,
@@ -391,6 +395,7 @@
           "name": "text-embedding-ada-002",
           "contextWindow": 8192,
           "maxOutput": 1536,
+          "toolCall": false,
           "cost": {
             "input": 0.1,
             "output": 0
@@ -516,6 +521,7 @@
           "name": "text-embedding-3-large",
           "contextWindow": 8191,
           "maxOutput": 3072,
+          "toolCall": false,
           "cost": {
             "input": 0.13,
             "output": 0
@@ -580,7 +586,8 @@
         "gpt-image-1": {
           "name": "gpt-image-1",
           "contextWindow": 0,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "gpt-daybreak-blue-latest": {
           "name": "Daybreak Blue",
@@ -700,12 +707,14 @@
         "gpt-image-1-mini": {
           "name": "gpt-image-1-mini",
           "contextWindow": 0,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "gpt-image-1.5": {
           "name": "gpt-image-1.5",
           "contextWindow": 0,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "gpt-5.6-terra": {
           "name": "GPT-5.6 Terra",
@@ -832,6 +841,7 @@
           "contextWindow": 131072,
           "maxOutput": 65536,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 1.5,
             "output": 17.5
@@ -842,6 +852,7 @@
           "contextWindow": 65536,
           "maxOutput": 65536,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["minimal", "high"],
           "cost": {
             "input": 0.5,
@@ -851,12 +862,14 @@
         "veo-3.1-lite-generate-preview": {
           "name": "Veo 3.1 lite",
           "contextWindow": 480,
-          "maxOutput": 8192
+          "maxOutput": 8192,
+          "toolCall": false
         },
         "lyria-3-pro-preview": {
           "name": "Lyria 3 Pro Preview",
           "contextWindow": 1048576,
           "maxOutput": 65536,
+          "toolCall": false,
           "cost": {
             "input": 0,
             "output": 0
@@ -867,6 +880,7 @@
           "contextWindow": 8192,
           "maxOutput": 16384,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 1,
             "output": 20
@@ -877,6 +891,7 @@
           "contextWindow": 32768,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.3,
             "output": 30,
@@ -899,6 +914,7 @@
           "name": "Gemini Embedding 2",
           "contextWindow": 8192,
           "maxOutput": 1,
+          "toolCall": false,
           "cost": {
             "input": 0.2,
             "output": 0
@@ -927,6 +943,7 @@
           "contextWindow": 131072,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 2,
             "output": 120
@@ -936,6 +953,7 @@
           "name": "Gemini 2.5 Pro Preview TTS",
           "contextWindow": 8192,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 1,
             "output": 20
@@ -958,6 +976,7 @@
           "contextWindow": 131072,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["minimal", "high"],
           "cost": {
             "input": 0.5,
@@ -968,6 +987,7 @@
           "name": "Lyria 3 Clip Preview",
           "contextWindow": 1048576,
           "maxOutput": 65536,
+          "toolCall": false,
           "cost": {
             "input": 0,
             "output": 0
@@ -1023,6 +1043,7 @@
           "contextWindow": 65536,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["low", "high"],
           "cost": {
             "input": 2,
@@ -1044,6 +1065,7 @@
           "name": "Gemini 2.5 Flash Preview TTS",
           "contextWindow": 8192,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 0.5,
             "output": 10
@@ -1085,7 +1107,8 @@
         "veo-3.1-fast-generate-preview": {
           "name": "Veo 3.1 fast",
           "contextWindow": 480,
-          "maxOutput": 8192
+          "maxOutput": 8192,
+          "toolCall": false
         },
         "gemini-3.7-flash": {
           "name": "Gemini 3.7 Flash",
@@ -1102,7 +1125,8 @@
         "veo-3.1-generate-preview": {
           "name": "Veo 3.1",
           "contextWindow": 480,
-          "maxOutput": 8192
+          "maxOutput": 8192,
+          "toolCall": false
         },
         "gemini-3.1-pro-preview-customtools": {
           "name": "Gemini 3.1 Pro Preview Custom Tools",
@@ -1144,6 +1168,7 @@
           "name": "Gemini 3.5 Live Translate Preview",
           "contextWindow": 16384,
           "maxOutput": 32768,
+          "toolCall": false,
           "cost": {
             "input": 3.5,
             "output": 21
@@ -1164,6 +1189,7 @@
           "name": "Gemini Embedding 001",
           "contextWindow": 2048,
           "maxOutput": 1,
+          "toolCall": false,
           "cost": {
             "input": 0.15,
             "output": 0
@@ -1214,6 +1240,7 @@
           "name": "Llama 3 8B Lunaris",
           "contextWindow": 8192,
           "maxOutput": 7372,
+          "toolCall": false,
           "cost": {
             "input": 0.04,
             "output": 0.05
@@ -1223,6 +1250,7 @@
           "name": "Llama 3.3 Euryale 70B",
           "contextWindow": 131072,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 0.65,
             "output": 0.75
@@ -1232,6 +1260,7 @@
           "name": "Llama 3.1 Euryale 70B v2.2",
           "contextWindow": 131072,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 0.85,
             "output": 0.85
@@ -1307,9 +1336,9 @@
           "reasoning": true,
           "efforts": ["low", "high", "max"],
           "cost": {
-            "input": 0.49,
-            "output": 13,
-            "cacheRead": 0.3
+            "input": 0.3,
+            "output": 14.9,
+            "cacheRead": 0.29
           }
         },
         "poolside/laguna-s-2.1:free": {
@@ -1574,6 +1603,7 @@
           "contextWindow": 262144,
           "maxOutput": 235929,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["none", "medium", "high"],
           "cost": {
             "input": 0.025,
@@ -1617,6 +1647,7 @@
           "name": "Command A",
           "contextWindow": 256000,
           "maxOutput": 8192,
+          "toolCall": false,
           "cost": {
             "input": 2.5,
             "output": 10
@@ -1636,6 +1667,7 @@
           "name": "Command R7B",
           "contextWindow": 128000,
           "maxOutput": 4000,
+          "toolCall": false,
           "cost": {
             "input": 0.0375,
             "output": 0.15
@@ -1765,13 +1797,13 @@
           "reasoning": true,
           "efforts": ["high", "xhigh"],
           "cost": {
-            "input": 0.2871,
-            "output": 0.5742,
-            "cacheRead": 0.023925
+            "input": 0.2088,
+            "output": 0.4176,
+            "cacheRead": 0.0174
           }
         },
         "deepseek/deepseek-r1-0528": {
-          "name": "R1 0528",
+          "name": "DeepSeek R1 0528",
           "contextWindow": 163840,
           "maxOutput": 32768,
           "reasoning": true,
@@ -1788,8 +1820,8 @@
           "reasoning": true,
           "cost": {
             "input": 0.259,
-            "output": 0.42,
-            "cacheRead": 0.135
+            "output": 0.8,
+            "cacheRead": 0.14
           }
         },
         "deepseek/deepseek-v4-flash": {
@@ -1799,9 +1831,9 @@
           "reasoning": true,
           "efforts": ["high", "xhigh"],
           "cost": {
-            "input": 0.0099,
+            "input": 0.03,
             "output": 1.28,
-            "cacheRead": 0.0099
+            "cacheRead": 0.03
           }
         },
         "unbiased/pareto-26.10-preview": {
@@ -1841,6 +1873,7 @@
           "contextWindow": 131072,
           "maxOutput": 117964,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.14,
             "output": 0.57
@@ -1850,6 +1883,7 @@
           "name": "Hy-MT2-30B-A3B",
           "contextWindow": 8192,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.074,
             "output": 0.295
@@ -1859,6 +1893,7 @@
           "name": "Hy-MT2-1.8B",
           "contextWindow": 8192,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.044,
             "output": 0.177
@@ -1871,15 +1906,16 @@
           "reasoning": true,
           "efforts": ["none", "low", "high"],
           "cost": {
-            "input": 0.132,
-            "output": 0.528,
-            "cacheRead": 0.033
+            "input": 0.0825,
+            "output": 0.33,
+            "cacheRead": 0.020625
           }
         },
         "tencent/hy-mt2-7b": {
           "name": "Hy-MT2-7B",
           "contextWindow": 8192,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.074,
             "output": 0.295
@@ -1892,15 +1928,16 @@
           "reasoning": true,
           "efforts": ["none", "low", "high"],
           "cost": {
-            "input": 0.834,
-            "output": 2.501,
-            "cacheRead": 0.042
+            "input": 0.7506,
+            "output": 2.2509,
+            "cacheRead": 0.0378
           }
         },
         "anthracite-org/magnum-v4-72b": {
           "name": "Magnum v4 72B",
           "contextWindow": 32768,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 2.5,
             "output": 5
@@ -1919,6 +1956,7 @@
           "name": "Llama Guard 4 12B",
           "contextWindow": 163840,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 0.18,
             "output": 0.18
@@ -1958,6 +1996,7 @@
           "name": "Llama 3.2 1B Instruct",
           "contextWindow": 60000,
           "maxOutput": 54000,
+          "toolCall": false,
           "cost": {
             "input": 0.027,
             "output": 0.201
@@ -1967,6 +2006,7 @@
           "name": "Llama 3.2 3B Instruct",
           "contextWindow": 131072,
           "maxOutput": 117964,
+          "toolCall": false,
           "cost": {
             "input": 0.05,
             "output": 0.33
@@ -2012,6 +2052,7 @@
           "contextWindow": 32768,
           "maxOutput": 8192,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.15,
             "output": 1.5
@@ -2088,12 +2129,12 @@
         "z-ai/glm-4.6": {
           "name": "GLM-4.6",
           "contextWindow": 204800,
-          "maxOutput": 16384,
+          "maxOutput": 131072,
           "reasoning": true,
           "cost": {
-            "input": 0.43,
-            "output": 1.75,
-            "cacheRead": 0.08
+            "input": 0.5,
+            "output": 2,
+            "cacheRead": 0.1
           }
         },
         "z-ai/glm-5": {
@@ -2159,7 +2200,7 @@
           "efforts": ["high", "xhigh"],
           "cost": {
             "input": 0.06,
-            "output": 6,
+            "output": 7,
             "cacheRead": 0.059
           }
         },
@@ -2203,15 +2244,16 @@
           "reasoning": true,
           "efforts": ["low", "high", "max"],
           "cost": {
-            "input": 0.04,
-            "output": 3.6,
-            "cacheRead": 0.039
+            "input": 0.039,
+            "output": 4.8,
+            "cacheRead": 0.038
           }
         },
         "inference-net/schematron-v2-small": {
           "name": "Schematron V2 Small",
           "contextWindow": 128000,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.05,
             "output": 0.23,
@@ -2222,6 +2264,7 @@
           "name": "Schematron V2 Turbo",
           "contextWindow": 128000,
           "maxOutput": 8192,
+          "toolCall": false,
           "cost": {
             "input": 0.03,
             "output": 0.15,
@@ -2288,7 +2331,8 @@
         "openrouter/bodybuilder": {
           "name": "Body Builder (beta)",
           "contextWindow": 128000,
-          "maxOutput": 128000
+          "maxOutput": 128000,
+          "toolCall": false
         },
         "openrouter/free": {
           "name": "Free Models Router",
@@ -2303,12 +2347,14 @@
         "openrouter/pareto-code": {
           "name": "Pareto Code Router",
           "contextWindow": 2000000,
-          "maxOutput": 200000
+          "maxOutput": 200000,
+          "toolCall": false
         },
         "openrouter/fusion": {
           "name": "Fusion",
           "contextWindow": 1000000,
-          "maxOutput": 128000
+          "maxOutput": 128000,
+          "toolCall": false
         },
         "openrouter/auto": {
           "name": "Auto Router",
@@ -2320,6 +2366,7 @@
           "name": "Sonar Pro",
           "contextWindow": 200000,
           "maxOutput": 8000,
+          "toolCall": false,
           "cost": {
             "input": 3,
             "output": 15
@@ -2330,6 +2377,7 @@
           "contextWindow": 128000,
           "maxOutput": 115200,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 2,
             "output": 8
@@ -2339,6 +2387,7 @@
           "name": "Sonar",
           "contextWindow": 127072,
           "maxOutput": 114364,
+          "toolCall": false,
           "cost": {
             "input": 1,
             "output": 1
@@ -2349,6 +2398,7 @@
           "contextWindow": 128000,
           "maxOutput": 115200,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 2,
             "output": 8
@@ -2359,6 +2409,7 @@
           "contextWindow": 200000,
           "maxOutput": 8000,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 3,
             "output": 15
@@ -2440,6 +2491,7 @@
           "name": "Hermes 3 70B Instruct",
           "contextWindow": 131072,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 0.7,
             "output": 0.7
@@ -2449,6 +2501,7 @@
           "name": "Hermes 3 405B Instruct",
           "contextWindow": 131072,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 1,
             "output": 1
@@ -2459,6 +2512,7 @@
           "contextWindow": 131072,
           "maxOutput": 117964,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 1,
             "output": 3
@@ -2467,25 +2521,25 @@
         "~z-ai/glm-flash-latest": {
           "name": "GLM Flash Latest",
           "contextWindow": 1048576,
-          "maxOutput": 943718,
+          "maxOutput": 131072,
           "reasoning": true,
           "efforts": ["low", "high", "max"],
           "cost": {
-            "input": 0.032,
-            "output": 0.326813,
-            "cacheRead": 0.02
+            "input": 0.04,
+            "output": 0.5,
+            "cacheRead": 0.0125
           }
         },
         "~z-ai/glm-latest": {
           "name": "GLM Latest",
           "contextWindow": 1048576,
-          "maxOutput": 131072,
+          "maxOutput": 943718,
           "reasoning": true,
           "efforts": ["low", "high", "max"],
           "cost": {
-            "input": 0.0312,
-            "output": 4.4,
-            "cacheRead": 0.029
+            "input": 0.039,
+            "output": 4.8,
+            "cacheRead": 0.038
           }
         },
         "arcee-ai/trinity-large-thinking": {
@@ -2567,6 +2621,7 @@
           "name": "Uncensored",
           "contextWindow": 128000,
           "maxOutput": 8192,
+          "toolCall": false,
           "cost": {
             "input": 0.2,
             "output": 0.9
@@ -2576,6 +2631,7 @@
           "name": "Skyfall 36B V2",
           "contextWindow": 32768,
           "maxOutput": 29491,
+          "toolCall": false,
           "cost": {
             "input": 0.55,
             "output": 0.8,
@@ -2586,6 +2642,7 @@
           "name": "UnslopNemo 12B",
           "contextWindow": 1024000,
           "maxOutput": 819200,
+          "toolCall": false,
           "cost": {
             "input": 0.4,
             "output": 0.4
@@ -2595,6 +2652,7 @@
           "name": "Cydonia 24B V4.1",
           "contextWindow": 131072,
           "maxOutput": 117964,
+          "toolCall": false,
           "cost": {
             "input": 0.3,
             "output": 0.5,
@@ -2606,6 +2664,7 @@
           "contextWindow": 2000000,
           "maxOutput": 1800000,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["low", "medium", "high", "xhigh"],
           "cost": {
             "input": 1.25,
@@ -2778,9 +2837,9 @@
           "reasoning": true,
           "efforts": ["low", "high", "max"],
           "cost": {
-            "input": 0.016,
-            "output": 1.2,
-            "cacheRead": 0.01
+            "input": 0.0001,
+            "output": 0.6,
+            "cacheRead": 0.005
           }
         },
         "~deepseek/deepseek-pro-latest": {
@@ -2790,9 +2849,9 @@
           "reasoning": true,
           "efforts": ["low", "high", "max"],
           "cost": {
-            "input": 0.1282,
-            "output": 8,
-            "cacheRead": 0.13
+            "input": 0.21912,
+            "output": 0.65736,
+            "cacheRead": 0.006972
           }
         },
         "~deepseek/deepseek-v4-flash-latest": {
@@ -2802,9 +2861,9 @@
           "reasoning": true,
           "efforts": ["low", "high", "max"],
           "cost": {
-            "input": 0.0144,
-            "output": 0.03408,
-            "cacheRead": 0.0096
+            "input": 0.018,
+            "output": 1.28,
+            "cacheRead": 0.018
           }
         },
         "~x-ai/grok-latest": {
@@ -2823,6 +2882,7 @@
           "name": "UI-TARS 7B ",
           "contextWindow": 128000,
           "maxOutput": 2048,
+          "toolCall": false,
           "cost": {
             "input": 0.1,
             "output": 0.2,
@@ -2855,6 +2915,7 @@
           "contextWindow": 65536,
           "maxOutput": 58982,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["minimal", "high"],
           "cost": {
             "input": 0.5,
@@ -2865,6 +2926,7 @@
           "name": "Lyria 3 Pro Preview",
           "contextWindow": 1048576,
           "maxOutput": 65536,
+          "toolCall": false,
           "cost": {
             "input": 0,
             "output": 0
@@ -2894,6 +2956,7 @@
           "name": "Nano Banana",
           "contextWindow": 32768,
           "maxOutput": 8192,
+          "toolCall": false,
           "cost": {
             "input": 0.3,
             "output": 2.5,
@@ -2915,6 +2978,7 @@
           "name": "Gemma 2 27B",
           "contextWindow": 8192,
           "maxOutput": 2048,
+          "toolCall": false,
           "cost": {
             "input": 0.65,
             "output": 0.65
@@ -2939,9 +3003,9 @@
           "maxOutput": 235929,
           "reasoning": true,
           "cost": {
-            "input": 0.09,
-            "output": 0.3,
-            "cacheRead": 0.05
+            "input": 0.0675,
+            "output": 0.225,
+            "cacheRead": 0.0375
           }
         },
         "google/gemini-3-pro-image-preview": {
@@ -2949,6 +3013,7 @@
           "contextWindow": 65536,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 2,
             "output": 12,
@@ -2974,6 +3039,7 @@
           "contextWindow": 131072,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["minimal", "high"],
           "cost": {
             "input": 0.5,
@@ -2984,6 +3050,7 @@
           "name": "Lyria 3 Clip Preview",
           "contextWindow": 1048576,
           "maxOutput": 65536,
+          "toolCall": false,
           "cost": {
             "input": 0,
             "output": 0
@@ -3065,6 +3132,7 @@
           "contextWindow": 65536,
           "maxOutput": 58982,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["minimal", "high"],
           "cost": {
             "input": 0.25,
@@ -3127,6 +3195,7 @@
           "name": "Gemma 3 4B IT",
           "contextWindow": 131072,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 0.05,
             "output": 0.1
@@ -3197,6 +3266,7 @@
           "name": "Palmyra X5",
           "contextWindow": 1040000,
           "maxOutput": 8192,
+          "toolCall": false,
           "cost": {
             "input": 0.6,
             "output": 6
@@ -3206,6 +3276,7 @@
           "name": "Granite 4.0 Micro",
           "contextWindow": 131000,
           "maxOutput": 117900,
+          "toolCall": false,
           "cost": {
             "input": 0.017,
             "output": 0.112
@@ -3258,6 +3329,7 @@
           "name": "Mistral Small 3",
           "contextWindow": 32768,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 0.05,
             "output": 0.08
@@ -3545,9 +3617,9 @@
           "reasoning": true,
           "efforts": ["low", "high", "max"],
           "cost": {
-            "input": 0.5,
-            "output": 12,
-            "cacheRead": 0.3
+            "input": 0.95,
+            "output": 15,
+            "cacheRead": 0.65
           }
         },
         "moonshotai/kimi-k2.6": {
@@ -3556,19 +3628,20 @@
           "maxOutput": 235929,
           "reasoning": true,
           "cost": {
-            "input": 0.4357,
+            "input": 0.4344,
             "output": 2.45,
-            "cacheRead": 0.1205
+            "cacheRead": 0.1077
           }
         },
         "moonshotai/kimi-k2-thinking": {
           "name": "Kimi K2 Thinking",
           "contextWindow": 262144,
-          "maxOutput": 235929,
+          "maxOutput": 98304,
           "reasoning": true,
           "cost": {
             "input": 0.6,
-            "output": 2.5
+            "output": 2.5,
+            "cacheRead": 0.15
           }
         },
         "moonshotai/kimi-k2.5": {
@@ -3577,13 +3650,13 @@
           "maxOutput": 235929,
           "reasoning": true,
           "cost": {
-            "input": 0.45,
-            "output": 2.25,
-            "cacheRead": 0.07
+            "input": 0.5,
+            "output": 2.5,
+            "cacheRead": 0.15
           }
         },
         "moonshotai/kimi-k2-0905": {
-          "name": "Kimi K2 0905",
+          "name": "Kimi K2 Instruct 0905",
           "contextWindow": 262144,
           "maxOutput": 98304,
           "cost": {
@@ -3616,6 +3689,7 @@
           "contextWindow": 65536,
           "maxOutput": 58982,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.1,
             "output": 0.2
@@ -3655,6 +3729,7 @@
           "contextWindow": 128000,
           "maxOutput": 8192,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0,
             "output": 0
@@ -3663,12 +3738,12 @@
         "nvidia/nemotron-3.5-lightning": {
           "name": "Nemotron 3.5 Lightning 30B A3B",
           "contextWindow": 262144,
-          "maxOutput": 131072,
+          "maxOutput": 235929,
           "reasoning": true,
           "cost": {
-            "input": 0.0469,
-            "output": 0.134,
-            "cacheRead": 0.02345
+            "input": 0.07,
+            "output": 0.2,
+            "cacheRead": 0.04
           }
         },
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
@@ -3731,6 +3806,7 @@
           "contextWindow": 131072,
           "maxOutput": 117964,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.2,
             "output": 0.2
@@ -3805,6 +3881,7 @@
           "name": "ReMM SLERP 13B",
           "contextWindow": 6144,
           "maxOutput": 5529,
+          "toolCall": false,
           "cost": {
             "input": 0.35,
             "output": 0.65
@@ -3814,6 +3891,7 @@
           "name": "MythoMax 13B",
           "contextWindow": 8192,
           "maxOutput": 3686,
+          "toolCall": false,
           "cost": {
             "input": 0.08,
             "output": 0.11
@@ -3834,6 +3912,7 @@
           "name": "MiniMax-01",
           "contextWindow": 1000192,
           "maxOutput": 40000,
+          "toolCall": false,
           "cost": {
             "input": 0.2,
             "output": 1.1
@@ -3843,6 +3922,7 @@
           "name": "MiniMax-M2 Her",
           "contextWindow": 65536,
           "maxOutput": 2048,
+          "toolCall": false,
           "cost": {
             "input": 0.3,
             "output": 1.2,
@@ -3906,6 +3986,7 @@
           "name": "Weaver (alpha)",
           "contextWindow": 8000,
           "maxOutput": 6000,
+          "toolCall": false,
           "cost": {
             "input": 0.4,
             "output": 0.75
@@ -4039,6 +4120,7 @@
           "name": "Relace Apply 3",
           "contextWindow": 256000,
           "maxOutput": 128000,
+          "toolCall": false,
           "cost": {
             "input": 0.85,
             "output": 1.25
@@ -4059,6 +4141,7 @@
           "name": "Aion-RP 1.0 (8B)",
           "contextWindow": 32768,
           "maxOutput": 29491,
+          "toolCall": false,
           "cost": {
             "input": 0.8,
             "output": 1.6
@@ -4154,16 +4237,6 @@
             "cacheWrite": 0.53125
           }
         },
-        "qwen/qwen3-vl-235b-a22b-thinking": {
-          "name": "Qwen3 VL 235B A22B Thinking",
-          "contextWindow": 131072,
-          "maxOutput": 32768,
-          "reasoning": true,
-          "cost": {
-            "input": 0.4,
-            "output": 4
-          }
-        },
         "qwen/qwen3.8-2.4t-a95b": {
           "name": "Qwen3.8 2.4T A95B",
           "contextWindow": 1048576,
@@ -4189,7 +4262,7 @@
         "qwen/qwen3-next-80b-a3b-thinking": {
           "name": "Qwen3-Next 80B-A3B (Thinking)",
           "contextWindow": 262144,
-          "maxOutput": 32768,
+          "maxOutput": 235929,
           "reasoning": true,
           "cost": {
             "input": 0.15,
@@ -4249,17 +4322,6 @@
             "cacheWrite": 0.038
           }
         },
-        "qwen/qwen3-max": {
-          "name": "Qwen3 Max",
-          "contextWindow": 262144,
-          "maxOutput": 65536,
-          "cost": {
-            "input": 0.78,
-            "output": 3.9,
-            "cacheRead": 0.156,
-            "cacheWrite": 0.975
-          }
-        },
         "qwen/qwen3-coder-30b-a3b-instruct": {
           "name": "Qwen3-Coder 30B-A3B Instruct",
           "contextWindow": 262144,
@@ -4291,22 +4353,12 @@
         },
         "qwen/qwen3-235b-a22b-thinking-2507": {
           "name": "Qwen3 235B A22B Thinking 2507",
-          "contextWindow": 131072,
-          "maxOutput": 117964,
+          "contextWindow": 128000,
+          "maxOutput": 16384,
           "reasoning": true,
           "cost": {
-            "input": 0.23,
-            "output": 2.3
-          }
-        },
-        "qwen/qwen3-235b-a22b": {
-          "name": "Qwen3 235B-A22B",
-          "contextWindow": 131072,
-          "maxOutput": 8192,
-          "reasoning": true,
-          "cost": {
-            "input": 0.455,
-            "output": 1.82
+            "input": 0.45,
+            "output": 3.5
           }
         },
         "qwen/qwen3.5-122b-a10b": {
@@ -4317,15 +4369,6 @@
           "cost": {
             "input": 0.26,
             "output": 2.08
-          }
-        },
-        "qwen/qwen-plus-2025-07-28": {
-          "name": "Qwen Plus 0728",
-          "contextWindow": 1000000,
-          "maxOutput": 32768,
-          "cost": {
-            "input": 0.26,
-            "output": 0.78
           }
         },
         "qwen/qwen3.6-35b-a3b": {
@@ -4352,11 +4395,11 @@
         "qwen/qwen3-vl-30b-a3b-thinking": {
           "name": "Qwen3 VL 30B A3B Thinking",
           "contextWindow": 262144,
-          "maxOutput": 32768,
+          "maxOutput": 235929,
           "reasoning": true,
           "cost": {
-            "input": 0.2,
-            "output": 2.4
+            "input": 0.29,
+            "output": 1
           }
         },
         "qwen/qwen3.6-flash": {
@@ -4385,6 +4428,7 @@
           "name": "Qwen2.5 Coder 32B Instruct",
           "contextWindow": 32768,
           "maxOutput": 29491,
+          "toolCall": false,
           "cost": {
             "input": 0.66,
             "output": 1
@@ -4398,27 +4442,6 @@
           "cost": {
             "input": 0.065,
             "output": 0.26
-          }
-        },
-        "qwen/qwen3-max-thinking": {
-          "name": "Qwen3 Max Thinking",
-          "contextWindow": 262144,
-          "maxOutput": 65536,
-          "reasoning": true,
-          "cost": {
-            "input": 0.78,
-            "output": 3.9
-          }
-        },
-        "qwen/qwen3-coder-plus": {
-          "name": "Qwen3 Coder Plus",
-          "contextWindow": 1000000,
-          "maxOutput": 65536,
-          "cost": {
-            "input": 0.65,
-            "output": 3.25,
-            "cacheRead": 0.13,
-            "cacheWrite": 0.8125
           }
         },
         "qwen/qwen3.5-9b": {
@@ -4462,8 +4485,7 @@
           "cost": {
             "input": 0.15,
             "output": 0.47,
-            "cacheRead": 0.016,
-            "cacheWrite": 0.2
+            "cacheRead": 0.016
           }
         },
         "qwen/qwen3.5-35b-a3b": {
@@ -4477,20 +4499,9 @@
             "cacheRead": 0.04
           }
         },
-        "qwen/qwen3.6-max-preview": {
-          "name": "Qwen3.6 Max Preview",
-          "contextWindow": 262144,
-          "maxOutput": 65536,
-          "reasoning": true,
-          "cost": {
-            "input": 1.027,
-            "output": 6.162,
-            "cacheWrite": 1.28375
-          }
-        },
         "qwen/qwen3-30b-a3b": {
           "name": "Qwen3 30B A3B",
-          "contextWindow": 131072,
+          "contextWindow": 40960,
           "maxOutput": 16384,
           "reasoning": true,
           "cost": {
@@ -4509,32 +4520,14 @@
             "cacheRead": 0.225
           }
         },
-        "qwen/qwen3-8b": {
-          "name": "Qwen3 8B",
-          "contextWindow": 131072,
-          "maxOutput": 8192,
-          "reasoning": true,
-          "cost": {
-            "input": 0.117,
-            "output": 0.455
-          }
-        },
-        "qwen/qwen3-vl-32b-instruct": {
-          "name": "Qwen3 VL 32B Instruct",
-          "contextWindow": 131072,
-          "maxOutput": 32768,
-          "cost": {
-            "input": 0.104,
-            "output": 0.416
-          }
-        },
         "qwen/qwen3-vl-8b-instruct": {
           "name": "Qwen3 VL 8B Instruct",
           "contextWindow": 262144,
-          "maxOutput": 32768,
+          "maxOutput": 235929,
           "cost": {
-            "input": 0.117,
-            "output": 0.455
+            "input": 0.25,
+            "output": 0.75,
+            "cacheRead": 0.12
           }
         },
         "qwen/qwen3-30b-a3b-instruct-2507": {
@@ -4550,6 +4543,7 @@
           "name": "Qwen2.5 VL 72B Instruct",
           "contextWindow": 128000,
           "maxOutput": 115200,
+          "toolCall": false,
           "cost": {
             "input": 0.8,
             "output": 1,
@@ -4584,24 +4578,14 @@
             "output": 0.4
           }
         },
-        "qwen/qwen3-30b-a3b-thinking-2507": {
-          "name": "Qwen3 30B A3B Thinking 2507",
-          "contextWindow": 81920,
-          "maxOutput": 32768,
-          "reasoning": true,
-          "cost": {
-            "input": 0.2,
-            "output": 2.4
-          }
-        },
         "qwen/qwen3.6-27b": {
           "name": "Qwen3.6 27B",
           "contextWindow": 262144,
-          "maxOutput": 65536,
+          "maxOutput": 81920,
           "reasoning": true,
           "cost": {
-            "input": 0.45,
-            "output": 2.7
+            "input": 0.32,
+            "output": 3.2
           }
         },
         "qwen/qwen3.6-plus": {
@@ -4617,22 +4601,12 @@
         },
         "qwen/qwen3-14b": {
           "name": "Qwen3 14B",
-          "contextWindow": 131072,
+          "contextWindow": 40960,
           "maxOutput": 16384,
           "reasoning": true,
           "cost": {
             "input": 0.12,
             "output": 0.24
-          }
-        },
-        "qwen/qwen3-vl-8b-thinking": {
-          "name": "Qwen3 VL 8B Thinking",
-          "contextWindow": 131072,
-          "maxOutput": 32768,
-          "reasoning": true,
-          "cost": {
-            "input": 0.18,
-            "output": 2.1
           }
         },
         "qwen/qwen3.7-plus": {
@@ -4656,14 +4630,14 @@
           "cost": {
             "input": 2,
             "output": 6,
-            "cacheRead": 0.25,
-            "cacheWrite": 2.5
+            "cacheRead": 0.25
           }
         },
         "morph/morph-v3-large": {
           "name": "Morph V3 Large",
           "contextWindow": 262144,
           "maxOutput": 131072,
+          "toolCall": false,
           "cost": {
             "input": 0.9,
             "output": 1.9
@@ -4673,6 +4647,7 @@
           "name": "Morph V3 Fast",
           "contextWindow": 81920,
           "maxOutput": 38000,
+          "toolCall": false,
           "cost": {
             "input": 0.8,
             "output": 1.2
@@ -4695,6 +4670,7 @@
           "contextWindow": 272000,
           "maxOutput": 128000,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["none", "low", "medium", "high", "xhigh"],
           "cost": {
             "input": 8,
@@ -4966,6 +4942,7 @@
           "name": "GPT-3.5 Turbo Instruct",
           "contextWindow": 4095,
           "maxOutput": 3685,
+          "toolCall": false,
           "cost": {
             "input": 1.5,
             "output": 2
@@ -5037,6 +5014,7 @@
           "contextWindow": 400000,
           "maxOutput": 128000,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 2.5,
             "output": 2,
@@ -5136,6 +5114,7 @@
           "contextWindow": 400000,
           "maxOutput": 128000,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 10,
             "output": 10,
@@ -5405,6 +5384,7 @@
           "contextWindow": 200000,
           "maxOutput": 100000,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 150,
             "output": 600
@@ -5414,6 +5394,7 @@
           "name": "Phi 4",
           "contextWindow": 16384,
           "maxOutput": 14745,
+          "toolCall": false,
           "cost": {
             "input": 0.07,
             "output": 0.14
@@ -5423,6 +5404,7 @@
           "name": "WizardLM-2 8x22B",
           "contextWindow": 65535,
           "maxOutput": 8000,
+          "toolCall": false,
           "cost": {
             "input": 0.62,
             "output": 0.62
@@ -5437,7 +5419,8 @@
         "whisper-large-v3": {
           "name": "Whisper",
           "contextWindow": 0,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "llama-3.3-70b-versatile": {
           "name": "Llama 3.3 70B",
@@ -5452,6 +5435,7 @@
           "name": "ALLaM-2-7b",
           "contextWindow": 4096,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0,
             "output": 0
@@ -5460,7 +5444,8 @@
         "whisper-large-v3-turbo": {
           "name": "Whisper Large V3 Turbo",
           "contextWindow": 0,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "llama-3.1-8b-instant": {
           "name": "Llama 3.1 8B",
@@ -5474,17 +5459,20 @@
         "groq/compound-mini": {
           "name": "Compound Mini",
           "contextWindow": 131072,
-          "maxOutput": 8192
+          "maxOutput": 8192,
+          "toolCall": false
         },
         "groq/compound": {
           "name": "Compound",
           "contextWindow": 131072,
-          "maxOutput": 8192
+          "maxOutput": 8192,
+          "toolCall": false
         },
         "meta-llama/llama-prompt-guard-2-86m": {
           "name": "Prompt Guard 2 86M",
           "contextWindow": 512,
           "maxOutput": 512,
+          "toolCall": false,
           "cost": {
             "input": 0.04,
             "output": 0.04
@@ -5494,6 +5482,7 @@
           "name": "Llama Prompt Guard 2 22M",
           "contextWindow": 512,
           "maxOutput": 512,
+          "toolCall": false,
           "cost": {
             "input": 0.03,
             "output": 0.03
@@ -5502,12 +5491,14 @@
         "canopylabs/orpheus-v1-english": {
           "name": "Canopy Labs Orpheus V1 English",
           "contextWindow": 4000,
-          "maxOutput": 50000
+          "maxOutput": 50000,
+          "toolCall": false
         },
         "canopylabs/orpheus-arabic-saudi": {
           "name": "Canopy Labs Orpheus Arabic Saudi",
           "contextWindow": 4000,
-          "maxOutput": 50000
+          "maxOutput": 50000,
+          "toolCall": false
         },
         "qwen/qwen3.8-27b": {
           "name": "Qwen3.8 27B",
@@ -5932,7 +5923,8 @@
         "voxtral-mini-tts-latest": {
           "name": "Voxtral Mini TTS (latest)",
           "contextWindow": 0,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "mistral-medium-2508": {
           "name": "Mistral Medium 3.1",
@@ -6100,6 +6092,7 @@
           "name": "Mistral Embed",
           "contextWindow": 8000,
           "maxOutput": 3072,
+          "toolCall": false,
           "cost": {
             "input": 0.1,
             "output": 0
@@ -6138,7 +6131,8 @@
         "voxtral-mini-latest": {
           "name": "Voxtral Mini (latest)",
           "contextWindow": 0,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "labs-devstral-small-2512": {
           "name": "Devstral Small 2",
@@ -6414,6 +6408,7 @@
           "name": "LFM2-24B-A2B",
           "contextWindow": 32768,
           "maxOutput": 32768,
+          "toolCall": false,
           "cost": {
             "input": 0.03,
             "output": 0.12
@@ -6436,6 +6431,7 @@
           "contextWindow": 163839,
           "maxOutput": 163839,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 3,
             "output": 7
@@ -6629,17 +6625,20 @@
         "grok-imagine-video-1.5-lite": {
           "name": "Grok Imagine Video 1.5 Lite",
           "contextWindow": 1024,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "grok-imagine-image": {
           "name": "Grok Imagine Image",
           "contextWindow": 16000,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "grok-imagine-video": {
           "name": "Grok Imagine Video",
           "contextWindow": 1024,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "grok-4.3": {
           "name": "Grok 4.3",
@@ -6667,7 +6666,8 @@
         "grok-imagine-video-1.5": {
           "name": "Grok Imagine Video 1.5",
           "contextWindow": 1024,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "grok-4.5": {
           "name": "Grok 4.5",
@@ -6694,7 +6694,8 @@
         "grok-imagine-image-quality": {
           "name": "Grok Imagine Image Quality",
           "contextWindow": 16000,
-          "maxOutput": 0
+          "maxOutput": 0,
+          "toolCall": false
         },
         "grok-build-0.1": {
           "name": "Grok Build 0.1",
@@ -6712,6 +6713,7 @@
           "contextWindow": 1000000,
           "maxOutput": 30000,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["low", "medium", "high", "xhigh"],
           "cost": {
             "input": 1.25,
@@ -6794,6 +6796,7 @@
           "contextWindow": 128000,
           "maxOutput": 128000,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.58,
             "output": 1.68
@@ -6837,6 +6840,7 @@
           "contextWindow": 32000,
           "maxOutput": 4096,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.125,
             "output": 0.5
@@ -6853,6 +6857,7 @@
           "name": "text-embedding-3-small",
           "contextWindow": 8192,
           "maxOutput": 1536,
+          "toolCall": false,
           "cost": {
             "input": 0.02,
             "output": 0
@@ -6953,6 +6958,7 @@
           "name": "GPT-Image-2",
           "contextWindow": 0,
           "maxOutput": 0,
+          "toolCall": false,
           "cost": {
             "input": 5,
             "output": 30,
@@ -7009,6 +7015,7 @@
           "name": "text-embedding-ada-002",
           "contextWindow": 8192,
           "maxOutput": 1536,
+          "toolCall": false,
           "cost": {
             "input": 0.1,
             "output": 0
@@ -7058,6 +7065,7 @@
           "name": "Phi-4-multimodal",
           "contextWindow": 128000,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.08,
             "output": 0.32
@@ -7102,6 +7110,7 @@
           "name": "GPT Image 2.5 Flare",
           "contextWindow": 0,
           "maxOutput": 0,
+          "toolCall": false,
           "cost": {
             "input": 5,
             "output": 30,
@@ -7134,6 +7143,7 @@
           "name": "Embed v3 Multilingual",
           "contextWindow": 512,
           "maxOutput": 1024,
+          "toolCall": false,
           "cost": {
             "input": 0.1,
             "output": 0
@@ -7168,6 +7178,7 @@
           "contextWindow": 32000,
           "maxOutput": 4096,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.125,
             "output": 0.5
@@ -7201,6 +7212,7 @@
           "name": "GPT-3.5 Turbo Instruct",
           "contextWindow": 4096,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 1.5,
             "output": 2
@@ -7210,6 +7222,7 @@
           "name": "GPT-3.5 Turbo 0125",
           "contextWindow": 16384,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.5,
             "output": 1.5
@@ -7232,6 +7245,7 @@
           "name": "text-embedding-3-large",
           "contextWindow": 8192,
           "maxOutput": 3072,
+          "toolCall": false,
           "cost": {
             "input": 0.13,
             "output": 0
@@ -7253,6 +7267,7 @@
           "name": "Embed v4",
           "contextWindow": 128000,
           "maxOutput": 1536,
+          "toolCall": false,
           "cost": {
             "input": 0.12,
             "output": 0
@@ -7348,6 +7363,7 @@
           "name": "Embed v3 English",
           "contextWindow": 512,
           "maxOutput": 1024,
+          "toolCall": false,
           "cost": {
             "input": 0.1,
             "output": 0
@@ -7366,6 +7382,7 @@
           "name": "GPT Image 2.5 Sunburst",
           "contextWindow": 0,
           "maxOutput": 0,
+          "toolCall": false,
           "cost": {
             "input": 5,
             "output": 30,
@@ -7389,6 +7406,7 @@
           "name": "GPT-Image-1",
           "contextWindow": 0,
           "maxOutput": 0,
+          "toolCall": false,
           "cost": {
             "input": 5,
             "output": 40,
@@ -7461,6 +7479,7 @@
           "name": "Phi-4",
           "contextWindow": 128000,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.125,
             "output": 0.5
@@ -7555,6 +7574,7 @@
           "name": "GPT-3.5 Turbo 1106",
           "contextWindow": 16384,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 1,
             "output": 2
@@ -7601,6 +7621,7 @@
           "contextWindow": 163840,
           "maxOutput": 163840,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 1.35,
             "output": 5.4
@@ -7611,6 +7632,7 @@
           "contextWindow": 1000000,
           "maxOutput": 384000,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 1.74,
             "output": 3.48
@@ -7655,6 +7677,7 @@
           "name": "GPT-Image-1.5",
           "contextWindow": 0,
           "maxOutput": 0,
+          "toolCall": false,
           "cost": {
             "input": 5,
             "output": 32,
@@ -7802,6 +7825,7 @@
           "contextWindow": 1000000,
           "maxOutput": 384000,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 0.19,
             "output": 0.51
@@ -7830,6 +7854,7 @@
           "name": "Gemma 3 12B IT",
           "contextWindow": 131072,
           "maxOutput": 8192,
+          "toolCall": false,
           "cost": {
             "input": 0.09,
             "output": 0.29
@@ -7839,6 +7864,7 @@
           "name": "Gemma 3 4B IT",
           "contextWindow": 131072,
           "maxOutput": 4096,
+          "toolCall": false,
           "cost": {
             "input": 0.04,
             "output": 0.08
@@ -7966,6 +7992,7 @@
           "contextWindow": 128000,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 1.35,
             "output": 5.4
@@ -8885,6 +8912,7 @@
           "name": "Gemma 3 27B IT",
           "contextWindow": 131072,
           "maxOutput": 8192,
+          "toolCall": false,
           "cost": {
             "input": 0.23,
             "output": 0.38
@@ -9391,6 +9419,7 @@
           "contextWindow": 128000,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 1.35,
             "output": 5.4
@@ -10173,6 +10202,7 @@
           "name": "Gemini 2.5 Flash TTS",
           "contextWindow": 32768,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 0.5,
             "output": 10
@@ -10194,6 +10224,7 @@
           "name": "Nano Banana",
           "contextWindow": 32768,
           "maxOutput": 32768,
+          "toolCall": false,
           "cost": {
             "input": 0.3,
             "output": 30
@@ -10317,6 +10348,7 @@
           "contextWindow": 131072,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["minimal", "high"],
           "cost": {
             "input": 0.5,
@@ -10411,6 +10443,7 @@
           "contextWindow": 65536,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "cost": {
             "input": 2,
             "output": 120,
@@ -10560,6 +10593,7 @@
           "name": "Gemini 2.5 Pro TTS",
           "contextWindow": 32768,
           "maxOutput": 16384,
+          "toolCall": false,
           "cost": {
             "input": 1,
             "output": 20
@@ -10569,6 +10603,7 @@
           "name": "Gemini Embedding 001",
           "contextWindow": 2048,
           "maxOutput": 1,
+          "toolCall": false,
           "cost": {
             "input": 0.15,
             "output": 0
@@ -10591,6 +10626,7 @@
           "contextWindow": 131072,
           "maxOutput": 32768,
           "reasoning": true,
+          "toolCall": false,
           "efforts": ["minimal", "medium", "high"],
           "cost": {
             "input": 1.5,

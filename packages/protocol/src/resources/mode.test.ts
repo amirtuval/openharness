@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { newModeId } from '../ids'
+import { newMcpServerId, newModeId } from '../ids'
 import {
   CreateModeRequestSchema,
   ListModesResponseSchema,
@@ -10,6 +10,7 @@ import {
   ModeModelSchema,
   ModeReferenceSchema,
   ModeSchema,
+  ModeToolOverrideSchema,
   UpdateModeRequestSchema,
 } from './mode'
 
@@ -21,6 +22,7 @@ const mode = {
   model: 'anthropic/claude-sonnet-5',
   reasoning_effort: 'high',
   system_prompt_addition: 'Think step by step.',
+  tools: null,
   created_at: '2026-03-15T10:00:00Z',
   updated_at: '2026-03-15T10:00:00Z',
 }
@@ -116,6 +118,71 @@ describe('mode request schemas', () => {
       reasoning_effort: 'low',
       system_prompt_addition: 'Be terse.',
     })
+  })
+
+  it('carries the tool override a mode may set (#307)', () => {
+    const tools = { builtin: { web_search: true, todo_write: false } }
+    expect(ModeToolOverrideSchema.parse(tools)).toEqual(tools)
+    expect(CreateModeRequestSchema.parse({ name: 'deep', model: 'x/y', tools })).toMatchObject({
+      tools,
+    })
+    expect(UpdateModeRequestSchema.parse({ tools })).toEqual({ tools })
+    // `null` is a mode that says nothing about tools, which is what a mode without the field is.
+    expect(UpdateModeRequestSchema.parse({ tools: null })).toEqual({ tools: null })
+    expect(ModeSchema.parse({ ...mode, tools }).tools).toEqual(tools)
+  })
+
+  it('refuses a tool name that is not a name, and an override that is not a map of booleans', () => {
+    expect(ModeToolOverrideSchema.safeParse({ builtin: { '': true } }).success).toBe(false)
+    expect(ModeToolOverrideSchema.safeParse({ builtin: { web_search: 'yes' } }).success).toBe(false)
+    expect(ModeToolOverrideSchema.safeParse({ builtin: { web_search: {} } }).success).toBe(false)
+    expect(ModeToolOverrideSchema.safeParse({ builtin: [] }).success).toBe(false)
+  })
+
+  it('carries the MCP-server half of the override, a sibling of `builtin` (#311)', () => {
+    const server = newMcpServerId()
+    const other = newMcpServerId()
+    const override = {
+      builtin: { web_search: true },
+      mcp_servers: { [server]: true, [other]: false },
+    }
+    expect(ModeToolOverrideSchema.parse(override)).toEqual(override)
+    // Both halves are optional in a mode's own terms — `builtin` empty, `mcp_servers` absent —
+    // so a mode may override only the servers.
+    expect(ModeToolOverrideSchema.parse({ builtin: {}, mcp_servers: { [server]: false } })).toEqual(
+      { builtin: {}, mcp_servers: { [server]: false } },
+    )
+    expect(CreateModeRequestSchema.parse({ name: 'deep', model: 'x/y', tools: override })).toEqual({
+      name: 'deep',
+      model: 'x/y',
+      tools: override,
+    })
+    expect(ModeSchema.parse({ ...mode, tools: override }).tools).toEqual(override)
+  })
+
+  it('treats a missing `mcp_servers` map as a mode that says nothing about servers', () => {
+    // Every mode stored before #311 has this shape, so it has to keep parsing — and parsing it
+    // must not invent a key the writer did not write.
+    const parsed = ModeToolOverrideSchema.parse({ builtin: { web_fetch: false } })
+    expect(parsed).toEqual({ builtin: { web_fetch: false } })
+    expect(parsed).not.toHaveProperty('mcp_servers')
+  })
+
+  it('refuses an MCP server key that is not an `mcps_` id', () => {
+    expect(
+      ModeToolOverrideSchema.safeParse({ builtin: {}, mcp_servers: { notes: true } }).success,
+    ).toBe(false)
+    expect(
+      ModeToolOverrideSchema.safeParse({
+        builtin: {},
+        mcp_servers: { [newMcpServerId().replace('mcps_', 'mode_')]: true },
+      }).success,
+    ).toBe(false)
+    expect(
+      ModeToolOverrideSchema.safeParse({ builtin: {}, mcp_servers: { [newMcpServerId()]: 'yes' } })
+        .success,
+    ).toBe(false)
+    expect(ModeToolOverrideSchema.safeParse({ builtin: {}, mcp_servers: [] }).success).toBe(false)
   })
 
   it('requires a name and a model on create', () => {

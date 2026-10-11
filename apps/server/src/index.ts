@@ -139,6 +139,12 @@ export {
   type McpServerServiceOptions,
   type ResolvedMcpServer,
 } from './mcp/service'
+// The servers in force for a request: the user's own `enabled`, overridden by the mode (#311).
+export {
+  listMcpServersInForce,
+  mcpServersInForce,
+  type McpServerSettingsDeps,
+} from './mcp/in-force'
 export {
   McpOAuthError,
   authorizationServerMetadataUrls,
@@ -210,6 +216,7 @@ export {
   type ProviderResponse,
 } from './catalog/provider-fetch'
 export { createReasoningSupportResolver } from './catalog/reasoning-support'
+export { createToolSupportResolver } from './catalog/tool-support'
 export {
   createBundledRegistry,
   emptyRegistry,
@@ -228,6 +235,9 @@ export {
 } from './main'
 export {
   createMockModelFactory,
+  MOCK_ASK_ANSWERS,
+  MOCK_ASK_INPUT,
+  MOCK_ASK_MARKER,
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
   MOCK_HOLD_TEXT,
@@ -238,6 +248,7 @@ export {
   MOCK_SLOW_MARKER,
   MOCK_SLOW_TOTAL_MS,
   MOCK_TERMINAL_MARKER,
+  MOCK_TOOL_MARKER,
   planFor,
 } from './mock-model'
 export {
@@ -265,6 +276,31 @@ export {
   type StopSchedulerOptions,
   type StopSessionOptions,
 } from './scheduler'
+export {
+  createTestToolRegistry,
+  createTurnRegistry,
+  createTurnTools,
+  TEST_TOOL_DESCRIPTION,
+  TEST_TOOL_NAME,
+  testEchoTool,
+  type TurnRegistryOptions,
+  type TurnToolOptions,
+  type TurnToolsOptions,
+} from './tools'
+export { askUserTool, withAlwaysApprovals } from './pausing'
+export {
+  createSearchAllowance,
+  type SearchAllowance,
+  type SearchAllowanceOptions,
+} from './searches'
+export {
+  createToolSettingsResolver,
+  effectiveTools,
+  listToolSettings,
+  toolDecisions,
+  toolSettingEntries,
+  type ToolSettingsDeps,
+} from './tool-settings'
 export {
   DefaultModelPicker,
   RECOMMENDED_DEFAULT_MODELS,

@@ -28,6 +28,7 @@ import type {
   UserEventInput,
   UserId,
   UserPreferences,
+  UserToolSettings,
 } from '@openharness/protocol'
 
 /**
@@ -41,8 +42,8 @@ import type {
 export type { UserPreferences } from '@openharness/protocol'
 
 /**
- * A user's mode (epic #245, M6): a named preset of a model, a reasoning effort and a
- * system-prompt addition.
+ * A user's mode (epic #245, M6): a named preset of a model, a reasoning effort, a
+ * system-prompt addition and an optional override of which built-in tools are on (#307).
  *
  * The protocol defines it; it is re-exported here because it is the vocabulary of the mode
  * methods below ({@link SessionStore.createMode}, `getMode`, `listModes`, `updateMode`,
@@ -50,6 +51,16 @@ export type { UserPreferences } from '@openharness/protocol'
  * type beside the method.
  */
 export type { Mode } from '@openharness/protocol'
+
+/**
+ * A user's stored tool settings (epic #303, X4; issue #307): which built-in tools their chats
+ * may use, and the permission each call is evaluated under.
+ *
+ * The protocol defines it; it is re-exported here because it is the vocabulary of
+ * {@link SessionStore.getToolSettings} and {@link SessionStore.putToolSettings}, so an
+ * implementation of this contract — or a caller of it — can name the type beside the method.
+ */
+export type { UserToolSettings } from '@openharness/protocol'
 
 /**
  * The storage and signaling contract the brain and the server code against.
@@ -127,6 +138,13 @@ export type { Mode } from '@openharness/protocol'
  *   per-user settings beside the log: one value per user — `{ default_model, theme }` — and a
  *   user who has never saved one reads the protocol's defaults rather than a `null` or a
  *   throw. The answer is deep-frozen, like a credential, because it is a value a caller owns.
+ * - **Tool settings** (epic #303, X4; issue #307). {@link SessionStore.getToolSettings} and
+ *   {@link SessionStore.putToolSettings} are the per-user tool choices beside the log: one
+ *   value per user — `{ builtin }`, a map of tool name to `{ enabled, policy }` — and a user
+ *   who has never saved one reads `{ builtin: {} }`, so every tool follows its own declared
+ *   default. A **mode** may override which built-in tools are on (`Mode.tools`); the store
+ *   keeps that on the mode and this on the user, and applying one over the other is the
+ *   caller's, never this store's.
  * - **Deletion** (#111, epic #116 U5). {@link SessionStore.deleteSession} removes a session
  *   and its whole log — owner-scoped, and irreversible — and a subscription to it ends with a
  *   final `session.deleted` stream event instead of starving.
@@ -201,8 +219,9 @@ export interface SessionStore {
    * Create a mode owned by `ownerId`, with `created_at` and `updated_at` set to the clock's
    * current instant (epic #245, M6).
    *
-   * A mode is a user's own named preset — a model, a reasoning effort and a system-prompt
-   * addition behind a stable name — so it is created like the other per-user resources: the
+   * A mode is a user's own named preset — a model, a reasoning effort, a system-prompt
+   * addition and an optional tool override behind a stable name (#307) — so it is created
+   * like the other per-user resources: the
    * owner comes from the caller (the server passes the authenticated user), never from the
    * request, and it is stored as the mode's `owner_id`, which never changes.
    *
@@ -241,7 +260,8 @@ export interface SessionStore {
    * that id.
    *
    * An omitted field keeps its stored value; `null` clears a nullable one
-   * (`reasoning_effort`, `system_prompt_addition`); `updated_at` is set from the clock. A chat
+   * (`reasoning_effort`, `system_prompt_addition`, `tools`); `updated_at` is set from the
+   * clock. A chat
    * that follows the mode picks the change up on its next request — this is what makes a mode
    * live rather than a snapshot.
    *
@@ -414,6 +434,35 @@ export interface SessionStore {
    * instant; the answer is the preferences as written, deep-frozen.
    */
   putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences>
+
+  // ---------------------------------------------------------- tool settings
+
+  /**
+   * Read a user's stored tool settings (epic #303, X4; issue #307), or the protocol's default
+   * when there are none.
+   *
+   * Tool settings are per user, like the preferences beside them: which built-in tools the
+   * user's chats may offer (`enabled`), and the permission a call to one is evaluated under
+   * (`allow | ask | deny`). A user who has never saved any reads
+   * `{ builtin: {} }` — the absence of a choice, never `null` and never a throw — and every
+   * tool then follows **its own declared default**, which is the permission its definition
+   * carries. Nothing here is a mode's: a mode may override which built-in tools are on
+   * ({@link Mode.tools}), and it is the caller — the server's resolver — that applies that
+   * over the answer. The answer is deep-frozen, like a credential.
+   */
+  getToolSettings(userId: UserId): Promise<UserToolSettings>
+
+  /**
+   * Write a user's tool settings whole, replacing what was stored, and answer what was stored
+   * (epic #303, X4; issue #307).
+   *
+   * One value per user, so a second put replaces the first in place rather than accumulating,
+   * exactly as {@link SessionStore.putPreferences} does. There is no partial update at this
+   * layer: a caller writes the complete value it wants, and the merge a
+   * `PUT /v1/me/tools` performs is the **route's** — that is what keeps one tool's setting from
+   * clearing another's. The answer is the settings as written, deep-frozen.
+   */
+  putToolSettings(userId: UserId, settings: UserToolSettings): Promise<UserToolSettings>
 
   // ----------------------------------------------------------------- events
 
@@ -643,6 +692,36 @@ export interface SessionStore {
   listModelRequests(options: ListModelRequestsOptions): Promise<ModelRequestUsage[]>
 
   /**
+   * Read the **tool calls** one owner's sessions completed in a half-open UTC window
+   * (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305)).
+   *
+   * The companion of {@link SessionStore.listModelRequests}, and a method for the same reason:
+   * what a `web_search` cost the operator's key is answered from the log, and answering it by
+   * walking the owner's sessions and every one of their events is the read this pair exists to
+   * avoid. The window is half-open — an end at exactly `from` is in the answer, one at exactly
+   * `to` is not — and which local day a call fell on is the caller's question, so a caller
+   * converts its days into a window like this one and groups what comes back.
+   *
+   * A call is here when it was **answered successfully**: an `agent.tool_use` whose
+   * `agent.tool_result` exists and does not carry `is_error`. A call the policy refused, one
+   * the registry could not run, one that timed out or was interrupted, and one a crashed turn
+   * never answered are all left out — none of them did what the call asked for, and counting
+   * them would bill a user for work that never happened. It is the same rule the usage surface
+   * follows about tokens, one level up.
+   *
+   * **Owner-scoped, and the owner is required** (epic #65, A4): only the owner's sessions are
+   * read. A call a `session.rewind` replaced is **not** in the answer (#238), exactly as it is
+   * not in a replay. The answer is ordered by `(session_id, seq)` — the log's own order, session
+   * by session — so two reads of an unchanged log hand back the same list.
+   *
+   * @param options.name only calls of this tool; every tool's calls when absent
+   * @param options.from the window's start, inclusive
+   * @param options.to the window's end, exclusive
+   * @throws RangeError when a bound is not an instant, or `from` is after `to`
+   */
+  listToolUses(options: ListToolUsesOptions): Promise<ToolUseRecord[]>
+
+  /**
    * Delete the stored events a supersession covers — older than the retention window — and
    * return how many went.
    *
@@ -716,12 +795,20 @@ export interface SessionStore {
   onPartitionSignal(partition: number, listener: PartitionSignalListener): Promise<Unsubscribe>
 
   /**
-   * The sessions in `partitions` that need work: pending user events, or an open turn.
+   * The sessions in `partitions` that need work: pending user events, an open turn, or a
+   * pause whose answer has landed.
    *
    * This is recovery's starting point, and it is deliberately log-derived — it does not consult
    * leases, signals or any other transient state, so it answers the same thing for a partition
    * that has just been taken over as it does for one that is running normally. A session with
    * pending user events *and* an open turn is returned once.
+   *
+   * The third case is the pause (epic #303, X6; #309): a session whose last turn ended
+   * `requires_action` and which now holds a `user.tool_confirmation` naming one of the calls it
+   * waits on. A confirmation is written by the server already processed, so it is not a queued
+   * user event and the session reads idle — the signal that would start the answering turn is a
+   * hint, and one an instance lost before it began leaves the chat stuck until another message.
+   * Asking the log here is what keeps a missed signal from stranding an answer.
    *
    * The result is ordered by `(created_at, id)` ascending: oldest session first.
    */
@@ -1133,6 +1220,32 @@ export interface ModelRequestUsage {
    * the caller groups by — the window filters on it — and it is the end's, so a request counts
    * on the day it ended.
    */
+  readonly processed_at: Timestamp
+}
+
+/** Query of {@link SessionStore.listToolUses} (epic #303, #305). */
+export interface ListToolUsesOptions extends OwnerScope {
+  /** Only calls of this tool, by the name the call's event carried; every tool when absent. */
+  readonly name?: string
+  /** The window's start, inclusive — a UTC instant, as the caller's local day was converted. */
+  readonly from: Date
+  /** The window's end, exclusive. */
+  readonly to: Date
+}
+
+/**
+ * One tool call the log recorded and answered, as {@link SessionStore.listToolUses} reads it
+ * (epic #303, #305).
+ *
+ * Two facts and nothing else: which tool the model called, and when the call was stored —
+ * which is the instant the window filters on and the day a caller groups by. The result's
+ * content is deliberately not here: a usage read counts calls, and what a call said is the
+ * model's business, not a report's.
+ */
+export interface ToolUseRecord {
+  /** The tool's name, as the call's `agent.tool_use` carried it. */
+  readonly name: string
+  /** When the call was stored: the call event's `processed_at`. */
   readonly processed_at: Timestamp
 }
 

@@ -3,6 +3,7 @@ import {
   type ContextCompactionOption,
   createContextStrategy,
   DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_TOOL_STEPS,
   type ModelFactory,
 } from '@openharness/brain'
 import {
@@ -15,6 +16,7 @@ import {
   type StoredEvent,
   type UserId,
 } from '@openharness/protocol'
+import type { ToolRegistry } from '@openharness/hands'
 import {
   InMemoryCredentialStore,
   InMemorySessionStore,
@@ -41,10 +43,13 @@ import {
 } from '../auth'
 import { ModelCatalog } from '../catalog/catalog'
 import { createMaxOutputResolver, createTokenBudgetResolver } from '../catalog/context-budget'
+import { createProviderFetch } from '../catalog/provider-fetch'
 import { createReasoningSupportResolver } from '../catalog/reasoning-support'
 import { createContextCompactionResolver } from '../context-compaction'
 import { createModeResolver } from '../modes'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
+import { createSearchAllowance } from '../searches'
+import { createTurnTools } from '../tools'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import {
   DEFAULT_LOG_FORMAT,
@@ -53,6 +58,7 @@ import {
   DEFAULT_TRUSTED_PROXY_HOPS,
   type LogFormat,
   type SchedulerKind,
+  type SearchConfig,
   type ServerConfig,
 } from '../config'
 import type { Tracer, TracingMode } from '../observability/tracing'
@@ -254,6 +260,17 @@ export interface TestOptions {
    */
   readonly compactionThreshold?: number
   /**
+   * `OPENHARNESS_MAX_TOOL_STEPS` for {@link testConfig} — the tool loop's budget (epic #303).
+   * The production default unless a test wants a turn cut short early.
+   */
+  readonly maxToolSteps?: number
+  /**
+   * The search API `testConfig` reports (epic #303, #305) — a `brave` provider with a key and a
+   * daily limit, for the tests that assert what `web_search` is offered and how the allowance
+   * is enforced. `null` — no search provider, which is a deployment without a key — by default.
+   */
+  readonly search?: SearchConfig | null
+  /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
    */
@@ -313,6 +330,16 @@ export interface TestOptions {
    * asserts on a server span passes a recorder. `createTestApp` only.
    */
   readonly tracer?: Tracer
+  /**
+   * The tools this process registers (epic #303, X4; issue #307). Omitted — the default — is a
+   * chat with no tools at all, exactly as `main.ts` wires a deployment on a provider model.
+   *
+   * A test that passes one gets the production wiring over it: the `/v1/me/tools` routes read
+   * it, and every turn is handed the settings resolver built from this harness's store. That is
+   * what lets a route test drive "the user turned this tool off and the next request offered
+   * nothing" in-process, with a registry of the test's own rather than #305's built-ins.
+   */
+  readonly tools?: ToolRegistry
 }
 
 /** Build an app, a store and a scheduler in-process; nothing listens. */
@@ -325,6 +352,27 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   const registry = options.registry ?? emptyRegistry
   const tokenBudgetFor = createTokenBudgetResolver(registry)
   const compactionThreshold = options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD
+  // The tools and their settings (epic #303, X4; the built-ins are #305, the per-user settings
+  // are #307), wired as `main.ts` wires a deployment's: one registry, read by the turn options
+  // and by the `/v1/me/tools` routes. A test passes its own small registry rather than #305's
+  // built-ins, so `kind` never has to build one here — but the search allowance is built from
+  // the harness's config when a test turned search on, exactly as `main.ts` builds it.
+  const turnConfig = testConfig(options)
+  const turnTools =
+    options.tools === undefined
+      ? undefined
+      : createTurnTools({
+          config: turnConfig,
+          kind: 'mock',
+          tools: options.tools,
+          store,
+          registry,
+          searchTransport: createProviderFetch(),
+          allowance:
+            turnConfig.search === null
+              ? undefined
+              : createSearchAllowance({ store, dailyLimit: turnConfig.search.dailyLimit }),
+        })
   const scheduler = new LocalScheduler({
     store,
     model: options.model ?? model.factory,
@@ -345,6 +393,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     // the threshold from the config, the registry's budgets and output ceilings). A test of the
     // per-user controls (C3, #282) asks for `resolveCompaction`, which builds that same resolver
     // against this harness's store and registry.
+    ...(turnTools === undefined ? {} : { tools: turnTools }),
     ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
     ...(options.resolveCompaction === true
       ? {
@@ -385,6 +434,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     },
     catalog,
     ...(options.mcpServers === undefined ? {} : { mcpServers: options.mcpServers }),
+    ...(options.tools === undefined ? {} : { tools: options.tools }),
     // What `GET /v1/me/preferences` reports as the default trigger share (C3, #282).
     compactionThreshold,
     ...(options.registry === undefined ? {} : { registry: options.registry }),
@@ -701,6 +751,8 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     // "the chunks are still there" assertions a race. The job's own suite turns it on.
     compactIntervalMs: options.compactIntervalMs ?? 0,
     compactionThreshold: options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
+    maxToolSteps: options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS,
+    search: options.search ?? null,
     // Observability (#158) is off in a test by default: the readable log format, and no
     // exporter to load. The suites that assert on the JSON shape call `jsonLogger` directly.
     logFormat: options.logFormat ?? DEFAULT_LOG_FORMAT,

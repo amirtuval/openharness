@@ -690,6 +690,47 @@ it is a variable this infrastructure sets.
   the same `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1` documented above. Staging and production
   leave it off, so an MCP server there must be on the public internet.
 
+### Web search, and the daily allowance that pays for it
+
+`web_fetch` and `todo_write` are offered by every deployment (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305)).
+`web_search` is different: it is served by **one search API the operator configures and pays
+for**, so a deployment turns it on deliberately, with three variables:
+
+```
+OPENHARNESS_SEARCH_PROVIDER=brave
+OPENHARNESS_SEARCH_API_KEY=<the operator's key>
+OPENHARNESS_SEARCH_DAILY_LIMIT=50
+```
+
+- **With no `OPENHARNESS_SEARCH_API_KEY` there is no search tool at all.** The model is offered
+  none — which is a smaller offer, not a broken one — rather than a tool that would always
+  fail. Naming a provider without a key stops the boot: that configuration asked for search and
+  gave no way to authenticate. `brave` is the provider this build has an adapter for and the
+  default when a key is set on its own; a name it has no adapter for is refused at boot.
+- **The key is the deployment's, never a user's.** It lives in the server process and reaches a
+  tool only through the turn's per-user values, for the length of one step; nothing writes it to
+  the log, and the result a tool returns is scrubbed of it like every other resolved secret.
+  Users do not bring their own search keys, and the settings screens do not offer one.
+- **`OPENHARNESS_SEARCH_DAILY_LIMIT` is per user, per day** and defaults to 50. A
+  research-shaped day of chat is a handful of searches, so fifty covers heavy honest use while
+  bounding what one account can spend of the plan; the whole deployment's worst case is
+  `users × limit` rather than "as many as a model asks for". The day is **UTC** — a cap is
+  enforced inside a turn, where no request named a time zone, and a user's zone is not stored
+  anywhere; the usage route's `tz` parameter is the reader's own. `0` keeps the tool registered
+  and answers every call with the limit notice, which is how a deployment turns search off
+  without dropping its configuration.
+- **Searches are counted, and never priced.** `GET /v1/sessions/{id}/usage` and
+  `GET /v1/me/usage` report `searches` beside the token totals: the number of `web_search`
+  calls the log holds. The operator's plan's rates are not in this repository, so no money is
+  invented for them.
+- **Nothing here sets any of the three.** Every environment takes the default, which is a
+  deployment with no search tool. Turning one on is a deliberate act: one key, one provider,
+  and the allowance above it.
+
+The outbound request goes through the server's egress like every provider call (`HTTP_PROXY` /
+`HTTPS_PROXY` / `NO_PROXY`, #270), to the provider's fixed endpoint — a URL this server wrote,
+not one a user typed, so there is no address to guard.
+
 ### Context compaction, and the one knob it has
 
 When a chat's context fills, the brain summarizes the older history instead of letting it be

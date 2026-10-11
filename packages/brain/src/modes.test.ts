@@ -32,6 +32,7 @@ function resolvedMode(overrides: Partial<ResolvedMode> = {}): ResolvedMode {
     model: 'openai/gpt-5-mini',
     reasoningEffort: 'high',
     systemPromptAddition: 'Think step by step.',
+    toolOverride: null,
     ...overrides,
   }
 }
