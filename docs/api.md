@@ -150,6 +150,7 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
 | `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)     |
 | `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)         |
+| `agent.opaque_content`             | the brain     | // extension: the parts of a step only its own provider can read back (#334)            |
 | `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
 | `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
 | `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
@@ -305,6 +306,44 @@ to one is stored in its own pair so the log says which server answered:
   is the user's own default and a mode's `tools.mcp_servers` map patches it, at **server**
   granularity — there is no per-MCP-tool on/off, only the permission a call is evaluated under
   (`ask` unless the user chose otherwise).
+
+#### Provider-opaque content (epic #303, X13; issue #334)
+
+Several providers require part of the assistant's turn to come back **exactly as it arrived**:
+Anthropic's `thinking` blocks carry a `signature` the API re-checks, OpenAI's and xAI's
+Responses reasoning items carry an id (and encrypted content), and DeepSeek's thinking mode
+requires the step's `reasoning_content`. None of it is the reply, and the brain does not write
+it into the transcript:
+
+```json
+{
+  "type": "agent.opaque_content",
+  "id": "sevt_…",
+  "seq": 4,
+  "processed_at": "…",
+  "provider": "anthropic",
+  "model": "anthropic/claude-sonnet-5",
+  "parts": [{ "type": "reasoning", "text": "…", "provider_options": { "signature": "…" } }]
+}
+```
+
+- **One event per model request, and it is never shown as the reply.** The reply is the
+  `agent.message` beside it; a client that does not know this event skips it, and a frontend
+  renders neither `parts` nor their text. It is stored whether or not the step streamed text —
+  the step this exists for is a thinking model's tool call, which streams none.
+- **`provider` and `model` are what the parts may be replayed to, and both must match.** The
+  brain re-attaches a step's parts to that step's assistant message on the **next request** only
+  when it goes to the same client family **and** the same model; a model or provider switch
+  drops them, because the AI SDK's clients then build the assistant turn without them, which is
+  what a provider that cannot read them wants. Nothing here is ever sent to another provider.
+- **`parts` is the provider's payload, unchanged.** `text` is the part's text (a redacted
+  block's is empty) and `provider_options` is whatever its provider attached, kept whole: a
+  signature or an encrypted payload the provider cannot verify is not one it accepts, so an
+  entry too large to keep is **dropped whole** — and `dropped` records how many were — never
+  truncated, and never half-replayed.
+- **A rewind takes it back with the step it belongs to**, clearing never touches it (only a tool
+  result's body is cleared), and a summary never reads it: the parts are not conversation, so
+  nothing of them reaches a summarizer's prompt.
 
 #### Pausing for the user (epic #303, X6; issue #309)
 
