@@ -37,6 +37,7 @@ export type {
   SessionsResource,
 } from './resources/sessions'
 export type { ProviderCredentialsResource } from './resources/provider-credentials'
+export type { McpServersResource } from './resources/mcp-servers'
 export type { ModesResource } from './resources/modes'
 export type { ModelsResource } from './resources/models'
 export type { PreferencesResource } from './resources/preferences'
@@ -164,6 +165,37 @@ export type {
   TranscriptToolCall,
   TruncatedToolResult,
 } from './tools'
+
+export {
+  MCP_AUTH_TYPES,
+  MCP_CONNECTED_PARAM,
+  MCP_CONNECT_POLL_INTERVAL_MS,
+  MCP_CONNECT_TIMEOUT_MS,
+  TOOL_POLICIES,
+  estimatedTokensLabel,
+  mcpAuthHint,
+  mcpAuthLabel,
+  mcpConnectedServerId,
+  mcpFailureNotice,
+  mcpServerById,
+  mcpServerByName,
+  mcpServerFromError,
+  mcpServerTools,
+  mcpStatusDetail,
+  mcpStatusLabel,
+  mcpStatusTone,
+  mcpToolEntriesByServer,
+  mcpToolPolicyBody,
+  toolPolicyLabel,
+  waitForMcpConnection,
+} from './mcp'
+export type {
+  McpConnectionWait,
+  McpFailureNotice,
+  McpServerTone,
+  McpServerTool,
+  WaitForMcpConnectionOptions,
+} from './mcp'
 
 export {
   APPROVAL_CHOICES,

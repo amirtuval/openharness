@@ -1,23 +1,30 @@
 import {
   AgentSchema,
   CompactSessionRequestSchema,
+  ConnectMcpServerRequestSchema,
   CreateAgentRequestSchema,
+  CreateMcpServerRequestSchema,
   CreateModeRequestSchema,
   EVENT_TYPES,
   CreateSessionRequestSchema,
   DEFAULT_MCP_TOOL_PERMISSION,
   DEFAULT_USER_THEME,
   DEFAULT_USER_TOOL_SETTINGS,
+  ListMcpServersResponseSchema,
   ListModelsResponseSchema,
   ListToolSettingsResponseSchema,
+  MAX_MCP_SERVERS_PER_USER,
   MODE_DEFAULT_MODEL,
   MAX_MODES_PER_USER,
+  McpServerSchema,
   ModeSchema,
   ProviderCredentialSchema,
   PutPreferencesRequestSchema,
   PutToolSettingsRequestSchema,
   PutProviderCredentialRequestSchema,
   SUMMARY_MODEL_SAME_AS_CHAT,
+  UpdateMcpServerRequestSchema,
+  estimateToolDefinitionTokens,
   parseServiceAccountKey,
   SendEventsRequestSchema,
   SessionSchema,
@@ -32,6 +39,7 @@ import {
   encodeKeyCursor,
   mcpToolOfferedName,
   newAgentId,
+  newMcpServerId,
   newModeId,
   newProviderCredentialId,
   newSessionId,
@@ -41,18 +49,24 @@ import { makeAgent, makeModelEntry, makeSession, makeUser } from '@openharness/p
 import type {
   Agent,
   AskUserInput,
+  ConnectMcpServerResponse,
   EventInput,
   GetPreferencesResponse,
   PreferencesDefaults,
   ListAgentsResponse,
   ListEventsResponse,
+  ListMcpServersResponse,
   ListModelsResponse,
   ListModesResponse,
   ListProviderCredentialsResponse,
   ListSessionsResponse,
   ListToolSettingsResponse,
+  McpOAuthClient,
+  McpServer,
+  McpToolSummary,
   Mode,
   ModeId,
+  ModeToolOverride,
   ModelEntry,
   ProviderCatalogStatus,
   PutProviderCredentialRequest,
@@ -80,6 +94,7 @@ import { ApiError, AuthenticationError } from '../errors'
 import type { Client, RequestOptions } from '../client'
 import type { StreamOptions } from '../events/stream'
 import { DEFAULT_CONTEXT_TOKEN_BUDGET, contextTokenBudget } from '../compaction'
+import { mcpServerByName } from '../mcp'
 import { isEventList } from '../internal/events'
 import { sleep } from '../internal/async'
 import { DeviceLoginError, SLOW_DOWN_INCREMENT_SECONDS } from '../resources/auth'
@@ -285,10 +300,31 @@ export interface FakeClientOptions {
    * Each becomes one `GET /v1/me/tools` entry — `source: 'mcp'`, its `<server>__<tool>` offered
    * name, the server's own `mcp_server`, and the `ask` policy a remote tool declares — which is
    * what a screen that groups remote tools by server, or one that must not break on them,
-   * renders. Seeded rather than created, like a mode: there is no MCP route in the fake (the
-   * resource is #311's, and this fake restates the settings shape, not that API).
+   * renders.
+   *
+   * When omitted, the fake lists the tools of the servers {@link mcpServers} seeded instead, so
+   * a test that seeds a server does not have to say its tools twice. An explicit `mcpTools` is
+   * used as given, names and all.
    */
   mcpTools?: readonly FakeMcpTool[]
+  /**
+   * The remote MCP servers {@link Client.mcpServers} starts with, over the default of none
+   * (epic #303, X10; #313).
+   *
+   * Seeded rather than created, like a mode: a settings screen renders from its first frame with
+   * a server already registered. Each server's `tools` are what its last connection check
+   * listed, and a server whose name is in {@link mcpUnreachable} is one the check cannot reach.
+   */
+  mcpServers?: readonly McpServer[]
+  /**
+   * Server names whose connection check fails, over the default of none.
+   *
+   * A real server that is down is stored in `status: error` with a `last_error`, and a `test`
+   * that reaches it fails again; the fake has no network to be down, so this names the servers
+   * that stand in for unreachable ones. `create` on such a name lands in `error` too, exactly as
+   * the server's save-time check does — a server it cannot reach is still stored.
+   */
+  mcpUnreachable?: readonly string[]
 }
 
 /**
@@ -296,13 +332,29 @@ export interface FakeClientOptions {
  *
  * Deliberately not the protocol's `McpServer` resource: the fake answers `GET /v1/me/tools`, and
  * an entry needs no URL, auth or connection status — only the pair a remote tool's offered name
- * is built from.
+ * is built from, and the description and definition size a settings screen shows.
  */
 export interface FakeMcpTool {
   /** The MCP server's name, as the log and the settings record it. */
   readonly server: string
   /** The tool's own name on that server. */
   readonly name: string
+  /** The tool's description, as its server would describe it; `null` when omitted. */
+  readonly description?: string | null
+  /**
+   * The estimated cost of its definition, in tokens; the protocol's own estimate over what the
+   * fake knows when omitted (`estimateToolDefinitionTokens`), which is what the real server does
+   * with what it can see.
+   */
+  readonly definitionTokens?: number
+}
+
+/** One `connect` call the fake answered, as {@link FakeClient.mcpConnects} records it. */
+export interface FakeMcpConnect {
+  /** The server whose flow was started. */
+  readonly serverId: string
+  /** Where the flow said it was started: `web` by default, `cli` for `oh`. */
+  readonly client: McpOAuthClient
 }
 
 /** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
@@ -453,6 +505,32 @@ export interface FakeClient extends Client {
   readonly modelListCalls: readonly ModelListCall[]
 
   /**
+   * Every {@link Client.mcpServers} `connect` call the fake has answered, in order (epic #303,
+   * X10; #313).
+   *
+   * A test of the connect flow asserts what it asked for — a web flow opened the authorization
+   * page in the app's own tab, `oh` started a `cli` one — and it is the record of the URL the
+   * fake answered being the one a browser would have been sent to.
+   */
+  readonly mcpConnects: readonly FakeMcpConnect[]
+
+  /**
+   * Simulate the provider redirecting the browser back to the server's OAuth callback (epic
+   * #303, X10; #311; #313).
+   *
+   * The real flow completes out of band: the user signs in at the provider, the provider
+   * redirects the browser to `GET /v1/me/mcp_servers/oauth/callback`, and the server exchanges
+   * the code and stores the tokens — there is no API call a client makes to finish it. So the
+   * fake cannot have `connect` complete by itself either, and this is how a test says "the
+   * browser came back": the server lands `connected` with the tools its check lists, exactly as
+   * the callback leaves it.
+   *
+   * @param serverId the `mcps_` id
+   * @throws ApiError with `not_found_error` for an unknown id
+   */
+  completeMcpOAuth(serverId: string): FakeClient
+
+  /**
    * Script the device flow `oh login` runs.
    *
    * The next {@link Client.auth} login answers the script; the codes it reports are
@@ -560,9 +638,36 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     ...FAKE_TOOLS_AVAILABLE,
     ...options.toolsAvailable,
   }
-  // The remote MCP tools this fake offers (#312), seeded by option: the tool-list read reports
-  // one entry per pair, which is what the settings screen's remote half renders.
-  const mcpTools: readonly FakeMcpTool[] = options.mcpTools ?? []
+  // The remote MCP servers the fake holds (epic #303, X10; #313): one in-memory map behind
+  // `/v1/me/mcp_servers`, seeded by option the way the credentials and modes are. The fake has
+  // one user, so ownership is only ever that user's — a server the map does not hold is the 404
+  // an unknown id gets — and the sealed secrets a real row carries (a header map, OAuth tokens)
+  // are not modelled at all: the fake keeps the header **names** a listing reports and nothing
+  // else, so a screen cannot be developed against a value no server would ever return.
+  const mcpServers = new Map<string, McpServer>(
+    (options.mcpServers ?? []).map((server) => [server.id, McpServerSchema.parse(server)]),
+  )
+  const unreachableServers = new Set(options.mcpUnreachable ?? [])
+  // What each seeded server really offers, keyed by **id** rather than by name: a check runs
+  // again after a rename, and a server's own tools are not its name's property. A created server
+  // has none — the fake cannot ask a server that does not exist — which is why a screen is
+  // developed against a seeded one.
+  const seededServerTools = new Map<string, readonly McpToolSummary[]>(
+    (options.mcpServers ?? []).map((server) => [server.id, server.tools]),
+  )
+  // The `oauth` servers that hold live tokens, by id. A real row keeps its sealed tokens
+  // whatever its status says — an `error` is usually the server being down, not the token being
+  // gone — so "does this server have tokens?" cannot be read off `status`, and a flow, a
+  // disconnect and an auth change are what move it.
+  const tokenHolders = new Set<string>(
+    (options.mcpServers ?? [])
+      .filter((server) => server.auth === 'oauth' && server.status !== 'needs_reconnect')
+      .map((server) => server.id),
+  )
+  // The remote MCP tools the fake offers (#312), seeded by option — or, when the option says
+  // nothing, read off the seeded servers' own tool lists so a test that registers a server does
+  // not have to name its tools twice.
+  const seededMcpTools: readonly FakeMcpTool[] | undefined = options.mcpTools
   const user = options.user ?? makeUser()
   // The fake is a stand-in for `GET /v1/models`, so it stamps the budget a real server would on
   // every entry it serves (epic #277, K10; #280) — a caller that passes one keeps it.
@@ -578,6 +683,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       message: null,
     }))
   const modelListCalls: ModelListCall[] = []
+  const mcpConnects: FakeMcpConnect[] = []
   // The caller's settings (#111, and the compaction controls of C3/#282): one in-memory value,
   // replaced whole by `put`, exactly like the server's row behind `GET`/`PUT /v1/me/preferences`.
   // The `defaults` a `null` control falls back to are the host's, not the stored value's, so
@@ -1301,6 +1407,340 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   }
 
   /** The effective tool list, as `GET /v1/me/tools` answers it (epic #303, X4; #307; #312). */
+  /**
+   * The remote MCP tools this fake offers: an explicit `mcpTools` seed as given, or one pair per
+   * tool the seeded servers' last checks listed (epic #303, #312; #313).
+   */
+  function remoteTools(): readonly FakeMcpTool[] {
+    if (seededMcpTools !== undefined) {
+      return seededMcpTools
+    }
+    return [...mcpServers.values()].flatMap((server) =>
+      server.tools.map((tool) => ({
+        server: server.name,
+        name: tool.name,
+        description: tool.description,
+        definitionTokens: tool.definition_tokens,
+      })),
+    )
+  }
+
+  /**
+   * Whether a server is in force for a request: its own `enabled`, with a mode's `mcp_servers`
+   * patch over it (#311). A mode that names a server the caller no longer has is ignored, which
+   * is the rule `apps/server/src/mcp/in-force.ts` applies.
+   */
+  function serverInForce(server: McpServer, override: ModeToolOverride | null): boolean {
+    const patch: Record<string, boolean> | undefined = override?.mcp_servers
+    return patch?.[server.id] ?? server.enabled
+  }
+
+  function hasLiveTokens(server: McpServer): boolean {
+    return tokenHolders.has(server.id)
+  }
+
+  /** The estimated cost of a tool's definition, over the shape the fake can see. */
+  function fakeDefinitionTokens(tool: FakeMcpTool): number {
+    return (
+      tool.definitionTokens ??
+      estimateToolDefinitionTokens({
+        name: tool.name,
+        description: tool.description ?? null,
+        input_schema: {},
+      })
+    )
+  }
+
+  /**
+   * The tool summaries a server's connection check lists.
+   *
+   * An explicit `mcpTools` seed is what the fake's remote half is, so it answers by name; with
+   * none, a seeded server's own tools are what its server has.
+   */
+  function checkedTools(server: McpServer): readonly McpToolSummary[] {
+    if (seededMcpTools !== undefined) {
+      return seededMcpTools
+        .filter((tool) => tool.server === server.name)
+        .map((tool) => ({
+          name: tool.name,
+          description: tool.description ?? null,
+          definition_tokens: fakeDefinitionTokens(tool),
+        }))
+    }
+    return [...(seededServerTools.get(server.id) ?? [])]
+  }
+
+  /**
+   * What the connection check writes onto a server (epic #303, X10).
+   *
+   * `none` and `headers` servers are reachable — the fake has no network to be down, so a name
+   * in `mcpUnreachable` is what stands in for one — and an `oauth` server **without** live
+   * tokens cannot be checked at all, which is why the real save leaves it `needs_reconnect`
+   * with its tools unlisted. `tokens` is what says a flow has completed (or that one has not
+   * been dropped since).
+   */
+  function checkedServer(
+    server: McpServer,
+    options: { readonly tokens?: boolean } = {},
+  ): McpServer {
+    const at = now().toISOString()
+    const usable = server.auth !== 'oauth' || options.tokens === true
+    if (!usable) {
+      return {
+        ...server,
+        status: 'needs_reconnect',
+        last_error: null,
+        tools: [],
+        definition_tokens: 0,
+        last_tested_at: null,
+        updated_at: at,
+      }
+    }
+    if (unreachableServers.has(server.name)) {
+      return {
+        ...server,
+        status: 'error',
+        last_error: 'The server could not be reached.',
+        tools: [],
+        definition_tokens: 0,
+        last_tested_at: at,
+        updated_at: at,
+      }
+    }
+    const tools = checkedTools(server)
+    return {
+      ...server,
+      status: 'connected',
+      last_error: null,
+      tools: [...tools],
+      definition_tokens: tools.reduce((total, tool) => total + tool.definition_tokens, 0),
+      last_tested_at: at,
+      updated_at: at,
+    }
+  }
+
+  const mcpServersResource: Client['mcpServers'] = {
+    create(body, requestOptions): Promise<McpServer> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = CreateMcpServerRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      if ([...mcpServers.values()].some((server) => server.name === request.data.name)) {
+        return Promise.reject(
+          new ApiError(409, `an MCP server named ${request.data.name} already exists`, {
+            type: 'conflict_error',
+          }),
+        )
+      }
+      if (mcpServers.size >= MAX_MCP_SERVERS_PER_USER) {
+        return Promise.reject(
+          new ApiError(409, `at most ${MAX_MCP_SERVERS_PER_USER} MCP servers`, {
+            type: 'conflict_error',
+          }),
+        )
+      }
+      const at = now().toISOString()
+      const created = checkedServer(
+        McpServerSchema.parse({
+          id: newMcpServerId(),
+          type: 'mcp_server',
+          owner_id: user.id,
+          name: request.data.name,
+          url: request.data.url,
+          auth: request.data.auth,
+          enabled: request.data.enabled ?? true,
+          status: 'needs_reconnect',
+          last_error: null,
+          header_names: request.data.auth === 'headers' ? Object.keys(request.data.headers) : [],
+          tools: [],
+          definition_tokens: 0,
+          last_tested_at: null,
+          created_at: at,
+          updated_at: at,
+        }),
+      )
+      mcpServers.set(created.id, created)
+      return Promise.resolve(created)
+    },
+
+    list(requestOptions): Promise<ListMcpServersResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      return Promise.resolve(ListMcpServersResponseSchema.parse({ data: [...mcpServers.values()] }))
+    },
+
+    get(serverId, requestOptions): Promise<McpServer> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const found = mcpServers.get(serverId)
+      return found === undefined
+        ? Promise.reject(notFoundMcpServer(serverId))
+        : Promise.resolve(found)
+    },
+
+    update(serverId, body, requestOptions): Promise<McpServer> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const found = mcpServers.get(serverId)
+      if (found === undefined) {
+        return Promise.reject(notFoundMcpServer(serverId))
+      }
+      const request = UpdateMcpServerRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      const patch = request.data
+      if (patch.name !== undefined && patch.name !== found.name) {
+        if ([...mcpServers.values()].some((server) => server.name === patch.name)) {
+          return Promise.reject(
+            new ApiError(409, `an MCP server named ${patch.name} already exists`, {
+              type: 'conflict_error',
+            }),
+          )
+        }
+      }
+      const auth = patch.auth ?? found.auth
+      // A `headers` map is only meaningful for a `headers` server; a body that carries one while
+      // the resulting auth is something else is the 400 the route gives.
+      if (patch.headers !== undefined && auth !== 'headers') {
+        return Promise.reject(
+          new ApiError(400, 'headers are only accepted for a headers-authenticated server', {
+            type: 'invalid_request_error',
+          }),
+        )
+      }
+      const changedAuth = patch.auth !== undefined && patch.auth !== found.auth
+      if (changedAuth) {
+        // Whatever the old auth type carried is gone: a header map for anything that is no
+        // longer `headers`, and the tokens for anything whose auth changed at all.
+        tokenHolders.delete(serverId)
+      }
+      // Changing the auth type drops whatever the old one carried: a header map for anything
+      // that is no longer `headers`, and OAuth tokens (and therefore the connection) for
+      // anything that becomes `oauth`, which must be connected again.
+      const headerNames =
+        auth !== 'headers'
+          ? []
+          : patch.headers !== undefined
+            ? Object.keys(patch.headers)
+            : found.header_names
+      const updated: McpServer = {
+        ...found,
+        name: patch.name ?? found.name,
+        url: patch.url ?? found.url,
+        enabled: patch.enabled ?? found.enabled,
+        auth,
+        header_names: headerNames,
+        updated_at: now().toISOString(),
+      }
+      // A check runs again when the address, the auth or the headers changed — the same rule
+      // the service follows — and a plain rename or enable leaves the listed tools alone.
+      const recheck =
+        changedAuth ||
+        patch.url !== undefined ||
+        (patch.headers !== undefined && auth === 'headers')
+      const next = recheck ? checkedServer(updated, { tokens: hasLiveTokens(updated) }) : updated
+      // A server that became `oauth` has no tokens until a flow completes, whatever it did
+      // before; `checkedServer` already lands it on `needs_reconnect` with nothing listed.
+      mcpServers.set(serverId, next)
+      return Promise.resolve(next)
+    },
+
+    delete(serverId, requestOptions): Promise<void> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      if (!mcpServers.delete(serverId)) {
+        return Promise.reject(notFoundMcpServer(serverId))
+      }
+      return Promise.resolve()
+    },
+
+    test(serverId, requestOptions): Promise<McpServer> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const found = mcpServers.get(serverId)
+      if (found === undefined) {
+        return Promise.reject(notFoundMcpServer(serverId))
+      }
+      // An `oauth` server with no live tokens cannot be checked however often it is asked: the
+      // flow is the only thing that changes its answer, so a test leaves it where it is.
+      if (found.auth === 'oauth' && !hasLiveTokens(found)) {
+        return Promise.resolve(found)
+      }
+      const tested = checkedServer(found, { tokens: hasLiveTokens(found) })
+      mcpServers.set(serverId, tested)
+      return Promise.resolve(tested)
+    },
+
+    connect(serverId, body, requestOptions): Promise<ConnectMcpServerResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const found = mcpServers.get(serverId)
+      if (found === undefined) {
+        return Promise.reject(notFoundMcpServer(serverId))
+      }
+      const request = ConnectMcpServerRequestSchema.safeParse(body ?? {})
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      if (found.auth !== 'oauth') {
+        return Promise.reject(
+          new ApiError(400, `the ${found.name} server does not use OAuth`, {
+            type: 'invalid_request_error',
+          }),
+        )
+      }
+      mcpConnects.push({ serverId, client: request.data.client })
+      return Promise.resolve({
+        authorization_url: `https://auth.example.com/authorize?server=${found.id}&state=fake_state`,
+      })
+    },
+
+    disconnect(serverId, requestOptions): Promise<McpServer> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const found = mcpServers.get(serverId)
+      if (found === undefined) {
+        return Promise.reject(notFoundMcpServer(serverId))
+      }
+      // Only an `oauth` server has tokens to drop; anything else is already as connected as it
+      // will ever be, and its listing is left alone.
+      if (found.auth !== 'oauth') {
+        return Promise.resolve(found)
+      }
+      tokenHolders.delete(serverId)
+      const dropped: McpServer = {
+        ...found,
+        status: 'needs_reconnect',
+        last_error: null,
+        tools: [],
+        definition_tokens: 0,
+        last_tested_at: null,
+        updated_at: now().toISOString(),
+      }
+      mcpServers.set(serverId, dropped)
+      return Promise.resolve(dropped)
+    },
+  }
+
   const toolEntries = (modeId: ModeId | undefined): ListToolSettingsResponse => {
     const override = modeId === undefined ? null : (modes.get(modeId)?.tools ?? null)
     if (modeId !== undefined && !modes.has(modeId)) {
@@ -1338,16 +1778,20 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     }
     // The remote MCP tools come after this build's own, one entry each under the offered name
     // the settings and the log are keyed by (#312). A remote tool has no on/off of its own —
-    // `enabled` is the server's, which the fake offers as on — and its `ask` declaration is what
-    // the user's policy falls back to, so the fake serves the shape the server sends without
-    // pretending to hold servers of its own.
-    for (const tool of mcpTools) {
+    // `enabled` is the server's, with a mode's patch over it (#311) — and its `ask` declaration
+    // is what the user's policy falls back to. A server that is off is not in force, so its
+    // tools are not in the list at all, exactly as the server's own listing drops them.
+    for (const tool of remoteTools()) {
+      const server = mcpServerByName([...mcpServers.values()], tool.server)
+      if (server !== null && !serverInForce(server, override)) {
+        continue
+      }
       const name = mcpToolOfferedName(tool.server, tool.name)
       const policy = toolSettings.mcp[name] ?? DEFAULT_MCP_TOOL_PERMISSION
       entries.push({
         name,
         source: 'mcp',
-        enabled: true,
+        enabled: server === null ? true : serverInForce(server, override),
         policy,
         default_policy: DEFAULT_MCP_TOOL_PERMISSION,
         available: true,
@@ -1356,7 +1800,14 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     }
     // A stored policy for a remote tool nothing offers is listed the same way a stray built-in
     // is: by name, unavailable, with no declaration and no server to name.
-    const offered = new Set(mcpTools.map((tool) => mcpToolOfferedName(tool.server, tool.name)))
+    const offered = new Set(
+      remoteTools()
+        .filter((tool) => {
+          const server = mcpServerByName([...mcpServers.values()], tool.server)
+          return server === null || serverInForce(server, override)
+        })
+        .map((tool) => mcpToolOfferedName(tool.server, tool.name)),
+    )
     for (const name of Object.keys(toolSettings.mcp)
       .filter((each) => !offered.has(each))
       .sort()) {
@@ -1562,15 +2013,29 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
     user,
     modelListCalls,
+    mcpConnects,
     agents: agentsResource,
     sessions: sessionsResource,
     providerCredentials: providerCredentialsResource,
     models: modelsResource,
     modes: modesResource,
+    mcpServers: mcpServersResource,
     tools: toolsResource,
     usage: usageResource,
     auth: authResource,
     preferences: preferencesResource,
+
+    completeMcpOAuth(serverId: string): FakeClient {
+      const found = mcpServers.get(serverId)
+      if (found === undefined) {
+        throw notFoundMcpServer(serverId)
+      }
+      // The callback exchanges the code and lists the tools; a server whose name is
+      // `mcpUnreachable` cannot be listed, so it lands on `error` like any failed check.
+      tokenHolders.add(serverId)
+      mcpServers.set(serverId, checkedServer(found, { tokens: true }))
+      return fake
+    },
 
     me(requestOptions): Promise<User> {
       throwIfAborted(requestOptions)
@@ -1816,6 +2281,11 @@ function confirmationRefused(refusal: ConfirmationRefusal, sessionId: string): A
 /** The 404 an unknown (or another user's) mode id gets — the server's `not_found_error`. */
 function notFoundMode(modeId: string): ApiError {
   return new ApiError(404, `no mode with id ${modeId}`, { type: 'not_found_error' })
+}
+
+/** The 404 an unknown MCP server id gets (epic #303, X10; #313). */
+function notFoundMcpServer(serverId: string): ApiError {
+  return new ApiError(404, `no MCP server with id ${serverId}`, { type: 'not_found_error' })
 }
 
 function badRequestFor(issues: readonly ValidationIssue[]): ApiError {

@@ -19,6 +19,7 @@ import type { DebugHook, FetchLike, ResponseSchema } from './http'
 import { createTransport } from './http'
 import { createAgentsResource, type AgentsResource } from './resources/agents'
 import { createAuthResource, type AuthResource } from './resources/auth'
+import { createMcpServersResource, type McpServersResource } from './resources/mcp-servers'
 import { createModesResource, type ModesResource } from './resources/modes'
 import { createModelsResource, type ModelsResource } from './resources/models'
 import { createPreferencesResource, type PreferencesResource } from './resources/preferences'
@@ -197,6 +198,16 @@ export interface Client {
    */
   readonly tools: ToolsResource
 
+  /**
+   * The caller's own remote MCP servers (epic #303, X10; the screen is #313).
+   *
+   * `mcpServers.create/get/list/update/delete` are `/v1/me/mcp_servers`, `test` runs the
+   * connection check now, and `connect`/`disconnect` drive an `oauth` server's flow. A server is
+   * per user — another user's is a 404 — and its secrets (a header map, OAuth tokens) never come
+   * back: a listing reports the header names and the status.
+   */
+  readonly mcpServers: McpServersResource
+
   /** Signing in (the CLI's device flow) and signing out (epic #65, A6). */
   readonly auth: AuthResource
 
@@ -279,6 +290,7 @@ export function createClient(options: ClientOptions): Client {
     providerCredentials: createProviderCredentialsResource(transport),
     models: createModelsResource(transport),
     modes: createModesResource(transport),
+    mcpServers: createMcpServersResource(transport),
     tools: createToolsResource(transport),
     auth: createAuthResource(transport),
     preferences: createPreferencesResource(transport),
