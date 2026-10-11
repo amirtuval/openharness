@@ -675,6 +675,7 @@ export class InMemorySessionStore implements SessionStore {
             model: modelOf.get(event.model_request_start_id) ?? null,
             usage: { ...event.model_usage },
             processed_at: event.processed_at,
+            searches: event.searches ?? 0,
           }),
         )
       }

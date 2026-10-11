@@ -5,26 +5,21 @@ import type {
   ToolSupportFor,
 } from '@openharness/brain'
 import {
-  WEB_SEARCH_API_KEY,
-  createBraveSearchProvider,
   createToolRegistry,
   createWebFetchTool,
-  createWebSearchTool,
   textResult,
   todoWriteTool,
 } from '@openharness/hands'
-import type { McpFetch, SearchTransport, ToolDefinition, ToolRegistry } from '@openharness/hands'
+import type { McpFetch, ToolDefinition, ToolRegistry } from '@openharness/hands'
 import type { SessionStore } from '@openharness/session'
 import { z } from 'zod'
 
 import type { ModelRegistry } from './catalog/registry'
 import { createToolSupportResolver } from './catalog/tool-support'
-import type { SearchConfig } from './config'
 import { createMcpToolProvider } from './mcp/tools'
 import type { McpServerService } from './mcp/service'
 import type { ResolvedModel } from './model'
 import { askUserTool } from './pausing'
-import type { SearchAllowance } from './searches'
 import { createToolSettingsResolver } from './tool-settings'
 import type { Logger } from './types'
 
@@ -33,34 +28,25 @@ import type { Logger } from './types'
  * #307), and how this server registers and wires them.
  *
  * Every deployment gets the built-in tools of
- * [#305](https://github.com/amirtuval/openharness/issues/305): `web_fetch` and `todo_write`
- * always — the one reaches a URL the model chose through `safeFetch`, the other keeps the
- * model's own list — and `web_search` **only where the operator configured a search API**,
- * because there is nothing to offer a model without one. A deployment that sets no
- * `OPENHARNESS_SEARCH_API_KEY` therefore offers two tools and no search, which is a smaller
- * offer rather than a broken one. The test model additionally gets the `echo` tool, which is
- * what lets the e2e suite drive a whole tool turn through the real server.
+ * [#305](https://github.com/amirtuval/openharness/issues/305): `web_fetch` and `todo_write` —
+ * the one reaches a URL the model chose through `safeFetch`, the other keeps the model's own
+ * list. **`web_search` is not one of them any more** (#335): it is offered by attaching the
+ * chat model's own provider's native search tool to the request, so there is nothing here to
+ * register, no key to inject and no allowance to count — `@openharness/brain`'s
+ * `./native-search` decides per request whether the model has one. The test model additionally
+ * gets the `echo` tool, which is what lets the e2e suite drive a whole tool turn through the
+ * real server.
  *
  * **`ask_user` is registered by every deployment, whatever the model** (epic #303, #309): a
  * model that needs a decision asks the user for one, the turn ends `requires_action`, and the
  * user's answer is the call's result. It is the one tool the server itself provides, and it is
  * process-independent — nothing about it is a test hook.
  *
- * Two things here are the server's alone, and they are why the tools live in `@openharness/hands`
- * and the wiring does not:
- *
- * - **The operator's search key**, which is a deployment secret: the tool is handed it per step
- *   through the turn's per-user values (`resolveToolSecrets`), which is also the channel the
- *   registry scrubs anything a tool returns with. `@openharness/hands` never reads an
- *   environment variable, so nothing else could hand it the key.
- * - **The daily allowance**, which is a fact about the log: the server counts the user's
- *   searches ({@link SearchAllowance}) and withholds the key once they are gone, so the tool
- *   answers with the limit notice. That is the one reason a registered search tool is ever
- *   handed no key.
- *
  * The per-user settings (#307) sit on top of the same registry: {@link createTurnTools} hands
  * the brain a resolver over the very registry {@link createTurnRegistry} built, so a tool a
- * settings screen calls unavailable is one a request is not offered.
+ * settings screen calls unavailable is one a request is not offered. `web_search` is not in
+ * that registry and is still listed there: it is offered per request, and its availability is
+ * the chat model's (`./tool-settings`).
  */
 
 /** The name of the test tool; the mock model calls it by this name. */
@@ -99,24 +85,15 @@ export function createTestToolRegistry(): ToolRegistry {
  * object to both builders rather than restating the environment twice.
  */
 export interface TurnRegistryOptions {
-  /** The parsed environment: the search API `web_search` is served by, or `null` for none. */
-  readonly config: {
-    /** The search API `web_search` is served by, or `null` when the deployment offers none. */
-    readonly search: SearchConfig | null
-  }
   /** Which factory the process runs — `mock` adds the test tool to the built-ins. */
   readonly kind: ResolvedModel['kind']
-  /** The client a search request goes through: the server's egress, like every other call. */
-  readonly searchTransport: SearchTransport
 }
 
 /**
  * The tools this process registers (epic #303; the built-ins are #305; `ask_user` is #309).
  *
  * `web_fetch` and `todo_write` are registered for every process, whatever model it runs, and
- * `web_search` is added only where the operator configured a search API — with no provider to
- * call there is nothing to offer, and a deployment that configured none gets a smaller offer
- * rather than a broken one. `ask_user` is registered by every process too, ahead of them: the
+ * `ask_user` ahead of them: the
  * model can ask the user a question and the turn pauses until they answer, whichever model the
  * process runs. The test model (`kind === 'mock'`) gets the `echo` tool after `ask_user`,
  * ahead of the tools that reach the world, since those would be exercised by a script that
@@ -127,21 +104,11 @@ export interface TurnRegistryOptions {
  * tool listed as available must be one a chat can really call.
  */
 export function createTurnRegistry(options: TurnRegistryOptions): ToolRegistry {
-  const { config, kind, searchTransport } = options
   const tools: ToolDefinition[] = [askUserTool]
-  if (kind === 'mock') {
+  if (options.kind === 'mock') {
     tools.push(testEchoTool)
   }
   tools.push(createWebFetchTool(), todoWriteTool)
-  const search = config.search
-  if (search !== null) {
-    tools.push(
-      createWebSearchTool({
-        provider: createBraveSearchProvider({ transport: searchTransport }),
-        dailyLimit: search.dailyLimit,
-      }),
-    )
-  }
   return createToolRegistry(tools)
 }
 
@@ -151,7 +118,9 @@ export function createTurnRegistry(options: TurnRegistryOptions): ToolRegistry {
  * The field names are `RunTurnOptions`' own, so `SessionRunner` spreads this object straight
  * into a turn's options and there is nothing to keep in step by hand. The settings resolver is
  * the one #307 adds: the session owner's stored choices, with the mode's override applied, read
- * per request; the secrets resolver is #305's, which is where the operator's search key travels.
+ * per request. What was #305's — the per-step secrets resolver the operator's search key
+ * travelled through — is gone with the key (#335); a tool that still wants a per-user value can
+ * be handed one the same way, and nothing needs one today.
  */
 export interface TurnToolOptions {
   /** The tools a request may offer — its offer, before the settings take any of them out. */
@@ -160,7 +129,7 @@ export interface TurnToolOptions {
   readonly toolSettings?: ToolSettingsResolver
   /** Whether a model can call tools; the registry's `tool_call` when absent. */
   readonly toolSupportFor?: ToolSupportFor
-  /** Where a step's per-user values come from — here, the operator's search key. */
+  /** Where a step's per-user values come from, for a tool that wants any (epic #303, X4). */
   readonly resolveToolSecrets?: ToolSecretResolver
   /** The most model requests one turn may make; the brain's default when absent. */
   readonly maxToolSteps?: number
@@ -177,23 +146,17 @@ export interface TurnToolOptions {
  * registers, and the store the settings are read from.
  */
 export interface TurnToolsOptions {
-  /** The parsed environment: how many requests a turn may make, and the search settings. */
+  /** The parsed environment: how many requests one turn may make. */
   readonly config: {
     /** The most model requests one turn may make. */
     readonly maxToolSteps: number
-    /** The search API `web_search` is served by, or `null` when the deployment offers none. */
-    readonly search: SearchConfig | null
   }
   /** Which factory the process runs — `mock` adds the test tool to the built-ins. */
   readonly kind: ResolvedModel['kind']
-  /** The client a search request goes through: the server's egress, like every other call. */
-  readonly searchTransport: SearchTransport
   /** The store the settings resolver reads a user's choices from. */
   readonly store: Pick<SessionStore, 'getToolSettings' | 'getMode' | 'getPreferences'>
   /** The model registry, which answers which models can call tools at all. */
   readonly registry: ModelRegistry
-  /** The per-user daily allowance, counted from the log; needed only when search is on. */
-  readonly allowance: SearchAllowance | undefined
   /**
    * The tools this process registers, when the caller already built them
    * ({@link createTurnRegistry}); omitted, the built-ins are built here.
@@ -222,20 +185,19 @@ export interface TurnToolsOptions {
 
 /**
  * Resolve the tools a turn runs with: the registry, the settings over it (#307), the support
- * gate, the operator's search key (#305) and the step budget.
+ * gate and the step budget.
  *
  * Every deployment registers `ask_user` (#309), so a chat always offers at least it: a chat
  * whose owner has turned every tool off offers nothing — an empty offer, not a missing one —
  * and a host that would rather run without tools passes the turn no options at all.
  *
- * The registry is built **once per process** and holds no per-user state: which user is
- * searching is resolved per step (`resolveToolSecrets` is asked with the session's owner), so
- * one registry serves every session without ever holding a key itself.
+ * The registry is built **once per process** and holds no per-user state, so one registry
+ * serves every session. The one tool a request carries besides it — a provider's native search
+ * (#335) — is not resolved here: the brain attaches it per request, and knows the model.
  */
 export function createTurnTools(options: TurnToolsOptions): TurnToolOptions {
-  const { config, registry, allowance } = options
+  const { config, registry } = options
   const tools = options.tools ?? createTurnRegistry(options)
-  const search = config.search
   const mcp = options.mcp
   return {
     tools,
@@ -251,12 +213,6 @@ export function createTurnTools(options: TurnToolsOptions): TurnToolOptions {
     // Which models may be offered tools is models.dev's `tool_call`, the same gate the context
     // budget and the reasoning effort come from (#304, X2).
     toolSupportFor: createToolSupportResolver(registry),
-    // The operator's key, per step, and only while the user has searches left. Withholding it
-    // is how the allowance is enforced: the tool answers with the limit notice, which says
-    // what happened rather than leaving the model to guess why its call failed.
-    ...(search === null || allowance === undefined
-      ? {}
-      : { resolveToolSecrets: searchSecretResolver(search, allowance) }),
     maxToolSteps: config.maxToolSteps,
     // The remote tools a request offers (epic #303, X10; #312): listed per request from the
     // chat's in-force servers, through the guarded fetch, and cached briefly.
@@ -270,16 +226,5 @@ export function createTurnTools(options: TurnToolsOptions): TurnToolOptions {
             ...(options.logger === undefined ? {} : { logger: options.logger }),
           }),
         }),
-  }
-}
-
-/** The resolver that hands a step the operator's key while the user's allowance lasts. */
-function searchSecretResolver(
-  search: SearchConfig,
-  allowance: SearchAllowance,
-): ToolSecretResolver {
-  return async (ownerId): Promise<Readonly<Record<string, string>>> => {
-    const remaining = await allowance.remaining(ownerId)
-    return remaining > 0 ? { [WEB_SEARCH_API_KEY]: search.apiKey } : {}
   }
 }

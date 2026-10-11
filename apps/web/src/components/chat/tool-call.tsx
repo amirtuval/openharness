@@ -1,5 +1,6 @@
 import { formatToolInput, toolCallSummary, toolStatusLabel } from '@openharness/client'
 import type { TranscriptToolCall, ToolCallStatus } from '@openharness/client'
+import type { Source } from '@openharness/protocol'
 import {
   Ban,
   Check,
@@ -112,9 +113,45 @@ export function ToolCallLine({
               error={call.result.isError}
             />
           )}
+          {call.sources === undefined ? null : <ToolSources sources={call.sources} />}
         </div>
       </CollapsibleContent>
     </Collapsible>
+  )
+}
+
+/**
+ * The web pages a search found (epic #303, X14; issue #335).
+ *
+ * A provider-executed search answers with the provider's own citations, normalized by the brain
+ * into one list, and this is where a reader sees them: the page's title as the link, its URL
+ * under it, and the passage it was cited for. Shown in the detail rather than on the compact
+ * line — a search finds five pages, and five lines of chrome per call is what the disclosure
+ * exists to avoid.
+ */
+function ToolSources({ sources }: { readonly sources: readonly Source[] }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-2xs font-medium tracking-wide text-muted-foreground uppercase">Sources</p>
+      <ol data-slot="tool-sources" className="space-y-1">
+        {sources.map((source) => (
+          <li key={`${source.url}#${source.title ?? ''}`} className="min-w-0">
+            <a
+              href={source.url}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="font-medium break-words hover:underline"
+            >
+              {source.title ?? source.url}
+            </a>
+            <p className="truncate text-2xs text-muted-foreground">{source.url}</p>
+            {source.cited_text === undefined ? null : (
+              <p className="text-2xs text-muted-foreground italic">{source.cited_text}</p>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
   )
 }
 

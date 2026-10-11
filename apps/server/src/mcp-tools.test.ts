@@ -284,6 +284,9 @@ describe('a remote tool turn', () => {
       { name: 'ask_user', source: 'builtin' },
       { name: 'echo', source: 'builtin' },
       { name: 'notes__search', source: 'mcp', server: 'notes' },
+      // The chat's model is a `gpt-5-mini`, whose provider has a native search tool, so the
+      // request carried `web_search` too (#335) — offered, not called.
+      { name: 'web_search', source: 'provider' },
     ])
     expect(server.status).toBe('connected')
   })
@@ -472,6 +475,7 @@ describe('a server that cannot be used', () => {
     expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : []).toEqual([
       { name: 'ask_user', source: 'builtin' },
       { name: 'echo', source: 'builtin' },
+      { name: 'web_search', source: 'provider' },
     ])
   })
 
@@ -511,6 +515,7 @@ describe('a server that cannot be used', () => {
     expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : []).toEqual([
       { name: 'ask_user', source: 'builtin' },
       { name: 'echo', source: 'builtin' },
+      { name: 'web_search', source: 'provider' },
     ])
   })
 
@@ -540,6 +545,7 @@ describe('a server that cannot be used', () => {
     expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : []).toEqual([
       { name: 'ask_user', source: 'builtin' },
       { name: 'echo', source: 'builtin' },
+      { name: 'web_search', source: 'provider' },
     ])
   })
 })
@@ -628,6 +634,7 @@ describe('name sanitizing and collisions', () => {
       { name: 'ask_user', source: 'builtin' },
       { name: 'echo', source: 'builtin' },
       { name: mcpToolOfferedName('notes', 'find.by tag'), source: 'mcp', server: 'notes' },
+      { name: 'web_search', source: 'provider' },
     ])
     expect(tools.some((tool) => /^[a-zA-Z0-9_-]{1,64}$/.test(tool.name))).toBe(true)
   })

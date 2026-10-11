@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  WEB_FETCH_TOOL_NAME,
-  WEB_SEARCH_TOOL_NAME,
-  createToolRegistry,
-  textResult,
-} from '@openharness/hands'
+import { WEB_FETCH_TOOL_NAME, createToolRegistry, textResult } from '@openharness/hands'
 import type { ToolDefinition } from '@openharness/hands'
 import {
   API_VERSION_PREFIX,
@@ -20,13 +15,13 @@ import {
   type Session,
   type SessionId,
   type ToolSettingEntry,
+  WEB_SEARCH_TOOL_NAME,
 } from '@openharness/protocol'
 import { z } from 'zod'
 
-import { createProviderFetch } from './catalog/provider-fetch'
 import { createBundledRegistry } from './catalog/registry'
+import { toolSettingEntries } from './tool-settings'
 import { createTurnRegistry } from './tools'
-import type { SearchConfig } from './config'
 import {
   asUser,
   createTestApp,
@@ -477,14 +472,10 @@ describe('a chat under the settings', () => {
   })
 })
 
-describe('the built-in tools under the settings (#305 × #307)', () => {
+describe('the built-in tools under the settings (#305 × #307; #335)', () => {
   /** The registry a deployment on a provider model really runs (`main.ts`'s `createTurnRegistry`). */
-  function builtins(search: SearchConfig | null = null) {
-    return createTurnRegistry({
-      config: { search },
-      kind: 'provider',
-      searchTransport: createProviderFetch(),
-    })
+  function builtins() {
+    return createTurnRegistry({ kind: 'provider' })
   }
 
   it('lists the built-ins a deployment really registers, and offers them to a chat', async () => {
@@ -494,12 +485,17 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
       replies: [{ text: ['ok'] }],
     })
 
+    // `web_search` is listed although nothing registers it (#335): it is a provider's own tool,
+    // and the settings are where a user's choice about it lives.
     expect((await getTools(test)).map((entry) => entry.name)).toEqual([
       ASK_USER_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
+      WEB_SEARCH_TOOL_NAME,
     ])
 
+    // `gpt-5-mini` is a model whose provider has a native search tool, so the request carries it
+    // — recorded on the span as `provider`, which is what tells the four apart.
     const session = await createSession(test, { model: { id: 'openai/gpt-5-mini' } })
     await send(test, session.id, message('hello'))
     await waitForIdle(test.store, session.id)
@@ -508,6 +504,7 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
+      { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
     ])
   })
 
@@ -519,79 +516,58 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
     })
     const session = await createSession(test, { model: { id: 'openai/gpt-5-mini' } })
     await putTools(test, {
-      builtin: { [WEB_FETCH_TOOL_NAME]: { enabled: false, policy: 'allow' } },
+      builtin: {
+        [WEB_FETCH_TOOL_NAME]: { enabled: false, policy: 'allow' },
+        [WEB_SEARCH_TOOL_NAME]: { enabled: false, policy: 'allow' },
+      },
     })
 
     await send(test, session.id, message('hello'))
     await waitForIdle(test.store, session.id)
 
     // A tool that is off is not in the offer at all — the model cannot see it — and the span
-    // records what was really offered.
+    // records what was really offered. It holds for the provider-native one too (#335): a
+    // search the user turned off is not attached, which is the only meaning `deny` can have
+    // for a provider-executed tool.
     expect((await spans(test, session.id))[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
     ])
   })
 
-  it('lists a web_search this deployment has no key for as available: false', async () => {
+  it('lists web_search as unavailable, and why, on a model that cannot search (#335)', async () => {
     const test = createTestApp({ tools: builtins() })
-    await putTools(test, {
-      builtin: { [WEB_SEARCH_TOOL_NAME]: { enabled: true, policy: 'allow' } },
+
+    // An answer that named no model claims nothing about one, and still lists `web_search`:
+    // the tool exists, and only a model decides whether it can be offered.
+    const entryOf = (entries: readonly ToolSettingEntry[], name: string) =>
+      entries.find((entry) => entry.name === name)
+    expect(entryOf(await getTools(test), WEB_SEARCH_TOOL_NAME)).toMatchObject({
+      name: WEB_SEARCH_TOOL_NAME,
+      source: 'builtin',
+      default_policy: 'allow',
+      available: true,
     })
 
-    // The tool is not registered — an operator configured no search API — so a stored setting
-    // for it is listed as unavailable rather than hidden, and never offered.
-    expect(await getTools(test)).toEqual([
-      {
-        name: ASK_USER_TOOL_NAME,
-        source: 'builtin',
-        enabled: true,
-        policy: 'allow',
-        default_policy: 'allow',
-        available: true,
-      },
-      {
-        name: WEB_FETCH_TOOL_NAME,
-        source: 'builtin',
-        enabled: true,
-        policy: 'allow',
-        default_policy: 'allow',
-        available: true,
-      },
-      {
-        name: 'todo_write',
-        source: 'builtin',
-        enabled: true,
-        policy: 'allow',
-        default_policy: 'allow',
-        available: true,
-      },
-      {
-        name: WEB_SEARCH_TOOL_NAME,
-        source: 'builtin',
-        enabled: true,
-        policy: 'allow',
-        default_policy: null,
-        available: false,
-      },
-    ])
+    // A chat on a model whose provider has no search tool is told so, and told why.
+    const unavailable = await getTools(test, '?model_id=deepseek/deepseek-chat')
+    expect(entryOf(unavailable, WEB_SEARCH_TOOL_NAME)).toMatchObject({
+      available: false,
+      reason: 'This model has no web search.',
+    })
+    // The built-ins are not model-dependent, and say nothing of the sort.
+    expect(entryOf(unavailable, WEB_FETCH_TOOL_NAME)?.reason).toBeUndefined()
+    // A model whose provider has one is available again — the question is the model's.
+    const available = await getTools(test, '?model_id=anthropic/claude-sonnet-4-5')
+    expect(entryOf(available, WEB_SEARCH_TOOL_NAME)).toMatchObject({ available: true })
   })
 
-  it('registers web_search where an operator configured one, and a mode can turn it off', async () => {
-    const search: SearchConfig = { provider: 'brave', apiKey: 'operator-key', dailyLimit: 5 }
+  it('offers web_search on a searchable model, and a mode can turn it off (#335)', async () => {
     const test = createTestApp({
-      tools: builtins(search),
-      search,
+      tools: builtins(),
       registry: createBundledRegistry(),
       replies: [{ text: ['ok'] }],
     })
-
-    expect((await getTools(test)).map((entry) => entry.name)).toEqual([
-      ASK_USER_TOOL_NAME,
-      WEB_FETCH_TOOL_NAME,
-      'todo_write',
-      WEB_SEARCH_TOOL_NAME,
-    ])
 
     // Continuing a chat on a mode checks the mode's model is usable, so its provider needs a key.
     await putKey(test, 'openai')
@@ -605,11 +581,37 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
     await waitForIdle(test.store, session.id)
 
     // The mode's override is applied over the user's settings (which say nothing here), so the
-    // search tool #305 registered is not offered — the two features meeting in one offer.
+    // provider's search tool is not attached — the settings and the offer meeting in one place.
     expect((await spans(test, session.id))[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
     ])
+  })
+
+  it('refuses an ask policy for web_search, and reads a stored one as allow (#335)', async () => {
+    const test = createTestApp({ tools: builtins() })
+
+    // There is no moment at which a provider-executed search could be held for the user, so the
+    // write is refused with the reason rather than stored as a switch that can never ask.
+    const refused = await putJson(test, TOOLS, {
+      builtin: { [WEB_SEARCH_TOOL_NAME]: { enabled: true, policy: 'ask' } },
+    })
+    expect(refused.status).toBe(400)
+    const body = (await refused.json()) as { error?: { type?: string; message?: string } }
+    expect(body.error?.type).toBe('invalid_request_error')
+    expect(body.error?.message).toContain('cannot be set to "ask"')
+
+    // A choice stored before that check existed is read as `allow`: the settings cannot honour
+    // an `ask`, so the only two meanings left are `allow` and `deny`, and `ask` is not `deny`.
+    const stored = toolSettingEntries(
+      createToolRegistry([tool('todo_write')]),
+      { builtin: { [WEB_SEARCH_TOOL_NAME]: { enabled: true, policy: 'ask' } }, mcp: {} },
+      null,
+    )
+    expect(stored.find((entry) => entry.name === WEB_SEARCH_TOOL_NAME)).toMatchObject({
+      policy: 'allow',
+      available: true,
+    })
   })
 })

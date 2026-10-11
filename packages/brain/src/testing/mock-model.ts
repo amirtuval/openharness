@@ -30,6 +30,35 @@ export interface MockModelScript {
    */
   readonly reasoning?: readonly MockReasoningBlock[]
   /**
+   * The tool calls the **provider** runs inside this step, in order (epic #303, X14; #335).
+   *
+   * A provider-executed tool is not a call of ours: the SDK reports it as a `tool-call` with
+   * `providerExecuted: true` and the `tool-result` that answers it in the same step, and the
+   * loop's job is to store both and hand them back — never to run anything.
+   */
+  readonly providerTools?: readonly MockProviderTool[]
+  /**
+   * The citations the step streamed, as the AI SDK's own `source` parts (#335).
+   *
+   * Every provider that cites emits the same part, which is why the brain's normalization is a
+   * fold over them rather than a branch per provider.
+   */
+  readonly sources?: readonly MockSource[]
+  /**
+   * How many searches the provider's own usage reported, in the shape its API spells it —
+   * Anthropic's `server_tool_use.web_search_requests` (#335). Omitted: the step reports none,
+   * and the loop falls back to counting the calls it saw.
+   */
+  readonly searches?: number
+  /**
+   * The provider's own stop reason, as its wire API spelled it.
+   *
+   * `pause_turn` is the one that matters (#335): Anthropic's server-side search loop hit its
+   * own limit, and the turn continues by sending the paused content back. The AI SDK folds it
+   * into `stop`, so this is the only place a test can put it.
+   */
+  readonly rawFinishReason?: string
+  /**
    * The tool calls this step makes, in order, after the text (epic #303).
    *
    * `input` is an object here; the wire carries it as JSON text, which is what the mock streams
@@ -61,6 +90,30 @@ export interface MockReasoningBlock {
    * `{ bedrock: { signature } }`). Streamed on a fragment of its own, with no text.
    */
   readonly metadata?: Record<string, Record<string, JsonValue>>
+}
+
+/** One tool call a scripted model's **provider** runs inside a step (epic #303, X14; #335). */
+export interface MockProviderTool {
+  /** The provider's id for the call, `srvtoolu_…`-shaped in the real thing. */
+  readonly id: string
+  /** The tool's name as the provider names it: `web_search`. */
+  readonly name: string
+  /** What the model asked it for, as the wire carries it. */
+  readonly input?: unknown
+  /** What the provider answered with, as its own output value — a search's results, say. */
+  readonly output?: unknown
+  /** Whether the provider reported the call itself as failed. */
+  readonly isError?: boolean
+  /** The provider metadata on the result, keyed by the provider's own name (#334). */
+  readonly providerMetadata?: Record<string, JsonValue>
+}
+
+/** One citation a scripted step streams as the AI SDK's `source` part (#335). */
+export interface MockSource {
+  readonly url: string
+  readonly title?: string
+  /** The passage the reply leans on, as Anthropic's citation carries it (`citedText`). */
+  readonly citedText?: string
 }
 
 /** One tool call a scripted model makes (epic #303). */
@@ -207,6 +260,56 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
   const steps: (() => Promise<LanguageModelV4StreamPart>)[] = [
     () => Promise.resolve({ type: 'stream-start', warnings: [] }),
     ...reasoning,
+    // What the provider ran itself, before the text it grounds (#335): the call, the answer, and
+    // the citations — the order Anthropic streams a search in.
+    ...(script.providerTools ?? []).flatMap((tool) => {
+      const input = JSON.stringify(tool.input ?? {})
+      return [
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({
+            type: 'tool-input-start' as const,
+            id: tool.id,
+            toolName: tool.name,
+            providerExecuted: true,
+          }),
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({ type: 'tool-input-delta' as const, id: tool.id, delta: input }),
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({ type: 'tool-input-end' as const, id: tool.id }),
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({
+            type: 'tool-call' as const,
+            toolCallId: tool.id,
+            toolName: tool.name,
+            input,
+            providerExecuted: true,
+          }),
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({
+            type: 'tool-result' as const,
+            toolCallId: tool.id,
+            toolName: tool.name,
+            result: (tool.output ?? []) as NonNullable<JsonValue>,
+            ...(tool.isError === true ? { isError: true } : {}),
+            ...(tool.providerMetadata === undefined
+              ? {}
+              : { providerMetadata: { anthropic: tool.providerMetadata } }),
+          }),
+      ]
+    }),
+    ...(script.sources ?? []).map(
+      (source, index) => (): Promise<LanguageModelV4StreamPart> =>
+        Promise.resolve({
+          type: 'source' as const,
+          sourceType: 'url' as const,
+          id: `mock-source-${index + 1}`,
+          url: source.url,
+          ...(source.title === undefined ? {} : { title: source.title }),
+          ...(source.citedText === undefined
+            ? {}
+            : { providerMetadata: { anthropic: { citedText: source.citedText } } }),
+        }),
+    ),
     () => Promise.resolve({ type: 'text-start', id: TEXT_ID }),
     ...(script.text ?? []).map((chunk, index) => async (): Promise<LanguageModelV4StreamPart> => {
       await script.onChunk?.(chunk, index)
@@ -244,7 +347,10 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
     () =>
       Promise.resolve<LanguageModelV4StreamPart>({
         type: 'finish',
-        finishReason: { unified: calls.length > 0 ? 'tool-calls' : 'stop', raw: undefined },
+        finishReason: {
+          unified: calls.length > 0 ? 'tool-calls' : 'stop',
+          raw: script.rawFinishReason,
+        },
         usage: {
           inputTokens: {
             total: usage.input_tokens,
@@ -258,6 +364,10 @@ function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4Stream
             cacheWrite: usage.cache_creation_input_tokens,
           },
           outputTokens: { total: usage.output_tokens, text: usage.output_tokens, reasoning: 0 },
+          // The provider's own report, which is where a search count lives (#335).
+          ...(script.searches === undefined
+            ? {}
+            : { raw: { server_tool_use: { web_search_requests: script.searches } } }),
         },
       }),
   ]

@@ -344,6 +344,8 @@ describe('an approval remembered for always', () => {
     // read the answer back off the log, so the call ran.
     const entries = await listTools(test)
     expect(entries.find((entry) => entry.name === 'web_search')?.policy).toBe('allow')
+    // The call ran **our** `web_search` — the harness's tool of that name, not the provider's
+    // native one, which a registry that registers the name is never offered (#335).
     const result = resultsOf(await log(test, session.id)).at(-1)
     expect(textOf(result)).toBe('web_search: tools')
   })

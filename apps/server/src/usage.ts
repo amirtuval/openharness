@@ -1,5 +1,10 @@
-import { WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
-import { EVENT_TYPES, MAX_PAGE_LIMIT, totalCost, usageCost } from '@openharness/protocol'
+import {
+  EVENT_TYPES,
+  MAX_PAGE_LIMIT,
+  WEB_SEARCH_TOOL_NAME,
+  totalCost,
+  usageCost,
+} from '@openharness/protocol'
 import type {
   LocalDay,
   ModelCost,
@@ -98,6 +103,8 @@ interface RecordedRequest {
   readonly usage: ModelUsage
   /** When it finished: the span end's `processed_at`, which is what a day groups by. */
   readonly at: Date
+  /** How many web searches the provider ran inside it (epic #303, X14; issue #335). */
+  readonly searches: number
 }
 
 /** The usage surface the routes answer with: two reads, both owner-scoped. */
@@ -148,6 +155,7 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
               model: modelOf.get(event.model_request_start_id) ?? null,
               usage: event.model_usage,
               at: new Date(event.processed_at),
+              searches: event.searches ?? 0,
             },
           ]
         : [],
@@ -198,10 +206,11 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
       // and which day a request fell on is the reader's zone.
       const window = utcWindowOf(range)
       const requests = await store.listModelRequests({ ownerId: userId, ...window })
-      // The searches are the second read of the same window (#305): a count of the calls that
-      // were answered, grouped by the day they fell on in the caller's zone exactly as the
-      // requests are — and never priced.
-      const searches = await store.listToolUses({
+      // The searches are two counts over the same window, and both are needed (#305, #335): the
+      // `web_search` calls a log stored before #335 holds — the operator-key era, which the log
+      // still carries — and the searches each request's own span counted, which is where a
+      // provider-executed one is. Neither is priced.
+      const legacySearches = await store.listToolUses({
         ownerId: userId,
         name: WEB_SEARCH_TOOL_NAME,
         ...window,
@@ -211,7 +220,7 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
       const searchesByDay = new Map<LocalDay, number>()
       let totalSearches = 0
 
-      for (const call of searches) {
+      for (const call of legacySearches) {
         const day = localDayOf(new Date(call.processed_at), range.tz)
         if (!dayInRange(day, range)) {
           continue
@@ -226,7 +235,16 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
         if (!dayInRange(day, range)) {
           continue
         }
-        const recorded: RecordedRequest = { model: request.model, usage: request.usage, at }
+        const recorded: RecordedRequest = {
+          model: request.model,
+          usage: request.usage,
+          at,
+          searches: request.searches,
+        }
+        if (request.searches > 0) {
+          totalSearches += request.searches
+          searchesByDay.set(day, (searchesByDay.get(day) ?? 0) + request.searches)
+        }
         inRange.push(recorded)
         // Appended into the day's own list rather than a fresh one per request: a day of heavy
         // use is one array, and the copy a spread would make per request is quadratic in it.
@@ -266,11 +284,13 @@ interface SessionUsageRead {
 }
 
 /**
- * Counts the `web_search` calls a log holds, as its events are read (epic #303, #305).
+ * Counts the web searches a log holds, as its events are read (epic #303, #305; #335).
  *
- * The same rule the store's per-user read follows, applied to one session's log: a call counts
- * when its `agent.tool_result` exists and does not carry `is_error`. A call a policy refused,
- * one the tool could not run and one a crashed turn never answered are not searches.
+ * Two things are counted, because the log holds two kinds and a session may have both: the
+ * `web_search` **calls** the operator-key era stored, which count when their `agent.tool_result`
+ * exists and does not carry `is_error` (a call a policy refused, one the tool could not run and
+ * one a crashed turn never answered are not searches), and the count each request's own
+ * `span.model_request_end` carries, which is what a provider-executed search is (#335).
  *
  * A call and its result are one identity (the result names the call's event id, epic #303 X1),
  * and the pair can straddle a page boundary — so the calls seen so far are kept, and dropped
@@ -289,6 +309,10 @@ function searchCounter(): {
           if (event.name === WEB_SEARCH_TOOL_NAME) {
             waiting.add(event.id)
           }
+        } else if (event.type === EVENT_TYPES.modelRequestEnd) {
+          // What the provider counted (#335): a provider-executed search has no call of ours to
+          // pair with a result, so the span that spent it is where the log holds the number.
+          answered += event.searches ?? 0
         } else if (
           event.type === EVENT_TYPES.agentToolResult &&
           !event.is_error &&

@@ -2,6 +2,7 @@ import { ASK_USER_TOOL_NAME, TODO_WRITE_TOOL_NAME } from '@openharness/protocol'
 import type {
   DeepReadonly,
   ModelEntry,
+  Source,
   ToolInput,
   ToolPermission,
   ToolSource,
@@ -113,6 +114,16 @@ export interface TranscriptToolCall {
   readonly position: number
   /** What the call produced, once a result has landed. */
   readonly result?: ToolCallResult
+  /**
+   * // extension: the web pages the search found, when the call was one (epic #303, X14;
+   * issue #335).
+   *
+   * A provider-executed `web_search` answers with the provider's citations normalized to one
+   * list (the protocol's `Source`), and this is what a line shows beside the query: where the
+   * reply got its facts. Absent for every other call — a tool this build ran, a remote server's,
+   * and every call stored before #335.
+   */
+  readonly sources?: readonly Source[]
 }
 
 /** The words a call's status is drawn with (epic #303, X5; issue #308). */
@@ -299,14 +310,17 @@ export function mcpServerMarker(server: string | undefined): string {
 }
 
 /**
- * How many searches a chat's calls add up to (epic #303, X5; #305; issue #308).
+ * How many searches a chat's calls add up to (epic #303, X5; #305; #335; issue #308).
  *
- * The usage routes carry a `searches` count of the `web_search` calls a covered log holds, and
- * this is the same count for a screen that is already following a chat: it has the calls, so it
- * does not need the route. Nothing is priced — the operator pays the search provider and no rate
- * is in this repository — which is why it is a count drawn beside the cost rather than a term in
- * it. A call counts whether it succeeded or not: the routes count the calls the log holds, and a
- * search the policy refused or the provider failed is still a call the model made.
+ * A provider-executed search is stored as a `web_search` call like any other (X14) — beside the
+ * provider's own content in `agent.opaque_content` — so a screen that is already following a
+ * chat counts it here without asking the usage route. The routes answer the same number the
+ * other way round, from each request's span, and count the operator-key era's calls as well.
+ *
+ * Nothing is priced — a search runs on the chat's own model key and no tool rate is in this
+ * repository — which is why it is a count drawn beside the cost rather than a term in it. A call
+ * counts whether it succeeded or not: a search the provider reported as failed is still a search
+ * the model made.
  */
 export function searchCount(calls: readonly TranscriptToolCall[]): number {
   return calls.filter((call) => call.name === WEB_SEARCH_TOOL).length

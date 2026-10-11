@@ -134,6 +134,22 @@ export function toolCallLines(
       lines.push(line)
     }
   }
+  // The pages a search found (epic #303, X14; #335). A terminal has no link to open, so the URL
+  // *is* the source here — a reader copies it — and the cited passage follows it when the
+  // provider gave one. A step of five sources is five short lines, which is what the reader
+  // asked for by searching.
+  for (const source of call.sources ?? []) {
+    const found: Span[] = [{ text: `  ${source.title ?? source.url}`, bold: true }]
+    if (source.title !== undefined) {
+      found.push({ text: ` — ${source.url}`, ...dimChrome(theme) })
+    }
+    lines.push(truncateSpans(found, width))
+    if (source.cited_text !== undefined) {
+      lines.push(
+        ...wrapSpans([{ text: `    ${source.cited_text}`, ...dimChrome(theme) }], width, 'flow'),
+      )
+    }
+  }
   return lines
 }
 

@@ -1221,6 +1221,16 @@ export interface ModelRequestUsage {
    * on the day it ended.
    */
   readonly processed_at: Timestamp
+  /**
+   * // extension: how many web searches the provider ran inside this request (epic #303, X14;
+   * issue #335) — the end's `searches`, or `0` for one that carried none.
+   *
+   * A provider-executed search is not a call of ours, so the log's `agent.tool_use` events do
+   * not count it; the count is the provider's own report, written on the span that spent it
+   * (`@openharness/brain`). A count and never a price: the search runs on the request's own
+   * model key, and no tool rate is in this repository.
+   */
+  readonly searches: number
 }
 
 /** Query of {@link SessionStore.listToolUses} (epic #303, #305). */

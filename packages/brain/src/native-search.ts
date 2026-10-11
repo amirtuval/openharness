@@ -1,4 +1,4 @@
-import type { ProviderCredentialType } from '@openharness/protocol'
+import type { ProviderCredentialType, ToolPermission } from '@openharness/protocol'
 import { WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
 import { anthropic } from '@ai-sdk/anthropic'
 import { openai } from '@ai-sdk/openai'
@@ -160,6 +160,36 @@ export function nativeSearchFor(
   }
   return { family, name: WEB_SEARCH_TOOL_NAME, tools: searchToolsFor(family, credentialType) }
 }
+
+/**
+ * One provider-native tool as the **settings** speak of it (epic #303, X14; issue #335).
+ *
+ * `web_search` is not in a host's tool registry — there is no `ToolDefinition` for it, because
+ * nothing of ours runs it — so the settings, whose whole job is to list every tool a user may
+ * choose about, would not know it exists. This is what a host adds to that listing: the name a
+ * user's stored choice and a mode's override are keyed by (`builtin.web_search`, which is what
+ * makes those carry over from the operator-key era unchanged), and the permission a call is
+ * evaluated under when the user has chosen none.
+ */
+export interface NativeToolDeclaration {
+  /** The name the settings are keyed by, and the name the model calls it by. */
+  readonly name: string
+  /** The permission a call is evaluated under when the user has chosen nothing. */
+  readonly permission: ToolPermission
+}
+
+/**
+ * The native tools this build can offer, as a settings listing adds them.
+ *
+ * One, and it is `allow` for the reason every built-in of #305 is: the search runs on the
+ * user's own model key and inside the request they already paid for, so there is nothing of
+ * someone else's to be careful with. A `deny` choice is still honoured — it is the one thing
+ * that keeps the tool out of the request entirely (`webSearchOffered`) — and an `ask` cannot
+ * be, which is why the settings refuse it (#335).
+ */
+export const NATIVE_TOOL_DECLARATIONS: readonly NativeToolDeclaration[] = [
+  { name: WEB_SEARCH_TOOL_NAME, permission: 'allow' },
+]
 
 /**
  * Whether a failure is a provider refusing the native search tool it was handed (epic #303,

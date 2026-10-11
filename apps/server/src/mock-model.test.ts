@@ -61,8 +61,7 @@ async function runTurn(
     onError: () => {},
     ...(options.retry === undefined ? {} : { retry: options.retry }),
     // The tools as `main.ts` wires them: the built-ins plus the test `echo` tool for the mock
-    // model (epic #303; the built-ins are #305), and the support gate over the registry. No
-    // search is configured, so nothing here reaches the operator's key.
+    // model (epic #303; the built-ins are #305), and the support gate over the registry.
     ...(options.tools === true
       ? {
           tools: createTurnTools({
@@ -70,8 +69,6 @@ async function runTurn(
             kind: 'mock',
             store,
             registry: createBundledRegistry(),
-            searchTransport: createProviderFetch(),
-            allowance: undefined,
           }),
         }
       : {}),

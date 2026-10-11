@@ -1,4 +1,4 @@
-import { EVENT_TYPES, newEventId } from '@openharness/protocol'
+import { EVENT_TYPES, WEB_SEARCH_TOOL_NAME, newEventId } from '@openharness/protocol'
 import type {
   EventId,
   ModeId,
@@ -1167,8 +1167,11 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     const offersTools =
       available !== undefined &&
       options.toolSupportFor?.(requestModel.id, credential.type) !== false
+    // A host that registers a tool of its own under the name keeps it: attaching the provider's
+    // would shadow it in the offer, and the tool a user configured is the one they meant.
     const search =
       offersTools &&
+      toolRegistry?.get(WEB_SEARCH_TOOL_NAME) === undefined &&
       webSearchOffered(requestModel.id, credential.type, toolSettings) &&
       !searchRejected
         ? nativeSearchFor(requestModel.id, credential.type)
@@ -1416,6 +1419,18 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // above, never from this (`./context`).
       for (const search of result.searchCalls) {
         await storeProviderSearch(search, result.sources, append)
+      }
+      if (result.paused) {
+        // The provider paused the turn itself (#335): Anthropic's server-side search loop hit
+        // its own limit, and the answer is to send the assistant turn back unchanged as the next
+        // request — which is what the loop does, because the step is in the log and the context
+        // strategy rebuilds it from the opaque content it stored. The step counts against the
+        // turn's budget like any other, so a provider that kept pausing ends the turn rather
+        // than looping.
+        if (isAborted()) {
+          return await endInterrupted()
+        }
+        continue
       }
     } catch (error) {
       // The events a model's report shapes are the ones that can turn out not to be protocol

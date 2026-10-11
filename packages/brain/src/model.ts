@@ -1037,7 +1037,7 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
           // one this build attaches is `web_search`. It is **not** a call of ours: nothing here
           // runs it, and what the loop owes the provider is the call back, exactly as it
           // arrived, which is what the opaque entry is for.
-          opaque.set(part.toolCallId, {
+          opaque.set(toolCallKey(part.toolCallId), {
             type: 'tool-call',
             text: '',
             metadata: {},
@@ -1062,13 +1062,15 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
         // The answer to a provider-executed call, matched by the call id rather than by a flag:
         // the AI SDK marks the call as provider-executed and not the result, and a result whose
         // call we never saw is not one of ours to replay.
-        const call = opaque.get(part.toolCallId)
-        if (call?.type !== 'tool-call') {
+        if (opaque.get(toolCallKey(part.toolCallId))?.type !== 'tool-call') {
           continue
         }
-        opaque.set(part.toolCallId, {
-          ...call,
+        // The answer is its own entry, after the call: the two are replayed as the pair they
+        // arrived as, and one key for both would lose the call it belongs to.
+        opaque.set(toolResultKey(part.toolCallId), {
           type: 'tool-result',
+          text: '',
+          metadata: {},
           payload: {
             toolCallId: part.toolCallId,
             toolName: part.toolName,
@@ -1079,25 +1081,6 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
             ? {}
             : { providerMetadata: part.providerMetadata }),
         })
-      } else if (part.type === 'tool-error') {
-        // The same answer, reported by the SDK's other part: a provider-executed call that
-        // failed. Anthropic's `web_search_tool_result_error` is this one.
-        const call = opaque.get(part.toolCallId)
-        if (call?.type === 'tool-call') {
-          opaque.set(part.toolCallId, {
-            ...call,
-            type: 'tool-result',
-            payload: {
-              toolCallId: part.toolCallId,
-              toolName: part.toolName,
-              output: { type: 'error-text', value: errorTextOf(part.error) },
-            },
-            isError: true,
-            ...(part.providerMetadata === undefined
-              ? {}
-              : { providerMetadata: part.providerMetadata }),
-          })
-        }
       } else if (part.type === 'source') {
         // One citation, in the AI SDK's own normalized shape — the same part every provider that
         // cites emits (epic #303, X14; #335). A document source is not a web one and is not
@@ -1198,6 +1181,16 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
   }
 }
 
+/** The key one provider-executed call is collected under, and the key its answer takes. */
+function toolCallKey(toolCallId: string): string {
+  return `tool-call:${toolCallId}`
+}
+
+/** The key one provider-executed call's answer is collected under. */
+function toolResultKey(toolCallId: string): string {
+  return `tool-result:${toolCallId}`
+}
+
 /** One part of a step being collected, as its fragments may arrive across several stream parts. */
 interface CollectedPart {
   type: 'reasoning' | 'tool-call' | 'tool-result'
@@ -1244,7 +1237,7 @@ function collectedParts(
   const searchCalls = collectedParts
     .filter((part) => part.type === 'tool-call' && part.payload?.toolName === WEB_SEARCH_TOOL_NAME)
     .map((part) => {
-      const result = collected.get(String(part.payload?.toolCallId))
+      const result = collected.get(toolResultKey(String(part.payload?.toolCallId)))
       return {
         name: WEB_SEARCH_TOOL_NAME,
         query: searchQueryOf([part]),

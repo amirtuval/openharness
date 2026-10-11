@@ -1297,8 +1297,12 @@ function fromToolResult(state: TranscriptState, event: ToolResultEvent): Transcr
     content: event.content.map((block) => block.text).join(''),
     isError: toolResultIsError(event),
   }
+  // The web pages a provider-executed search found (#335), kept beside the answer so a line can
+  // show them. Absent for every other result, and for one stored before the field existed.
+  const sources = event.sources ?? []
   const call: TranscriptToolCall = {
     ...existing,
+    ...(sources.length === 0 ? {} : { sources }),
     result,
     status: toolCallStatus(existing.permission, result, {
       waiting: false,
@@ -1408,7 +1412,8 @@ function isSameToolCall(current: TranscriptToolCall, next: TranscriptToolCall): 
     current.position === next.position &&
     sameJson(current.input, next.input) &&
     current.result?.content === next.result?.content &&
-    current.result?.isError === next.result?.isError
+    current.result?.isError === next.result?.isError &&
+    sameJson(current.sources ?? null, next.sources ?? null)
   )
 }
 
