@@ -5,6 +5,7 @@ import {
   type Client,
   type ClearedToolResults,
   type SessionUsage,
+  type TranscriptConfirmation,
   type TranscriptContext,
   type TranscriptError,
   type TranscriptManualCompaction,
@@ -15,7 +16,13 @@ import {
   type TranscriptTruncation,
   type TruncatedToolResult,
 } from '@openharness/client'
-import type { ModeId, Session, SessionStatus, TodoList } from '@openharness/protocol'
+import type {
+  ModeId,
+  Session,
+  SessionStatus,
+  TodoList,
+  UserToolConfirmationEventInput,
+} from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 import { describeError } from '../lib/errors'
@@ -68,6 +75,17 @@ export interface SessionView {
   readonly truncatedToolResults: readonly TruncatedToolResult[]
   /** The old tool results the newest request cleared, or `null` (epic #303, X9; #306; #308). */
   readonly clearedToolResults: ClearedToolResults | null
+  /**
+   * The decisions the reader has made about calls that waited on them, in log order
+   * (epic #303, X6; #309; #310).
+   *
+   * A waiting call with a confirmation of its own has been answered and the turn is on its
+   * way — which is why the prompts read this rather than only a local "sent" flag: a reload
+   * lands on the same state a live tab shows.
+   */
+  readonly confirmations: readonly TranscriptConfirmation[]
+  /** The call ids whose confirmation this tab has sent and the log has not echoed yet. */
+  readonly answering: readonly string[]
   /** How many `web_search` calls this chat made (epic #303, X5; #305; #308). */
   readonly searches: number
   /**
@@ -126,6 +144,16 @@ export interface SessionView {
   readonly compact: (instructions?: string) => Promise<boolean>
   /** Ask the running session to stop. */
   readonly interrupt: () => Promise<void>
+  /**
+   * Answer calls that are waiting on the reader (epic #303, X6; #309; #310).
+   *
+   * One `user.tool_confirmation` per call — an approval, a denial, or an `ask_user` call's
+   * answers — sent in one batch so a "Deny all" is one append. The server checks each one
+   * against the log before storing it, and the brain turns it into the result the call is
+   * owed; nothing is written here. The stored events arrive on the stream, so the transcript
+   * moves on its own; answers `false` when the request failed, so a prompt can stay put.
+   */
+  readonly respond: (events: readonly UserToolConfirmationEventInput[]) => Promise<boolean>
   /** Clear {@link requestError}. */
   readonly dismissError: () => void
 }
@@ -286,6 +314,30 @@ export function useSession(client: Client, sessionId: string): SessionView {
     [client, sessionId, transcript, serverUrl],
   )
 
+  const [answering, setAnswering] = useState<readonly string[]>([])
+
+  const respond = useCallback(
+    async (events: readonly UserToolConfirmationEventInput[]): Promise<boolean> => {
+      if (events.length === 0) {
+        return false
+      }
+      setRequestError(null)
+      setAnswering(events.map((event) => event.tool_use_id))
+      try {
+        await client.sessions.events.send(sessionId, [...events])
+        return true
+      } catch (caught) {
+        if (!noteAuthenticationError(client, caught)) {
+          setRequestError(describeError(caught, { serverUrl }))
+        }
+        return false
+      } finally {
+        setAnswering([])
+      }
+    },
+    [client, sessionId, serverUrl],
+  )
+
   const interrupt = useCallback(async (): Promise<void> => {
     setRequestError(null)
     try {
@@ -313,6 +365,8 @@ export function useSession(client: Client, sessionId: string): SessionView {
     todos: state.todos,
     truncatedToolResults: state.truncatedToolResults,
     clearedToolResults: state.clearedToolResults,
+    confirmations: state.confirmations,
+    answering,
     searches: searchCount(state.toolCalls),
     usage: selectSessionUsage(state),
     status: state.status,
@@ -325,6 +379,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
     send,
     compact,
     interrupt,
+    respond,
     dismissError,
   }
 }

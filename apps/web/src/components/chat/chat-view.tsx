@@ -4,12 +4,14 @@ import {
   compactionThreshold,
   contextMeter,
   modelSupportsTools,
+  pendingCalls,
+  pendingCallsNotice,
   sessionCost,
   stepLimitNotice,
   truncatedResultsNotice,
 } from '@openharness/client'
 import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
-import type { Mode } from '@openharness/protocol'
+import type { Mode, UserToolConfirmationEventInput } from '@openharness/protocol'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -112,6 +114,8 @@ export function ChatView({
     todos,
     truncatedToolResults,
     clearedToolResults,
+    confirmations,
+    answering,
     searches,
     usage,
     status,
@@ -123,6 +127,7 @@ export function ChatView({
     send,
     compact,
     interrupt,
+    respond,
     dismissError,
   } = useSession(client, sessionId)
   // The share of the budget a chat compacts at (epic #277, K10; #280), from the reader's stored
@@ -173,6 +178,12 @@ export function ChatView({
     modelSupportsTools(catalog.models.find((entry) => entry.id === sessionModel)) === false
   const truncatedResultsNoticeText = truncatedResultsNotice(truncatedToolResults)
   const clearedResultsNoticeText = clearedResultsNotice(clearedToolResults)
+  // The calls waiting on the reader (epic #303, X6; #310): what the composer has to warn about,
+  // because a message sent while they wait resolves every one of them.
+  const waiting = pendingCalls(toolCalls).filter(
+    (entry) => !confirmations.some((confirmation) => confirmation.toolUseId === entry.call.id),
+  ).length
+  const declineNotice = pendingCallsNotice(waiting)
   // A pick that has not been sent yet (U3): the selector shows it, the next message carries it.
   const [chosen, setChosen] = useState<string | null>(null)
   // A mode pick, held the same way (#245, M6): the next message carries it, and the chat then
@@ -298,6 +309,16 @@ export function ChatView({
     setEditing({ seq: message.position })
     focusComposer()
   }, [])
+
+  // Answer the calls waiting on the reader (epic #303, X6; #310). The hook owns the request and
+  // its failure; this only says when there is nothing to send. A message sent while calls wait
+  // resolves them instead, which is what the notice above the box warns about.
+  const answerPending = useCallback(
+    (events: readonly UserToolConfirmationEventInput[]): void => {
+      void respond(events)
+    },
+    [respond],
+  )
 
   // The composer's text, and the one rule about the edit: **clearing the box cancels it**. A
   // reader who empties the box and types something else is writing a new message at the end of
@@ -458,6 +479,9 @@ export function ChatView({
         toolsUnsupported={toolsUnsupported}
         truncatedResults={truncatedResultsNoticeText}
         clearedResults={clearedResultsNoticeText}
+        confirmations={confirmations}
+        answering={answering}
+        onRespond={answerPending}
         loading={loadingHistory}
         nameOf={nameOf}
         costOf={costOf}
@@ -474,6 +498,17 @@ export function ChatView({
               not scroll away with the transcript — and it is `null` (never an empty list) once no
               `todo_write` call has taken effect. */}
           {todos === null ? null : <TodoPanel todos={todos} />}
+          {/* Sending a message is allowed while calls wait — and it declines them all (epic
+              #303, X6; #310), so the box says so before the reader presses Enter rather than
+              after. The prompts above stay usable; this is only the other way out. */}
+          {declineNotice === null ? null : (
+            <p
+              data-slot="pending-notice"
+              className="rounded-lg border border-dashed px-2.5 py-1.5 text-xs text-muted-foreground"
+            >
+              {declineNotice}
+            </p>
+          )}
           {deleteError === null ? null : (
             <ErrorBanner
               title="Could not delete the chat"
