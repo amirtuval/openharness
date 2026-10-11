@@ -111,6 +111,18 @@ export interface ToolDefinition<Input = unknown> {
   readonly description: string
   /** The shape of a call's arguments; see the note above. */
   readonly inputSchema: z.ZodType<Input>
+  /**
+   * The JSON Schema a model is offered, when the tool's schema is not this build's to model
+   * (epic #303, X10; #312).
+   *
+   * A remote MCP tool's arguments are described by the server's own JSON Schema, and the model
+   * has to be shown *that* — the parameters it may pass — rather than a translated zod
+   * approximation. So a tool whose definition came from elsewhere carries the schema it was
+   * given here, and a request offers it as received; {@link inputSchema} stays the permissive
+   * zod schema the registry validates a call with (for an MCP tool: any object). Absent for
+   * every tool this build defines, whose `inputSchema` is the definition.
+   */
+  readonly inputJson?: Readonly<Record<string, unknown>>
   /** The policy this tool gets when the host's resolver has none of its own. */
   readonly permission: ToolPermission
   /** The most a call may take; {@link DEFAULT_TOOL_TIMEOUT_MS} when omitted. */
