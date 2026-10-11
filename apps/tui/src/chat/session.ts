@@ -1,7 +1,14 @@
 import { createTranscript, initialTranscriptState } from '@openharness/client'
 import type { Client, Transcript, TranscriptState } from '@openharness/client'
 import { EVENT_TYPES } from '@openharness/protocol'
-import type { Mode, ModeId, ModelEntry, Session, StreamEvent } from '@openharness/protocol'
+import type {
+  Mode,
+  ModeId,
+  ModelEntry,
+  Session,
+  StreamEvent,
+  UserToolConfirmationEventInput,
+} from '@openharness/protocol'
 
 import { describeError, type ErrorContext } from '../errors'
 import { CTRL_C_WINDOW_MS, decideCtrlC, type CtrlCAction } from './ctrl-c'
@@ -73,6 +80,15 @@ export interface ChatViewState {
   readonly awaitingMetaId: string | null
   /** The user cut the turn short with Ctrl+C, until the next turn or the next send (#208). */
   readonly interrupted: boolean
+  /**
+   * The calls whose confirmation this terminal has sent and the log has not echoed yet
+   * (epic #303, #310).
+   *
+   * A pause is answered by an event the **server** stores, so between the key and the stream
+   * there is a moment nothing on screen says the answer went out; the prompt keeps those rows
+   * off while it lasts, so a second Enter cannot send the same answer twice.
+   */
+  readonly answering: readonly string[]
 }
 
 /** What {@link createChatSession} needs. */
@@ -149,6 +165,15 @@ export interface ChatSession {
    * suggestion (#207). It replaces whatever was there, and the next message clears it.
    */
   readonly showNotice: (notice: Notice) => void
+  /**
+   * Answer the calls waiting on the reader (epic #303, X6; #309; #310).
+   *
+   * One `user.tool_confirmation` per call — an approval, a denial, or an `ask_user` call's
+   * answers — in one request. The server checks each against the log before storing it and the
+   * brain writes the result the call is owed; nothing is written from here, and the stored
+   * events come back on the stream, so the prompt moves on its own.
+   */
+  readonly respond: (events: readonly UserToolConfirmationEventInput[]) => Promise<void>
   /** Ask a running turn to stop, keeping what it has produced so far. */
   readonly interrupt: () => Promise<void>
   /** Apply the Ctrl+C rules; the caller exits when this returns `exit`. */
@@ -189,6 +214,7 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
     lastTextAt: null,
     awaitingMetaId: null,
     interrupted: false,
+    answering: [],
   }
   let armedAt: number | null = null
   const listeners = new Set<(state: ChatViewState) => void>()
@@ -381,6 +407,22 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       // A command is activity, the way picking a model is: it disarms an armed exit.
       armedAt = null
       setState({ notice })
+    },
+
+    async respond(events) {
+      if (events.length === 0) return
+      armedAt = null
+      setState({
+        notice: null,
+        answering: events.map((event) => event.tool_use_id),
+      })
+      try {
+        await client.sessions.events.send(sessionId, [...events], { signal: lifetime.signal })
+      } catch (error) {
+        if (!lifetime.signal.aborted) setState({ notice: noticeFor(error) })
+      } finally {
+        if (!lifetime.signal.aborted) setState({ answering: [] })
+      }
     },
 
     async interrupt() {

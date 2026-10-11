@@ -723,3 +723,65 @@ describe('promptLines', () => {
     ])
   })
 })
+
+/**
+ * The prompt while something else owns the keyboard (#310).
+ *
+ * A call waiting on the reader takes every key — the arrows and the space are its own — so the
+ * prompt is drawn without listening until the flow hands the keys back. It hears nothing: not
+ * characters, not Enter, not a paste.
+ */
+describe('PromptInput with the keyboard taken (#310)', () => {
+  it('ignores keys, and takes them again once they are handed back', async () => {
+    const submitted: string[] = []
+    const instance = render(
+      <PromptInput
+        captureKeys={false}
+        onSubmit={(text) => {
+          submitted.push(text)
+        }}
+      />,
+    )
+    await waitForScreen(instance, '❯')
+
+    typeText(instance, 'hello')
+    pressKey(instance, 'enter')
+    pressKey(instance, 'up')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(submitted).toEqual([])
+    expect(frameOf(instance)).not.toContain('hello')
+
+    // The same prompt with the keys back is an ordinary one again.
+    const back = render(
+      <PromptInput
+        onSubmit={(text) => {
+          submitted.push(text)
+        }}
+      />,
+    )
+    await waitForScreen(back, '❯')
+    typeText(back, 'hello')
+    pressKey(back, 'enter')
+    await waitForFrame(back, '❯')
+    expect(submitted).toContain('hello')
+  })
+
+  it('does not take a paste while the keys belong to something else', async () => {
+    const submitted: string[] = []
+    const instance = render(
+      <PromptInput
+        captureKeys={false}
+        onSubmit={(text) => {
+          submitted.push(text)
+        }}
+      />,
+    )
+    await waitForScreen(instance, '❯')
+
+    paste(instance, 'pasted words')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(frameOf(instance)).not.toContain('pasted')
+    expect(submitted).toEqual([])
+  })
+})

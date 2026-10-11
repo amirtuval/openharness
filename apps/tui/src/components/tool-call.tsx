@@ -35,6 +35,7 @@ const STATUS_MARKS: Readonly<Record<ToolCallStatus, string>> = {
   done: '●',
   error: '✗',
   denied: '⊘',
+  dismissed: '◌',
   interrupted: '◌',
   lost: '?',
 }

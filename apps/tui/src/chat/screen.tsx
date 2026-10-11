@@ -4,6 +4,7 @@ import {
   contextMeter,
   manualCompactionNotice,
   modelSupportsTools,
+  pendingCalls,
   providerName,
   searchCount,
   selectManualCompaction,
@@ -13,14 +14,21 @@ import {
   truncatedResultsNotice,
 } from '@openharness/client'
 import type { Client, TranscriptError } from '@openharness/client'
-import type { GetPreferencesResponse, Mode, ModelEntry } from '@openharness/protocol'
+import type {
+  GetPreferencesResponse,
+  Mode,
+  ModelEntry,
+  UserToolConfirmationEventInput,
+} from '@openharness/protocol'
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import { CompactionNotice } from '../components/compaction-notice'
 import { ModelPicker } from '../components/model-picker'
 import { NoticeView } from '../components/notice-view'
+import { PendingPromptView } from '../components/pending-prompt'
 import { PromptInput } from '../components/prompt-input'
+import { TextEntry } from '../components/text-entry'
 import { usePromptSlot } from '../components/prompt-slot'
 import { ProviderSetup } from '../components/provider-setup'
 import { formatCostTotal } from '../components/reply-meta'
@@ -123,6 +131,15 @@ export function ChatScreen({
   // frontend makes, through the same `compactionThreshold`, and a failure — or a server that
   // predates the field — leaves the 0.7 default in place.
   const [preferences, setPreferences] = useState<GetPreferencesResponse | null>(null)
+  /**
+   * The reader has asked to write a message instead of answering (epic #303, #310).
+   *
+   * The pending list owns the keyboard while something waits — the space and the arrows are
+   * both its keys — so sending a message is the list's own last row, which hands the keys back
+   * here. It comes back to the list whenever the set of waiting calls changes: a question that
+   * just arrived is a new thing to answer.
+   */
+  const [composing, setComposing] = useState(false)
   const { stdout } = useStdout()
   const { suspendTerminal } = useApp()
   // A clear is in flight. A second Ctrl+L while the first is being handed over has nowhere
@@ -309,13 +326,28 @@ export function ChatScreen({
   // the scroller with the notices — and it is `null`, never an empty list, once no `todo_write`
   // call has taken effect.
   const todos = view.transcript.todos
+  // The calls waiting on the reader (epic #303, X6; #310). One whose confirmation is already in
+  // the log — or on its way from this terminal — is answered, so it is off the list: the same
+  // rule the web's prompts read, and what makes a reload land on the state a live view shows.
+  const waiting = pendingCalls(view.transcript.toolCalls).filter(
+    (entry) =>
+      !view.transcript.confirmations.some(
+        (confirmation) => confirmation.toolUseId === entry.call.id,
+      ) && !view.answering.includes(entry.call.id),
+  )
+  const waitingKey = waiting.map((entry) => entry.call.id).join(',')
+  useEffect(() => {
+    setComposing(false)
+  }, [waitingKey])
+
   const hasNotice =
     view.notice !== null ||
     failure !== null ||
     truncation !== null ||
     manualCompactionNoticeDrawn !== null ||
     hasToolNotices ||
-    todos !== null
+    todos !== null ||
+    waiting.length > 0
 
   /**
    * Whether the transcript owes the block under it a blank line (issue #233).
@@ -420,6 +452,40 @@ export function ChatScreen({
     [client, context, onSignIn, openUrl, request, session],
   )
 
+  /**
+   * Answer the calls waiting on the reader (epic #303, X6; #310).
+   *
+   * The runtime owns the request and its failure; the list rebuilds itself from the log, so
+   * nothing is folded here. Sending a message instead is the same statement in the other
+   * direction: the brain resolves every waiting call with "The user sent a message instead."
+   */
+  const respond = useCallback(
+    (events: readonly UserToolConfirmationEventInput[]): void => {
+      void session.respond(events)
+    },
+    [session],
+  )
+
+  /**
+   * Ask for a line of text through the prompt slot (#310): an `ask_user` answer, a write-in,
+   * or a denial's message. The flow is the slot's own mechanism — the list comes back with
+   * what it settled — so a terminal needs no field of its own.
+   */
+  const askText = useCallback(
+    (options: { readonly label: string; readonly initial: string }): Promise<string | null> =>
+      request<string | null>((settle) => (
+        <TextEntry
+          label={options.label}
+          initial={options.initial}
+          onSubmit={settle}
+          onCancel={() => {
+            settle(null)
+          }}
+        />
+      )),
+    [request],
+  )
+
   /** Run a command the prompt parsed, with what only this screen can do (#207). */
   const runCommand = (command: ChatCommand, args: string): void => {
     const commandContext: CommandContext = {
@@ -517,6 +583,23 @@ export function ChatScreen({
               terminal has no pinned chrome, so this is where it can be redrawn in place as the
               model rewrites it. */}
           {todos !== null && <TodoPanel todos={todos} />}
+          {/* The approvals and questions waiting on the reader (epic #303, X6; #310). It sits
+              with the notices because a terminal has no pinned chrome: it is chrome about the
+              work, redrawn in place as the turn goes on, and the prompt under it is how a
+              message is sent instead — which declines everything here. */}
+          {waiting.length > 0 && (
+            <PendingPromptView
+              entries={waiting}
+              active={!composing}
+              onRespond={(input) => {
+                respond([input])
+              }}
+              onText={askText}
+              onFocusComposer={() => {
+                setComposing(true)
+              }}
+            />
+          )}
         </>
       )}
       {/* The input area is its own section (issue #233): a blank line, a dim full-width rule,
@@ -548,6 +631,11 @@ export function ChatScreen({
         <PromptInput
           commands={CHAT_COMMANDS}
           history={history}
+          // The pending list owns the keyboard while calls wait (epic #303, #310): its keys are
+          // the prompt's own, and a message is written by picking its "write a message instead"
+          // row. With nothing waiting — or once that row is picked — the prompt reads keys as
+          // it always did.
+          captureKeys={waiting.length === 0 || composing}
           onSubmit={onSubmit}
           onActivity={() => {
             session.dismissHint()
