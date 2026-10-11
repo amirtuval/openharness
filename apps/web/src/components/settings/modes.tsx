@@ -3,7 +3,9 @@ import { useState } from 'react'
 
 import type { ModesView } from '../../hooks/use-modes'
 import type { ModelsView } from '../../hooks/use-models'
+import { useTools } from '../../hooks/use-tools'
 import { modeLabel } from '../../lib/modes'
+import { useClient } from '../client-provider'
 import { Button } from '../ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card'
 import { ModeFormDialog } from './mode-form-dialog'
@@ -15,8 +17,15 @@ import { ModeFormDialog } from './mode-form-dialog'
  * the shape the Providers card uses, because a mode is the same kind of thing: a small per-user
  * resource with a name. Deleting a mode does not touch the chats that followed it: they
  * continue on the model they last ran, which is what the Delete button's confirmation says.
+ *
+ * Since #307 a mode may also override **which built-in tools are on** for the chats that follow
+ * it, so this card reads the deployment's tool list once (the same `GET /v1/me/tools` the Tools
+ * card reads) and hands it to the editor. The panel beside the modes is where those overrides
+ * are made.
  */
 export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: ModelsView }) {
+  const client = useClient()
+  const { tools } = useTools(client)
   const [editing, setEditing] = useState<Mode | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [confirming, setConfirming] = useState<string | null>(null)
@@ -95,6 +104,11 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">{mode.name}</p>
                 <p className="truncate text-xs text-muted-foreground">{modeLabel(mode)}</p>
+                {mode.tools === null ? null : (
+                  <p className="truncate text-xs text-muted-foreground" data-slot="mode-tools">
+                    tools: {describeModeTools(mode)}
+                  </p>
+                )}
               </div>
               {confirming === mode.id ? (
                 <div className="flex items-center gap-2">
@@ -147,9 +161,17 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
         mode={editing}
         modes={modes}
         catalog={catalog}
+        tools={tools?.data ?? []}
         onSaved={() => setDialogOpen(false)}
         onClose={() => setDialogOpen(false)}
       />
     </Card>
   )
+}
+
+/** What a mode's tool override says, as the row's one-line summary: "web_search on · todo_write off". */
+function describeModeTools(mode: Mode): string {
+  const builtin = mode.tools?.builtin ?? {}
+  const parts = Object.entries(builtin).map(([name, on]) => `${name} ${on ? 'on' : 'off'}`)
+  return parts.length === 0 ? 'follow your settings' : parts.join(' · ')
 }

@@ -70,6 +70,16 @@ export function UsageCard() {
               </span>
             </div>
 
+            {/* Searches are counted, never priced (epic #303, X5): the operator pays the search
+                provider and no rate for that is in the repository, so this is a count beside the
+                money rather than part of it. It is shown only when the month had one. */}
+            {usage.searches === 0 ? null : (
+              <p className="text-xs text-muted-foreground" data-slot="usage-searches">
+                {formatCount(usage.searches)} {usage.searches === 1 ? 'web search' : 'web searches'}{' '}
+                this month.
+              </p>
+            )}
+
             <ModelTable entries={usage.by_model} />
 
             <DayList days={usage.by_day} />

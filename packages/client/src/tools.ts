@@ -257,6 +257,20 @@ export function formatToolInput(input: ToolCallInput): string {
   return JSON.stringify(input, null, 2)
 }
 
+/**
+ * How many searches a chat's calls add up to (epic #303, X5; #305; issue #308).
+ *
+ * The usage routes carry a `searches` count of the `web_search` calls a covered log holds, and
+ * this is the same count for a screen that is already following a chat: it has the calls, so it
+ * does not need the route. Nothing is priced — the operator pays the search provider and no rate
+ * is in this repository — which is why it is a count drawn beside the cost rather than a term in
+ * it. A call counts whether it succeeded or not: the routes count the calls the log holds, and a
+ * search the policy refused or the provider failed is still a call the model made.
+ */
+export function searchCount(calls: readonly TranscriptToolCall[]): number {
+  return calls.filter((call) => call.name === WEB_SEARCH_TOOL).length
+}
+
 /** One tool result a request had to shorten before it entered the prompt (epic #303, X9; #306). */
 export interface TruncatedToolResult {
   /** The `seq` of the `agent.tool_result` that was shortened. */

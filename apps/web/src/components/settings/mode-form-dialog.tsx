@@ -1,9 +1,15 @@
 import { MODE_DEFAULT_MODEL, REASONING_EFFORTS } from '@openharness/protocol'
-import type { CreateModeRequest, Mode } from '@openharness/protocol'
+import type {
+  CreateModeRequest,
+  Mode,
+  ModeToolOverride,
+  ToolSettingEntry,
+} from '@openharness/protocol'
 import { useEffect, useState } from 'react'
 
 import type { ModesView } from '../../hooks/use-modes'
 import type { ModelsView } from '../../hooks/use-models'
+import { modeToolChoice, withModeToolChoice, type ModeToolChoice } from '../../lib/tools'
 import { ModelPicker } from '../models/model-picker'
 import { Button } from '../ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog'
@@ -26,6 +32,14 @@ interface FormState {
   readonly model: string | null
   readonly reasoningEffort: '' | 'low' | 'medium' | 'high'
   readonly systemPromptAddition: string
+  /**
+   * The mode's built-in tool override (#307), or `null` for "follow my settings".
+   *
+   * The wire is a per-tool boolean patch; the form's choice is tri-state ({@link ModeToolChoice}),
+   * which `withModeToolChoice` folds back into the patch. An empty patch becomes `null`, the one
+   * value that reads as "follow my settings" on both sides.
+   */
+  readonly tools: ModeToolOverride | null
 }
 
 const EMPTY: FormState = {
@@ -34,6 +48,7 @@ const EMPTY: FormState = {
   model: null,
   reasoningEffort: '',
   systemPromptAddition: '',
+  tools: null,
 }
 
 /** The form's values from a mode being edited, or the empty form for a new one. */
@@ -47,8 +62,16 @@ function formOf(mode: Mode | null): FormState {
     model: mode.model === MODE_DEFAULT_MODEL ? null : mode.model,
     reasoningEffort: mode.reasoning_effort ?? '',
     systemPromptAddition: mode.system_prompt_addition ?? '',
+    tools: mode.tools,
   }
 }
+
+/** The three choices the tools section offers one built-in tool, and what each means. */
+const TOOL_CHOICES: readonly { readonly value: ModeToolChoice; readonly label: string }[] = [
+  { value: 'follow', label: 'Follow my settings' },
+  { value: 'on', label: 'Always on' },
+  { value: 'off', label: 'Always off' },
+]
 
 /**
  * Create or edit one mode (#245, M6): its name, the model it runs (or "my default model"), the
@@ -64,6 +87,7 @@ export function ModeFormDialog({
   mode,
   modes,
   catalog,
+  tools,
   onSaved,
   onClose,
 }: {
@@ -74,6 +98,11 @@ export function ModeFormDialog({
   modes: ModesView
   /** The shell's catalog, for the picker. */
   catalog: ModelsView
+  /**
+   * The deployment's tools, for the override section (#307): the same effective entries the
+   * Tools card reads, so a mode's choices are offered for the tools that really exist here.
+   */
+  tools: readonly ToolSettingEntry[]
   /** Called after a successful write, with what was saved. */
   onSaved: (mode: Mode) => void
   onClose: () => void
@@ -102,6 +131,7 @@ export function ModeFormDialog({
     reasoning_effort: form.reasoningEffort === '' ? null : form.reasoningEffort,
     system_prompt_addition:
       form.systemPromptAddition.trim() === '' ? null : form.systemPromptAddition,
+    tools: form.tools,
   })
 
   const canSave =
@@ -125,6 +155,7 @@ export function ModeFormDialog({
             model: request.model,
             reasoning_effort: request.reasoning_effort,
             system_prompt_addition: request.system_prompt_addition,
+            tools: request.tools ?? null,
           })
     setSaving(false)
     if (!result.ok) {
@@ -212,6 +243,45 @@ export function ModeFormDialog({
               Appended after the chat's own system prompt, never in place of it.
             </p>
           </div>
+
+          {tools.length === 0 ? null : (
+            <div className="space-y-2">
+              <Label>Tools</Label>
+              <p className="text-xs text-muted-foreground">
+                Which of your tools a chat on this mode has, or leave each one following your own
+                settings. A mode turns a tool on or off — it never changes what a call may do.
+              </p>
+              <ul className="space-y-1.5">
+                {tools.map((entry) => (
+                  <li key={entry.name} className="flex items-center gap-2 text-sm">
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs">{entry.name}</span>
+                    <select
+                      data-slot="mode-tool-choice"
+                      data-tool={entry.name}
+                      aria-label={`${entry.name} in this mode`}
+                      className="h-8 rounded-md border bg-transparent px-2 text-xs"
+                      value={modeToolChoice(form.tools, entry.name)}
+                      onChange={(event) =>
+                        patch({
+                          tools: withModeToolChoice(
+                            form.tools,
+                            entry.name,
+                            event.target.value as ModeToolChoice,
+                          ),
+                        })
+                      }
+                    >
+                      {TOOL_CHOICES.map((choice) => (
+                        <option key={choice.value} value={choice.value}>
+                          {choice.label}
+                        </option>
+                      ))}
+                    </select>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {failure === null ? null : (
             <p role="alert" className="text-sm text-destructive">

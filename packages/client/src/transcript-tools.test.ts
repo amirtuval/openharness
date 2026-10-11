@@ -19,6 +19,7 @@ import {
   selectClearedToolResults,
   selectToolCalls,
   selectTranscriptEntries,
+  selectTodos,
   selectTruncatedToolResults,
 } from './transcript'
 
@@ -237,5 +238,61 @@ describe('tool calls in the transcript (#303, #308)', () => {
     const state = reduce([call, call])
 
     expect(selectToolCalls(state)).toHaveLength(1)
+  })
+})
+
+describe('the todo list in the transcript (#303, #305, #308)', () => {
+  const todos = [
+    { content: 'read the docs', status: 'done' as const },
+    { content: 'write the code', status: 'in_progress' as const },
+    { content: 'ship it', status: 'pending' as const },
+  ]
+
+  it('is null until a successful todo_write call takes effect', () => {
+    expect(selectTodos(reduce([]))).toBeNull()
+
+    const call = makeAgentToolUse('todo_write', { todos }, { seq: 2 })
+    expect(selectTodos(reduce([call]))).toBeNull()
+
+    const state = reduce([call, makeAgentToolResult(call, 'ok', { seq: 3 })])
+    expect(selectTodos(state)).toEqual(todos)
+  })
+
+  it('takes the newest successful call, and reads an empty list as cleared', () => {
+    const first = makeAgentToolUse('todo_write', { todos }, { seq: 2 })
+    const cleared = makeAgentToolUse('todo_write', { todos: [] }, { seq: 5 })
+
+    const state = reduce([
+      first,
+      makeAgentToolResult(first, 'ok', { seq: 3 }),
+      cleared,
+      makeAgentToolResult(cleared, 'ok', { seq: 6 }),
+    ])
+
+    expect(selectTodos(state)).toEqual([])
+  })
+
+  it('ignores a call that failed, and one nothing answered', () => {
+    const failed = makeAgentToolUse('todo_write', { todos }, { seq: 2 })
+    const unanswered = makeAgentToolUse('todo_write', { todos }, { seq: 5 })
+
+    const state = reduce([
+      failed,
+      makeAgentToolResult(failed, 'Invalid input for todo_write', { seq: 3, is_error: true }),
+      unanswered,
+    ])
+
+    expect(selectTodos(state)).toBeNull()
+  })
+
+  it('drops a list a rewind took back with the call that wrote it', () => {
+    const call = makeAgentToolUse('todo_write', { todos }, { seq: 2 })
+    const state = reduce([
+      call,
+      makeAgentToolResult(call, 'ok', { seq: 3 }),
+      makeSessionRewind({ seq: 9, supersedes: { from_seq: 1, to_seq: 8 } }),
+    ])
+
+    expect(selectTodos(state)).toBeNull()
   })
 })

@@ -1,4 +1,4 @@
-import { EVENT_TYPES, totalCost, usageCost } from '@openharness/protocol'
+import { EVENT_TYPES, readTodoList, totalCost, usageCost } from '@openharness/protocol'
 import type {
   AgentMessageEvent,
   AgentToolResultEvent,
@@ -20,11 +20,17 @@ import type {
   SessionErrorType,
   SessionRewindEvent,
   SessionStatus,
+  TodoList,
   TotalCost,
 } from '@openharness/protocol'
 
 import { contextAfterSummary } from './compaction'
-import { clearedResultsFrom, toolCallStatus, truncatedResultsFrom } from './tools'
+import {
+  clearedResultsFrom,
+  searchCount,
+  toolCallStatus,
+  truncatedResultsFrom,
+} from './tools'
 import type {
   ClearedToolResults,
   ToolCallResult,
@@ -531,6 +537,16 @@ export interface TranscriptState {
   readonly clearedToolResults: ClearedToolResults | null
 
   /**
+   * The task list the model last wrote with `todo_write`, or `null` (epic #303, X5; #305; #308).
+   *
+   * Read with the protocol's own `readTodoList` over the calls the log holds, so the list a
+   * frontend draws is exactly the one the brain and any other reader of the log compute: the
+   * newest successful `todo_write` call's own input, and nothing when none has taken effect. An
+   * empty array is a model clearing a list it no longer needs, and is told apart from `null`.
+   */
+  readonly todos: TodoList | null
+
+  /**
    * Where the tools a request offered come from, keyed by name — bookkeeping (epic #303, X1).
    *
    * A UI renders messages and calls, not this. It is read once, when an `agent.tool_use` lands,
@@ -539,6 +555,16 @@ export interface TranscriptState {
    * not change and a call may be replayed long after the request that offered it.
    */
   readonly toolSources: Readonly<Record<string, ToolSource>>
+
+  /**
+   * The tool events the todo list is read from, in log order — bookkeeping (epic #303, #308).
+   *
+   * `readTodoList` is the one reading of the list a log holds, and it takes whole events; keeping
+   * the `agent.tool_use` / `agent.tool_result` events here (and no others) is what lets the
+   * transcript call it rather than restate its rule. A rewind drops the ones its range covers, so
+   * the list follows the branch the same way the messages do.
+   */
+  readonly todoEvents: readonly StoredEvent[]
 }
 
 /**
@@ -586,6 +612,8 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
     truncatedToolResults: [],
     clearedToolResults: null,
     toolSources: {},
+    todos: null,
+    todoEvents: [],
   }
 }
 
@@ -988,6 +1016,9 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
   // test is the same one. The newest request's result notices go too — they describe a request
   // inside the branch a rewind just took back, and the next request writes fresh ones.
   const toolCalls = state.toolCalls.filter((call) => !inRange(call.position))
+  // The tool events the todo list is read from go with the branch too, so a list a rewound call
+  // wrote stops being current (epic #303, #308).
+  const todoEvents = state.todoEvents.filter((event) => !inRange(event.seq))
   if (
     messages.length === state.messages.length &&
     summaries.length === state.summaries.length &&
@@ -995,6 +1026,7 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     truncation === state.truncation &&
     manualCompaction === state.manualCompaction &&
     toolCalls.length === state.toolCalls.length &&
+    todoEvents.length === state.todoEvents.length &&
     state.truncatedToolResults.length === 0 &&
     state.clearedToolResults === null &&
     state.lastError === null &&
@@ -1020,6 +1052,8 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     toolCalls,
     truncatedToolResults: [],
     clearedToolResults: null,
+    todoEvents,
+    todos: readTodoList(todoEvents),
     lastError: null,
     pendingRequests: [],
     usage: null,
@@ -1092,18 +1126,21 @@ function sourcesFrom(tools: readonly ToolReference[]): Readonly<Record<string, T
  * a call the brain never got to run can be.
  */
 function fromToolUse(state: TranscriptState, event: AgentToolUseEvent): TranscriptState {
-  return upsertToolCall(state, {
-    id: event.id,
-    name: event.name,
-    input: event.input,
-    permission: event.evaluated_permission,
-    source: state.toolSources[event.name] ?? 'builtin',
-    status: toolCallStatus(event.evaluated_permission, undefined, {
-      waiting: false,
-      running: state.status === 'running',
+  return withTodoEvents(
+    upsertToolCall(state, {
+      id: event.id,
+      name: event.name,
+      input: event.input,
+      permission: event.evaluated_permission,
+      source: state.toolSources[event.name] ?? 'builtin',
+      status: toolCallStatus(event.evaluated_permission, undefined, {
+        waiting: false,
+        running: state.status === 'running',
+      }),
+      position: event.seq,
     }),
-    position: event.seq,
-  })
+    event,
+  )
 }
 
 /**
@@ -1133,7 +1170,20 @@ function fromToolResult(state: TranscriptState, event: AgentToolResultEvent): Tr
   }
   const toolCalls = state.toolCalls.slice()
   toolCalls[index] = call
-  return { ...state, toolCalls }
+  return withTodoEvents({ ...state, toolCalls }, event)
+}
+
+/**
+ * Record a tool event for the todo list, and recompute the list it holds (epic #303, #308).
+ *
+ * Only `todo_write`'s own calls matter to {@link readTodoList}, but keeping every tool event is
+ * what lets the protocol's rule — the newest successful call wins, a failed or unanswered one
+ * counts for nothing — be the one that runs, rather than a restatement of it here. The list is
+ * recomputed from the events, so a call and the result that answers it move it in one step.
+ */
+function withTodoEvents(state: TranscriptState, event: StoredEvent): TranscriptState {
+  const todoEvents = [...state.todoEvents, event]
+  return { ...state, todoEvents, todos: readTodoList(todoEvents) }
 }
 
 /**
@@ -1811,6 +1861,28 @@ export function selectTruncatedToolResults(state: TranscriptState): readonly Tru
 /** The old tool results the newest real request cleared, or `null` (epic #303, X9; #306; #308). */
 export function selectClearedToolResults(state: TranscriptState): ClearedToolResults | null {
   return state.clearedToolResults
+}
+
+/**
+ * How many searches this chat's calls add up to (epic #303, X5; #305; #308).
+ *
+ * The same count the usage routes report, for a screen that already holds the calls — so the
+ * chat header can say what the chat searched for without a second request. `searchCount` is
+ * where the counting rule lives, shared with whatever else draws it.
+ */
+export function selectSearchCount(state: TranscriptState): number {
+  return searchCount(state.toolCalls)
+}
+
+/**
+ * The task list the model last wrote with `todo_write`, or `null` (epic #303, X5; #305; #308).
+ *
+ * Both frontends draw it while a chat has one — a pinned panel on the web, a compact block in
+ * `oh` — and it updates live, because it is recomputed from the calls as they land. `null` is "no
+ * list has ever been written"; an empty array is a model clearing the one it had.
+ */
+export function selectTodos(state: TranscriptState): TodoList | null {
+  return state.todos
 }
 
 /** The summary being written right now, or `null` (epic #277, C2/K10; #280). */

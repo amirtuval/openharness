@@ -126,4 +126,32 @@ describe('Settings → Modes', () => {
     }
     expect(screen.getByText('deep')).toBeInTheDocument()
   })
+
+  it('lets a mode turn a built-in tool on or off, and stores only the override (#307)', async () => {
+    const fake = makeFake()
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: 'Create mode' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Name'), 'research')
+    await user.click(within(dialog).getByRole('button', { name: /Model/ }))
+    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 5/ }))
+
+    // Each tool defaults to following the reader's own settings; one choice makes the override.
+    const toolSelect = within(dialog).getByLabelText('web_search in this mode')
+    expect(toolSelect).toHaveValue('follow')
+    await user.selectOptions(toolSelect, 'off')
+    expect(within(dialog).getByLabelText('todo_write in this mode')).toHaveValue('follow')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Create mode' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data.find((mode) => mode.name === 'research')?.tools).toEqual({
+        builtin: { web_search: false },
+      })
+    })
+    // The row says what the mode overrides, so the list is readable without opening the editor.
+    expect(await screen.findByText('tools: web_search off')).toBeInTheDocument()
+  })
 })
