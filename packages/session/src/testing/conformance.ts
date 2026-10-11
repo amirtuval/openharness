@@ -2470,8 +2470,29 @@ export function runSessionStoreConformance(
             model: MODEL_ID,
             usage: REQUEST_USAGE,
             processed_at: timestampAt(START_MS),
+            // A span end that reported no provider-executed search counts none (#335).
+            searches: 0,
           },
         ])
+      })
+
+      it('carries the provider-executed searches the span end reported (#335)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [start] = await append(store, session.id, [
+          { type: EVENT_TYPES.modelRequestStart, model: MODEL_ID },
+        ])
+        if (start?.type !== EVENT_TYPES.modelRequestStart) {
+          throw new Error('the store did not return the span start it was given')
+        }
+        await append(store, session.id, [spanEnd(start, { searches: 3 })])
+
+        const [request] = await store.listModelRequests(
+          usageWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+        )
+        // The provider's own count, read off the end's payload: a provider-executed search is
+        // not a call of ours, so no `agent.tool_use` counts it.
+        expect(request?.searches).toBe(3)
       })
 
       it('reads the half-open window: `from` is in it and `to` is not', async () => {
@@ -3740,12 +3761,16 @@ function supersedingMessage(from: number, to: number): AppendableEvent {
 }
 
 /** A `span.model_request_end` that closes `start`. */
-function spanEnd(start: ModelRequestStartEvent): AppendableEvent {
+function spanEnd(
+  start: ModelRequestStartEvent,
+  overrides: { readonly searches?: number } = {},
+): AppendableEvent {
   const end: AppendableEvent = {
     type: EVENT_TYPES.modelRequestEnd,
     model_request_start_id: start.id,
     model_usage: { ...REQUEST_USAGE },
     is_error: null,
+    ...(overrides.searches === undefined ? {} : { searches: overrides.searches }),
   }
   return end
 }
