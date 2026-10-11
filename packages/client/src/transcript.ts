@@ -22,6 +22,10 @@ import type {
   SessionStatus,
   TodoList,
   TotalCost,
+  UserToolConfirmationEvent,
+  ToolConfirmationRemember,
+  ToolConfirmationResult,
+  AskUserAnswer,
 } from '@openharness/protocol'
 
 import { contextAfterSummary } from './compaction'
@@ -385,6 +389,36 @@ export type TranscriptEntry =
   | { readonly kind: 'summary'; readonly summary: TranscriptSummary }
 
 /**
+ * What the reader decided about a call that was waiting on them (epic #303, X6; issues #309,
+ * #310).
+ *
+ * The `user.tool_confirmation` is the log's own record of the answer — the server writes it
+ * only once it has checked the call really was waiting, so one in the log is a decision that
+ * happened — and the transcript keeps it so a call can be shown as **how** it was allowed:
+ * "Allowed once", "Allowed for this chat", "Always allowed". The tool's own result cannot say
+ * that (it is what the tool answered, not what the reader decided), and an `ask_user` call's
+ * answers *are* its result, so those need no line of their own.
+ *
+ * It is kept beside the calls rather than on one, because it is an event: a `session.rewind`
+ * past a confirmation takes it back with the branch, exactly as it takes back the call the
+ * confirmation answered.
+ */
+export interface TranscriptConfirmation {
+  /** The call this answers — its id, the `agent.tool_use` event's own. */
+  readonly toolUseId: string
+  /** What the reader decided: `allow` ran the call, `deny` refused it. */
+  readonly result: ToolConfirmationResult
+  /** How long the approval is remembered; absent means `once`. */
+  readonly remember?: ToolConfirmationRemember
+  /** Why the call was refused, when the reader said so. */
+  readonly denyMessage?: string
+  /** The answers to an `ask_user` call, when this confirmation carried them. */
+  readonly answers?: readonly AskUserAnswer[]
+  /** Where the event sits in the log: the rewind test, as for a call. */
+  readonly seq: number
+}
+
+/**
  * The newest item a request had to shorten to fit the model (epic #277, K6/K10; #280).
  *
  * The newest message alone was over the chat model's budget, so the request carried it capped to
@@ -528,6 +562,16 @@ export interface TranscriptState {
   /** The tool results the newest real request had to shorten, or `[]` (epic #303, X9; #306; #308). */
   readonly truncatedToolResults: readonly TruncatedToolResult[]
 
+  /**
+   * The decisions the reader made about calls that waited on them, in log order
+   * (epic #303, X6; #309; #310).
+   *
+   * One per `user.tool_confirmation` a `session.rewind` has not taken back. A call the reader
+   * allowed can then say **how** it was allowed ({@link confirmationSummary} in
+   * `./approvals`), which the call's own result cannot.
+   */
+  readonly confirmations: readonly TranscriptConfirmation[]
+
   /** The old tool results the newest real request cleared, or `null` (epic #303, X9; #306; #308). */
   readonly clearedToolResults: ClearedToolResults | null
 
@@ -605,6 +649,7 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
     manualCompaction: null,
     toolCalls: [],
     truncatedToolResults: [],
+    confirmations: [],
     clearedToolResults: null,
     toolSources: {},
     todos: null,
@@ -772,6 +817,13 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
     case EVENT_TYPES.agentToolResult:
       // What answered the call, and the status the line moves to (epic #303, X1; #308).
       return fromToolResult(state, event)
+
+    case EVENT_TYPES.userToolConfirmation:
+      // The reader's decision about a call that was waiting on them (epic #303, X6; #309; #310).
+      // The event itself is the record — the server stores it only after checking the call was
+      // really waiting, and the brain reads it back off the log to learn what a `session`
+      // approval allows — so the transcript keeps it to draw how a call came to run.
+      return recordConfirmation(state, event)
 
     case EVENT_TYPES.eventStart:
       // The reply's chunks are log events (D9), so a client that resumes mid-reply meets
@@ -1014,6 +1066,10 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
   // The tool events the todo list is read from go with the branch too, so a list a rewound call
   // wrote stops being current (epic #303, #308).
   const todoEvents = state.todoEvents.filter((event) => !inRange(event.seq))
+  // A confirmation inside the range goes with it (epic #303, X6; #310): the decision is part of
+  // the branch the edit took back, and the brain's own reading of the log — the tools this chat
+  // has been told to allow — takes it back with the branch, so the two stay one answer.
+  const confirmations = state.confirmations.filter((confirmation) => !inRange(confirmation.seq))
   if (
     messages.length === state.messages.length &&
     summaries.length === state.summaries.length &&
@@ -1022,6 +1078,7 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     manualCompaction === state.manualCompaction &&
     toolCalls.length === state.toolCalls.length &&
     todoEvents.length === state.todoEvents.length &&
+    confirmations.length === state.confirmations.length &&
     state.truncatedToolResults.length === 0 &&
     state.clearedToolResults === null &&
     state.lastError === null &&
@@ -1048,6 +1105,7 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     truncatedToolResults: [],
     clearedToolResults: null,
     todoEvents,
+    confirmations,
     todos: readTodoList(todoEvents),
     lastError: null,
     pendingRequests: [],
@@ -1166,6 +1224,38 @@ function fromToolResult(state: TranscriptState, event: AgentToolResultEvent): Tr
   const toolCalls = state.toolCalls.slice()
   toolCalls[index] = call
   return withTodoEvents({ ...state, toolCalls }, event)
+}
+
+/**
+ * Keep the reader's decision about a waiting call (epic #303, X6; #309; #310).
+ *
+ * The stored `user.tool_confirmation` is the record, so this is a plain append keyed by the
+ * call it names: the newest confirmation for a call is the answer, exactly as the brain's
+ * `confirmationsByCall` reads it. A confirmation for a call the transcript never saw — it
+ * joined mid-step — is still kept: the decision happened, and the call it names may arrive
+ * later in the same replay.
+ */
+function recordConfirmation(
+  state: TranscriptState,
+  event: UserToolConfirmationEvent,
+): TranscriptState {
+  const confirmation: TranscriptConfirmation = {
+    toolUseId: event.tool_use_id,
+    result: event.result,
+    ...(event.remember === undefined ? {} : { remember: event.remember }),
+    ...(event.deny_message === undefined ? {} : { denyMessage: event.deny_message }),
+    ...(event.answers === undefined ? {} : { answers: event.answers }),
+    seq: event.seq,
+  }
+  const replaceable = state.confirmations.findIndex(
+    (current) => current.seq === event.seq || current.toolUseId === confirmation.toolUseId,
+  )
+  if (replaceable === -1) {
+    return { ...state, confirmations: [...state.confirmations, confirmation] }
+  }
+  const confirmations = state.confirmations.slice()
+  confirmations[replaceable] = confirmation
+  return { ...state, confirmations }
 }
 
 /**
@@ -1841,6 +1931,40 @@ export function transcriptEntries(
  */
 export function selectToolCalls(state: TranscriptState): readonly TranscriptToolCall[] {
   return state.toolCalls
+}
+
+/**
+ * The decisions the reader made about calls that waited on them, in log order (epic #303,
+ * X6; #309; #310).
+ *
+ * A frontend reads {@link selectConfirmation} for one call's own answer; this is for one that
+ * wants them all (a count, an audit line).
+ */
+export function selectConfirmations(state: TranscriptState): readonly TranscriptConfirmation[] {
+  return state.confirmations
+}
+
+/**
+ * The reader's decision about one call, or `null` (epic #303, X6; #309; #310).
+ *
+ * The newest confirmation naming the call is the answer, which is the same rule the brain
+ * reads a `remember: session` approval back with — one lookup, so a UI and the brain cannot
+ * disagree about what was decided.
+ *
+ * @param state the transcript
+ * @param toolUseId the call's id, the `agent.tool_use` event's own
+ */
+export function selectConfirmation(
+  state: TranscriptState,
+  toolUseId: string,
+): TranscriptConfirmation | null {
+  let found: TranscriptConfirmation | null = null
+  for (const confirmation of state.confirmations) {
+    if (confirmation.toolUseId === toolUseId) {
+      found = confirmation
+    }
+  }
+  return found
 }
 
 /**

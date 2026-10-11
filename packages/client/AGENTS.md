@@ -61,6 +61,11 @@ src/
   tools.ts              the tool-call view both frontends share (#303, X5; #308): the
                         derived status, the summary and the words a call line is drawn
                         with, the result notices, and the search count
+  approvals.ts          the pause both frontends share (#303, X6; #309; #310): which calls
+                        wait on the reader, the four approval choices and the
+                        `user.tool_confirmation` each builds, the ask_user form's drafts
+                        turned into answers and checked with the protocol's validator, and
+                        the words a decision is drawn with
   providers.ts          PROVIDERS: the frontends' view of the shared provider list — the
                         protocol's id/name/key URL/credential type, plus free-tier and
                         key-format hints (#209, #245)
@@ -117,7 +122,12 @@ src/
 | `selectTranscriptEntries()`, `transcriptEntries()`, `TranscriptEntry`                                                                                                                                                                                                                                                                                                                       | the messages, the tool calls and the summary dividers as one ordered list a frontend renders (#280; #308)                                                                                                    |
 | `TranscriptSummary`, `TranscriptSummarizing`, `TranscriptContext`, `TranscriptTruncation`                                                                                                                                                                                                                                                                                                   | the four shapes that state is kept in (#280)                                                                                                                                                                 |
 | `selectToolCalls()`, `selectTodos()`, `selectTruncatedToolResults()`, `selectClearedToolResults()`, `selectSearchCount()`, `TranscriptToolCall`                                                                                                                                                                                                                                             | the tool calls a conversation holds, the chat's task list, the newest request's result notices and its search count (#303, X1/X5/X9; #308)                                                                   |
+| `selectConfirmations()`, `selectConfirmation()`, `TranscriptConfirmation`                                                                                                                                                                                                                                                                                                                   | the reader's decisions about calls that waited on them, and one call's own answer — how a call came to be allowed (#303, X6; #309; #310)                                                                     |
 | `toolCallStatus()`, `toolCallSummary()`, `toolStatusLabel()`, `formatToolInput()`, `ToolCallStatus`, `ToolCallResult`, `TruncatedToolResult`, `ClearedToolResults`, `ToolResultsNotice`                                                                                                                                                                                                     | one call's derived status, its short summary, the words for a status, the pretty-printed input, and the shapes those are kept in (#308)                                                                      |
+| `pendingCalls()`, `pendingCallKind()`, `askUserQuestions()`, `PendingCall`, `PendingCallKind`                                                                                                                                                                                                                                                                                               | the calls the reader owes an answer to, which of the two prompts each needs, and the questions an `ask_user` call asked (#303, X6; #310)                                                                     |
+| `APPROVAL_CHOICES`, `ApprovalChoice`, `approvalChoiceLabel()`, `approvalConfirmation()`, `approvalConfirmations()`, `declineConfirmation()`, `answerConfirmation()`                                                                                                                                                                                                                         | the four things a reader can say about a waiting call, and the one `user.tool_confirmation` each sends — one event per call, and one batch for several (#303, #310)                                          |
+| `QuestionDraft`, `emptyDraft()`, `emptyDrafts()`, `withLabel()`, `withOther()`, `withText()`, `withConfirmed()`, `answersFrom()`, `draftProblems()`, `draftComplete()`, `OTHER_CHOICE_LABEL`                                                                                                                                                                                                | an `ask_user` form's state, the wire's answers it becomes, and the protocol's own check that holds a Submit — so a client cannot send what the server refuses (#303, #310)                                   |
+| `confirmationSummary()`, `pendingCallsNotice()`                                                                                                                                                                                                                                                                                                                                             | what a decided call shows ("Allowed for this chat", "Always allowed"), and the composer's sentence for a message that would decline what is waiting (#303, #310)                                             |
 | `truncatedResultsNotice()`, `clearedResultsNotice()`, `stepLimitNotice()`, `modelSupportsTools()`, `searchCount()`, `TOOL_STEPS_EXHAUSTED_NOTICE`, `TOOLS_UNSUPPORTED_NOTICE`                                                                                                                                                                                                               | the sentences a tool-aware screen is owed: shortened and cleared results, the step limit, "this model can't use tools", and how many searches a chat made (#303, X2/X5/X9; #308)                             |
 | `contextMeter()`, `ContextMeter`, `contextTokenBudget()`, `contextAfterSummary()`, `estimateTokens()`, `summaryDescription()`, `compactionThreshold()`, `modelContextBudget()`, `COMPACTING_LABEL`, `manualCompactionNotice()`, `summaryModelFallback()`, `SummaryModelFallback`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`, `OUTPUT_RESERVE_RATIO` | how full the context is, the words both frontends draw it in, and the pass math the settings warn with (#277, #280, #282)                                                                                    |
 | `contextTokenBudget()`, `contextAfterSummary()`, `estimateTokens()`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`, `OUTPUT_RESERVE_RATIO`                                                                                                                                                                                                              | the meter's arithmetic: the server's per-model budget rule restated, and the estimate a summary leaves (#280)                                                                                                |
@@ -697,6 +707,55 @@ effective list — one entry per tool, with `policy`, `default_policy` and `avai
 fake client backs both (a registered set of three built-ins, a seeded `toolSettings`, and a
 `toolsAvailable` over which of them this fake deployment registers).
 
+## The pause (epic #303, X6; issues #309, #310)
+
+A turn can end because it is waiting on the reader, and the two frontends must agree about what
+it is asking and what answers it. `src/approvals.ts` is that agreement; the transcript keeps the
+decisions; and the fake can produce a pause, so a prompt is testable end to end.
+
+| state                                   | set by                   | cleared by                                      |
+| --------------------------------------- | ------------------------ | ----------------------------------------------- |
+| `confirmations` (`selectConfirmations`) | `user.tool_confirmation` | a `session.rewind` whose range covers the event |
+
+- **Which calls wait is one reading.** `pendingCalls(calls)` is exactly the calls whose status
+  is `waiting` — the status `toolCallStatus` derives, which is a call with
+  `evaluated_permission: ask` that no result has answered — and `pendingCallKind(call)` names
+  the prompt: `ask_user` is a **question**, every other waiting call is an **approval**. Nothing
+  is asked of a `session.status_idle.stop_reason`, because the log's own permission says the
+  same thing and a reload reads it identically.
+- **The four choices are the policy's vocabulary plus the two ways of remembering.**
+  `APPROVAL_CHOICES` is Allow once, Allow for this chat, Always allow, Deny — and
+  `approvalConfirmation(callId, choice, denyMessage?)` builds the one `user.tool_confirmation`
+  each sends, with `remember: 'session' | 'always'` as the protocol's extension. `once` is
+  spelled by **leaving the field out**, so an approval an older client would have sent is
+  byte-identical. Several approvals are answered together as one event per call
+  (`approvalConfirmations`) in one batch — which is why "Allow all" is the **once** approval
+  for each: answering several at once must not hand out a remembered permission nobody chose.
+- **An `ask_user` answer is one event carrying `answers`.** `answerConfirmation` does that —
+  the answers _are_ the call's result, because the tool never runs — and
+  `declineConfirmation` is what a question's Decline sends: a denial, the one event that says
+  "not answered" rather than leaving the model to read silence.
+- **A form's state is `QuestionDraft`s, and the protocol judges them.**
+  `emptyDrafts(questions)` starts one per question; `withLabel` replaces on a single-select
+  question and toggles on a `multi_select` one; `withOther`/`withText` carry the write-in the
+  type always allows (which is why no call has to list an "Other" option);
+  `withConfirmed` answers a yes/no one. `answersFrom(questions, drafts)` builds the wire's
+  answers, leaving out what a question's type cannot carry, and `draftProblems` is the
+  protocol's own `askUserAnswerProblems` over them — the same check the server refuses a 400
+  with, so a form that submits is one the server accepts. `draftComplete` is Submit's condition.
+- **The decision is kept, because the result cannot say it.** A call that ran shows what the
+  tool answered; only the `user.tool_confirmation` says **how** it was allowed. The transcript
+  keeps each one in `confirmations` (with the decision, its `remember`, the denial's message and
+  any answers), `selectConfirmation(state, toolUseId)` is the newest for a call — the same rule
+  the brain reads a `session` approval back with — and `confirmationSummary` turns it into
+  "Allowed once" / "Allowed for this chat" / "Always allowed". A denial and an answered question
+  answer `null`: the result the brain wrote already says them. A `session.rewind` past a
+  confirmation takes it back with the branch, exactly as the brain's own reading does.
+- **A message resolves what waits, so the composer says so.** `pendingCallsNotice(count)` is the
+  sentence a reader is owed before pressing Enter — "Sending a message will decline the item
+  waiting on you." — and `statusFromResult` reads the brain's `The user sent a message instead.`
+  as `dismissed` rather than as a failure: the reader moving on is not a tool that broke.
+
 ## Provider metadata (#209, #245)
 
 `src/providers.ts` is the list both frontends offer: one `ProviderInfo` per provider — the
@@ -842,11 +901,26 @@ never a silent page 1.
 
 A `user.tool_confirmation` (epic #303, #309) is the same 400: the server accepts one only while
 the call it names is waiting on the user, and the fake's brain never pauses — it answers every
-message in one turn — so every confirmation names a call that is not waiting.
+message in one turn, so no confirmation it ever accepted named a call that was waiting.
+
+**The fake pauses since #310.** `askWith(input)` queues an `ask_user` call: the turn stores it
+with `evaluated_permission: ask`, nothing answers it, and the turn ends
+`session.status_idle { stop_reason: { type: 'requires_action', event_ids } }` — exactly what the
+real brain writes, so a prompt can be driven end to end without a server. `sessions.events.send`
+then accepts the one `user.tool_confirmation` that answers it, with the server's own checks and
+wording: a call that is not waiting, a question approved with no answers, a `remember` that
+would silence the next one, and answers that do not fit the questions asked are all the 400 the
+route gives, storing nothing. It writes what the brain writes — the confirmation, and the
+`agent.tool_result` the call is owed: an `ask_user` call's answers (the protocol's
+`formatAskUserAnswers` wording), or a denial in the reader's own words. A message that arrives
+while calls wait resolves them all with `The user sent a message instead.`, as the real brain
+does. It is deliberately **not** twice the fake's brain being clever: nothing there reasons
+about a tool registry, because the fake registers none — the pause it can make is `ask_user`'s.
 
 | scripting                  | what it does                                                                                                 |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `respondWith(text, opts?)` | queue a reply for the next model request; `chunks` a count or the exact fragments, `delayMs` a pace          |
+| `askWith(input, opts?)`    | queue an `ask_user` call, and leave the turn waiting on the reader (#303, #309; #310)                        |
 | `failWith(opts?)`          | queue a failure: `type`, `message`, `retryStatus` (`retrying` keeps the turn alive, the rest end it)         |
 | `scriptDeviceLogin(opts?)` | script the device flow `oh login` runs: `pendingPolls`, `slowDownPolls`, `outcome`, and the codes it reports |
 | `waitForIdle(sessionId?)`  | resolve when the session's turn — retries included — has finished                                            |
@@ -1038,6 +1112,16 @@ stamped from the request's offered tools, `waiting` kept across an idle, the tru
 records and their clearing, a rewind dropping the calls it covers, and the todo list read with
 `readTodoList`'s rule). `src/client.test.ts` holds `client.tools`' two routes and the fake's own
 `tools` store is in `src/testing/fake.test.ts`.
+
+The pause (#303, X6; #309; #310) is `src/approvals.test.ts` (which calls wait and which prompt
+each needs, the four choices and the event each builds — the `once` with no `remember`, the
+denial with and without the reader's words, a batch answering several calls in order — the
+drafts and what the protocol says about them, the decision's words, and the composer's notice)
+plus the `confirmations` half of `src/transcript-tools.test.ts` (a decision kept and read back
+by the call it names, the newest one winning, what an answered question carried, and a rewind
+taking it back with the branch), the `dismissed` case in the status matrix, and the fake's own
+round trip in `src/testing/fake.test.ts` (the call stored and the turn ended `requires_action`,
+the answers written as the result, a denial, the four 400s, and a message resolving what waits).
 
 `src/transcript.test.ts` also holds the epics #277/#280 half: the divider and where it draws,
 a summary a rewind took back (and one it did not reach), the progress lifecycle (the summary

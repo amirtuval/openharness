@@ -35,15 +35,24 @@ const STATUS_MARKS: Readonly<Record<ToolCallStatus, string>> = {
   done: '●',
   error: '✗',
   denied: '⊘',
+  dismissed: '◌',
   interrupted: '◌',
   lost: '?',
 }
 
 export function ToolCallView({
   call,
+  decision = null,
   width,
 }: {
   readonly call: TranscriptToolCall
+  /**
+   * What the reader decided about this call, when it waited on them (epic #303, X6; #310):
+   * "Allowed once", "Allowed for this chat", "Always allowed". The `user.tool_confirmation` is
+   * the log's record, so only it can say **how** a call came to run — its own result is what the
+   * tool answered.
+   */
+  readonly decision?: string | null | undefined
   /**
    * How wide the terminal is, when the caller knows better than Ink does — the test seam the
    * frame tests draw at a width they can read, as `MessageView` and `SummaryDivider` have.
@@ -52,7 +61,7 @@ export function ToolCallView({
 }) {
   const theme = useTerminalTheme()
   const { stdout } = useStdout()
-  const lines = toolCallLines(call, width ?? stdout.columns ?? FALLBACK_COLUMNS, theme)
+  const lines = toolCallLines(call, width ?? stdout.columns ?? FALLBACK_COLUMNS, theme, decision)
 
   return (
     <Box flexDirection="column">
@@ -87,6 +96,7 @@ export function toolCallLines(
   call: TranscriptToolCall,
   columns: number,
   theme: TerminalTheme,
+  decision: string | null = null,
 ): Line[] {
   const width = Math.max(1, columns - CURSOR_COLUMNS)
   const status = toolStatusLabel(call.status)
@@ -108,6 +118,10 @@ export function toolCallLines(
   }
   head.push({ text: ' · ', ...dimChrome(theme) })
   head.push({ text: status, color: paint(theme, accent) })
+  if (decision !== null) {
+    head.push({ text: ' · ', ...dimChrome(theme) })
+    head.push({ text: decision, ...dimChrome(theme) })
+  }
 
   const lines: Line[] = [truncateSpans(head, width)]
 

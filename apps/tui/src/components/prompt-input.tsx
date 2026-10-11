@@ -87,6 +87,15 @@ export interface PromptInputProps {
    * and no menu opens.
    */
   readonly commands?: readonly ChatCommand[] | undefined
+  /**
+   * Whether the prompt reads keys, `true` by default (#310).
+   *
+   * Something else sometimes owns the keyboard: the pending prompt — an approval or an
+   * `ask_user` question waiting on the reader — takes every key while it is focused, including
+   * the space and the arrows the prompt would otherwise use. The prompt is still drawn, and
+   * still holds what was typed; it simply hears nothing until the flow hands the keys back.
+   */
+  readonly captureKeys?: boolean | undefined
 }
 
 /**
@@ -125,9 +134,21 @@ export interface PromptInputProps {
  * text alone. The prompt decides none of what a command *is*: it submits the name, and the
  * screen parses the line against the same registry.
  */
-export function PromptInput({ onSubmit, onActivity, history, commands }: PromptInputProps) {
+export function PromptInput({
+  onSubmit,
+  onActivity,
+  history,
+  commands,
+  captureKeys = true,
+}: PromptInputProps) {
   const [buffer, setBuffer] = useState<Buffer>(EMPTY)
   const [menu, setMenu] = useState<MenuState>(FRESH_MENU)
+
+  // Whether the prompt reads keys, for the handler below: Ink's `useInput` callback sees the
+  // latest committed render, and the prop may have flipped with the render that committed this
+  // one, so it is mirrored into a ref the way the buffer is.
+  const captureRef = useRef(captureKeys)
+  captureRef.current = captureKeys
 
   // The buffer the handlers read.
   //
@@ -338,6 +359,9 @@ export function PromptInput({ onSubmit, onActivity, history, commands }: PromptI
     // Ctrl+C is the screen's: it interrupts, and it exits on the second idle press.
     if (key.ctrl && input === 'c') return
 
+    // Something else owns the keyboard (#310): the prompt is drawn, but it hears nothing.
+    if (!captureRef.current) return
+
     // The menu's keys come before the buffer's, because they are the buffer's keys (#207):
     // ↑/↓ would walk the history out from under the list, Tab is otherwise unbound, and Esc
     // would leave a highlighted row on screen that the user has just dismissed.
@@ -415,6 +439,9 @@ export function PromptInput({ onSubmit, onActivity, history, commands }: PromptI
   // Ink's parser keeps it off the key channel entirely, so nothing inside it can be read as
   // a keypress — which is the whole point, because a pasted line ending must not send.
   usePaste((text) => {
+    // A paste is keys too: while a flow has the input area (#310) the prompt must not take
+    // one, or a stray paste would land in a buffer nobody is looking at.
+    if (!captureRef.current) return
     // A terminal sends `\r` (or `\r\n`) for the line endings inside a paste; the buffer's
     // own newline is `\n`, so normalize before it becomes part of what is sent.
     const pasted = text.replace(/\r\n?/gu, '\n')

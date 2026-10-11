@@ -50,7 +50,7 @@ describe('toolCallStatus', () => {
       ['The user denied this.', 'denied'],
       ['The user denied this: not that URL', 'denied'],
       ['Tool web_fetch timed out after 30s', 'error'],
-      ['The user sent a message instead.', 'error'],
+      ['The user sent a message instead.', 'dismissed'],
     ]
     for (const [content, expected] of cases) {
       expect(toolCallStatus('allow', { content, isError: true }, idle)).toBe(expected)

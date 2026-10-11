@@ -46,11 +46,14 @@ export type ToolCallInput = DeepReadonly<ToolInput>
  * - `error` — the call failed (its tool's own error, a timeout, a schema refusal, or a call the
  *   reader moved on from).
  * - `denied` — a policy or the reader refused the call without running it.
+ * - `dismissed` — the call was waiting on the reader and a message or an interrupt resolved it
+ *   instead (#310): "The user sent a message instead" is not a failure and not a refusal, it
+ *   is the reader moving on.
  * - `interrupted` — the reader stopped the turn while the call was out.
  * - `lost` — the turn that started the call died before it ran, so it never ran.
  */
 export type ToolCallStatus =
-  'running' | 'waiting' | 'done' | 'error' | 'denied' | 'interrupted' | 'lost'
+  'running' | 'waiting' | 'done' | 'error' | 'denied' | 'dismissed' | 'interrupted' | 'lost'
 
 /**
  * What a call produced, as the transcript keeps it (epic #303, X1).
@@ -104,6 +107,7 @@ const STATUS_WORDS: Readonly<Record<ToolCallStatus, string>> = {
   done: 'done',
   error: 'failed',
   denied: 'denied',
+  dismissed: 'dismissed',
   interrupted: 'interrupted',
   lost: 'execution lost',
 }
@@ -163,6 +167,12 @@ function statusFromResult(result: ToolCallResult): ToolCallStatus {
   const text = result.content
   if (text.startsWith('Interrupted by the user.')) {
     return 'interrupted'
+  }
+  // A message that arrived while the call waited resolves it (epic #303, X6; #310): the brain's
+  // sentence for that is not a failure, it is the reader moving on — so it gets its own word
+  // rather than reading as "failed".
+  if (text.startsWith('The user sent a message instead.')) {
+    return 'dismissed'
   }
   if (text.includes('execution lost')) {
     return 'lost'

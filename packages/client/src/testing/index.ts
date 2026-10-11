@@ -38,6 +38,7 @@ import {
 import { makeAgent, makeModelEntry, makeSession, makeUser } from '@openharness/protocol/fixtures'
 import type {
   Agent,
+  AskUserInput,
   EventInput,
   GetPreferencesResponse,
   PreferencesDefaults,
@@ -70,6 +71,7 @@ import type {
   UserInterruptEvent,
   UserMessageEvent,
   UserPreferences,
+  UserToolConfirmationEventInput,
 } from '@openharness/protocol'
 
 import { ApiError, AuthenticationError } from '../errors'
@@ -80,7 +82,13 @@ import { isEventList } from '../internal/events'
 import { sleep } from '../internal/async'
 import { DeviceLoginError, SLOW_DOWN_INCREMENT_SECONDS } from '../resources/auth'
 import type { DeviceLoginStart, PollDeviceLoginOptions } from '../resources/auth'
-import { FakeBrain, clampLimit, type FakeScript, type RewindRefusal } from './fake-brain'
+import {
+  FakeBrain,
+  clampLimit,
+  type ConfirmationRefusal,
+  type FakeScript,
+  type RewindRefusal,
+} from './fake-brain'
 import {
   fakeLocalDay,
   fakeRequestsOf,
@@ -339,6 +347,14 @@ export interface FakeFailureOptions {
   delayMs?: number
 }
 
+/** An `ask_user` call, as {@link FakeClient.askWith} takes it (epic #303, #309). */
+export interface FakeAskOptions {
+  /** The session to script for; defaults to the fake's own {@link FakeClient.session}. */
+  sessionId?: string
+  /** Milliseconds before the question arrives; overrides the client's `delayMs`. */
+  delayMs?: number
+}
+
 /** One `models.list` call the fake answered, as {@link FakeClient.modelListCalls} records it. */
 export interface ModelListCall {
   /** Whether the call asked to bypass the server's cache: `refresh: true`. */
@@ -455,6 +471,25 @@ export interface FakeClient extends Client {
    * @param options the error to report, and how the server reacts to it
    */
   failWith(options?: FakeFailureOptions): FakeClient
+
+  /**
+   * Script an `ask_user` call for the next model request (epic #303, X6; #309).
+   *
+   * The request stores the call and ends the turn `requires_action`, exactly as the real brain
+   * does, so a client sees a question waiting on the reader. Answering it is one
+   * `user.tool_confirmation` through `sessions.events.send` — the fake accepts one for a call
+   * that is really waiting, and writes the answers as the call's result.
+   *
+   * ```ts
+   * fake.askWith({ questions: [{ type: 'confirm', question: 'Go ahead?', header: 'Go' }] })
+   * await fake.sendMessage(fake.session.id, 'deploy?')
+   * await fake.waitForIdle() // paused: the call is in the log, nothing answers it
+   * ```
+   *
+   * @param input the questions the call asks
+   * @param options which session, and how long before the question arrives
+   */
+  askWith(input: AskUserInput, options?: FakeAskOptions): FakeClient
 
   /**
    * Resolve once the session is idle — its turn, retries included, has finished.
@@ -783,17 +818,19 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         }
       }
       // A `user.tool_confirmation` answers a call that is waiting on the user (epic #303,
-      // #309). The fake's brain never pauses — it answers every message in one turn — so no
-      // call in it is ever waiting, and the server's 400 for exactly that is the honest answer.
-      const hasConfirmation = request.data.events.some(
-        (input) => input.type === EVENT_TYPES.userToolConfirmation,
+      // #309). The server checks the call before it stores anything and the brain writes the
+      // result the call is owed, which is what the fake's brain does in one step here — so a
+      // confirmation for a call that is not waiting is the same 400 the route answers, and one
+      // the questions do not fit is refused with nothing stored.
+      const confirmations = request.data.events.filter(
+        (input): input is UserToolConfirmationEventInput =>
+          input.type === EVENT_TYPES.userToolConfirmation,
       )
-      if (hasConfirmation) {
-        throw new ApiError(
-          400,
-          `nothing in session ${brain.session.id} is waiting on the user, so there is nothing to confirm`,
-          { type: 'invalid_request_error' },
-        )
+      for (const confirmation of confirmations) {
+        const outcome = brain.answer(confirmation)
+        if ('refusal' in outcome) {
+          throw confirmationRefused(outcome.refusal, brain.session.id)
+        }
       }
       // The mode the chat will be on after the batch, and its refusal (#245, M6): checked
       // before anything is stored, exactly where the events route checks it — a batch that
@@ -1553,6 +1590,13 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       })
     },
 
+    askWith(input, askOptions = {}) {
+      return scriptOn(askOptions.sessionId ?? fake.session.id, {
+        kind: 'ask',
+        ask: { input, delayMs: askOptions.delayMs },
+      })
+    },
+
     scriptDeviceLogin(flowOptions = {}) {
       deviceFlow = makeDeviceFlow(flowOptions)
       return fake
@@ -1683,6 +1727,26 @@ function rewindRefused(refusal: RewindRefusal): ApiError {
     : new ApiError(400, 'the rewind names no message of this session that can be edited', {
         type: 'invalid_request_error',
       })
+}
+
+/**
+ * The error a refused `user.tool_confirmation` answers with (epic #303, #309).
+ *
+ * The wording follows the server's own (`apps/server/src/pausing.ts`), so a frontend's test
+ * against the fake sees the refusals the real route gives: a call that is not waiting, a
+ * question approved with no answers, a `remember` that would silence the next one, and answers
+ * that do not fit the questions asked.
+ */
+function confirmationRefused(refusal: ConfirmationRefusal, sessionId: string): ApiError {
+  const message =
+    refusal === 'not_waiting'
+      ? `nothing in session ${sessionId} is waiting on the user, so there is nothing to confirm`
+      : refusal === 'remember'
+        ? 'a question is not an approval: `remember` cannot silence the next `ask_user` call'
+        : refusal === 'no_answers'
+          ? 'a call to ask_user is answered with `answers`: allow it with the user’s answers, or deny it because they would not answer'
+          : 'the answers do not fit the questions asked'
+  return new ApiError(400, message, { type: 'invalid_request_error' })
 }
 
 /** The 404 an unknown (or another user's) mode id gets — the server's `not_found_error`. */

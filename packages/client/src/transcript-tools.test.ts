@@ -8,6 +8,7 @@ import {
   makeSessionRewind,
   makeStatusIdle,
   makeStatusRunning,
+  makeToolConfirmation,
   makeUserMessage,
 } from '@openharness/protocol/fixtures'
 import { newEventId } from '@openharness/protocol'
@@ -17,6 +18,8 @@ import {
   initialTranscriptState,
   reduceTranscriptAll,
   selectClearedToolResults,
+  selectConfirmation,
+  selectConfirmations,
   selectToolCalls,
   selectTranscriptEntries,
   selectTodos,
@@ -294,5 +297,120 @@ describe('the todo list in the transcript (#303, #305, #308)', () => {
     ])
 
     expect(selectTodos(state)).toBeNull()
+  })
+})
+
+describe('the reader’s decisions in the transcript (#303, #309; #310)', () => {
+  it('keeps a confirmation and reads it back by the call it names', () => {
+    const call = makeAgentToolUse(
+      'web_fetch',
+      { url: 'x' },
+      { seq: 2, evaluated_permission: 'ask' },
+    )
+    const state = reduce([
+      call,
+      makeToolConfirmation(call, { seq: 3, remember: 'session' }),
+      makeAgentToolResult(call, 'the page', { seq: 4 }),
+    ])
+
+    expect(selectConfirmation(state, call.id)).toMatchObject({
+      toolUseId: call.id,
+      result: 'allow',
+      remember: 'session',
+      seq: 3,
+    })
+    expect(selectConfirmations(state)).toHaveLength(1)
+    expect(selectConfirmation(state, 'sevt_other')).toBeNull()
+  })
+
+  it('keeps what an answered question carried', () => {
+    const call = makeAgentToolUse(
+      'ask_user',
+      { questions: [] },
+      { seq: 2, evaluated_permission: 'ask' },
+    )
+    const answers = [{ question: 'Which?', text: 'staging' }]
+    const state = reduce([call, makeToolConfirmation(call, { seq: 3, answers })])
+
+    expect(selectConfirmation(state, call.id)).toMatchObject({ answers, result: 'allow' })
+  })
+
+  it('reads a denial with the reader’s own words', () => {
+    const call = makeAgentToolUse(
+      'web_fetch',
+      { url: 'x' },
+      { seq: 2, evaluated_permission: 'ask' },
+    )
+    const state = reduce([
+      call,
+      makeToolConfirmation(call, { seq: 3, result: 'deny', deny_message: 'too risky' }),
+      makeAgentToolResult(call, 'The user denied this: too risky', { seq: 4, is_error: true }),
+    ])
+
+    expect(selectConfirmation(state, call.id)).toMatchObject({
+      result: 'deny',
+      denyMessage: 'too risky',
+    })
+    expect(state.toolCalls[0]?.status).toBe('denied')
+  })
+
+  it('lets the newest decision about a call win', () => {
+    const call = makeAgentToolUse(
+      'web_fetch',
+      { url: 'x' },
+      { seq: 2, evaluated_permission: 'ask' },
+    )
+    const state = reduce([
+      call,
+      makeToolConfirmation(call, { seq: 3 }),
+      makeToolConfirmation(call, { seq: 7, remember: 'always' }),
+    ])
+
+    expect(selectConfirmation(state, call.id)).toMatchObject({ remember: 'always', seq: 7 })
+    expect(selectConfirmations(state)).toHaveLength(1)
+  })
+
+  it('drops a decision a rewind took back with the branch it was on', () => {
+    const call = makeAgentToolUse(
+      'web_fetch',
+      { url: 'x' },
+      { seq: 2, evaluated_permission: 'ask' },
+    )
+    const state = reduce([
+      call,
+      makeToolConfirmation(call, { seq: 3 }),
+      makeSessionRewind({ seq: 9, supersedes: { from_seq: 1, to_seq: 8 } }),
+    ])
+
+    expect(selectConfirmations(state)).toEqual([])
+  })
+
+  it('keeps a decision the rewind did not reach', () => {
+    const call = makeAgentToolUse(
+      'web_fetch',
+      { url: 'x' },
+      { seq: 2, evaluated_permission: 'ask' },
+    )
+    const state = reduce([
+      call,
+      makeToolConfirmation(call, { seq: 3 }),
+      makeSessionRewind({ seq: 9, supersedes: { from_seq: 8, to_seq: 8 } }),
+    ])
+
+    expect(selectConfirmations(state)).toHaveLength(1)
+  })
+
+  it('reads a call a message resolved as dismissed, not failed', () => {
+    const call = makeAgentToolUse(
+      'web_search',
+      { query: 'x' },
+      { seq: 2, evaluated_permission: 'ask' },
+    )
+    const result = makeAgentToolResult(call, 'The user sent a message instead.', {
+      seq: 3,
+      is_error: true,
+    })
+
+    expect(onlyCall([call, result]).status).toBe('dismissed')
   })
 })
