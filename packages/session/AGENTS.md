@@ -1060,7 +1060,8 @@ dependency table.
   and the `RangeError` a window that is not one raises. The per-user tool-call read (#305) is in
   the suite beside it: a call its result answered, a failed call and one nothing answered both
   left out, the `name` filter, owner scoping, the half-open window, the `(session_id, seq)`
-  order and the rewind rule. The modes (#245, M6) are there as well:
+  order, the rewind rule, and — since #312 — a remote MCP call never counting: the read is
+  about this build's own tools, and an MCP server is the user's own, whatever its tool is named. The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,
