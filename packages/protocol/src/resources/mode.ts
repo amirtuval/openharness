@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { TimestampSchema } from '../common'
-import { ModeIdSchema } from '../ids'
+import { McpServerIdSchema, ModeIdSchema } from '../ids'
 import { ReasoningEffortSchema } from '../reasoning'
 import { ToolNameSchema } from './tool-settings'
 import { DEFAULT_MODEL_PATTERN, UserIdSchema } from './user'
@@ -21,7 +21,9 @@ import { DEFAULT_MODEL_PATTERN, UserIdSchema } from './user'
  * and a system-prompt addition behind a stable name. A chat that starts from a mode follows
  * it live — the next request uses the mode as it is now — which is what lets a user retune a
  * mode without touching every chat that runs it. This is the first step of the modes design
- * (epic #245, decision M6); a tool set is deliberately not part of it yet.
+ * (epic #245, decision M6). Since #307 a mode may also override which tools a chat has —
+ * the built-in ones by name, and the user's remote MCP servers by id (#311) — see
+ * {@link ModeToolOverrideSchema}.
  *
  * Modes are per user and owner-scoped like every other resource (epic #65, A4): a mode is
  * listed only to its owner and answers 404 to anyone else.
@@ -80,14 +82,34 @@ export type ModeReference = z.infer<typeof ModeReferenceSchema>
  * - **On and off, never a permission.** A mode decides *which* tools a chat has, not what a
  *   call to one may do: a permission is the user's (E6), and "always allow" (#309) is
  *   remembered per tool.
- * - **Built-in tools twice over, MCP servers once.** `builtin` is keyed by tool name; the MCP
- *   half (#311/#312) will be server-granular here — a mode turns a whole server on or off —
- *   and will be a sibling key of this object rather than more entries in this one, because an
- *   MCP tool's permission is the user's and only its server's presence is a mode's.
+ * - **Built-in tools by name, MCP servers by id.** `builtin` is keyed by tool name and
+ *   `mcp_servers` by a server's `mcps_` id — a mode turns a whole server on or off, never one
+ *   MCP tool, because an MCP tool's permission and its server's presence are different things
+ *   and only the second is a mode's (#311/#312). Two keys rather than one, so neither can be
+ *   mistaken for the other: a tool name is free text and a server id is not.
  */
 export const ModeToolOverrideSchema = z.object({
   /** Per-tool on/off; a tool not named follows the user's own setting. */
   builtin: z.record(ToolNameSchema, z.boolean()),
+  /**
+   * // extension: per-**server** on/off for the user's remote MCP servers (epic #303, X10;
+   * #311). A server the map does not name follows the user's own `enabled` on the resource —
+   * which is the user's default — and a mode that names one turns it on or off for every chat
+   * that follows the mode, live, exactly as it decides a built-in tool.
+   *
+   * **Never per MCP tool, and never a permission.** A mode says whether a server is in play;
+   * which of its tools a request offers and under which permission is the server's own
+   * listing and the user's settings (#312), not a mode's.
+   *
+   * **A server the user no longer has is simply ignored.** A mode is stored by id, and the
+   * server may be deleted afterwards — or the id may name nothing at all, because the mode
+   * routes do not check it — so a map entry is an instruction about a server that is still
+   * there and has no effect on one that is not.
+   *
+   * Optional, and absent from every mode stored before #311, so "this mode says nothing about
+   * MCP servers" and "an empty map" are the same thing.
+   */
+  mcp_servers: z.record(McpServerIdSchema, z.boolean()).optional(),
 })
 
 export type ModeToolOverride = z.infer<typeof ModeToolOverrideSchema>

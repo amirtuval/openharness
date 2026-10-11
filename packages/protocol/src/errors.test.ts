@@ -65,6 +65,7 @@ describe('error types and status codes', () => {
       request_too_large: 413,
       invalid_provider_credential: 422,
       mode_unavailable_error: 422,
+      mcp_connection_error: 422,
       rate_limit_error: 429,
       api_error: 500,
       timeout_error: 504,

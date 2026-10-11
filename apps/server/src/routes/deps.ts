@@ -1,12 +1,14 @@
 import type { ToolRegistry } from '@openharness/hands'
 import type { SessionStore } from '@openharness/session'
 
+import type { AuthUser } from '../auth'
 import type { SocialProviderName } from '../auth-profile'
 import type { ModelCatalog } from '../catalog/catalog'
 import type { UsageReader } from '../usage'
 import type { DefaultModelPicker } from '../default-model'
 import type { SessionScheduler } from '../scheduler'
 import type { SessionRevocations } from '../session-watch'
+import type { McpServerService } from '../mcp/service'
 import type { ProviderCredentialDeps } from './provider-credentials'
 
 /**
@@ -26,6 +28,12 @@ export interface RouteDeps {
   readonly auth: AuthDeps
   /** The vault, the sealed-credential store and the validator the credential routes use. */
   readonly credentialRoutes: ProviderCredentialDeps
+  /**
+   * The remote-MCP-server resource and its OAuth 2.1 client (epic #303, X10): the routes over
+   * `/v1/me/mcp_servers`, and the seam the tool loop (#312) resolves a server's URL and auth
+   * headers through.
+   */
+  readonly mcpServers: McpServerService
   /**
    * The model catalogue (epic #92): `GET /v1/models`, and the hook a saved or deleted
    * credential drops that provider's cached answer with (C4).
@@ -68,6 +76,17 @@ export interface RouteDeps {
    * Auth in `app.ts`.
    */
   readonly revalidateSession: (headers: Headers) => Promise<boolean>
+  /**
+   * The signed-in caller behind a request's headers, or `null` when there is none (A2). Wired
+   * to Better Auth in `app.ts`.
+   *
+   * The OAuth callback is the one route that asks. It is registered ahead of the `/v1` auth
+   * guard — the browser `oh` opens may never have signed in to this server — and it uses a
+   * session only to refuse a flow presented by a user other than the one the `state` is bound
+   * to (#311). Every route behind the guard reads `c.get('user')` instead, which is always
+   * there.
+   */
+  readonly sessionUser: (headers: Headers) => Promise<AuthUser | null>
 }
 
 /**

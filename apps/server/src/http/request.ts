@@ -2,6 +2,8 @@ import type { Context } from 'hono'
 import {
   type AgentId,
   AgentIdSchema,
+  type McpServerId,
+  McpServerIdSchema,
   type ModeId,
   ModeIdSchema,
   type SessionId,
@@ -48,6 +50,32 @@ export async function parseBody<T>(c: Context<AppEnv>, schema: SafeSchema<T>): P
 }
 
 /**
+ * Parse a body that may be absent, with a protocol schema.
+ *
+ * `POST …/connect` is the one route whose whole body is optional (#311): its `client` field
+ * defaults, so a request that carries no body at all — which is what every caller sent before
+ * the field existed — means the same thing as one that carries `{}`. An empty body parses as
+ * the schema's own defaults; anything else has to be JSON and match, exactly like
+ * {@link parseBody}.
+ *
+ * @throws HttpError 400 `invalid_request_error` when a non-empty body is not JSON, or when it
+ *   does not match the schema
+ */
+export async function parseOptionalBody<T>(c: Context<AppEnv>, schema: SafeSchema<T>): Promise<T> {
+  const text = await c.req.text()
+  if (text.trim().length === 0) {
+    return parseWith(schema, {})
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    throw invalidRequest('the request body must be JSON')
+  }
+  return parseWith(schema, raw)
+}
+
+/**
  * Parse the query string with a protocol schema.
  *
  * Array-valued parameters use the protocol's wire spelling: the key is repeated with a `[]`
@@ -86,6 +114,11 @@ export function sessionIdParam(c: Context<AppEnv>, name: string): SessionId {
 /** Validate a path parameter that has to be a `mode_` id; see {@link agentIdParam}. */
 export function modeIdParam(c: Context<AppEnv>, name: string): ModeId {
   return idParam(c.req.param(name), ModeIdSchema, name)
+}
+
+/** Validate a path parameter that has to be an `mcps_` id; see {@link agentIdParam}. */
+export function mcpServerIdParam(c: Context<AppEnv>, name: string): McpServerId {
+  return idParam(c.req.param(name), McpServerIdSchema, name)
 }
 
 /** A query parameter name as the array its `[]` spelling collects. */

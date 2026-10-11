@@ -30,6 +30,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@mozilla/readability": "0.6.0",
     "@openharness/protocol": "workspace:*",
     "linkedom": "0.18.13",

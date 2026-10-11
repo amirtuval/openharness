@@ -19,7 +19,8 @@ ideas carry the design:
   A4): it carries the owner's id, the reads a user-facing route makes are scoped to it, and
   another user's resource is answered 404, never 403. `@openharness/session` also owns the SQL
   everything else sits on: Better Auth's own tables (A1) and the sealed
-  `provider_credentials` users' model keys live in (A5).
+  `provider_credentials` users' model keys live in (A5), and the `mcp_servers`/`mcp_oauth_states`
+  a user's remote MCP servers and their pending OAuth flows live in (#303, X10).
 
   What a model request answers is a fact in the log, not state beside it: the events that
   claim user input — a `span.model_request_start` claims the messages its request folds in,
@@ -101,7 +102,9 @@ envelope encryption from `@openharness/vault` under a master key that comes from
 `OPENHARNESS_SECRETS_KEY` (`OPENHARNESS_KEY_PROVIDER=local`, the default) or from Cloud KMS
 (`gcp-kms`, #150), and never returned.
 [`docs/api.md`](./api.md#authentication) has the routes and rules;
-[`apps/server/AGENTS.md`](../apps/server/AGENTS.md) has the implementation.
+[`apps/server/AGENTS.md`](../apps/server/AGENTS.md) has the implementation. A user's **remote
+MCP servers** (epic #303, X10) are sealed the same way: their header maps and OAuth tokens live
+in the vault, never in the event log or a model request's context (X11).
 
 ## Package map
 
@@ -127,17 +130,19 @@ its name is not `@openharness/cli`; the other workspaces are private to the repo
 description, input schema, default permission and timeout, and one place to run it — and the
 three built-in tools ([#304](https://github.com/amirtuval/openharness/issues/304),
 [#305](https://github.com/amirtuval/openharness/issues/305)): `web_fetch`, which reads a URL the
-model chose through `safeFetch` and answers it as Markdown; `web_search`, which a deployment
-offers only where an operator configured a search API, behind an adapter and under a per-user
-daily allowance; and `todo_write`, whose list is the newest call in the log and nothing else.
-Every deployment gets the first and the third. Which of them a chat may use is the user's own
-choice, stored beside the log and read per request — on or off and a permission per tool, with a
-mode able to override the on/off part
+model chose through `safeFetch` — the one outbound-request guard the rest of openharness uses,
+the SSRF guard for a URL a user supplied — and answers it as Markdown; `web_search`, which a
+deployment offers only where an operator configured a search API, behind an adapter and under a
+per-user daily allowance; and `todo_write`, whose list is the newest call in the log and nothing
+else. Every deployment gets the first and the third. Which of them a chat may use is the user's
+own choice, stored beside the log and read per request — on or off and a permission per tool,
+with a mode able to override the on/off part
 ([#307](https://github.com/amirtuval/openharness/issues/307)) — and the loop sizes what a request
-carries of a tool's result ([#306](https://github.com/amirtuval/openharness/issues/306)). The MCP
-client will live here too ([#312](https://github.com/amirtuval/openharness/issues/312)); the loop
-they run in is the brain's, and what they may reach is
-[`docs/threat-model.md`](./threat-model.md).
+carries of a tool's result ([#306](https://github.com/amirtuval/openharness/issues/306)). It also
+holds the remote-MCP client (`openMcpClient`, Streamable HTTP over the official
+`@modelcontextprotocol/sdk`), shared with the tool loop
+([#312](https://github.com/amirtuval/openharness/issues/312)); the loop they run in is the
+brain's, and what they may reach is [`docs/threat-model.md`](./threat-model.md).
 
 ## Allowed dependency graph
 

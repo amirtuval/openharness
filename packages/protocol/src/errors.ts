@@ -40,6 +40,11 @@ export const API_ERROR_TYPES = [
   // provider, or "my default model" with no default set (epic #245, M6). Anthropic has no
   // modes and so nothing to refuse.
   'mode_unavailable_error',
+  // extension: an MCP server that could not be reached, discovered or registered as an OAuth
+  // client — the connection check on save, or a `connect` whose discovery or dynamic client
+  // registration failed (epic #303, X10). Anthropic holds the MCP servers and so has nothing
+  // to connect.
+  'mcp_connection_error',
   'rate_limit_error',
   'api_error',
   'timeout_error',
@@ -87,6 +92,12 @@ export const API_ERROR_STATUS_BY_TYPE: Record<ApiErrorType, number> = {
    * right now (epic #245, M6).
    */
   mode_unavailable_error: 422,
+  /**
+   * 422 — an MCP server could not be reached, its OAuth discovery failed, or it offers no
+   * dynamic client registration (epic #303, X10). Unprocessable rather than a conflict: the
+   * request is well-formed, but the server could not be brought into a usable state.
+   */
+  mcp_connection_error: 422,
   /** 429 — rate limited, or a spend limit was reached. */
   rate_limit_error: 429,
   /** 500 — an unexpected internal error. */

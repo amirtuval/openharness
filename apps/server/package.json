@@ -54,6 +54,7 @@
   },
   "devDependencies": {
     "@ai-sdk/provider": "4.0.18",
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@openharness/config": "workspace:*",
     "@testcontainers/postgresql": "12.1.0",
     "@types/node": "26.6.3",

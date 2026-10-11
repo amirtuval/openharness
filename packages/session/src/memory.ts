@@ -3,6 +3,7 @@ import {
   DEFAULT_PARTITION_COUNT,
   DEFAULT_USER_THEME,
   EVENT_TYPES,
+  MAX_MCP_SERVERS_PER_USER,
   StoredEventSchema,
   encodeKeyCursor,
   encodeSeqCursor,
@@ -10,6 +11,7 @@ import {
   SUMMARY_MODEL_SAME_AS_CHAT,
   newAgentId,
   newEventId,
+  newMcpServerId,
   newModeId,
   newProviderCredentialId,
   newSessionId,
@@ -24,6 +26,9 @@ import {
   type ListAgentsResponse,
   type ListEventsResponse,
   type ListSessionsResponse,
+  type McpServer,
+  type McpServerId,
+  type McpToolSummary,
   type Mode,
   type ModeId,
   type ModelRequestStartEvent,
@@ -50,14 +55,17 @@ import type {
   CredentialStore,
   ListCredentialsOptions,
   SealedProviderCredential,
+  SealedSecret,
   UpsertCredentialInput,
 } from './credentials'
 import {
   AgentNotFoundError,
   ClaimConflictError,
   DuplicateEventIdError,
+  DuplicateMcpServerNameError,
   DuplicateModeNameError,
   FencedError,
+  McpServerLimitReachedError,
   ModeLimitReachedError,
   SessionNotFoundError,
 } from './errors'
@@ -72,6 +80,14 @@ import {
   type SupersessionRecord,
 } from './events'
 import { deepFreeze } from './freeze'
+import type {
+  ConsumedMcpOAuthState,
+  CreateMcpServerInput,
+  McpOAuthStateInput,
+  McpServerStore,
+  StoredMcpServer,
+  UpdateMcpServerInput,
+} from './mcp-servers'
 import {
   assertEventIds,
   assertLivenessWindow,
@@ -1576,4 +1592,249 @@ function lastOf<T>(items: readonly T[]): T {
     throw new RangeError('lastOf() needs a non-empty array')
   }
   return last
+}
+
+/**
+ * The in-memory {@link McpServerStore} (epic #303, X10): the test fake and the reference
+ * behaviour for the contract.
+ *
+ * It keeps a server's metadata and its sealed blobs together — there is no separate secret
+ * table in memory — and its OAuth states in their own map. A `list` strips the sealed fields
+ * the way the Postgres store's metadata-only `select` does, so a secret cannot leak through a
+ * listing either way.
+ */
+export class InMemoryMcpServerStore implements McpServerStore {
+  readonly #clock: Clock
+
+  /** One record per server, keyed by its `mcps_` id. */
+  readonly #servers = new Map<McpServerId, StoredMcpServer>()
+
+  /** One pending OAuth state per `(user, server)`, keyed by the state string. */
+  readonly #states = new Map<string, McpOAuthStateInput & { readonly createdAt: Timestamp }>()
+
+  constructor(options: InMemoryMcpServerStoreOptions = {}) {
+    this.#clock = options.now ?? systemClock
+  }
+
+  create(input: CreateMcpServerInput): Promise<McpServer> {
+    const owned = [...this.#servers.values()].filter((server) => server.owner_id === input.ownerId)
+    if (owned.some((server) => server.name === input.name)) {
+      throw new DuplicateMcpServerNameError(input.ownerId, input.name)
+    }
+    if (owned.length >= MAX_MCP_SERVERS_PER_USER) {
+      throw new McpServerLimitReachedError(input.ownerId, MAX_MCP_SERVERS_PER_USER)
+    }
+    const now = this.#clock()
+    const at = timestampAt(now)
+    const record: StoredMcpServer = {
+      id: input.id ?? newMcpServerId(now),
+      type: 'mcp_server',
+      owner_id: input.ownerId,
+      name: input.name,
+      url: input.url,
+      auth: input.auth,
+      enabled: input.enabled,
+      status: input.status,
+      last_error: input.lastError,
+      header_names: [...input.headerNames],
+      tools: input.tools.map(copyToolSummary),
+      definition_tokens: input.definitionTokens,
+      last_tested_at: input.lastTestedAt,
+      created_at: at,
+      updated_at: at,
+      ...copySecrets(input.secrets),
+    }
+    this.#servers.set(record.id, record)
+    return resolved(deepFreeze(serverMetadataOf(record)))
+  }
+
+  get(serverId: McpServerId, options: OwnerScope): Promise<StoredMcpServer | null> {
+    const record = this.#servers.get(serverId)
+    if (record === undefined || !matchesOwner(record, options)) {
+      return resolved(null)
+    }
+    return resolved(deepFreeze(structuredClone(record)))
+  }
+
+  list(options: OwnerScope): Promise<McpServer[]> {
+    const servers = [...this.#servers.values()]
+      .filter((server) => matchesOwner(server, options))
+      .sort(compareKeys)
+      .map((server) => deepFreeze(serverMetadataOf(server)))
+    return resolved(servers)
+  }
+
+  update(
+    serverId: McpServerId,
+    options: OwnerScope,
+    input: UpdateMcpServerInput,
+  ): Promise<McpServer | null> {
+    const record = this.#servers.get(serverId)
+    if (record === undefined || !matchesOwner(record, options)) {
+      return resolved(null)
+    }
+    const name = input.name ?? record.name
+    const collides = [...this.#servers.values()].some(
+      (other) => other.id !== serverId && other.owner_id === record.owner_id && other.name === name,
+    )
+    if (collides) {
+      throw new DuplicateMcpServerNameError(record.owner_id, name)
+    }
+    const mergedSecrets = mergeSecrets(record, input.secrets)
+    const updated: MutableStoredMcpServer = {
+      ...record,
+      name,
+      url: input.url ?? record.url,
+      auth: input.auth ?? record.auth,
+      enabled: input.enabled ?? record.enabled,
+      status: input.status ?? record.status,
+      last_error: input.lastError === undefined ? record.last_error : input.lastError,
+      header_names: input.headerNames === undefined ? record.header_names : [...input.headerNames],
+      tools: input.tools === undefined ? record.tools : input.tools.map(copyToolSummary),
+      definition_tokens: input.definitionTokens ?? record.definition_tokens,
+      last_tested_at: input.lastTestedAt === undefined ? record.last_tested_at : input.lastTestedAt,
+      updated_at: timestampAt(this.#clock()),
+      ...mergedSecrets,
+    }
+    // A secret the patch cleared has no key at all, not one set to `undefined`: spreading the
+    // stored record above would otherwise leave the old blob in place.
+    for (const key of ['headers', 'tokens', 'oauthClient'] as const) {
+      if (input.secrets?.[key] === null) {
+        delete updated[key]
+      }
+    }
+    this.#servers.set(serverId, updated)
+    return resolved(deepFreeze(serverMetadataOf(updated)))
+  }
+
+  delete(serverId: McpServerId, options: OwnerScope): Promise<boolean> {
+    const record = this.#servers.get(serverId)
+    if (record === undefined || !matchesOwner(record, options)) {
+      return resolved(false)
+    }
+    this.#servers.delete(serverId)
+    // A deleted server takes its pending OAuth states with it, the cascade the Postgres schema
+    // writes as a foreign key.
+    for (const [state, pending] of this.#states) {
+      if (pending.serverId === serverId) {
+        this.#states.delete(state)
+      }
+    }
+    return resolved(true)
+  }
+
+  createOAuthState(input: McpOAuthStateInput): Promise<void> {
+    // One pending flow per `(user, server)`: a second `connect` replaces the first, so an
+    // abandoned flow cannot leave a second usable state behind.
+    for (const [state, pending] of this.#states) {
+      if (pending.userId === input.userId && pending.serverId === input.serverId) {
+        this.#states.delete(state)
+      }
+    }
+    this.#states.set(input.state, { ...input, createdAt: timestampAt(this.#clock()) })
+    return resolved(undefined)
+  }
+
+  consumeOAuthState(state: string): Promise<ConsumedMcpOAuthState | null> {
+    const pending = this.#states.get(state)
+    if (pending === undefined) {
+      return resolved(null)
+    }
+    // Single use whatever the outcome: a used or expired state is gone either way, so a
+    // callback replay finds nothing.
+    this.#states.delete(state)
+    if (Date.parse(pending.expiresAt) <= this.#clock()) {
+      return resolved(null)
+    }
+    return resolved({
+      userId: pending.userId,
+      serverId: pending.serverId,
+      codeVerifier: pending.codeVerifier,
+      client: pending.client,
+    })
+  }
+}
+
+/** Everything {@link InMemoryMcpServerStore} takes. */
+export interface InMemoryMcpServerStoreOptions {
+  /**
+   * The store's time source. Defaults to {@link systemClock}; pass a controllable clock in
+   * tests, which is what the conformance suite does.
+   */
+  readonly now?: Clock
+}
+
+/** The metadata of a stored server, without its sealed secrets: what `create`, `update` and `list` answer. */
+function serverMetadataOf(record: StoredMcpServer): McpServer {
+  const { headers: _headers, tokens: _tokens, oauthClient: _oauthClient, ...metadata } = record
+  return metadata
+}
+
+/** A tool summary as a fresh value, so a caller's array is never aliased. */
+function copyToolSummary(tool: McpToolSummary): McpToolSummary {
+  return {
+    name: tool.name,
+    description: tool.description,
+    definition_tokens: tool.definition_tokens,
+  }
+}
+
+/** The sealed secrets of a record to store, as copies, absent when none were given. */
+function copySecrets(secrets: CreateMcpServerInput['secrets']): Partial<StoredMcpServer> {
+  if (secrets === undefined) {
+    return {}
+  }
+  return {
+    ...(secrets.headers === undefined ? {} : { headers: { ...secrets.headers } }),
+    ...(secrets.tokens === undefined ? {} : { tokens: { ...secrets.tokens } }),
+    ...(secrets.oauthClient === undefined ? {} : { oauthClient: { ...secrets.oauthClient } }),
+  }
+}
+
+/** A mutable spelling of {@link McpServerSecrets}, for building a record field by field. */
+interface MutableSecrets {
+  headers?: SealedSecret
+  tokens?: SealedSecret
+  oauthClient?: SealedSecret
+}
+
+/** A stored server as the in-memory store mutates it while applying a patch. */
+type MutableStoredMcpServer = Omit<StoredMcpServer, 'headers' | 'tokens' | 'oauthClient'> &
+  MutableSecrets
+
+/** The secrets a patch leaves behind: keep what is omitted, replace a value, clear a `null`. */
+function mergeSecrets(
+  record: StoredMcpServer,
+  patch: UpdateMcpServerInput['secrets'],
+): MutableSecrets {
+  const merged: MutableSecrets = {
+    ...(record.headers === undefined ? {} : { headers: { ...record.headers } }),
+    ...(record.tokens === undefined ? {} : { tokens: { ...record.tokens } }),
+    ...(record.oauthClient === undefined ? {} : { oauthClient: { ...record.oauthClient } }),
+  }
+  if (patch === undefined) {
+    return merged
+  }
+  if (patch.headers !== undefined) {
+    if (patch.headers === null) {
+      delete merged.headers
+    } else {
+      merged.headers = { ...patch.headers }
+    }
+  }
+  if (patch.tokens !== undefined) {
+    if (patch.tokens === null) {
+      delete merged.tokens
+    } else {
+      merged.tokens = { ...patch.tokens }
+    }
+  }
+  if (patch.oauthClient !== undefined) {
+    if (patch.oauthClient === null) {
+      delete merged.oauthClient
+    } else {
+      merged.oauthClient = { ...patch.oauthClient }
+    }
+  }
+  return merged
 }

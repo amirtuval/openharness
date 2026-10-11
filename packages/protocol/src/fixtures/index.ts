@@ -1,5 +1,12 @@
 import type { EventId } from '../ids'
-import { newAgentId, newEventId, newModeId, newProviderCredentialId, newSessionId } from '../ids'
+import {
+  newAgentId,
+  newEventId,
+  newMcpServerId,
+  newModeId,
+  newProviderCredentialId,
+  newSessionId,
+} from '../ids'
 import { SUMMARY_MODEL_SAME_AS_CHAT } from '../index'
 import type {
   Agent,
@@ -10,6 +17,7 @@ import type {
   ContextSummaryEvent,
   ContextSummaryProgressEvent,
   ListModelsResponse,
+  McpServer,
   Mode,
   ModelEntry,
   ModelRequestEndEvent,
@@ -254,6 +262,34 @@ export function makeMode(overrides: Partial<Mode> = {}): Mode {
     updated_at: fixtureTimestamp(),
   }
   return { ...mode, ...overrides }
+}
+
+/**
+ * A remote MCP server (#303, X10): `notes`, an `oauth` server whose last check listed one
+ * tool. Pass a different `auth` — and, for `headers`, `header_names` — to build the other
+ * forms; the fixture never carries a secret, because the resource never does.
+ *
+ * @param overrides fields to replace on the default server
+ */
+export function makeMcpServer(overrides: Partial<McpServer> = {}): McpServer {
+  const server: McpServer = {
+    id: newMcpServerId(),
+    type: 'mcp_server',
+    owner_id: makeUser().id,
+    name: 'notes',
+    url: 'https://mcp.example.com/mcp',
+    auth: 'oauth',
+    enabled: true,
+    status: 'connected',
+    last_error: null,
+    header_names: [],
+    tools: [{ name: 'search', description: 'Search notes', definition_tokens: 24 }],
+    definition_tokens: 24,
+    last_tested_at: fixtureTimestamp(),
+    created_at: fixtureTimestamp(),
+    updated_at: fixtureTimestamp(),
+  }
+  return { ...server, ...overrides }
 }
 
 /**

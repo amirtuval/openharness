@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { newModeId } from '../ids'
+import { newMcpServerId, newModeId } from '../ids'
 import {
   CreateModeRequestSchema,
   ListModesResponseSchema,
@@ -137,6 +137,52 @@ describe('mode request schemas', () => {
     expect(ModeToolOverrideSchema.safeParse({ builtin: { web_search: 'yes' } }).success).toBe(false)
     expect(ModeToolOverrideSchema.safeParse({ builtin: { web_search: {} } }).success).toBe(false)
     expect(ModeToolOverrideSchema.safeParse({ builtin: [] }).success).toBe(false)
+  })
+
+  it('carries the MCP-server half of the override, a sibling of `builtin` (#311)', () => {
+    const server = newMcpServerId()
+    const other = newMcpServerId()
+    const override = {
+      builtin: { web_search: true },
+      mcp_servers: { [server]: true, [other]: false },
+    }
+    expect(ModeToolOverrideSchema.parse(override)).toEqual(override)
+    // Both halves are optional in a mode's own terms — `builtin` empty, `mcp_servers` absent —
+    // so a mode may override only the servers.
+    expect(ModeToolOverrideSchema.parse({ builtin: {}, mcp_servers: { [server]: false } })).toEqual(
+      { builtin: {}, mcp_servers: { [server]: false } },
+    )
+    expect(CreateModeRequestSchema.parse({ name: 'deep', model: 'x/y', tools: override })).toEqual({
+      name: 'deep',
+      model: 'x/y',
+      tools: override,
+    })
+    expect(ModeSchema.parse({ ...mode, tools: override }).tools).toEqual(override)
+  })
+
+  it('treats a missing `mcp_servers` map as a mode that says nothing about servers', () => {
+    // Every mode stored before #311 has this shape, so it has to keep parsing — and parsing it
+    // must not invent a key the writer did not write.
+    const parsed = ModeToolOverrideSchema.parse({ builtin: { web_fetch: false } })
+    expect(parsed).toEqual({ builtin: { web_fetch: false } })
+    expect(parsed).not.toHaveProperty('mcp_servers')
+  })
+
+  it('refuses an MCP server key that is not an `mcps_` id', () => {
+    expect(
+      ModeToolOverrideSchema.safeParse({ builtin: {}, mcp_servers: { notes: true } }).success,
+    ).toBe(false)
+    expect(
+      ModeToolOverrideSchema.safeParse({
+        builtin: {},
+        mcp_servers: { [newMcpServerId().replace('mcps_', 'mode_')]: true },
+      }).success,
+    ).toBe(false)
+    expect(
+      ModeToolOverrideSchema.safeParse({ builtin: {}, mcp_servers: { [newMcpServerId()]: 'yes' } })
+        .success,
+    ).toBe(false)
+    expect(ModeToolOverrideSchema.safeParse({ builtin: {}, mcp_servers: [] }).success).toBe(false)
   })
 
   it('requires a name and a model on create', () => {
