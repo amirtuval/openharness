@@ -367,6 +367,35 @@ describe('a remote tool turn', () => {
   })
 })
 
+describe('a call to a server that is gone', () => {
+  it('is answered sensibly when the user confirms it after the server was removed', async () => {
+    const world = await makeWorld({ replies: callsRemote('notes__search', { query: 'x' }) })
+    const server = await addServer(world)
+    const session = await createSession(world.test)
+
+    await say(world.test, session.id, 'search my notes')
+    const paused = await waitForPause(world, session.id)
+
+    // The server is removed while the call waits: the chat stops offering its tools, and the
+    // call that is already in the log keeps waiting for the user's answer.
+    const removed = await world.test.request(`${SERVERS}/${server.id}`, { method: 'DELETE' })
+    expect(removed.status).toBe(204)
+
+    const response = await confirm(world.test, session.id, paused.callId, { result: 'allow' })
+    expect(response.status).toBe(200)
+    await waitForIdle(world.test.store, session.id)
+
+    // The confirmation is honoured as an answer, not as a run: the registry no longer holds
+    // that tool, and its own sentence is what the model reads.
+    expect(world.mcp.calls).toEqual([])
+    const result = remoteResult(await readHistory(world.test.store, session.id))
+    expect(result).toMatchObject({ is_error: true })
+    expect(
+      result?.type === EVENT_TYPES.agentMcpToolResult ? result.content[0]?.text : '',
+    ).toContain('is registered')
+  })
+})
+
 describe('what a remote call’s result carries', () => {
   it('turns a tool-level error into an is_error result', async () => {
     const world = await makeWorld({
