@@ -1,0 +1,36 @@
+=== T10/T11/T12 — remote MCP servers ===
+(stub MCP + OAuth servers from apps/server/src/test-support/mcp.ts; :3001 with
+ OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1)
+
+T10 headers auth:
+POST /v1/me/mcp_servers {name:"notes", url:<stub>, auth:"headers", headers:{Authorization:"Bearer secret-token"}}
+ -> 201 status=connected tools=[{name:"search",definition_tokens:36},{name:"ping",definition_tokens:17}]
+POST .../{id}/test -> status=connected tools=2 last_error=null
+GET /v1/me/tools -> notes__search | server notes | policy ask | default ask | available true
+                     notes__ping   | server notes | policy ask | default ask | available true
+A call: the model is offered ["ask_user","web_fetch","todo_write","notes__search","notes__ping"],
+calls notes__search (stored agent.mcp_tool_use name=search server=notes perm=ask), the turn pauses;
+one confirmation (allow) runs it -> agent.mcp_tool_result
+ "Answer from the MCP server \"notes\" (tool \"search\"): ... search answered {\"query\":\"openharness\"}"
+
+T11 OAuth:
+POST /v1/me/mcp_servers {auth:"oauth"} -> status needs_reconnect, tools 0
+POST .../connect {client:"cli"} -> authorization_url with response_type=code, client_id,
+  redirect_uri=http://localhost:3001/v1/me/mcp_servers/oauth/callback, state, code_challenge(S256)
+Simulated browser: GET the authorization URL -> 302 to the callback?code&state;
+GET the callback with NO session -> 200 HTML "Connected — openharness"; status connected, tools 2
+A call through it: agent.mcp_tool_use -> approved -> "search answered {\"query\":\"hello\"}"
+Token refresh: the stub issues expires_in=30; the control surface showed
+  issued: [access-1, access-2, access-3, access-4, access-5]  (a fresh token per resolve)
+Revoke: setRefreshWorking(false) then test -> status needs_reconnect
+Disconnect -> status needs_reconnect; reconnect (client:"web") -> callback 302 to
+  ?mcp_connected=mcps_...#/settings, status connected, tools 2
+
+T12 failures:
+A server that is down (a dead URL) -> at the next request boundary:
+  session.error t=mcp_connection_failed_error
+  msg="The MCP server \"down\" could not be used: fetch failed This chat continues without its tools."
+  the request offers the other tools and the chat answers normally.
+A mode turning a server off: mode {tools:{builtin:{}, mcp_servers:{<oauth id>:false}}} ->
+  GET /v1/me/tools?mode_id= drops oauthnotes__*; a chat on the mode is offered
+  ["ask_user","web_fetch","todo_write"] only.

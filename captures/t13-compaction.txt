@@ -1,0 +1,26 @@
+=== T13 — large results and compaction ===
+(:3006, deepseek/deepseek-chat — a model id the registry does not list, so the history budget is
+ the 32,768 fallback; OPENHARNESS_COMPACTION_THRESHOLD=0.3; and :3007, threshold 0.95)
+
+--- a call and its result are never split; the summary covers tool work whole ---
+request after the fetch: span.model_request_start.truncated =
+ {seq:17, tokens_before:12558, tokens_after:4096, results:[{seq:17, tool:"web_fetch", ...}]}
+ (the 50k-char page is capped to 4096 tokens in the request; the stored result keeps every character)
+crossing the threshold:
+ 61 session.context_summary_progress 1/1
+ 62 span.model_request_start tools=[] purpose=summary
+ 65 session.context_summary reason=threshold covers.to_seq=58 model=deepseek/deepseek-chat passes=1
+      <- covers.to_seq 58 includes the whole turn (call seq 16 + result seq 17)
+ 66 span.model_request_start (the chat's next request, built from the summary + the kept tail)
+The model's next request was accepted by the provider (an assistant tool call without its
+answer would have been refused), and the reply streamed.
+The summary text has a "## Tool work" section:
+  "- `web_fetch` called with {\"url\":\"https://en.wikipedia.org/wiki/TypeScript\"} — result:
+     \"Fetched ... (text/html).\" ... the page was longer than 50000 characters."
+
+--- old results are cleared before anything is summarized ---
+(:3007, threshold 0.95 so clearing is not followed by a summary)
+after the fetch and a large filler:
+ 153 span.model_request_start tools=[...] trunc=undefined cleared={"results":1,"tokens":12558}
+ (the old result's body is replaced by "result cleared, N tokens"; nothing is capped and
+  NO session.context_summary is written — clearing alone brought the context under the threshold)

@@ -1,0 +1,22 @@
+=== T5 — interrupt during a tool; crash during a tool -> "execution lost", not re-run ===
+(:3005 and :3004, real model; web_fetch pointed at a black-hole host so the call runs for ~20s)
+
+--- interrupt during a tool ---
+start the turn, POST user.interrupt after 7s:
+  {"data":[{"id":"sevt_...","type":"user.interrupt","seq":8,"processed_at":null}]}
+7  agent.tool_use  name=web_fetch input={"url":"http://1.2.3.4.nip.io/"}
+9  agent.tool_result err=true content=[{"type":"text","text":"Interrupted by the user."}]
+10 session.status_idle stop={"type":"end_turn"}
+
+--- crash during a tool (:3004, Postgres) ---
+the tool call is stored, then the server is SIGKILLed. The DB before the restart:
+  1 user.message, 2 session.status_running, 3 span.model_request_start, 4 event_start,
+  5 span.model_request_end, 6 session.usage, 7 agent.tool_use     <- no result: killed mid-call
+restart the server; recovery runs the inherited turn:
+  8  agent.tool_result err=true
+     "Tool web_fetch: execution lost. The turn that started this call did not finish, so it was
+      not run again."
+  9  span.model_request_start ... (the model is asked again, with the result it was owed)
+  74 agent.message  (the model carries on)
+The crashed call is never re-run: it has one call event and one result, and no second execution
+(the model's own later calls are new calls, not the lost one).

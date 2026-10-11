@@ -1,0 +1,12 @@
+=== T6 — a model without tool support ===
+(:3000, OPENHARNESS_TEST_MODEL=mock so a chat runs with no provider; the tool gate is the real
+ registry one: models.dev marks openai/gpt-3.5-turbo unable to call tools)
+
+an openai credential is stored (the sandbox's /v1/models answers), so the catalog lists it:
+session on openai/gpt-3.5-turbo, "Say hello in five words."
+3  span.model_request_start model=openai/gpt-3.5-turbo      "tools" in the event: false
+16 agent.message text="Say hello in five words."              <- the mock streams a reply
+19 session.status_idle stop={"type":"end_turn"}
+No tools are offered at all, so the request is built exactly as it was before tools existed;
+the chat works and writes no tool events. The web UI draws "this model can't use tools"
+(the model entry's tool_call === false).

@@ -1,0 +1,50 @@
+=== T8 — approvals (all on :3001, real model; web_fetch policy = ask) ===
+
+--- pause on ask ---
+15 agent.tool_use name=web_fetch perm=ask input={"url":"https://example.com/"}
+16 session.status_idle stop={"type":"requires_action","event_ids":["sevt_..."]}
+
+--- allow once ---
+17 user.tool_confirmation use=sevt_... result=allow remember=(absent)
+19 agent.tool_result err=false "Fetched https://example.com/ (text/html)..."
+   web UI: the call line reads "done" with "Allowed once" beside it.
+
+--- deny with a message ---
+9  user.tool_confirmation result=deny
+11 agent.tool_result err=true content="The user denied this: Not this site, thanks"
+   (the tool did not run; the model carried on)
+
+--- remember: this chat (session) ---
+18 user.tool_confirmation result=allow remember=session
+20 agent.tool_result err=false (the call ran)
+   42 agent.tool_use name=web_fetch perm=allow  <- a later call in the same chat runs with no pause
+
+--- always ---
+after user.tool_confirmation {result:allow, remember:always}:
+GET /v1/me/tools -> web_fetch  enabled=true  policy=allow  default_policy=allow
+   (the stored policy moved to allow, so new chats do not pause either)
+
+--- several pending calls ---
+7  agent.tool_use name=todo_write perm=ask ...
+8  agent.tool_use name=web_fetch  perm=ask ...
+9  session.status_idle stop={"type":"requires_action","event_ids":["sevt_...","sevt_..."]}
+   web UI: both calls show a prompt; the bulk bar offers Allow all / Deny all.
+
+--- a message sent while waiting ---
+12 agent.tool_result err=true "The user sent a message instead."
+13 agent.tool_result err=true "The user sent a message instead."
+18 agent.message "DONE"    (the turn carried on with the message)
+
+--- another tab sees and clears the prompt ---
+Two tabs on the same session both draw the approval prompt. "Allow once" in one tab:
+tab 2's prompt disappears and the call line reads "done · Allowed once"
+(captures/t8-approval-prompt.png, captures/t8-second-tab-cleared.png)
+
+--- kill the server right after a confirmation is stored -> another start resumes the turn ---
+:3004, Postgres. The confirmation POST returns, then the server is SIGKILLed. The DB holds:
+  1 user.message, 2 status_running, 3 span start, 4 event_start, 5 span end, 6 usage,
+  7 agent.tool_use, 8 status_idle(requires_action), 9 user.tool_confirmation, 10 status_running
+Restart -> the turn resumes (no stranding): the approved-but-unfinished call is answered
+  11 agent.tool_result err=true "Tool web_fetch: execution lost. The turn that started this
+     call did not finish, so it was not run again."
+and the model carries on (a fresh call, its own pause). The tool is never re-run.

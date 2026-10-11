@@ -1,0 +1,26 @@
+=== T2 — web_search: with the operator key; hidden with no key; the daily cap; searches in usage ===
+
+--- hidden with no key (default deployment, :3000/:3001) ---
+startup banner: "tools: web_fetch, todo_write (no search provider configured)"
+span.model_request_start tools=["ask_user","web_fetch","todo_write", ...]   <- no web_search
+GET /v1/me/tools -> the registered tools only; no web_search entry at all
+   (a smaller offer, not a broken one: the tool does not exist)
+
+--- the daily cap (:3002 with OPENHARNESS_SEARCH_PROVIDER=brave,
+    OPENHARNESS_SEARCH_API_KEY=dummy, OPENHARNESS_SEARCH_DAILY_LIMIT=0) ---
+banner: "tools: web_fetch, todo_write, web_search (brave, 0 searches/user/day, key not printed)"
+GET /v1/me/tools -> web_search available=true policy=allow
+the model calls it:
+  7 agent.tool_use name=web_search perm=allow input={"query":"openharness"}
+  8 agent.tool_result err=true
+    "Search limit reached: this account has used all 0 of its web searches for today.
+     The allowance starts again tomorrow."
+   no provider request is made (the key is withheld), which is how the cap is enforced.
+
+--- can't test: the live search and the searches count ---
+This sandbox has no operator search key (the plan allows this: "If none is available in the
+sandbox, test the 'no key -> tool absent' behaviour by hand, and mark the live-search parts
+'can't test'"). GET /v1/sessions/{id}/usage and /v1/me/usage do carry `searches`, but with no
+working provider no successful web_search result can be produced, so the count stays 0 and the
+Brave adapter's happy path is only reachable through the package's stub tests
+(packages/hands/src/search.test.ts, web-search.test.ts).

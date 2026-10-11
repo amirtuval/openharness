@@ -1,0 +1,32 @@
+=== T4 — several tools in one step, across steps, the step-limit notice, the tool timeout ===
+(real model deepseek/deepseek-flash on :3001; step-limit and timeout on separate shapes)
+
+--- several tools in one step (ONE model request, two calls, one append, results in call order) ---
+Sent prompt: "In ONE step, call both tools at the same time: todo_write ... and web_fetch on https://example.com/."
+7  agent.tool_use  name=todo_write perm=allow input={"todos":[{"content":"write the report","status":"pending"}]}
+8  agent.tool_use  name=web_fetch  perm=allow input={"url":"https://example.com/"}
+9  agent.tool_result err=false content=[{"type":"text","text":"Todo list (1 items: 1 pending): ..."}]
+10 agent.tool_result err=false content=[{"type":"text","text":"Fetched https://example.com/ (text/html)..."}]
+   (both calls are appended before either runs; results in the order the model made them)
+
+--- tools across steps (two requests, a call in each) ---
+3  span.model_request_start model=deepseek/deepseek-flash tools=[ask_user, web_fetch, todo_write]
+16 agent.tool_use  name=todo_write input={"todos":[{"content":"first step","status":"pending"}]}
+17 agent.tool_result err=false "Todo list (1 items: 1 pending): - [ ] first step"
+18 span.model_request_start model=deepseek/deepseek-flash tools=[ask_user, web_fetch, todo_write]
+34 agent.tool_use  name=todo_write input={"todos":[{"content":"second step","status":"pending"}]}
+35 agent.tool_result err=false "Todo list (1 items: 1 pending): - [ ] second step"
+36 span.model_request_start ...   (a third request for the final reply)
+
+--- the step-limit notice (OPENHARNESS_MAX_TOOL_STEPS=1, mock model, :3003) ---
+3  span.model_request_start model=mock/model tools=[ask_user, echo, web_fetch, todo_write]
+7  agent.tool_use  name=echo perm=allow input={"text":"hello"}
+8  agent.tool_result err=false content=[{"type":"text","text":"hello"}]
+9  session.error t=tool_steps_exhausted_error retry_status=terminal
+   msg="This turn reached its limit of 1 model requests before the model finished, so it was ended. Send a message to carry on."
+10 session.status_idle stop={"type":"end_turn"}
+
+--- the tool timeout (web_fetch on a black-hole host, NO_PROXY'd so the fetch is direct, :3005) ---
+7  agent.tool_use  name=web_fetch perm=allow input={"url":"http://1.2.3.4.nip.io/"}
+8  agent.tool_result err=true content=[{"type":"text","text":"Tool web_fetch timed out after 20000 ms."}]
+   turn continued to session.status_idle {end_turn} after ~23s

@@ -1,0 +1,22 @@
+=== T7 — tool settings: on/off and policies; the mode override; a mode switch mid-chat ===
+(mock model on :3000 for on/off+policy; real model on :3001 for the mode cases)
+
+--- a tool turned off is absent from the offer ---
+PUT /v1/me/tools {"builtin":{"todo_write":{"enabled":false,"policy":"allow"}}}
+span.model_request_start tools=["ask_user","echo","web_fetch"]      <- todo_write gone
+
+--- a policy of deny is recorded on the call and the tool does not run ---
+PUT /v1/me/tools {"builtin":{"echo":{"enabled":true,"policy":"deny"}}}
+7 agent.tool_use name=echo perm=deny input={"text":"hi there"}
+8 agent.tool_result err=true content=[{"type":"text","text":"Permission to use echo has been denied."}]
+
+--- the mode override (GET ...?mode_id= answers the read as a chat on that mode would see it) ---
+mode "notodo" = {model: deepseek/deepseek-flash, tools:{builtin:{todo_write:false}}}
+GET /v1/me/tools?mode_id=mode_...     -> ask_user true allow / web_fetch true allow / todo_write FALSE allow
+GET /v1/me/tools                      -> ... todo_write TRUE allow
+
+--- a mode switch mid-chat (the request records the mode and the tools it resolved) ---
+message carrying mode=mode_... :
+  span model=deepseek/deepseek-flash mode={"id":"mode_...","name":"notodo"} tools=["ask_user","web_fetch"]
+message carrying mode:null (detach):
+  span model=deepseek/deepseek-flash mode=undefined tools=["ask_user","web_fetch","todo_write"]

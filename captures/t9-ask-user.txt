@@ -1,0 +1,48 @@
+=== T9 — ask_user: each question type, multi-select, "Other", decline; keyboard-only in `oh` ===
+(real model on :3001)
+
+--- the model asks a choice, a multi-select choice, a text and a confirm question ---
+call input: questions =
+ [{question:"Which colour would you like?", header:"Color", type:"choice", options:[{label:"Red"},{label:"Blue"}]},
+  {question:"Which features do you want?", header:"Features", type:"choice", options:[...], multi_select:true},
+  {question:"Any notes you'd like to add?", header:"Notes", type:"text"},
+  {question:"Do you want to proceed?", header:"Proceed", type:"confirm"}]
+idle stop={"type":"requires_action","event_ids":["sevt_..."]}
+
+--- the answers, including an "Other" write-in, become the call's result ---
+user.tool_confirmation {result:"allow", answers:[
+  {question:"Which colour would you like?", text:"Green (my own answer)"},
+  {question:"Which features do you want?", labels:["Auth","Logging"]},
+  {question:"Any notes you'd like to add?", text:"ship it"},
+  {question:"Do you want to proceed?", confirmed:true}]}
+agent.tool_result:
+  "Which colour would you like?: Green (my own answer)
+   Which features do you want?: Auth, Logging
+   Any notes you'd like to add?: ship it
+   Do you want to proceed?: Yes"
+
+--- an answer that does not fit the questions is refused, storing nothing ---
+400 invalid_request_error "the answers do not fit the questions asked: Notes: no answer was given; (answers): ... is not a question this call asked"
+
+--- decline ---
+user.tool_confirmation {result:"deny", deny_message:"I'd rather not say"}
+agent.tool_result err=true "The user denied this: I'd rather not say"
+
+--- the web form (captures/t9-ask-user-form.png) ---
+radios with an "Other" write-in per choice question, checkboxes for the multi-select,
+a text input, a yes/no pair, Submit held until valid (the missing parts are named),
+Decline. Picking Blue + Auth + notes + Yes and pressing Submit produced exactly the
+same confirmation/answers above.
+
+--- keyboard-only in `oh` (tmux, 140x45) ---
+  ◔ ask_user What is your name? · waiting for you
+  1 item is waiting on you · ↑/↓ move · Enter choose · Tab next question · Esc decline
+  Name · What is your name?
+  ▸ · Type your name here
+  · Submit answers  Name: a text question needs `text`
+  · Decline  the model is told you would not answer
+  · Write a message instead  sending it declines everything waiting
+Keys only: Enter -> the prompt slot's text entry ("What is your name? ›"), typed "Ada",
+Enter, ↓ to "Submit answers · your answers are ready", Enter:
+  ● ask_user What is your name? · done
+  "You said your name is Ada — nice to meet you!..."

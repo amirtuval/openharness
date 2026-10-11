@@ -1,0 +1,22 @@
+=== T15 — regression: chats without tools behave as before; older logs replay unchanged ===
+
+--- a chat that calls no tool writes no tool events ---
+session on deepseek/deepseek-flash, one plain question:
+  event types: user.message, session.status_running, session.error, span.model_request_start,
+               agent.message, span.model_request_end, session.usage, session.status_idle
+  tool-related events: 0
+
+--- a model that may not call tools is offered none, and the chat works ---
+(:3000, mock model, session on openai/gpt-3.5-turbo — models.dev marks it tool_call false)
+  span.model_request_start model=openai/gpt-3.5-turbo   "tools" in span: false   (the pre-tools shape)
+  the turn answered normally and went idle: the UI says "this model can't use tools".
+
+--- replay matches the live transcript ---
+a session with an allowed call, a denied call and a done MCP call:
+  live [role=log] innerText and the same after a reload compare EQUAL (byte-for-byte, 1245 chars)
+  (captures/t14-live.txt vs captures/t14-replay.txt; the body text is t14-live-body.txt)
+`oh -s <id>` replays the same states in the terminal:
+  ● web_fetch https://example.com/ · done · Allowed once
+  ⊘ web_fetch https://example.org/ · denied   ("The user denied this: no")
+  ● oauthnotes__search (mcp: oauthnotes) hello · done · Allowed once
+  error: The MCP server "down" could not be used: ...   Ctrl+R to reconnect
