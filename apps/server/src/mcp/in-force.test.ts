@@ -33,7 +33,7 @@ function modeOverride(mcp: Record<string, boolean>): ModeToolOverride {
 
 /** A `McpServerService` whose `list` answers exactly these servers, for the async half. */
 function service(servers: readonly McpServer[]): Pick<McpServerService, 'list'> {
-  return { list: async () => [...servers] }
+  return { list: () => Promise.resolve([...servers]) }
 }
 
 describe('mcpServersInForce', () => {
