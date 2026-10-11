@@ -1,6 +1,6 @@
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
 import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
-import { ASK_USER_TOOL_NAME, EVENT_TYPES } from '@openharness/protocol'
+import { ASK_USER_TOOL_NAME, EVENT_TYPES, WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
 import type { ModelRequestStartEvent, StoredEvent, ToolSettingEntry } from '@openharness/protocol'
 import type { Client } from '@openharness/client'
 import { describe, expect, it } from 'vitest'
@@ -97,12 +97,14 @@ describe('the tool settings over the wire', () => {
     // Every deployment registers `ask_user` (#309); the mock process adds the test tool, and
     // #305's built-ins follow. Each is on under its own declared `allow`, and a call to
     // `ask_user` is answered by the user rather than run, which is what its `policy: 'allow'`
-    // says about the *tool* — the registry the settings and the chat read alike.
+    // says about the *tool* — the registry the settings and the chat read alike. `web_search`
+    // is listed beside them without any registry carrying it (#335): it is the provider's own.
     expect(await listTools(server, me)).toEqual([
       listed(ASK_USER_TOOL_NAME),
       listed(TEST_TOOL_NAME),
       listed(WEB_FETCH_TOOL_NAME),
       listed('todo_write'),
+      listed(WEB_SEARCH_TOOL_NAME),
     ])
 
     const session = await me.client.sessions.create({ model: { id: 'anthropic/claude-sonnet-5' } })
@@ -114,6 +116,8 @@ describe('the tool settings over the wire', () => {
       { name: TEST_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
+      // And the provider's own tool, because this chat runs a Claude (#335).
+      { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
     ])
 
     const stored = await tools(server, me, {
@@ -146,6 +150,7 @@ describe('the tool settings over the wire', () => {
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
+      { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
     ])
     // The mock called the disabled tool anyway (nothing told it what the request offered) and
     // the loop, having no tool of that name to run, answers it as the unknown tool a disabled
@@ -167,6 +172,7 @@ describe('the tool settings over the wire', () => {
           [ASK_USER_TOOL_NAME]: { enabled: false, policy: 'allow' },
           [TEST_TOOL_NAME]: { enabled: false, policy: 'allow' },
           [WEB_FETCH_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [WEB_SEARCH_TOOL_NAME]: { enabled: false, policy: 'allow' },
           todo_write: { enabled: false, policy: 'allow' },
         },
       }),
