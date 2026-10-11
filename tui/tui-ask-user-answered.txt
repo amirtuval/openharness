@@ -1,0 +1,30 @@
+XDG_CONFIG_HOME=/tmp/oh-cfg OH_NO_AUTO_UPDATE=1 node /home/user/workspace/openharness/apps/tui/dist/
+index.js -s sesn_01M4MQGMSH86GP9J3Z48K592MC
+user@e2b:~/workspace/openharness/apps/tui$ XDG_CONFIG_HOME=/tmp/oh-cfg OH_NO_AUTO_UPDATE=1 node /hom
+e/user/workspace/openharness/apps/tui/dist/index.js -s sesn_01M4MQGMSH86GP9J3Z48K592MC
+__ask__ please
+
+● ask_user Which environment should I deploy to? · done
+
+the tool said: Which environment should I deploy to?: production Anything else I should know?: the
+release is on Thursday
+
+32ms · 59 tokens · —
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+openai/gpt-5-mini · sesn_…K592MC · — · 0% of context used · idle
+❯
+
+
+
+
+
+
+
+
+
+
+
+
+
+

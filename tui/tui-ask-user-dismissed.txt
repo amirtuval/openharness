@@ -1,0 +1,30 @@
+XDG_CONFIG_HOME=/tmp/oh-cfg OH_NO_AUTO_UPDATE=1 node /home/user/workspace/openharness/apps/tui/dist/
+index.js -s sesn_01M4MQSS4NEQ33817FHT68BQ94
+user@e2b:~/workspace/openharness/apps/tui$ XDG_CONFIG_HOME=/tmp/oh-cfg OH_NO_AUTO_UPDATE=1 node /hom
+e/user/workspace/openharness/apps/tui/dist/index.js -s sesn_01M4MQSS4NEQ33817FHT68BQ94
+__ask__ please
+
+◌ ask_user Which environment should I deploy to? · dismissed
+The user sent a message instead.
+
+never mind, do it later
+
+never mind, do it later
+
+112ms · 59 tokens · —
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+openai/gpt-5-mini · sesn_…68BQ94 · — · 0% of context used · idle
+❯
+
+
+
+
+
+
+
+
+
+
+
+

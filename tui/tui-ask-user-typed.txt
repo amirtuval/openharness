@@ -1,0 +1,30 @@
+XDG_CONFIG_HOME=/tmp/oh-cfg OH_NO_AUTO_UPDATE=1 node /home/user/workspace/openharness/apps/tui/dist/
+index.js -s sesn_01M4MQGMSH86GP9J3Z48K592MC
+user@e2b:~/workspace/openharness/apps/tui$ XDG_CONFIG_HOME=/tmp/oh-cfg OH_NO_AUTO_UPDATE=1 node /hom
+e/user/workspace/openharness/apps/tui/dist/index.js -s sesn_01M4MQGMSH86GP9J3Z48K592MC
+__ask__ please
+
+◔ ask_user Which environment should I deploy to? · waiting for you
+
+1 item is waiting on you · ↑/↓ move · Enter choose · Tab next question · Esc decline
+Environment · Which environment should I deploy to?
+  ○ staging
+  ● production
+  ○ Other  type your own answer
+Notes · Anything else I should know?
+▸ · the release is on Thursday  your answer
+ask_user asked you 2 questions
+  · Submit answers  your answers are ready
+  · Decline  the model is told you would not answer
+  · Write a message instead  sending it declines everything waiting
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+openai/gpt-5-mini · sesn_…K592MC · — · 0% of context used · idle
+❯
+
+
+
+
+
+
+

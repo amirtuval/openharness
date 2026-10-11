@@ -1,0 +1,26 @@
+4MQQ53VG0EXABQQP79R2VKF
+user@e2b:~/workspace/openharness/apps/tui$ XDG_CONFIG_HOME=/
+tmp/oh-cfg OH_NO_AUTO_UPDATE=1 node /home/user/workspace/ope
+nharness/apps/tui/dist/index.js -s sesn_01M4MQQ53VG0EXABQQP7
+9R2VKF
+__ask__ please
+
+◔ ask_user Which environment should I deploy to? · waiting…
+
+1 item is waiting on you · ↑/↓ move · Enter choose · Tab
+next question · Esc decline
+Environment · Which environment should I deploy to?
+▸ ○ staging
+  ○ production
+  ○ Other  type your own answer
+Notes · Anything else I should know?
+  · type an answer
+ask_user asked you 2 questions
+  · Submit answers  Environment: choose an option, or writ…
+  · Decline  the model is told you would not answer
+  · Write a message instead  sending it declines everythin…
+
+───────────────────────────────────────────────────────────
+openai/gpt-5-mini · sesn_…9R2VKF · — · 0% · idle
+❯
+
