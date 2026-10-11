@@ -97,7 +97,9 @@ export function ToolsCard() {
             <div>
               <h4 className="text-sm font-medium">MCP · {group.server}</h4>
               <p className="text-xs text-muted-foreground">
-                This server&rsquo;s tools are on while the server is. Editing them is coming.
+                This server&rsquo;s tools are on while the server is, and each call asks you first
+                unless you say otherwise. Set a permission, or the server&rsquo;s state, under{' '}
+                <span className="font-medium">MCP servers</span> below.
               </p>
             </div>
             <ul className="space-y-3">

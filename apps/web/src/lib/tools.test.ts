@@ -1,6 +1,12 @@
+import { newMcpServerId } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
-import { modeToolChoice, withModeToolChoice } from './tools'
+import {
+  modeMcpServerChoice,
+  modeToolChoice,
+  withModeMcpServerChoice,
+  withModeToolChoice,
+} from './tools'
 
 /**
  * The mode editor's tri-state (epic #303, X4; #307).
@@ -70,5 +76,53 @@ describe('a mode’s MCP server patch is carried through a save (#311, #312)', (
     })
     // An empty server map is the same as none: the mode says nothing either way.
     expect(withModeToolChoice({ builtin: {}, mcp_servers: {} }, 'web_search', 'follow')).toBeNull()
+  })
+})
+
+describe('a mode’s MCP server choice (#311; #313)', () => {
+  // The ids are the protocol's own: `mcp_servers` is keyed by a branded `mcps_` id, so a
+  // hand-typed string is not the shape the wire holds.
+  const NOTES = newMcpServerId()
+  const GIT = newMcpServerId()
+  const PATCH = { builtin: { web_search: true }, mcp_servers: { [NOTES]: false } }
+
+  it('reads a missing server as "follow my settings"', () => {
+    expect(modeMcpServerChoice(null, NOTES)).toBe('follow')
+    expect(modeMcpServerChoice({ builtin: {} }, NOTES)).toBe('follow')
+    expect(modeMcpServerChoice({ builtin: {}, mcp_servers: {} }, NOTES)).toBe('follow')
+  })
+
+  it('reads an explicit boolean as on or off', () => {
+    expect(modeMcpServerChoice({ builtin: {}, mcp_servers: { [NOTES]: true } }, NOTES)).toBe('on')
+    expect(modeMcpServerChoice(PATCH, NOTES)).toBe('off')
+  })
+
+  it('sets one server without disturbing the tools or the other servers', () => {
+    const both = {
+      builtin: { web_search: true },
+      mcp_servers: { [NOTES]: false, [GIT]: true },
+    }
+    expect(withModeMcpServerChoice(both, NOTES, 'on')).toEqual({
+      builtin: { web_search: true },
+      mcp_servers: { [NOTES]: true, [GIT]: true },
+    })
+  })
+
+  it('leaves the builtin map in place, even when it names nothing', () => {
+    // `builtin` is the wire's one required field of an override: a mode that says something
+    // about servers only is `{ builtin: {}, mcp_servers: { … } }`.
+    expect(withModeMcpServerChoice(null, NOTES, 'off')).toEqual({
+      builtin: {},
+      mcp_servers: { [NOTES]: false },
+    })
+    expect(withModeMcpServerChoice(PATCH, NOTES, 'follow')).toEqual({
+      builtin: { web_search: true },
+    })
+  })
+
+  it('folds a patch that names nothing back to null', () => {
+    expect(
+      withModeMcpServerChoice({ builtin: {}, mcp_servers: { [NOTES]: false } }, NOTES, 'follow'),
+    ).toBeNull()
   })
 })

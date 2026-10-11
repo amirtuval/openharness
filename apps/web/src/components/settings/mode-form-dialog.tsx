@@ -1,6 +1,7 @@
 import { MODE_DEFAULT_MODEL, REASONING_EFFORTS } from '@openharness/protocol'
 import type {
   CreateModeRequest,
+  McpServer,
   Mode,
   ModeToolOverride,
   ToolSettingEntry,
@@ -9,7 +10,13 @@ import { useEffect, useState } from 'react'
 
 import type { ModesView } from '../../hooks/use-modes'
 import type { ModelsView } from '../../hooks/use-models'
-import { modeToolChoice, withModeToolChoice, type ModeToolChoice } from '../../lib/tools'
+import {
+  modeMcpServerChoice,
+  modeToolChoice,
+  withModeMcpServerChoice,
+  withModeToolChoice,
+  type ModeToolChoice,
+} from '../../lib/tools'
 import { ModelPicker } from '../models/model-picker'
 import { Button } from '../ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog'
@@ -88,6 +95,7 @@ export function ModeFormDialog({
   modes,
   catalog,
   tools,
+  mcpServers,
   onSaved,
   onClose,
 }: {
@@ -103,11 +111,20 @@ export function ModeFormDialog({
    * Tools card reads, so a mode's choices are offered for the tools that really exist here.
    *
    * The remote MCP entries are ignored here (#312): a mode overrides a **server**, by id, and
-   * a per-MCP-tool switch would be a choice the wire has nowhere to put — that half of the
-   * editor is #313. {@link withModeToolChoice} still carries a mode's `mcp_servers` through a
-   * save, so opening this form never drops what a mode already says about servers.
+   * a per-MCP-tool switch would be a choice the wire has nowhere to put.
    */
   tools: readonly ToolSettingEntry[]
+  /**
+   * The reader's remote MCP servers, for the servers section (#311; #313): a mode may turn a
+   * whole server on or off for the chats that follow it, by id.
+   *
+   * A server the reader has deleted is not offered — a mode naming it is ignored by the server
+   * rather than refused, so an old id in a mode is untroubled and this form simply does not
+   * show it. A mode whose patch still names one keeps it: {@link withModeMcpServerChoice}
+   * rebuilds the patch from what the form holds plus what it changes, and removing a server
+   * from the list is not a change to the mode.
+   */
+  mcpServers: readonly McpServer[]
   /** Called after a successful write, with what was saved. */
   onSaved: (mode: Mode) => void
   onClose: () => void
@@ -274,6 +291,46 @@ export function ModeFormDialog({
                           tools: withModeToolChoice(
                             form.tools,
                             entry.name,
+                            event.target.value as ModeToolChoice,
+                          ),
+                        })
+                      }
+                    >
+                      {TOOL_CHOICES.map((choice) => (
+                        <option key={choice.value} value={choice.value}>
+                          {choice.label}
+                        </option>
+                      ))}
+                    </select>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {mcpServers.length === 0 ? null : (
+            <div className="space-y-2">
+              <Label>MCP servers</Label>
+              <p className="text-xs text-muted-foreground">
+                Which of your remote MCP servers a chat on this mode uses, or leave each one
+                following your own settings. A server is on or off as a whole — its tools cannot be
+                switched one by one.
+              </p>
+              <ul className="space-y-1.5">
+                {mcpServers.map((server) => (
+                  <li key={server.id} className="flex items-center gap-2 text-sm">
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs">{server.name}</span>
+                    <select
+                      data-slot="mode-mcp-choice"
+                      data-server={server.name}
+                      aria-label={`${server.name} in this mode`}
+                      className="h-8 rounded-md border bg-transparent px-2 text-xs"
+                      value={modeMcpServerChoice(form.tools, server.id)}
+                      onChange={(event) =>
+                        patch({
+                          tools: withModeMcpServerChoice(
+                            form.tools,
+                            server.id,
                             event.target.value as ModeToolChoice,
                           ),
                         })

@@ -37,6 +37,7 @@ describe('SettingsScreen', () => {
       'Modes',
       'Context',
       'Tools',
+      'MCP servers',
       'Appearance',
       'Usage',
       'Advanced',
