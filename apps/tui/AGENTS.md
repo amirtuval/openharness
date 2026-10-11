@@ -33,26 +33,27 @@ repo.
 
 ## The `oh` command
 
-| command                                 | what it does                                                                 |
-| --------------------------------------- | ---------------------------------------------------------------------------- |
-| `oh`                                    | start a new chat on the default model                                        |
-| `oh -s <id>` / `--session <id>`         | resume a session, showing its history                                        |
-| `oh -c` / `--continue`                  | resume the most recent session                                               |
-| `oh sessions`                           | list every session: id, title, status, updated                               |
-| `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips)                     |
-| `oh agents`                             | list the saved agents (optional presets): id, name                           |
-| `oh modes`                              | list your modes and what each resolves to (#245, M6)                         |
-| `oh providers`                          | list the stored model-provider keys: provider, last 4                        |
-| `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden |
-| `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                              |
-| `oh default-model [provider/model]`     | print or set the model a new chat starts on                                  |
-| `oh settings [flags]`                   | print or set the context (compaction) settings (#282)                        |
-| `oh tools [name] [flags]`               | list which tools your chats may use, or set one (#303 X4; #307; #308)        |
-| `oh login`                              | sign in through the browser (the device flow)                                |
-| `oh logout`                             | revoke the session on the server, forget the token                           |
-| `oh whoami`                             | print the signed-in email and server                                         |
-| `oh update`                             | install the newest published version now                                     |
-| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                                               |
+| command                                 | what it does                                                                           |
+| --------------------------------------- | -------------------------------------------------------------------------------------- |
+| `oh`                                    | start a new chat on the default model                                                  |
+| `oh -s <id>` / `--session <id>`         | resume a session, showing its history                                                  |
+| `oh -c` / `--continue`                  | resume the most recent session                                                         |
+| `oh sessions`                           | list every session: id, title, status, updated                                         |
+| `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips)                               |
+| `oh agents`                             | list the saved agents (optional presets): id, name                                     |
+| `oh modes`                              | list your modes and what each resolves to (#245, M6)                                   |
+| `oh providers`                          | list the stored model-provider keys: provider, last 4                                  |
+| `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden           |
+| `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                                        |
+| `oh default-model [provider/model]`     | print or set the model a new chat starts on                                            |
+| `oh settings [flags]`                   | print or set the context (compaction) settings (#282)                                  |
+| `oh tools [name] [flags]`               | list which tools your chats may use, or set one (#303 X4; #307; #308)                  |
+| `oh mcp`                                | your remote MCP servers: add, edit, connect, reconnect, test, delete (#303, X10; #313) |
+| `oh login`                              | sign in through the browser (the device flow)                                          |
+| `oh logout`                             | revoke the session on the server, forget the token                                     |
+| `oh whoami`                             | print the signed-in email and server                                                   |
+| `oh update`                             | install the newest published version now                                               |
+| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                                                         |
 
 Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`, and
 `oh sessions delete` / `oh providers remove` take `--yes`. The chat flags are `-s`/`-c`,
@@ -63,8 +64,8 @@ rejected everywhere else.
 
 Exit codes: `0` did what it was asked (including a chat the user ended, a chat that was
 deleted elsewhere, a delete or remove answer of "no", a `providers add` the user cancelled,
-and a `logout` whose server-side revoke could
-not be reached — the token is still gone locally); `1` the server,
+a `logout` whose server-side revoke could
+not be reached — the token is still gone locally, and an `oh mcp` the reader left with Esc); `1` the server,
 the network or the sign-in state said no — a 401 is the not-signed-in error described under
 "Signing in" below (or, in a chat that can sign in, the offer described there), and an
 account that ends up with no provider key ends there too, as "Choosing a
@@ -347,7 +348,8 @@ no other file knows its name.
 `/model` picks a model (pending until the next message, as above), `/new` starts a new chat on
 the current model (the app opens the session the way a first chat does, and the old screen's
 stream is disposed with it), `/providers [provider]` connects a provider without leaving the
-chat (#210), `/compact [instructions]` asks the brain to summarize the older history now
+chat (#210), `/mcp` opens the remote MCP servers in the prompt slot (#303, X10; #313),
+`/compact [instructions]` asks the brain to summarize the older history now
 (#283 — the guidance, if any, is the user's instruction to the summarizer; the outcome arrives
 on the stream and is shown as a notice, so it is never a silent no-op), `/clear` wipes the screen
 with the Ctrl+L mechanism and keeps the session, `/help` prints the commands and the keys above
@@ -513,6 +515,7 @@ install, because there is nothing here for npm to replace.
 | Tab                     | complete the highlighted command into the buffer (#207)                                                     |
 | Esc                     | close the menu, keeping the text (#207)                                                                     |
 | Ctrl+L                  | clear the screen; the session stays (#206)                                                                  |
+| Ctrl+R                  | reconnect the MCP server a failed turn named (#303, X10; #313)                                              |
 | Ctrl+C                  | interrupt the running turn; pressed again when idle, leave                                                  |
 
 "Shift+Enter" is not a key a terminal can send — most send the same `\r` for both — so the
@@ -719,6 +722,62 @@ available on this server` for one this deployment does not register; with a name
 merges that one change over the stored setting (`PUT /v1/me/tools`), reading the entry first so
 the half the flags did not name is kept. A name nothing registers is a message and exit `1`.
 
+### Remote MCP servers in the terminal (#303, X10; #313)
+
+A chat can reach the reader's own remote MCP servers, and `oh mcp` is where they live: the same
+screen `/mcp` opens in a chat's prompt slot, so a server is registered, connected, tested and
+deleted the same way whether the reader is in a conversation or not. Every word comes from
+`@openharness/client`'s `src/mcp.ts` (`mcpStatusLabel`, `mcpStatusDetail`, `mcpAuthLabel`,
+`estimatedTokensLabel`, `mcpServerTools`, `toolPolicyLabel`), so `oh` and the page say the same
+things; the colours are the terminal's named ones, and a status is green / yellow / red by its
+tone rather than by its words.
+
+The screen has three faces, because a terminal has no pointer and one flat thing at a time is
+what a keyboard drives:
+
+| key    | on the list                                              |
+| ------ | -------------------------------------------------------- |
+| ↑ / ↓  | move the cursor                                          |
+| Enter  | edit the server (or open its tools while they are shown) |
+| n      | register a new one                                       |
+| space  | turn it on or off                                        |
+| t      | Test — the connection check now                          |
+| c      | Connect / Reconnect an `oauth` server                    |
+| x      | Disconnect — drop its tokens                             |
+| d      | Delete, after a `y/N`                                    |
+| p      | the server's tools                                       |
+| Esc    | back one layer; from the list, done                      |
+| Ctrl+C | leave the form, or the screen                            |
+
+- **A server's row is what a reader needs to decide**: its name, its auth type, its status (+
+  `· off` when it is), and under it the status detail — the last error, what its tools cost, or
+  that no check has run. The tools face lists each one as `<server>__<tool> · <permission> ·
+~N tokens`, and **←/→ cycles the permission** in place: it is the one thing a reader chooses
+  about a remote tool (a server is on or off; a tool's permission is theirs), and the write goes
+  to `PUT /v1/me/tools`'s `mcp` map under the offered name.
+- **The form is one prompt per field**, and its conditional part is the auth type: a `headers`
+  server is asked for **one** masked pair, and the other two are asked nothing more. The pair is
+  optional on an **edit** and required on a create — the values are sealed and never come back,
+  so a blank pair is the only way to say "keep what is stored", while a new `headers` server with
+  no map is a `none` server that says otherwise and the wire refuses one. `src/mcp/form.ts` is
+  the fields, the checks and the body they build, in one testable place.
+- **Connect opens the page and waits.** `oh` starts the flow with `client: 'cli'` — decision X10
+  has the CLI's browser do the signing in, and that browser may never have a session here — opens
+  the authorization URL with the same `openBrowser` rules the login and the provider flow use
+  (and prints the URL when there is no browser to open), then polls the server's status with the
+  client's `waitForMcpConnection` until it stops needing a sign-in. **Esc stops the waiting**: the
+  sign-in is the browser's, and a reader who leaves it half-done can connect again or press `t`.
+- **A turn that could not use a server is a notice, not the red error line.** The brain writes
+  one `session.error` per server per turn and the chat carries on without its tools, so the
+  sentence is drawn with `Ctrl+R to reconnect` under it. **Ctrl+R** (not `r`: a bare letter
+  belongs to the prompt, and Ink delivers every key to every mounted handler) reads the caller's
+  servers once — the log names a server, not an id — finds the one the message names, starts the
+  flow for an `oauth` server and waits, exactly as `c` does on the screen. A `none` or `headers`
+  server has no flow to run, so it says so and points at `/mcp`.
+- **Piped, `oh mcp` prints instead**: one three-line block per server (what it is and what state
+  it is in, its address, the status detail), because a screen with no terminal to read has
+  nothing to read — and an empty list says how a server is added rather than printing nothing.
+
 ### The input section
 
 The bottom of the screen is its own section (#233): one blank line under the transcript, then a
@@ -841,6 +900,9 @@ src/
     highlight.ts         highlight.js → coloured spans, for the code blocks
     parse.ts             a reply's text → mdast (remark-parse + remark-gfm)
     render.ts            mdast → lines of spans: headings, lists, tables, quotes, code (#205)
+  mcp/
+    form.ts               the remote MCP server form: the fields per auth type, the rules they
+                          are checked with, and the body the answers become (#303, X10; #313)
   components/            message-view (a message, the renderer per part type, and the
                          per-reply metadata line, #201/#208/#233), reply-meta (the
                          words and numbers that line is made of), theme (the context the
@@ -862,7 +924,9 @@ src/
                          X2/X5/X9; #308), pending-prompt (the approvals and questions
                          waiting on the reader, as one keyboard-driven list, X6; #310)
                          and text-entry (the one-line field a pending row's free text
-                         goes through, #310)
+                         goes through, #310), and mcp-servers (the remote MCP servers: the
+                         list with a key per verb, the form, and the per-tool permissions,
+                         X10; #313)
   update/
     index.ts             the auto-update: the notice, and the decision to check
     decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
@@ -878,6 +942,8 @@ src/
   commands/settings.ts   `oh settings` — the context settings, printed and set (#282)
   commands/tools.ts      `oh tools` — which tools a chat may use, listed and set
                          (#303 X4; #307; #308)
+  commands/mcp.tsx       `oh mcp` — the remote MCP servers: the screen in a terminal, the
+                         listing without one (#303, X10; #313)
   commands/io.ts         what a print-and-stop command writes, how it fails, and the
                          read-line / y-or-n pair the commands that ask share
   commands/auth.ts       `oh login` / `oh logout` / `oh whoami`, and offerSignIn — the
@@ -1029,6 +1095,8 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/text-entry.test.tsx`              | the one-line entry (#303, #310): what is typed is echoed and settled on Enter, it starts from what was said before so an answer can be corrected, Esc and Ctrl+C settle nothing, an empty line is a real answer, and a pasted several-line string stays on one line                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/chat/pausing.test.tsx`                       | the pause end to end in `oh` (#303, X6; #310): a **reloaded** paused chat drawing its questions with the keys that answer them, the answers taken with arrows/Tab/Enter and sent as one confirmation, Esc's decline, the keyboard staying with the list until "write a message instead" hands it back, a message sent that way declining what waited, and a free-text question answered through the prompt slot's entry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |     |
 | `src/commands/tools.test.ts`                      | `oh tools` (#303 X4; #307; #308): `formatTools`' columns and its "not available" case, a plain read, one tool turned off without touching the others, a permission-only change, and a name nothing registers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/mcp/form.test.ts`                            | the MCP server form (#303, X10; #313): the fields per auth type (the pair only for `headers`, optional on an edit and required on a create, the protocol's own name/URL rules), the auth a label stands for, and the body the answers become — a create with and without a map, an edit that omits it to keep what is sealed, and a map an edit was given                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/commands/mcp.test.tsx`                       | `oh mcp` (#303, X10; #313): `formatMcpServers`' three lines per server and its empty state, and the screen at the keyboard — the rows and their status detail, the on/off key, Test reporting a failure, the delete's `y/N` (a no first), Connect opening the page and reporting the wait's outcome, the tools face and a permission written by ←/→, a registration through the form, the inline refusals held on their prompt, and Esc / Ctrl+C leaving                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -1037,7 +1105,7 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/chat/target.test.ts`                         | session/model/agent selection, the default model, and the paging it needs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/chat/ctrl-c.test.ts`                         | the Ctrl+C rules: interrupt, arm, exit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `src/components/model-picker.test.tsx`            | the picker: windowing, number keys, the free-text row, and the search line: `pickerRows` as a rule, the filtering list, heading hiding, the cursor reset, digits, Esc, the counts, the empty state and prefill                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`, and the bottom of the screen whole: reply → blank → metadata → blank → rule → status → prompt, and one blank line and no more while a turn works (#233)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `src/app.test.tsx`                                | the Ink screens through `ink-testing-library` and `createFakeClient()`, and the bottom of the screen whole: reply → blank → metadata → blank → rule → status → prompt, and one blank line and no more while a turn works (#233); and the MCP notice (#313): the brain's sentence with `Ctrl+R to reconnect` under it, and the key starting the flow, opening the page and reporting the sign-in when the browser comes back                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `src/errors.test.ts`                              | `describeError`: the 401 line, the connection hints, 403/429, `--debug`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `src/signals.test.ts`, `src/terminal.test.ts`     | the signal handlers and `restoreTerminal`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/update/semver.test.ts`                       | the comparator: the three numbers, prereleases, and what is not a version                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
