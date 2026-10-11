@@ -9,7 +9,12 @@ import { z } from 'zod'
 import type { ToolSettings, ToolSettingsResolver } from './tools'
 import { runTurn } from './turn'
 import { logOf, message, NATIVE_SEARCH_TOOL, newSession, TEST_MODEL_ID } from './testing/harness'
-import { mockModel, readAssistantParts, resolveTestCredential } from './testing/mock-model'
+import {
+  mockModel,
+  readAssistantParts,
+  readPrompt,
+  resolveTestCredential,
+} from './testing/mock-model'
 
 /**
  * Provider-native web search at the loop's boundary (epic #303, X14; issue #335).
@@ -475,6 +480,52 @@ describe('a provider that refuses the search tool (#335)', () => {
     expect(
       ends[0]?.type === EVENT_TYPES.modelRequestEnd ? ends[0].search_rejected : undefined,
     ).toBeUndefined()
+  })
+})
+
+describe('a log stored before #335 (#335)', () => {
+  it('still replays a `web_search` call of the operator-key era as a tool of ours', async () => {
+    const { store, sessionId } = await newSession([message('look it up')])
+    // What #305 stored: a call of this build's own, with no `source`, and the result that
+    // answered it. Nothing about it is a provider's, so the request carries the pair the way it
+    // always did — the removal of the tool's *implementation* does not rewrite the log.
+    const [call] = await store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.agentToolUse,
+        name: WEB_SEARCH_TOOL_NAME,
+        input: { query: 'brave era' },
+        evaluated_permission: 'allow',
+      },
+    ])
+    if (call === undefined) {
+      throw new Error('the call was not stored')
+    }
+    await store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.agentToolResult,
+        tool_use_id: call.id,
+        content: [{ type: 'text', text: '1. An old result' }],
+        is_error: false,
+      },
+    ])
+
+    const { factory, calls } = mockModel({ text: ['Carrying on.'] })
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([echo()]),
+    })
+
+    // One assistant turn carrying the call, and the `tool` message that answers it: the pair
+    // the log holds, rebuilt exactly as #305's own request had it.
+    expect(readPrompt(calls[0] as LanguageModelV4CallOptions).map((entry) => entry.role)).toEqual([
+      'system',
+      'user',
+      'assistant',
+      'tool',
+    ])
+    expect(JSON.stringify(calls[0]?.prompt)).toContain('An old result')
   })
 })
 
