@@ -259,10 +259,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // applies whatever this answers.
   const resolveMode = createModeResolver({ store, credentials })
 
-  // The tools a turn may offer (epic #303, X4; the built-ins are #305): `web_fetch` and
-  // `todo_write` for every deployment, `web_search` where an operator configured a search API,
-  // and the test `echo` tool behind `OPENHARNESS_TEST_MODEL=mock`. Which models may call tools
-  // at all comes from the same registry, as `models.dev`'s `tool_call`.
+  // The tools a turn may offer (epic #303, X4; the built-ins are #305, the per-user settings
+  // are #307): `web_fetch` and `todo_write` for every deployment, `web_search` where an
+  // operator configured a search API, and the test `echo` tool behind
+  // `OPENHARNESS_TEST_MODEL=mock`. Which models may call tools at all comes from the same
+  // registry, as `models.dev`'s `tool_call`. The registry is built once here and handed to both
+  // readers — the turn options and the `/v1/me/tools` routes (`createApp`) — so a tool the
+  // settings screen calls available is one a chat can really call.
   const turnTools = createTurnTools({
     config,
     kind: resolvedModel.kind,
@@ -274,6 +277,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       config.search === null
         ? undefined
         : createSearchAllowance({ store, dailyLimit: config.search.dailyLimit }),
+    store,
   })
 
   const scheduler = createScheduler(
@@ -342,6 +346,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     },
     catalog,
     registry,
+    // The tools `/v1/me/tools` reports on: the same registry the turn options were built from.
+    tools: turnTools.tools,
     // The preferences response reports it as the default a user who has not chosen a compaction
     // share follows (C3, #282).
     compactionThreshold: config.compactionThreshold,

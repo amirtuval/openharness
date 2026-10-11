@@ -1056,6 +1056,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         model: request.data.model,
         reasoning_effort: request.data.reasoning_effort ?? null,
         system_prompt_addition: request.data.system_prompt_addition ?? null,
+        // The tool override a mode may carry (#307); a mode that names none has none.
+        tools: request.data.tools ?? null,
         created_at: timestamp,
         updated_at: timestamp,
       })
@@ -1131,6 +1133,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           request.data.system_prompt_addition === undefined
             ? mode.system_prompt_addition
             : request.data.system_prompt_addition,
+        // The tool override a mode may carry (#307): an update that says nothing keeps it.
+        tools: request.data.tools === undefined ? mode.tools : request.data.tools,
         updated_at: now().toISOString(),
       })
       modes.set(modeId, updated)

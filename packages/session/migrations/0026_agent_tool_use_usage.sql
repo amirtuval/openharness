@@ -20,7 +20,9 @@
 -- **Migration number.** This is the next free number on the tools epic's base
 -- (`tools/x1-loop-304`): the sibling branches of the epic add their own files from the same base
 -- (#311 takes 0026 too), and a rebase is what settles it — every file runs on every `migrate()`
--- in name order, so the numbers have to be unique and ordered.
+-- in name order, so the numbers have to be unique and ordered. This file is the one that keeps
+-- 0026 where the stack met: it is earlier in the stack than #307's `0026_tool_settings.sql`,
+-- which was renumbered to `0027_tool_settings.sql` rather than this one moving.
 
 create index if not exists events_agent_tool_use_idx
   on events (session_id, processed_at)
