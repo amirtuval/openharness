@@ -1,8 +1,12 @@
 import {
   CREDENTIAL_TARGETS,
+  clearedResultsNotice,
   compactionThreshold,
   contextMeter,
+  modelSupportsTools,
   sessionCost,
+  stepLimitNotice,
+  truncatedResultsNotice,
 } from '@openharness/client'
 import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import type { Mode } from '@openharness/protocol'
@@ -28,6 +32,7 @@ import { ContextMeter } from './context-meter'
 import { ErrorBanner } from './error-banner'
 import { MessageList } from './message-list'
 import { StatusIndicator } from './status-indicator'
+import { TodoPanel } from './todo-panel'
 import { workingState } from './working-row'
 
 /**
@@ -103,6 +108,11 @@ export function ChatView({
     context,
     truncation,
     manualCompaction,
+    toolCalls,
+    todos,
+    truncatedToolResults,
+    clearedToolResults,
+    searches,
     usage,
     status,
     lastError,
@@ -153,6 +163,16 @@ export function ChatView({
     model: catalog.models.find((entry) => entry.id === sessionModel),
     threshold: compactionThreshold(preferences),
   })
+  // The tool half of the screen (epic #303, X2/X5/X9; #308). All of it is the client's words: the
+  // step limit and the two result notices come from the transcript's records, and the model's
+  // ability to call tools from its catalog entry's `tool_call` (which the server answers). The
+  // step-limit sentence replaces the generic error banner — it is a notice, not a failure to
+  // retry — so the reader is told once.
+  const stepLimit = stepLimitNotice(lastError)
+  const toolsUnsupported =
+    modelSupportsTools(catalog.models.find((entry) => entry.id === sessionModel)) === false
+  const truncatedResultsNoticeText = truncatedResultsNotice(truncatedToolResults)
+  const clearedResultsNoticeText = clearedResultsNotice(clearedToolResults)
   // A pick that has not been sent yet (U3): the selector shows it, the next message carries it.
   const [chosen, setChosen] = useState<string | null>(null)
   // A mode pick, held the same way (#245, M6): the next message carries it, and the chat then
@@ -367,6 +387,17 @@ export function ChatView({
                 </span>
               </>
             )}
+            {/* What the chat searched for (epic #303, X5; #305; #308): the same count the usage
+                routes report, read off the calls this transcript already holds. A count and never
+                a price — the operator pays the search provider. Nothing is shown until one ran. */}
+            {searches === 0 ? null : (
+              <>
+                {' · '}
+                <span data-slot="session-searches">
+                  {searches} {searches === 1 ? 'search' : 'searches'}
+                </span>
+              </>
+            )}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -420,8 +451,13 @@ export function ChatView({
       <MessageList
         messages={messages}
         summaries={summaries}
+        toolCalls={toolCalls}
         truncation={truncation}
         compaction={manualCompaction}
+        stepLimit={stepLimit}
+        toolsUnsupported={toolsUnsupported}
+        truncatedResults={truncatedResultsNoticeText}
+        clearedResults={clearedResultsNoticeText}
         loading={loadingHistory}
         nameOf={nameOf}
         costOf={costOf}
@@ -433,6 +469,11 @@ export function ChatView({
 
       <div className="border-t px-4 py-3">
         <div className="mx-auto w-full max-w-3xl space-y-2">
+          {/* The chat's task list (epic #303, X5; #305; #308), pinned above the composer while the
+              model has one: it is chrome about the work, not part of the conversation, so it must
+              not scroll away with the transcript — and it is `null` (never an empty list) once no
+              `todo_write` call has taken effect. */}
+          {todos === null ? null : <TodoPanel todos={todos} />}
           {deleteError === null ? null : (
             <ErrorBanner
               title="Could not delete the chat"
@@ -440,7 +481,10 @@ export function ChatView({
               onDismiss={() => setDeleteError(null)}
             />
           )}
-          {lastError === null ? null : (
+          {/* A step-limit error is drawn by the tool notices below the transcript — it is a
+              notice ("send a message to carry on"), not a failure — so the red banner is skipped
+              for exactly that error type rather than saying it twice. */}
+          {lastError === null || stepLimit !== null ? null : (
             <ErrorBanner
               title={
                 lastError.retryStatus === 'retrying'

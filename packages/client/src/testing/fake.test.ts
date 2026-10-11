@@ -1646,6 +1646,130 @@ describe('the fake’s modes (#245, M6)', () => {
   })
 })
 
+describe('the fake’s tool settings (#303, #307, #308)', () => {
+  it('lists the registered tools, following each tool’s declaration until a choice is stored', async () => {
+    const fake = createFakeClient()
+
+    const { data } = await fake.tools.list()
+
+    expect(data.map((entry) => entry.name)).toEqual(['web_fetch', 'web_search', 'todo_write'])
+    expect(data.every((entry) => entry.enabled && entry.policy === 'allow')).toBe(true)
+    expect(data.every((entry) => entry.available && entry.default_policy === 'allow')).toBe(true)
+  })
+
+  it('merges a write per tool, and reports an unregistered tool as unavailable', async () => {
+    const fake = createFakeClient({ toolsAvailable: { web_search: false } })
+
+    const before = await fake.tools.list()
+    expect(before.data.find((entry) => entry.name === 'web_search')).toMatchObject({
+      available: false,
+      default_policy: null,
+    })
+
+    await fake.tools.put({ builtin: { web_search: { enabled: false, policy: 'ask' } } })
+    const after = await fake.tools.list()
+    expect(after.data.find((entry) => entry.name === 'web_search')).toMatchObject({
+      enabled: false,
+      policy: 'ask',
+    })
+    // The other tools keep their declaration: the write is a patch, not a replacement.
+    expect(after.data.find((entry) => entry.name === 'web_fetch')).toMatchObject({
+      enabled: true,
+      policy: 'allow',
+    })
+  })
+
+  it('applies a mode’s on/off override to the read that names it', async () => {
+    const mode = makeMode({ tools: { builtin: { todo_write: false } } })
+    const fake = createFakeClient({ modes: [mode] })
+
+    const plain = await fake.tools.list()
+    expect(plain.data.find((entry) => entry.name === 'todo_write')?.enabled).toBe(true)
+
+    const onMode = await fake.tools.list({ mode_id: mode.id })
+    expect(onMode.data.find((entry) => entry.name === 'todo_write')?.enabled).toBe(false)
+    // A mode never changes a permission.
+    expect(onMode.data.find((entry) => entry.name === 'todo_write')?.policy).toBe('allow')
+  })
+
+  it('rejects a write while signed out, like every other /v1 route', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    await expect(fake.tools.list()).rejects.toBeInstanceOf(AuthenticationError)
+  })
+})
+
+describe('the fake’s remote MCP tools (#303, #312)', () => {
+  const MCP_TOOLS = [
+    { server: 'notes', name: 'search' },
+    { server: 'notes', name: 'read' },
+    { server: 'github', name: 'search' },
+  ]
+
+  it('lists one entry per offered tool, under its offered name and its server', async () => {
+    const fake = createFakeClient({ mcpTools: MCP_TOOLS })
+
+    const { data } = await fake.tools.list()
+    const remote = data.filter((entry) => entry.source === 'mcp')
+
+    expect(remote.map((entry) => [entry.name, entry.mcp_server])).toEqual([
+      // The model-facing offered name, which is what the settings and the log are keyed by —
+      // two servers' `search` told apart by the name, never by the server alone.
+      ['notes__search', 'notes'],
+      ['notes__read', 'notes'],
+      ['github__search', 'github'],
+    ])
+    // A remote tool has no on/off of its own and declares `ask`, which is what a call under it
+    // is evaluated under until the reader chooses otherwise.
+    expect(remote.every((entry) => entry.enabled && entry.available)).toBe(true)
+    expect(remote.every((entry) => entry.policy === 'ask' && entry.default_policy === 'ask')).toBe(
+      true,
+    )
+    // This build's own tools are unchanged by a deployment that offers remote ones.
+    expect(data.slice(0, 3).map((entry) => entry.name)).toEqual([
+      'web_fetch',
+      'web_search',
+      'todo_write',
+    ])
+  })
+
+  it('serves a stored remote policy, and keeps the remote half across a built-in write', async () => {
+    const fake = createFakeClient({
+      mcpTools: MCP_TOOLS,
+      toolSettings: { builtin: {}, mcp: { notes__search: 'allow' } },
+    })
+
+    const before = await fake.tools.list()
+    expect(before.data.find((entry) => entry.name === 'notes__search')?.policy).toBe('allow')
+
+    // A write that names only a built-in tool must not drop the `mcp` map: the two are separate
+    // halves of one stored value, and the merge is per tool (#307, #312).
+    await fake.tools.put({ builtin: { web_search: { enabled: false, policy: 'deny' } } })
+
+    const after = await fake.tools.list()
+    expect(after.data.find((entry) => entry.name === 'notes__search')?.policy).toBe('allow')
+    expect(after.data.find((entry) => entry.name === 'web_search')).toMatchObject({
+      enabled: false,
+      policy: 'deny',
+    })
+  })
+
+  it('lists a stored remote policy for a tool nothing offers as unavailable', async () => {
+    const fake = createFakeClient({ toolSettings: { builtin: {}, mcp: { gone__search: 'deny' } } })
+
+    const { data } = await fake.tools.list()
+    const stray = data.find((entry) => entry.name === 'gone__search')
+
+    expect(stray).toMatchObject({
+      source: 'mcp',
+      enabled: false,
+      policy: 'deny',
+      default_policy: null,
+      available: false,
+    })
+    expect(stray?.mcp_server).toBeUndefined()
+  })
+})
+
 describe('the fake’s manual compaction (#283)', () => {
   it('records the request and answers it with a nothing-to-summarize outcome, as the route does', async () => {
     const fake = createFakeClient()

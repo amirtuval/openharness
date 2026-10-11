@@ -47,6 +47,7 @@ repo.
 | `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                              |
 | `oh default-model [provider/model]`     | print or set the model a new chat starts on                                  |
 | `oh settings [flags]`                   | print or set the context (compaction) settings (#282)                        |
+| `oh tools [name] [flags]`               | list which tools your chats may use, or set one (#303 X4; #307; #308)        |
 | `oh login`                              | sign in through the browser (the device flow)                                |
 | `oh logout`                             | revoke the session on the server, forget the token                           |
 | `oh whoami`                             | print the signed-in email and server                                         |
@@ -56,7 +57,9 @@ repo.
 Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`, and
 `oh sessions delete` / `oh providers remove` take `--yes`. The chat flags are `-s`/`-c`,
 `--agent`, `--model` and `--mode`; the other commands take none of them (and reject them
-loudly).
+loudly). `oh settings` takes `--threshold`/`--summary-model`/`--summary-passes`, and
+`oh tools` takes a tool name with `--on`/`--off`/`--policy <allow|ask|deny>`; each set is
+rejected everywhere else.
 
 Exit codes: `0` did what it was asked (including a chat the user ended, a chat that was
 deleted elsewhere, a delete or remove answer of "no", a `providers add` the user cancelled,
@@ -634,6 +637,39 @@ divider above is the outcome. The words are the client's (`manualCompactionNotic
 app and the terminal say the same thing; the "Compacting…" wait between the ask and the answer
 is the status field's, next to the summarising pass count.
 
+### The tools, in the transcript (epic #303, X1/X2/X5/X9; issue #308)
+
+The terminal's half of the tool UI, all of it from the transcript's `toolCalls`, `todos` and the
+newest request's `truncatedToolResults` / `clearedToolResults`, with the words from
+`@openharness/client`'s `src/tools.ts` — so `oh` and the web app say the same thing.
+
+- **`components/tool-call.tsx` is one call's line**, drawn where its event sits among the
+  messages (`TranscriptView` renders the client's `transcriptEntries(messages, summaries,
+toolCalls)`): the status mark, the tool's name, the shared `toolCallSummary` and the status
+  words, with a remote MCP call marked `(mcp: <server>)` (#312) — a terminal has no hover to hide
+  the server behind, and two servers' `search` differ by exactly that. **A terminal has no
+  disclosure control**, so what the page hides behind the line is drawn here as it is worth
+  drawing: the status, and the first line of a failed or interrupted result — the whole input and
+  result would flood the scrollback, and the log holds them.
+- **A call that is still running or waiting stays in the live area** (`isLiveEntry`), because its
+  status and the reason under it change as the turn goes on — and a settled block is written once
+  and never redrawn (#208, X2), so a committed running call would say "running" for ever.
+- **`components/todo-panel.tsx` is the chat's task list**, under the transcript with the notices
+  (a terminal has no pinned chrome), one line per item with a distinct mark per state (`☐`,
+  `◐`, `☑` — glyphs, so they read under `NO_COLOR`) and "1 of 3 done" in the header.
+- **`components/tool-notices.tsx`** draws the step-limit notice — which replaces the generic turn
+  error for that one type, because it is a notice rather than a failure — "this model can't use
+  tools", and what a request shortened or cleared.
+- **the status line carries `N searches`** beside the cost, from `searchCount` over the calls the
+  transcript holds: a count and never a price, the same statement the usage routes make.
+
+`oh tools [name] [--on|--off] [--policy <allow|ask|deny>]` (epic #303, X4; #307) is the
+terminal's Tools settings, the counterpart of the web app's Settings → Tools: with no name it
+prints every tool with its on/off, its permission (and the default it agrees with) and `not
+available on this server` for one this deployment does not register; with a name and a flag it
+merges that one change over the stored setting (`PUT /v1/me/tools`), reading the entry first so
+the half the flags did not name is kept. A name nothing registers is a message and exit `1`.
+
 ### The input section
 
 The bottom of the screen is its own section (#233): one blank line under the transcript, then a
@@ -769,7 +805,12 @@ src/
                          notice-view, model-picker, summary-divider (the "conversation
                          summarized" mark and the summary under it, #280), truncation-notice
                          ("your message was too long for this model and was shortened", #280)
-                         and compaction-notice (what a manual `/compact` came to, #283)
+                         and compaction-notice (what a manual `/compact` came to, #283),
+                         tool-call (a call's compact line and the reason a failed one owes,
+                         X5; #308), todo-panel (the chat's task list as a compact block,
+                         X5; #305; #308) and tool-notices (the step limit, a model that
+                         cannot use tools, and what a request shortened or cleared,
+                         X2/X5/X9; #308)
   update/
     index.ts             the auto-update: the notice, and the decision to check
     decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
@@ -783,6 +824,8 @@ src/
   commands/providers.tsx `oh providers` / `add` / `remove` (#210)
   commands/preferences.ts  `oh default-model`
   commands/settings.ts   `oh settings` — the context settings, printed and set (#282)
+  commands/tools.ts      `oh tools` — which tools a chat may use, listed and set
+                         (#303 X4; #307; #308)
   commands/io.ts         what a print-and-stop command writes, how it fails, and the
                          read-line / y-or-n pair the commands that ask share
   commands/auth.ts       `oh login` / `oh logout` / `oh whoami`, and offerSignIn — the
@@ -926,6 +969,11 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/summary-divider.test.tsx`         | the divider's lines (#280): the label with the reason, the model and the passes, the rule drawn to the transcript's width, the summary wrapped under it (and its line breaks kept), a narrow terminal truncating rather than overflowing, `NO_COLOR`, an empty summary, and the two lines the component draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `src/components/truncation-notice.test.tsx`       | the sentence and its count (#280), never a negative one, and the line the component draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/compaction-notice.test.tsx`       | what a manual `/compact` came to (#283): the brain's sentence for `nothing_to_summarize` and `failed`, the shared fallbacks, and nothing drawn for a summary or a pending ask                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `src/components/tool-call.test.tsx`               | one call's line (#303, X5; #308): the mark, the tool, the summary and the status, "waiting for you" and the MCP marker with its server (#312), the reason line a failure owes (and only its first line), the line reading without colour, and the truncation a narrow terminal gets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `src/components/todo-panel.test.tsx`              | the task list (#303, X5; #305; #308): `todoLines`' header, marks and states, a cleared list drawn as cleared, the truncation, and the block a frame draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/components/tool-notices.test.tsx`            | the four tool notices (#303, X2/X5/X9; #308): nothing when there is nothing to say, the step limit in the amber, the two result lines in chrome, and the words keeping without colour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/components/transcript-view-tools.test.tsx`   | a call in the transcript (#303, X5; #308): drawn between the messages with one blank line around it, kept live while it runs and settled once it does not, and a failed call's reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/commands/tools.test.ts`                      | `oh tools` (#303 X4; #307; #308): `formatTools`' columns and its "not available" case, a plain read, one tool turned off without touching the others, a permission-only change, and a name nothing registers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |

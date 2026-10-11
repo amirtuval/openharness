@@ -7,6 +7,7 @@ import {
   SUMMARY_MAX_PASSES_MIN,
   SUMMARY_MODEL_SAME_AS_CHAT,
 } from '@openharness/protocol'
+import type { ToolPermission } from '@openharness/protocol'
 
 import { HELP_TEXT } from './help'
 
@@ -46,6 +47,22 @@ export interface SettingsPatch {
   readonly summaryModel?: string
   /** How many passes the summary model may take, 1–10, or `null` for the engine's default. */
   readonly summaryPasses?: number | null
+}
+
+/**
+ * What `oh tools` changes (epic #303, X4; #307; #308).
+ *
+ * A tool's whole setting is `{ enabled, policy }`, and a flag names at most one of them: the
+ * command reads the stored entry first and keeps the half the flags did not mention, so
+ * `oh tools web_search --off` does not make a reader repeat the permission.
+ */
+export interface ToolsPatch {
+  /** The tool to change; absent is a plain read of every tool. */
+  readonly name?: string | undefined
+  /** `--on` / `--off`, or absent to keep what the tool is set to. */
+  readonly enabled?: boolean | undefined
+  /** `--policy allow|ask|deny`, or absent to keep the stored permission. */
+  readonly policy?: ToolPermission | undefined
 }
 
 /** Flags `oh login` takes on top of the global ones. */
@@ -95,6 +112,12 @@ export type CliCommand =
       readonly patch: SettingsPatch
       readonly options: GlobalOptions
     }
+  | {
+      readonly kind: 'tools'
+      /** The one tool a flag changes, if any; no name is a plain read (#303 X4; #307; #308). */
+      readonly patch: ToolsPatch
+      readonly options: GlobalOptions
+    }
   | { readonly kind: 'login'; readonly options: LoginOptions }
   | { readonly kind: 'logout'; readonly options: GlobalOptions }
   | { readonly kind: 'whoami'; readonly options: GlobalOptions }
@@ -120,6 +143,7 @@ const SUBCOMMANDS = [
   'providers',
   'default-model',
   'settings',
+  'tools',
   'login',
   'logout',
   'whoami',
@@ -136,6 +160,7 @@ const SUBCOMMAND_BLURBS: Record<Subcommand, string> = {
   providers: 'it lists the model-provider keys, or manages them with `add` and `remove <provider>`',
   'default-model': 'it gets or sets the default model',
   settings: 'it prints the context settings, and sets them with its flags',
+  tools: 'it prints which tools your chats may use, and sets one with --on/--off/--policy',
   login: 'it signs you in through the browser',
   logout: 'it ends the session and forgets the token',
   whoami: 'it prints the signed-in user',
@@ -159,6 +184,11 @@ const OPTIONS = {
   threshold: { type: 'string' },
   'summary-model': { type: 'string' },
   'summary-passes': { type: 'string' },
+  // `oh tools` (#308): on/off and the permission a call is evaluated under. `--on` and `--off`
+  // are two flags rather than `--enabled=<bool>` because that is how a person types it.
+  on: { type: 'boolean' },
+  off: { type: 'boolean' },
+  policy: { type: 'string' },
 } as const satisfies ParseArgsConfig['options']
 
 /**
@@ -220,6 +250,10 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
       return parseSettings(extra, values, global)
     }
 
+    if (subcommand === 'tools') {
+      return parseTools(extra, values, global)
+    }
+
     if (extra.length > 0) {
       return {
         ok: false,
@@ -251,6 +285,11 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
   const settingsFlag = settingsFlagIn(values)
   if (settingsFlag !== undefined) {
     return { ok: false, error: `${settingsFlag} only makes sense with \`oh settings\`.` }
+  }
+
+  const toolsFlag = toolsFlagIn(values)
+  if (toolsFlag !== undefined) {
+    return { ok: false, error: `${toolsFlag} only makes sense with \`oh tools\`.` }
   }
 
   if (values['no-browser'] === true) {
@@ -604,6 +643,80 @@ function parseSettings(
   return { ok: true, command: { kind: 'settings', patch, options: global } }
 }
 
+/**
+ * `oh tools [name] [--on|--off] [--policy <allow|ask|deny>]` (epic #303, X4; #307; #308).
+ *
+ * With no name it prints every tool and the reader's choices. A name with `--on`/`--off` or
+ * `--policy` changes that one tool; the flags are validated here so a typo names the flag and
+ * its values rather than coming back a 400. `--on` and `--off` together, or a setting flag with
+ * no tool to apply it to, is a usage error rather than a guess.
+ */
+function parseTools(
+  extra: readonly string[],
+  values: ReturnType<typeof parseOptions>['values'],
+  global: GlobalOptions,
+): ParseOutcome {
+  const [name, ...overflow] = extra
+  if (overflow.length > 0) {
+    return {
+      ok: false,
+      error: `\`oh tools\` takes at most one tool name, got '${extra.join(' ')}'.`,
+    }
+  }
+  if (values.on === true && values.off === true) {
+    return { ok: false, error: 'use either --on or --off, not both.' }
+  }
+
+  const setsSomething = values.on === true || values.off === true || values.policy !== undefined
+  if (setsSomething && name === undefined) {
+    return {
+      ok: false,
+      error: 'name a tool to change, like `oh tools web_search --off`.',
+    }
+  }
+
+  const conflicting = wrongFlagFor('tools', values)
+  if (conflicting !== undefined) {
+    return {
+      ok: false,
+      error: `\`oh tools\` does not take ${conflicting}; ${SUBCOMMAND_BLURBS.tools}.`,
+    }
+  }
+
+  const patch: {
+    name?: string
+    enabled?: boolean
+    policy?: ToolPermission
+  } = {}
+  if (name !== undefined) {
+    if (name.trim() === '') {
+      return { ok: false, error: '`oh tools` needs a tool name, like web_search.' }
+    }
+    patch.name = name
+  }
+  if (values.on === true) {
+    patch.enabled = true
+  }
+  if (values.off === true) {
+    patch.enabled = false
+  }
+  if (values.policy !== undefined) {
+    const policy = values.policy.trim()
+    if (!TOOL_PERMISSION_WORDS.includes(policy as ToolPermission)) {
+      return {
+        ok: false,
+        error: `--policy needs one of ${TOOL_PERMISSION_WORDS.join(', ')}, got '${values.policy}'.`,
+      }
+    }
+    patch.policy = policy as ToolPermission
+  }
+
+  return { ok: true, command: { kind: 'tools', patch, options: global } }
+}
+
+/** The permission words `--policy` accepts — the protocol's own three, spelled out. */
+const TOOL_PERMISSION_WORDS: readonly ToolPermission[] = ['allow', 'ask', 'deny']
+
 /** The word a nullable setting takes to mean "follow the default" (K2/K5). */
 const CLEAR_WORD = 'default'
 
@@ -612,6 +725,14 @@ function settingsFlagIn(values: ReturnType<typeof parseOptions>['values']): stri
   if (values.threshold !== undefined) return '--threshold <share>'
   if (values['summary-model'] !== undefined) return '--summary-model <id>'
   if (values['summary-passes'] !== undefined) return '--summary-passes <n>'
+  return undefined
+}
+
+/** The tool flags, in the order their messages name them. */
+function toolsFlagIn(values: ReturnType<typeof parseOptions>['values']): string | undefined {
+  if (values.on === true) return '--on'
+  if (values.off === true) return '--off'
+  if (values.policy !== undefined) return '--policy <allow|ask|deny>'
   return undefined
 }
 
@@ -644,6 +765,11 @@ function wrongFlagFor(
   if (subcommand !== 'settings') {
     const setting = settingsFlagIn(values)
     if (setting !== undefined) return setting
+  }
+  // `oh tools`' own flags (#308), rejected everywhere else the same way.
+  if (subcommand !== 'tools') {
+    const tool = toolsFlagIn(values)
+    if (tool !== undefined) return tool
   }
   if (
     values.yes === true &&

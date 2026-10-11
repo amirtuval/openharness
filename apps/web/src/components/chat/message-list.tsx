@@ -1,8 +1,10 @@
 import type {
   ModelPriceLookup,
+  TranscriptEntry,
   TranscriptManualCompaction,
   TranscriptMessage,
   TranscriptSummary,
+  TranscriptToolCall,
   TranscriptTruncation,
 } from '@openharness/client'
 import { transcriptEntries } from '@openharness/client'
@@ -16,6 +18,8 @@ import { CompactionNotice } from './compaction-notice'
 import { MessageItem } from './message-item'
 import { previousReplyModels } from './message-meta'
 import { SummaryDivider } from './summary-divider'
+import { ToolCallLine } from './tool-call'
+import { ToolNotices } from './tool-notices'
 import { TruncationNotice } from './truncation-notice'
 import { WorkingRow, type WorkingState } from './working-row'
 
@@ -51,8 +55,13 @@ import { WorkingRow, type WorkingState } from './working-row'
 export function MessageList({
   messages,
   summaries = [],
+  toolCalls = [],
   truncation = null,
   compaction = null,
+  stepLimit = null,
+  toolsUnsupported = false,
+  truncatedResults = null,
+  clearedResults = null,
   loading,
   nameOf,
   costOf,
@@ -64,6 +73,8 @@ export function MessageList({
   messages: readonly TranscriptMessage[]
   /** The summary dividers still in the conversation, in order (epic #277; #280). */
   summaries?: readonly TranscriptSummary[]
+  /** The tool calls in the conversation, in order (epic #303, X5; #308). */
+  toolCalls?: readonly TranscriptToolCall[]
   /** The newest item a request had to shorten, or `null` (epic #277, K6; #280). */
   truncation?: TranscriptTruncation | null
   /**
@@ -71,6 +82,14 @@ export function MessageList({
    * `nothing_to_summarize` or `failed` outcome is owed.
    */
   compaction?: TranscriptManualCompaction | null
+  /** The step-limit notice, or `null` (epic #303, X2; #308). */
+  stepLimit?: string | null
+  /** Whether the chat's model cannot call tools at all (epic #303, X2; #308). */
+  toolsUnsupported?: boolean
+  /** What a request shortened a tool result to, or `null` (epic #303, X9; #306; #308). */
+  truncatedResults?: string | null
+  /** What a request cleared, or `null` (epic #303, X9; #306; #308). */
+  clearedResults?: string | null
   loading: boolean
   /** The catalog lookup for a model-change marker's display name. */
   nameOf?: ModelNameLookup | undefined
@@ -97,9 +116,9 @@ export function MessageList({
     // turn that adds no message at all (a request whose newest item did not change): it counts
     // as content, so a reader who is already at the bottom is shown it rather than being left
     // with it below the fold.
-    `${messages.length}:${last?.text.length ?? 0}:${truncation === null ? '' : 'truncated'}:${
-      compaction?.outcome ?? ''
-    }`,
+    `${messages.length}:${last?.text.length ?? 0}:${String(toolCalls.length)}:${
+      truncation === null ? '' : 'truncated'
+    }:${compaction?.outcome ?? ''}`,
   )
 
   // What each reply's meta line compares its model against (#212). The list is the only place
@@ -128,9 +147,26 @@ export function MessageList({
               <EmptyConversation />
             )
           ) : (
-            transcriptEntries(messages, summaries).map((entry) =>
-              entry.kind === 'summary' ? (
+            groupToolCalls(transcriptEntries(messages, summaries, toolCalls)).map((entry) =>
+              entry.kind === 'group' ? (
+                // Several calls in a row are one step's work (epic #303, X5): they are drawn as a
+                // tidy block rather than as three full-width lines with gaps between them. The
+                // grouping is a rendering decision — the log still holds one call per event.
+                <div
+                  key={`tools:${String(entry.calls[0]?.position ?? 0)}`}
+                  data-slot="tool-group"
+                  role="group"
+                  aria-label="Tool calls"
+                  className="flex w-full flex-col gap-1 rounded-lg border border-dashed px-2 py-1.5"
+                >
+                  {entry.calls.map((call) => (
+                    <ToolCallLine key={call.id} call={call} />
+                  ))}
+                </div>
+              ) : entry.kind === 'summary' ? (
                 <SummaryDivider key={entry.summary.id} summary={entry.summary} />
+              ) : entry.kind === 'tool' ? (
+                <ToolCallLine key={entry.call.id} call={entry.call} />
               ) : (
                 <MessageItem
                   key={entry.message.id}
@@ -152,6 +188,12 @@ export function MessageList({
             )
           )}
           {compaction === null ? null : <CompactionNotice compaction={compaction} />}
+          <ToolNotices
+            stepLimit={stepLimit}
+            unsupported={toolsUnsupported}
+            truncated={truncatedResults}
+            cleared={clearedResults}
+          />
           {truncation === null ? null : <TruncationNotice truncation={truncation} />}
           {working === null ? null : <WorkingRow state={working} />}
         </div>
@@ -198,4 +240,41 @@ function EmptyConversation() {
       <p className="text-sm text-muted-foreground">Say something to start the conversation.</p>
     </div>
   )
+}
+
+/** One row of the transcript as this component draws it: an entry, or a run of tool calls. */
+type RenderEntry =
+  TranscriptEntry | { readonly kind: 'group'; readonly calls: readonly TranscriptToolCall[] }
+
+/**
+ * Collapse runs of consecutive tool calls into one group (epic #303, X5; issue #308).
+ *
+ * A step that calls four tools is four events in the log — one line each, in position order —
+ * but it reads as one piece of work, so consecutive calls are drawn inside a single block. A run
+ * of one is left as the bare line it already is: a box around a single call is noise. The
+ * grouping is a rendering decision and nothing else — the order, the ids and the statuses come
+ * from the entries the client merged, and a message or a divider between two calls starts a
+ * fresh group.
+ */
+function groupToolCalls(entries: readonly TranscriptEntry[]): readonly RenderEntry[] {
+  const grouped: RenderEntry[] = []
+  let run: TranscriptToolCall[] = []
+  const flush = (): void => {
+    if (run.length === 1) {
+      grouped.push({ kind: 'tool', call: run[0] as TranscriptToolCall })
+    } else if (run.length > 1) {
+      grouped.push({ kind: 'group', calls: run })
+    }
+    run = []
+  }
+  for (const entry of entries) {
+    if (entry.kind === 'tool') {
+      run.push(entry.call)
+      continue
+    }
+    flush()
+    grouped.push(entry)
+  }
+  flush()
+  return grouped
 }

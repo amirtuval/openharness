@@ -36,6 +36,7 @@ describe('SettingsScreen', () => {
       'Default model',
       'Modes',
       'Context',
+      'Tools',
       'Appearance',
       'Usage',
       'Advanced',

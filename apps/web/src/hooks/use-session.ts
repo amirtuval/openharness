@@ -1,7 +1,9 @@
 import {
   createTranscript,
+  searchCount,
   selectSessionUsage,
   type Client,
+  type ClearedToolResults,
   type SessionUsage,
   type TranscriptContext,
   type TranscriptError,
@@ -9,9 +11,11 @@ import {
   type TranscriptMessage,
   type TranscriptSummarizing,
   type TranscriptSummary,
+  type TranscriptToolCall,
   type TranscriptTruncation,
+  type TruncatedToolResult,
 } from '@openharness/client'
-import type { ModeId, Session, SessionStatus } from '@openharness/protocol'
+import type { ModeId, Session, SessionStatus, TodoList } from '@openharness/protocol'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 import { describeError } from '../lib/errors'
@@ -56,6 +60,16 @@ export interface SessionView {
   readonly context: TranscriptContext | null
   /** The newest item a request had to shorten to fit, or `null` (epic #277, K6; #280). */
   readonly truncation: TranscriptTruncation | null
+  /** The tool calls the conversation holds, in order (epic #303, X5; #308). */
+  readonly toolCalls: readonly TranscriptToolCall[]
+  /** The task list the model last wrote, or `null` (epic #303, X5; #305; #308). */
+  readonly todos: TodoList | null
+  /** The tool results the newest request shortened, or `[]` (epic #303, X9; #306; #308). */
+  readonly truncatedToolResults: readonly TruncatedToolResult[]
+  /** The old tool results the newest request cleared, or `null` (epic #303, X9; #306; #308). */
+  readonly clearedToolResults: ClearedToolResults | null
+  /** How many `web_search` calls this chat made (epic #303, X5; #305; #308). */
+  readonly searches: number
   /**
    * The manual compaction the log last asked for, or `null` (epic #277, K8; #283).
    *
@@ -295,6 +309,11 @@ export function useSession(client: Client, sessionId: string): SessionView {
     context: state.context,
     truncation: state.truncation,
     manualCompaction: state.manualCompaction,
+    toolCalls: state.toolCalls,
+    todos: state.todos,
+    truncatedToolResults: state.truncatedToolResults,
+    clearedToolResults: state.clearedToolResults,
+    searches: searchCount(state.toolCalls),
     usage: selectSessionUsage(state),
     status: state.status,
     lastError: state.lastError,

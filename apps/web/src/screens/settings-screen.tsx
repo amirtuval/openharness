@@ -6,6 +6,7 @@ import { ContextCard } from '../components/settings/context'
 import { DefaultModelCard } from '../components/settings/default-model'
 import { ModesCard } from '../components/settings/modes'
 import { ProvidersCard } from '../components/settings/providers'
+import { ToolsCard } from '../components/settings/tools'
 import { UsageCard } from '../components/settings/usage'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Button } from '../components/ui/button'
@@ -20,9 +21,9 @@ import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
 /**
  * Settings, in the order a reader needs it (epic #201, X5).
  *
- * **Providers** — the keys every chat runs on — first, then **Default model**, **Modes** (#245)
- * and **Context** (the compaction controls, #282), then **Appearance**, then **Usage** (what the
- * month has cost so far, #247), and last **Advanced**,
+ * **Providers** — the keys every chat runs on — first, then **Default model**, **Modes** (#245),
+ * **Context** (the compaction controls, #282) and **Tools** (which tools a chat may use, #303
+ * X4/#307), then **Appearance**, then **Usage** (what the month has cost so far, #247), and last **Advanced**,
  * which holds the one developer-facing setting and is collapsed. Before this, the screen opened on a Connection card that only a self-hoster has
  * any use for, with the thing everyone needs — a provider key — below the fold; the order is
  * the fix, and it is why the server URL moved rather than disappeared.
@@ -53,6 +54,8 @@ export function SettingsScreen({ catalog, modes }: { catalog: ModelsView; modes:
         <ModesCard modes={modes} catalog={catalog} />
 
         <ContextCard catalog={catalog} />
+
+        <ToolsCard />
 
         <AppearanceCard />
 
