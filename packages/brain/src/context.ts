@@ -1288,11 +1288,12 @@ function truncationRecord(
  * does not replay is left out entirely, so a model or provider switch builds the assistant turn
  * it built before #334: no parts, the model's own text and calls.
  *
- * The newest assistant turn is the one that matters — it is the step the next request continues
- * — and an older turn's parts are dropped by the same rule, because replaying them is a
- * *prefix* of each provider's sequence (Anthropic accepts a contiguous window of thinking
- * blocks; a hole in the middle it refuses). Nothing here caps or clears a part: they are not
- * text, and the log's own size cap dropped any oversized one before it was stored.
+ * **Every** matching step's parts are replayed, not only the newest turn's: the
+ * OpenAI-compatible family needs the key on each assistant turn of a thinking-mode conversation
+ * (`./opaque` has the whole of it), and keeping them all is the contiguous window Anthropic's
+ * preserved-thinking check accepts — a block dropped from the middle is what it refuses.
+ * Nothing here caps or clears a part: they are not text, and the log's own size cap dropped any
+ * oversized one before it was stored.
  */
 function conversationAfter(
   events: readonly StoredEvent[],

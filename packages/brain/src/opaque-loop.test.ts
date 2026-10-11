@@ -160,6 +160,44 @@ describe('a step’s parts come back on that step’s assistant message (X13)', 
     })
   })
 
+  it('keeps every step of a multi-step turn, not only the newest one', async () => {
+    // The compatible families need the key on *every* assistant turn of a thinking-mode
+    // conversation, and the real endpoint refuses the turn that lacks one (issue #330, one step
+    // later than its first request). So a two-step turn's third request carries both.
+    const { store, sessionId } = await newSession([message('both')])
+    const { factory, calls } = mockModel(
+      {
+        reasoning: [
+          { text: 'first thought', metadata: { anthropic: { signature: 'sig-1' } } },
+        ],
+        toolCalls: [{ name: 'echo', input: { text: 'one' } }],
+      },
+      {
+        reasoning: [{ text: 'second thought', metadata: { anthropic: { signature: 'sig-2' } } }],
+        toolCalls: [{ name: 'echo', input: { text: 'two' } }],
+      },
+      { text: ['Done.'] },
+    )
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([echo()]),
+    })
+
+    expect(assistantShape(calls, 2)).toEqual([
+      ['reasoning', 'tool-call'],
+      ['reasoning', 'tool-call'],
+    ])
+    expect(assistantPartsOf(calls, 2)[0]?.providerOptions).toEqual({
+      anthropic: { signature: 'sig-1' },
+    })
+    expect(assistantPartsOf(calls, 2, 1)[0]?.providerOptions).toEqual({
+      anthropic: { signature: 'sig-2' },
+    })
+  })
+
   it('keeps an OpenAI-compatible step’s reasoning and sends it back as plain text', async () => {
     const custom = 'custom/deepseek-v4'
     const { store, sessionId } = await newSession([

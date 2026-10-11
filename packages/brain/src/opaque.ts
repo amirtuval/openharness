@@ -46,12 +46,15 @@ import { isVertexAnthropicModel } from './vertex'
  * the entries — the assistant turn goes out without them, which is what the provider that
  * cannot read them wants.
  *
- * And the entries that are replayed are the **newest assistant turn's** only (see
- * {@link ./context}'s `conversationAfter`): the step a request is continuing is the one whose
- * parts it must carry, and dropping the earlier turns' parts is a *prefix* of each provider's
- * sequence — which is the one shape Anthropic's preserved-thinking check accepts (a contiguous
- * window; a block dropped from the middle fails the block after the gap). Replaying less is
- * also cheaper, and it is the whole of what each API asks for.
+ * Every entry that **does** match is replayed, on the assistant message of the step that
+ * produced it (see `./context`'s `conversationAfter`), and never only the newest one: the
+ * OpenAI-compatible family needs the key on *every* assistant turn of a thinking-mode
+ * conversation — its own client sends `reasoning_content` on each one, empty or not — and an
+ * endpoint refuses the next request without it (that is issue #330's failure, one step later
+ * than the first). It is also the one shape Anthropic's preserved-thinking check accepts: the
+ * blocks of a conversation come back as a **contiguous window**, and replaying all of them is
+ * that window whole — a block dropped from the middle, which replaying "the newest turn only"
+ * would eventually amount to, fails the block after the gap.
  *
  * ## What a family needs beyond the parts
  *
