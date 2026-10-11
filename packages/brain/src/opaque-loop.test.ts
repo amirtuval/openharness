@@ -167,9 +167,7 @@ describe('a step’s parts come back on that step’s assistant message (X13)', 
     const { store, sessionId } = await newSession([message('both')])
     const { factory, calls } = mockModel(
       {
-        reasoning: [
-          { text: 'first thought', metadata: { anthropic: { signature: 'sig-1' } } },
-        ],
+        reasoning: [{ text: 'first thought', metadata: { anthropic: { signature: 'sig-1' } } }],
         toolCalls: [{ name: 'echo', input: { text: 'one' } }],
       },
       {
