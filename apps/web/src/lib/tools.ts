@@ -12,6 +12,10 @@ import type { ModeToolOverride, ToolPermission } from '@openharness/protocol'
  *   a mode's `tools.builtin` is a per-tool boolean patch, and "absent" means "follow my own
  *   setting" — which a two-state switch cannot express. The two helpers read a choice out of an
  *   override and put one back, so the mode form never writes the patch inline.
+ *
+ * Only the `builtin` half is offered here: a mode's `tools.mcp_servers` is a per-**server**
+ * patch whose editor is #313, and {@link withModeToolChoice} carries it through a save
+ * unchanged rather than dropping it with the patch it rebuilds.
  */
 
 /** One permission a form offers: the protocol's value and what it does. */
@@ -57,6 +61,13 @@ export function modeToolChoice(override: ModeToolOverride | null, name: string):
  * A patch that ends up empty is returned as `null` rather than `{ builtin: {} }` — the two mean
  * the same thing to the server, and `null` is the reading a reader sees ("follow my settings").
  *
+ * **The MCP half is carried through untouched** (#311, #312). `Mode.tools.mcp_servers` is a
+ * per-server on/off patch this editor does not offer yet (its own screen is #313), so a mode a
+ * reader edits here must keep whatever it already says about servers: the form writes back the
+ * whole `tools` value, and rebuilding it from `builtin` alone would silently drop those choices
+ * on the next save. A patch holding only `mcp_servers` is not empty — it is a mode that says
+ * something — so it is returned as it stands rather than folded to `null`.
+ *
  * @param override the mode's current `tools`
  * @param name the tool to set
  * @param choice what to set it to
@@ -72,5 +83,14 @@ export function withModeToolChoice(
   } else {
     builtin[name] = choice === 'on'
   }
-  return Object.keys(builtin).length === 0 ? null : { builtin }
+  const mcpServers = override?.mcp_servers
+  if (Object.keys(builtin).length === 0 && (mcpServers === undefined || isEmpty(mcpServers))) {
+    return null
+  }
+  return mcpServers === undefined ? { builtin } : { builtin, mcp_servers: mcpServers }
+}
+
+/** Whether a record holds no entries at all. */
+function isEmpty(record: Readonly<Record<string, unknown>>): boolean {
+  return Object.keys(record).length === 0
 }

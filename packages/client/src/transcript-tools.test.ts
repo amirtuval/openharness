@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  makeAgentMcpToolResult,
+  makeAgentMcpToolUse,
   makeAgentMessage,
   makeAgentToolResult,
   makeAgentToolUse,
@@ -17,6 +19,7 @@ import {
   initialTranscriptState,
   reduceTranscriptAll,
   selectClearedToolResults,
+  selectSearchCount,
   selectToolCalls,
   selectTranscriptEntries,
   selectTodos,
@@ -238,6 +241,115 @@ describe('tool calls in the transcript (#303, #308)', () => {
     const state = reduce([call, call])
 
     expect(selectToolCalls(state)).toHaveLength(1)
+  })
+})
+
+describe('MCP tool calls in the transcript (#312)', () => {
+  it('folds an `agent.mcp_tool_use` into the same list, under its offered name and server', () => {
+    const start = makeModelRequestStart({
+      seq: 1,
+      tools: [{ name: 'notes__search', source: 'mcp', server: 'notes' }],
+    })
+    const call = makeAgentMcpToolUse('notes', 'search', { query: 'doom' }, { seq: 2 })
+    const result = makeAgentMcpToolResult(call, 'two notes', { seq: 3 })
+
+    const calls = selectToolCalls(reduce([start, call, result]))
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      // The event's id is the call's id, and the result names it in `mcp_tool_use_id`.
+      id: call.id,
+      // The model called it by the name it was offered under — the same spelling the settings
+      // and the request's own `tools` record are keyed by.
+      name: 'notes__search',
+      source: 'mcp',
+      server: 'notes',
+      permission: 'ask',
+      status: 'done',
+      position: 2,
+      result: { content: 'two notes', isError: false },
+    })
+  })
+
+  it('pairs a result by `mcp_tool_use_id`, and drops one for a call it never saw', () => {
+    const call = makeAgentMcpToolUse('notes', 'search', { query: 'x' }, { seq: 2 })
+    const orphan = makeAgentMcpToolResult(
+      makeAgentMcpToolUse('notes', 'search', { query: 'y' }, { seq: 5 }),
+      'nobody asked',
+      { id: newEventId(), mcp_tool_use_id: newEventId(), seq: 6 },
+    )
+
+    const state = reduce([call, orphan])
+
+    expect(selectToolCalls(state).map((each) => each.id)).toEqual([call.id])
+  })
+
+  it('says `mcp` even when the client never saw the request that offered it', () => {
+    const call = makeAgentMcpToolUse('notes', 'search', { query: 'x' }, { seq: 2 })
+    // No `span.model_request_start` at all: the event's own type is what the call is read from.
+    expect(onlyCall([call])).toMatchObject({ source: 'mcp', server: 'notes' })
+  })
+
+  it('reads a remote call as waiting for you, as its own `ask` default says', () => {
+    const call = makeAgentMcpToolUse('notes', 'search', { query: 'x' }, { seq: 2 })
+    const idle = makeStatusIdle({
+      seq: 3,
+      stop_reason: { type: 'requires_action', event_ids: [call.id] },
+    })
+
+    const state = reduce([makeStatusRunning({ seq: 1 }), call, idle])
+
+    // A pause is a turn that ended on the question, so the line keeps waiting rather than
+    // becoming `lost` — the same rule a policy-`ask` built-in call gets (#309).
+    expect(selectToolCalls(state)[0]?.status).toBe('waiting')
+  })
+
+  it('reports a remote call nothing answered on a turn that ended as lost, when it may run', () => {
+    const call = makeAgentMcpToolUse(
+      'notes',
+      'search',
+      { query: 'x' },
+      { seq: 2, evaluated_permission: 'allow' },
+    )
+    const state = reduce([makeStatusRunning({ seq: 1 }), call, makeStatusIdle({ seq: 3 })])
+
+    expect(selectToolCalls(state)[0]?.status).toBe('lost')
+  })
+
+  it('interleaves an MCP call with the messages and a built-in call, by position', () => {
+    const builtin = makeAgentToolUse('web_fetch', { url: 'https://x.test' }, { seq: 2 })
+    const mcp = makeAgentMcpToolUse('notes', 'search', { query: 'x' }, { seq: 4 })
+
+    const state = reduce([makeUserMessage('look', { seq: 1, processed_at: null }), builtin, mcp])
+
+    expect(selectTranscriptEntries(state).map((entry) => entry.kind)).toEqual([
+      'message',
+      'tool',
+      'tool',
+    ])
+    expect(state.toolCalls.map((call) => call.name)).toEqual(['web_fetch', 'notes__search'])
+  })
+
+  it('drops the MCP calls a rewind took back', () => {
+    const kept = makeAgentMcpToolUse('notes', 'search', { query: 'kept' }, { seq: 2 })
+    const dropped = makeAgentMcpToolUse('notes', 'search', { query: 'dropped' }, { seq: 4 })
+
+    const state = reduce([
+      kept,
+      dropped,
+      makeSessionRewind({ seq: 9, supersedes: { from_seq: 4, to_seq: 8 } }),
+    ])
+
+    expect(selectToolCalls(state).map((call) => call.id)).toEqual([kept.id])
+  })
+
+  it('counts a search by the model-facing name, so a remote `web_search` is not one', () => {
+    const builtin = makeAgentToolUse('web_search', { query: 'a' }, { seq: 2 })
+    const remote = makeAgentMcpToolUse('notes', 'web_search', { query: 'b' }, { seq: 3 })
+
+    const state = reduce([builtin, remote])
+
+    expect(selectSearchCount(state)).toBe(1)
   })
 })
 

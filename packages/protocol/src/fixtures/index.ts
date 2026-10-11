@@ -1,8 +1,18 @@
 import type { EventId } from '../ids'
-import { newAgentId, newEventId, newModeId, newProviderCredentialId, newSessionId } from '../ids'
+import {
+  newAgentId,
+  newEventId,
+  newMcpServerId,
+  newModeId,
+  newProviderCredentialId,
+  newSessionId,
+} from '../ids'
 import { SUMMARY_MODEL_SAME_AS_CHAT } from '../index'
+import { DEFAULT_MCP_TOOL_PERMISSION, mcpToolOfferedName } from '../tools'
 import type {
   Agent,
+  AgentMcpToolResultEvent,
+  AgentMcpToolUseEvent,
   AgentMessageEvent,
   AgentToolResultEvent,
   AgentToolUseEvent,
@@ -10,6 +20,7 @@ import type {
   ContextSummaryEvent,
   ContextSummaryProgressEvent,
   ListModelsResponse,
+  McpServer,
   Mode,
   ModelEntry,
   ModelRequestEndEvent,
@@ -257,6 +268,34 @@ export function makeMode(overrides: Partial<Mode> = {}): Mode {
 }
 
 /**
+ * A remote MCP server (#303, X10): `notes`, an `oauth` server whose last check listed one
+ * tool. Pass a different `auth` — and, for `headers`, `header_names` — to build the other
+ * forms; the fixture never carries a secret, because the resource never does.
+ *
+ * @param overrides fields to replace on the default server
+ */
+export function makeMcpServer(overrides: Partial<McpServer> = {}): McpServer {
+  const server: McpServer = {
+    id: newMcpServerId(),
+    type: 'mcp_server',
+    owner_id: makeUser().id,
+    name: 'notes',
+    url: 'https://mcp.example.com/mcp',
+    auth: 'oauth',
+    enabled: true,
+    status: 'connected',
+    last_error: null,
+    header_names: [],
+    tools: [{ name: 'search', description: 'Search notes', definition_tokens: 24 }],
+    definition_tokens: 24,
+    last_tested_at: fixtureTimestamp(),
+    created_at: fixtureTimestamp(),
+    updated_at: fixtureTimestamp(),
+  }
+  return { ...server, ...overrides }
+}
+
+/**
  * A user's stored tool settings (epic #303, X4; #307): no choices at all, so every tool
  * follows its own declaration — which is what a user who has never opened the settings screen
  * reads.
@@ -264,7 +303,7 @@ export function makeMode(overrides: Partial<Mode> = {}): Mode {
  * @param overrides fields to replace on the default settings
  */
 export function makeUserToolSettings(overrides: Partial<UserToolSettings> = {}): UserToolSettings {
-  return { builtin: {}, ...overrides }
+  return { builtin: {}, mcp: {}, ...overrides }
 }
 
 /**
@@ -294,6 +333,27 @@ export function makeListToolSettingsResponse(
   overrides: Partial<ToolSettingEntry> = {},
 ): ListToolSettingsResponse {
   return { data: [makeToolSettingEntry(overrides)] }
+}
+
+/**
+ * One `GET /v1/me/tools` entry for a remote MCP tool (epic #303, X10; #312): the `notes`
+ * server's `search`, offered to a model as `notes__search`, under the default `ask` policy.
+ *
+ * @param overrides fields to replace on the default entry
+ */
+export function makeMcpToolSettingEntry(
+  overrides: Partial<ToolSettingEntry> = {},
+): ToolSettingEntry {
+  const entry: ToolSettingEntry = {
+    name: mcpToolOfferedName('notes', 'search'),
+    source: 'mcp',
+    enabled: true,
+    policy: DEFAULT_MCP_TOOL_PERMISSION,
+    default_policy: DEFAULT_MCP_TOOL_PERMISSION,
+    available: true,
+    mcp_server: 'notes',
+  }
+  return { ...entry, ...overrides }
 }
 
 /**
@@ -454,19 +514,75 @@ export function makeAgentToolResult(
 }
 
 /**
+ * A stored `agent.mcp_tool_use`: the model asking for a remote MCP server's tool (epic #303,
+ * X10; #312).
+ *
+ * The event's id **is** the call's id, so a test pairs it with the `agent.mcp_tool_result`
+ * built from the same event. `name` is the tool's own name on the server, not the model-facing
+ * `<server>__<tool>` name — that is recomputed with `mcpToolOfferedName`.
+ *
+ * @param serverName the MCP server's name
+ * @param name the tool's own name on that server
+ * @param input the arguments the model produced
+ * @param overrides fields to replace on the event, `id` included
+ */
+export function makeAgentMcpToolUse(
+  serverName: string,
+  name: string,
+  input: ToolInput,
+  overrides: Partial<AgentMcpToolUseEvent> = {},
+): AgentMcpToolUseEvent {
+  const event: AgentMcpToolUseEvent = {
+    id: newEventId(),
+    type: 'agent.mcp_tool_use',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    mcp_server_name: serverName,
+    name,
+    input,
+    evaluated_permission: 'ask',
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `agent.mcp_tool_result`: what a remote MCP tool call produced (epic #303, X10; #312).
+ *
+ * @param call the `agent.mcp_tool_use` this answers; its id becomes `mcp_tool_use_id`
+ * @param text the result body; becomes the single text block
+ * @param overrides fields to replace on the event
+ */
+export function makeAgentMcpToolResult(
+  call: AgentMcpToolUseEvent,
+  text: string,
+  overrides: Partial<AgentMcpToolResultEvent> = {},
+): AgentMcpToolResultEvent {
+  const event: AgentMcpToolResultEvent = {
+    id: newEventId(),
+    type: 'agent.mcp_tool_result',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    mcp_tool_use_id: call.id,
+    content: [{ type: 'text', text }],
+    is_error: false,
+  }
+  return { ...event, ...overrides }
+}
+
+/**
  * A stored `user.tool_confirmation`: the user's answer to a call that was waiting on them
  * (epic #303, X6; #309).
  *
- * The event names the call it answers — `makeAgentToolUse`'s event carries the call's id, so
- * passing it here is what pairs the two, exactly as {@link makeAgentToolResult} does. The
- * default is an approval for this call only; a test that answers an `ask_user` call adds
- * `answers`, and one that remembers the answer adds `remember`.
+ * The event names the call it answers — a built-in or an MCP one, each of which carries the
+ * call's id in its own event — so passing the call here is what pairs the two, exactly as
+ * {@link makeAgentToolResult} does. The default is an approval for this call only; a test that
+ * answers an `ask_user` call adds `answers`, and one that remembers the answer adds `remember`.
  *
- * @param call the `agent.tool_use` this answers; its id becomes `tool_use_id`
+ * @param call the tool call this answers; its id becomes `tool_use_id`
  * @param overrides fields to replace on the event
  */
 export function makeToolConfirmation(
-  call: AgentToolUseEvent,
+  call: AgentToolUseEvent | AgentMcpToolUseEvent,
   overrides: Partial<UserToolConfirmationEvent> = {},
 ): UserToolConfirmationEvent {
   const event: UserToolConfirmationEvent = {

@@ -285,6 +285,13 @@ export {
   waitForTurnEnd,
 } from './events'
 export type { StreamCollector } from './events'
+export {
+  STUB_SEARCH_TOOL,
+  startStubMcpServer,
+  type StubCallToolResult,
+  type StubMcpServer,
+  type StubTool,
+} from './mcp'
 export { expectedSlowReply } from './mock'
 export {
   startOpenAICompatibleStub,

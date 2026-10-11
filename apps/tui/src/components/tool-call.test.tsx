@@ -49,7 +49,7 @@ describe('toolCallLines (#308)', () => {
     expect(text).toContain('done')
   })
 
-  it('says "waiting for you" for a paused call, and names an MCP call', () => {
+  it('says "waiting for you" for a paused call, and names an MCP call and its server', () => {
     expect(
       textOf(
         toolCallLines(call({ permission: 'ask', status: 'waiting', result: undefined }), 80, DARK),
@@ -58,6 +58,13 @@ describe('toolCallLines (#308)', () => {
     expect(textOf(toolCallLines(call({ source: 'mcp', name: 'srv_search' }), 80, DARK))).toContain(
       '(mcp)',
     )
+    // A remote call names the server it came from when the log says which one (#312): two
+    // servers' `search` differ by exactly this and nothing else on the line.
+    expect(
+      textOf(
+        toolCallLines(call({ source: 'mcp', name: 'notes__search', server: 'notes' }), 80, DARK),
+      ),
+    ).toContain('(mcp: notes)')
   })
 
   it('adds the reason line a failed call owes the reader', () => {

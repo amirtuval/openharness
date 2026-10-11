@@ -1,22 +1,29 @@
 import type { ToolRegistry, ToolResult, ToolRunContext } from '@openharness/hands'
 import { createToolRegistry, errorResult } from '@openharness/hands'
 import type {
-  AgentToolUseEvent,
   JsonValue,
   ModeToolOverride,
   ProviderCredentialType,
   StoredEvent,
+  ToolCallEvent,
   ToolInput,
   ToolPermission,
   ToolReference,
   UserId,
 } from '@openharness/protocol'
-import { ASK_USER_TOOL_NAME, EVENT_TYPES } from '@openharness/protocol'
+import {
+  ASK_USER_TOOL_NAME,
+  isToolCallEvent,
+  isToolResultEvent,
+  toolCallOfferedName,
+  toolResultCallId,
+} from '@openharness/protocol'
 import type { AppendableEvent } from '@openharness/session'
 import type { ToolSet } from 'ai'
-import { zodSchema } from 'ai'
+import { jsonSchema, zodSchema } from 'ai'
 
-import { agentToolResult, agentToolUse } from './events'
+import { agentMcpToolUse, agentToolUse, toolResultForCall } from './events'
+import type { McpToolRef } from './mcp'
 import type { ModelToolCall } from './model'
 import {
   awaitingUser,
@@ -177,9 +184,23 @@ function isEnabled(decision: ToolDecision | undefined): boolean {
   return decision?.enabled ?? true
 }
 
-/** The tools a request offers, as its `span.model_request_start` records them. */
-export function offeredTools(registry: ToolRegistry): ToolReference[] {
-  return registry.tools.map((tool) => ({ name: tool.name, source: 'builtin' }))
+/**
+ * The tools a request offers, as its `span.model_request_start` records them (epic #303, X1; #312).
+ *
+ * @param registry the tools the request offered — the deployment's and the remote ones together
+ * @param mcp which server each remote tool came from, by offered name, or `undefined` for a
+ *   request that offered none. A tool the map does not name is this build's own.
+ */
+export function offeredTools(
+  registry: ToolRegistry,
+  mcp?: ReadonlyMap<string, McpToolRef>,
+): ToolReference[] {
+  return registry.tools.map((tool) => {
+    const remote = mcp?.get(tool.name)
+    return remote === undefined
+      ? { name: tool.name, source: 'builtin' }
+      : { name: tool.name, source: 'mcp', server: remote.serverName }
+  })
 }
 
 /**
@@ -194,7 +215,16 @@ export function toolSet(registry: ToolRegistry): ToolSet {
   return Object.fromEntries(
     registry.tools.map((tool) => [
       tool.name,
-      { description: tool.description, inputSchema: zodSchema(tool.inputSchema) },
+      {
+        description: tool.description,
+        // A tool whose schema came from elsewhere (a remote MCP tool's, #312) is offered the
+        // JSON Schema it was given — the model has to see the parameters the server really
+        // takes — while a tool this build defines is offered its zod schema.
+        inputSchema:
+          tool.inputJson === undefined
+            ? zodSchema(tool.inputSchema)
+            : jsonSchema(tool.inputJson as unknown as Parameters<typeof jsonSchema>[0]),
+      },
     ]),
   )
 }
@@ -207,6 +237,15 @@ export interface ToolStepOptions {
   readonly registry: ToolRegistry
   /** What the settings in force say; each tool's own permission when absent (#307). */
   readonly settings?: ToolSettings
+  /**
+   * The remote tools this request offered, by their offered name (epic #303, X10; #312).
+   *
+   * A call to one of these is stored as an `agent.mcp_tool_use` — with the server it belongs to
+   * and the tool's own name on it — and answered with an `agent.mcp_tool_result`. Absent (or a
+   * name it does not carry) means a built-in call, which is the pair `agent.tool_use` /
+   * `agent.tool_result` records.
+   */
+  readonly mcp?: ReadonlyMap<string, McpToolRef>
   /**
    * The tools this chat has already been told to allow — a `remember: session` approval
    * (epic #303, #309). Read off the log by the turn (`sessionApprovedTools`), because the
@@ -264,9 +303,16 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
   const decisions = calls.map((call) => decisionFor(registry, settings, call.name, approved))
   const inputs = calls.map((call) => asToolInput(call.input))
   const stored = await append(
-    calls.map((call, index) =>
-      agentToolUse(call.name, inputs[index] ?? {}, decisions[index]?.permission ?? 'deny'),
-    ),
+    calls.map((call, index) => {
+      const permission = decisions[index]?.permission ?? 'deny'
+      const input = inputs[index] ?? {}
+      const remote = options.mcp?.get(call.name)
+      // The pair the call belongs to is the event type: a remote tool's call records the server
+      // and the tool's own name on it, and is answered by an `agent.mcp_tool_result` (#312).
+      return remote === undefined
+        ? agentToolUse(call.name, input, permission)
+        : agentMcpToolUse(remote.serverName, remote.toolName, input, permission)
+    }),
   )
   const context: ToolRunContext = {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -293,9 +339,11 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
   await append(
     stored.flatMap((event, index) => {
       const result = results[index]
-      return result === null || result === undefined
-        ? []
-        : [agentToolResult(event.id, result.content, result.isError === true)]
+      if (result === null || result === undefined || !isToolCallEvent(event)) {
+        return []
+      }
+      // The answer is written in the call's own pair, `agent.mcp_tool_result` for a remote one.
+      return [toolResultForCall(event, result.content, result.isError === true)]
     }),
   )
 }
@@ -329,7 +377,13 @@ export async function repairLostExecutions(
   }
   await append(
     lost.map((call) =>
-      agentToolResult(call.id, [{ type: 'text', text: executionLost(call.name) }], true),
+      toolResultForCall(
+        call,
+        // The name the model called the tool by: for a remote tool the offered name (#312),
+        // which is what the model called and what a cap or a settings entry is keyed by.
+        [{ type: 'text', text: executionLost(toolCallOfferedName(call)) }],
+        true,
+      ),
     ),
   )
 }
@@ -342,9 +396,12 @@ export async function repairLostExecutions(
  * confirmation is not waiting any more — the user answered, and whether the loop had got as far
  * as running it is exactly what a crash makes unknowable — so it is one of these.
  *
+ * Built-in and remote alike (#312): a remote tool may have had an effect nobody recorded just as
+ * a built-in one may, so it is answered `execution lost` and never run again either.
+ *
  * @param events the session's log, as the turn's replay read handed it over
  */
-export function lostExecutions(events: readonly StoredEvent[]): AgentToolUseEvent[] {
+export function lostExecutions(events: readonly StoredEvent[]): ToolCallEvent[] {
   const confirmations = confirmationsByCall(events)
   const waiting = new Set(
     awaitingUser(events)
@@ -362,16 +419,15 @@ export function lostExecutions(events: readonly StoredEvent[]): AgentToolUseEven
  * points at. A `session.rewind` that took a call back removes it from the replay read the
  * caller passes here, so a branch nobody is on contributes nothing.
  */
-export function pendingToolUse(events: readonly StoredEvent[]): AgentToolUseEvent[] {
+export function pendingToolUse(events: readonly StoredEvent[]): ToolCallEvent[] {
   const answered = new Set<string>()
   for (const event of events) {
-    if (event.type === EVENT_TYPES.agentToolResult) {
-      answered.add(event.tool_use_id)
+    if (isToolResultEvent(event)) {
+      answered.add(toolResultCallId(event))
     }
   }
   return events.filter(
-    (event): event is AgentToolUseEvent =>
-      event.type === EVENT_TYPES.agentToolUse && !answered.has(event.id),
+    (event): event is ToolCallEvent => isToolCallEvent(event) && !answered.has(event.id),
   )
 }
 

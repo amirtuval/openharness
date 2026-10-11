@@ -30,9 +30,9 @@ export type ToolCallInput = DeepReadonly<ToolInput>
  * - **the words** ({@link toolStatusLabel}, {@link toolCallSummary} and the notices below) — the
  *   sentences a reader sees, in one place so the terminal and the page cannot disagree.
  *
- * The shape is built to extend: #310's approval prompt reads a `waiting` call's `input`, and
- * #313's MCP calls will carry `source: 'mcp'` with the server in the name — nothing here assumes
- * a built-in tool.
+ * The shape is built to extend: #310's approval prompt reads a `waiting` call's `input`, and an
+ * MCP call (#312) carries `source: 'mcp'` with its {@link TranscriptToolCall.server} named —
+ * nothing here assumes a built-in tool, and both pairs arrive through one fold in the reducer.
  */
 
 /**
@@ -68,30 +68,45 @@ export interface ToolCallResult {
 /**
  * One tool call the conversation holds (epic #303, X1/X5; issue #308).
  *
- * Built from an `agent.tool_use` and the `agent.tool_result` that answers it, keyed by the call's
- * id — which **is** the `agent.tool_use` event's id ({@link https://github.com/amirtuval/openharness/issues/303}).
- * `position` is that event's `seq`, so a call interleaves with the messages around it.
+ * Built from a call and the result that answers it — either pair: a built-in's `agent.tool_use` /
+ * `agent.tool_result`, or a remote MCP server's `agent.mcp_tool_use` / `agent.mcp_tool_result`
+ * (#312) — keyed by the call's id, which **is** the call event's id
+ * ({@link https://github.com/amirtuval/openharness/issues/303}). `position` is that event's
+ * `seq`, so a call interleaves with the messages around it.
  */
 export interface TranscriptToolCall {
-  /** The call's id: the `agent.tool_use` event's id, which its result names. */
+  /** The call's id: the call event's id, which its result names. */
   readonly id: string
-  /** The tool's name, as the model called it. */
+  /**
+   * The name the model called the tool by.
+   *
+   * A built-in's own name; a remote tool's model-facing `<server>__<tool>` spelling
+   * (`mcpToolOfferedName`), recomputed from the log's own pair so a reader of the log alone
+   * arrives at the same name — the one the settings and a request's offer are keyed by.
+   */
   readonly name: string
   /** The arguments the model produced: a JSON object, shown in full when the line expands. */
   readonly input: ToolCallInput
   /** What the policy in force said about this call: `allow`, `ask` or `deny`. */
   readonly permission: ToolPermission
   /**
-   * Where the tool comes from: `builtin` today, `mcp` when #312 puts one there.
+   * Where the tool comes from: this build's own, or a remote MCP server's (#312).
    *
-   * Read off the request's own `span.model_request_start.tools` record, so a call the log
-   * describes is not re-interpreted by the build reading it, and an MCP call can name its
-   * server without this module changing.
+   * A built-in reads it off the request's own `span.model_request_start.tools` record, so a call
+   * the log describes is not re-interpreted by the build reading it; an MCP call is `mcp` by the
+   * event's own type, with the server named beside it.
    */
   readonly source: ToolSource
+  /**
+   * The MCP server the tool belongs to, by name — absent for a built-in tool (#312).
+   *
+   * The same server name the log records on the call and `GET /v1/me/tools` reports on the
+   * entry, so a line can say which server a remote tool came from.
+   */
+  readonly server?: string
   /** The state the line shows; see {@link ToolCallStatus}. */
   readonly status: ToolCallStatus
-  /** Where the call sorts, in the log's numbering: its `agent.tool_use` event's `seq`. */
+  /** Where the call sorts, in the log's numbering: its call event's `seq`. */
   readonly position: number
   /** What the call produced, once a result has landed. */
   readonly result?: ToolCallResult

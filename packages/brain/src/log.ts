@@ -1,8 +1,6 @@
 import type { SessionStore } from '@openharness/session'
-import { EVENT_TYPES, MAX_PAGE_LIMIT } from '@openharness/protocol'
+import { EVENT_TYPES, isToolCallEvent, MAX_PAGE_LIMIT } from '@openharness/protocol'
 import type {
-  AgentToolResultEvent,
-  AgentToolUseEvent,
   EventId,
   ModelRequestPurpose,
   ModelUsage,
@@ -150,19 +148,9 @@ export function awaitingToolStep(events: readonly StoredEvent[]): boolean {
   if (lastChatStart === 0) {
     return false
   }
-  return events.some(
-    (event) => event.type === EVENT_TYPES.agentToolUse && event.seq > lastChatStart,
-  )
-}
-
-/** Whether a stored event is the model asking for a tool. */
-export function isToolUse(event: StoredEvent): event is AgentToolUseEvent {
-  return event.type === EVENT_TYPES.agentToolUse
-}
-
-/** Whether a stored event is an answer to a tool call. */
-export function isToolResult(event: StoredEvent): event is AgentToolResultEvent {
-  return event.type === EVENT_TYPES.agentToolResult
+  // Built-in and remote calls alike (#312): a step that called any tool still owes its answers
+  // to the next request.
+  return events.some((event) => isToolCallEvent(event) && event.seq > lastChatStart)
 }
 
 /**

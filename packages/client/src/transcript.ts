@@ -1,8 +1,19 @@
-import { EVENT_TYPES, readTodoList, totalCost, usageCost } from '@openharness/protocol'
+import {
+  EVENT_TYPES,
+  readTodoList,
+  toolCallId,
+  toolCallInput,
+  toolCallOfferedName,
+  toolCallPermission,
+  toolCallServer,
+  toolCallSource,
+  toolResultCallId,
+  toolResultIsError,
+  totalCost,
+  usageCost,
+} from '@openharness/protocol'
 import type {
   AgentMessageEvent,
-  AgentToolResultEvent,
-  AgentToolUseEvent,
   ContextSummaryEvent,
   ContextSummaryReason,
   ModelCost,
@@ -12,7 +23,9 @@ import type {
   SessionUsageEvent,
   StreamEvent,
   StoredEvent,
+  ToolCallEvent,
   ToolReference,
+  ToolResultEvent,
   ToolSource,
   UserMessageEvent,
   RetryStatusType,
@@ -101,8 +114,8 @@ export interface TextPart {
  * made four calls and wrote no words is four calls and no message — so they live in
  * {@link TranscriptState.toolCalls} and reach a renderer as their own {@link TranscriptEntry}
  * (`kind: 'tool'`), interleaved with the messages by position. #310 draws its approval prompt
- * from a call's `waiting` status, and #313's MCP calls are the same shape with
- * `source: 'mcp'`.
+ * from a call's `waiting` status, and a remote MCP server's call (#312) is the same shape with
+ * `source: 'mcp'` and the server named beside it.
  */
 export type MessagePart = TextPart
 
@@ -517,11 +530,12 @@ export interface TranscriptState {
   readonly manualCompaction: TranscriptManualCompaction | null
 
   /**
-   * The tool calls the conversation holds, in position order (epic #303, X1/X5; #308).
+   * The tool calls the conversation holds, in position order (epic #303, X1/X5; #308; #312).
    *
-   * One per `agent.tool_use` a `session.rewind` has not taken back, each paired with its
-   * `agent.tool_result` when one has landed. Both frontends interleave these with the messages
-   * through {@link selectTranscriptEntries}, so a call draws where it was made.
+   * One per tool call a `session.rewind` has not taken back — a built-in's `agent.tool_use` or a
+   * remote server's `agent.mcp_tool_use` — each paired with the result that answers it when one
+   * has landed. Both frontends interleave these with the messages through
+   * {@link selectTranscriptEntries}, so a call draws where it was made.
    */
   readonly toolCalls: readonly TranscriptToolCall[]
 
@@ -555,9 +569,11 @@ export interface TranscriptState {
    * The tool events the todo list is read from, in log order — bookkeeping (epic #303, #308).
    *
    * `readTodoList` is the one reading of the list a log holds, and it takes whole events; keeping
-   * the `agent.tool_use` / `agent.tool_result` events here (and no others) is what lets the
-   * transcript call it rather than restate its rule. A rewind drops the ones its range covers, so
-   * the list follows the branch the same way the messages do.
+   * the tool-call events here (and no others) is what lets the transcript call it rather than
+   * restate its rule. Every tool event is kept, MCP ones included (#312), because they arrive
+   * through the same fold — and `readTodoList` ignores a name that is not `todo_write`'s, which
+   * is what keeps the extra events inert. A rewind drops the ones its range covers, so the list
+   * follows the branch the same way the messages do.
    */
   readonly todoEvents: readonly StoredEvent[]
 }
@@ -764,13 +780,17 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
       return state
 
     case EVENT_TYPES.agentToolUse:
+    case EVENT_TYPES.agentMcpToolUse:
       // A call the model made (epic #303, X1/X5; #308): a line of its own in the conversation,
       // interleaved with the messages by position. The event's id **is** the call's id, which
-      // the result that answers it names.
+      // the result that answers it names. A remote MCP server's call (#312) is the same line
+      // through the same fold — its pair differs only in the type strings and the id field's
+      // name, which the protocol's `events/tool.ts` readings absorb.
       return fromToolUse(state, event)
 
     case EVENT_TYPES.agentToolResult:
-      // What answered the call, and the status the line moves to (epic #303, X1; #308).
+    case EVENT_TYPES.agentMcpToolResult:
+      // What answered the call, and the status the line moves to (epic #303, X1; #308; #312).
       return fromToolResult(state, event)
 
     case EVENT_TYPES.eventStart:
@@ -1113,22 +1133,37 @@ function sourcesFrom(tools: readonly ToolReference[]): Readonly<Record<string, T
 }
 
 /**
- * Fold an `agent.tool_use` in: one call line, at the event's own `seq` (epic #303, X1; #308).
+ * Fold a tool call in: one call line, at the event's own `seq` (epic #303, X1; #308; #312).
  *
- * The status is derived rather than stored in the log: a call whose policy is `ask` is
- * `waiting` (nothing runs it until the reader answers), and any other call is `running` while
- * the turn is working — or `lost` once the turn is over and nothing has answered it, which only
- * a call the brain never got to run can be.
+ * One fold for both pairs — a built-in's `agent.tool_use` and a remote MCP server's
+ * `agent.mcp_tool_use` — read through the protocol's `events/tool.ts` helpers, so a reader
+ * cannot handle one pair and quietly drop the other. What they differ in is read there: the
+ * call's id (`toolCallId`), where its tool comes from (`toolCallSource`) and the server it
+ * belongs to (`toolCallServer`), and the name the model called it by (`toolCallOfferedName` —
+ * a built-in's own name, an MCP tool's model-facing `<server>__<tool>` spelling).
+ *
+ * The source is the request's own record when the log has one — its
+ * `span.model_request_start.tools` list — and the event's own type otherwise, which is how an
+ * MCP call a client joined mid-request still says `mcp` rather than being read as a built-in.
+ *
+ * The status is derived rather than stored in the log: a call whose policy is `ask` (which is
+ * every MCP tool's default, #312) is `waiting` — nothing runs it until the reader answers — and
+ * any other call is `running` while the turn is working, or `lost` once the turn is over and
+ * nothing has answered it, which only a call the brain never got to run can be.
  */
-function fromToolUse(state: TranscriptState, event: AgentToolUseEvent): TranscriptState {
+function fromToolUse(state: TranscriptState, event: ToolCallEvent): TranscriptState {
+  const name = toolCallOfferedName(event)
+  const server = toolCallServer(event)
+  const permission = toolCallPermission(event)
   return withTodoEvents(
     upsertToolCall(state, {
-      id: event.id,
-      name: event.name,
-      input: event.input,
-      permission: event.evaluated_permission,
-      source: state.toolSources[event.name] ?? 'builtin',
-      status: toolCallStatus(event.evaluated_permission, undefined, {
+      id: toolCallId(event),
+      name,
+      input: toolCallInput(event),
+      permission,
+      source: state.toolSources[name] ?? toolCallSource(event),
+      ...(server === undefined ? {} : { server }),
+      status: toolCallStatus(permission, undefined, {
         waiting: false,
         running: state.status === 'running',
       }),
@@ -1139,21 +1174,24 @@ function fromToolUse(state: TranscriptState, event: AgentToolUseEvent): Transcri
 }
 
 /**
- * Fold an `agent.tool_result` in: what answered the call, and the status it moves to
- * (epic #303, X1; #308).
+ * Fold a tool result in: what answered the call, and the status it moves to (epic #303, X1;
+ * #308; #312).
  *
- * The result names its call in `tool_use_id`; a result for a call this client never saw — it
- * joined mid-step, or a rewind took the call back — has nothing to attach to and is dropped.
+ * One fold for both pairs. The result names its call through the protocol's id reading
+ * (`toolResultCallId`, the MCP pair's `mcp_tool_use_id` against the built-in's `tool_use_id`);
+ * a result for a call this client never saw — it joined mid-step, or a rewind took the call
+ * back — has nothing to attach to and is dropped.
  */
-function fromToolResult(state: TranscriptState, event: AgentToolResultEvent): TranscriptState {
-  const index = state.toolCalls.findIndex((call) => call.id === event.tool_use_id)
+function fromToolResult(state: TranscriptState, event: ToolResultEvent): TranscriptState {
+  const callId = toolResultCallId(event)
+  const index = state.toolCalls.findIndex((call) => call.id === callId)
   if (index === -1) {
     return state
   }
   const existing = state.toolCalls[index] as TranscriptToolCall
   const result: ToolCallResult = {
     content: event.content.map((block) => block.text).join(''),
-    isError: event.is_error,
+    isError: toolResultIsError(event),
   }
   const call: TranscriptToolCall = {
     ...existing,
@@ -1229,6 +1267,7 @@ function isSameToolCall(current: TranscriptToolCall, next: TranscriptToolCall): 
     current.name === next.name &&
     current.permission === next.permission &&
     current.source === next.source &&
+    current.server === next.server &&
     current.status === next.status &&
     current.position === next.position &&
     sameJson(current.input, next.input) &&

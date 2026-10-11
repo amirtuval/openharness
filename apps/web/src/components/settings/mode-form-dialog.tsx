@@ -101,6 +101,11 @@ export function ModeFormDialog({
   /**
    * The deployment's tools, for the override section (#307): the same effective entries the
    * Tools card reads, so a mode's choices are offered for the tools that really exist here.
+   *
+   * The remote MCP entries are ignored here (#312): a mode overrides a **server**, by id, and
+   * a per-MCP-tool switch would be a choice the wire has nowhere to put — that half of the
+   * editor is #313. {@link withModeToolChoice} still carries a mode's `mcp_servers` through a
+   * save, so opening this form never drops what a mode already says about servers.
    */
   tools: readonly ToolSettingEntry[]
   /** Called after a successful write, with what was saved. */
@@ -110,6 +115,9 @@ export function ModeFormDialog({
   const [form, setForm] = useState<FormState>(EMPTY)
   const [saving, setSaving] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
+  // Only this build's own tools get a per-tool choice: a remote MCP tool's presence is its
+  // server's, which a mode overrides by id on a screen this form does not offer (#312, #313).
+  const builtinTools = tools.filter((entry) => entry.source !== 'mcp')
 
   // Every open starts from the mode being edited (or the empty form): a dialog left mounted
   // between uses must not carry the last write's values into the next one.
@@ -244,7 +252,7 @@ export function ModeFormDialog({
             </p>
           </div>
 
-          {tools.length === 0 ? null : (
+          {builtinTools.length === 0 ? null : (
             <div className="space-y-2">
               <Label>Tools</Label>
               <p className="text-xs text-muted-foreground">
@@ -252,7 +260,7 @@ export function ModeFormDialog({
                 settings. A mode turns a tool on or off — it never changes what a call may do.
               </p>
               <ul className="space-y-1.5">
-                {tools.map((entry) => (
+                {builtinTools.map((entry) => (
                   <li key={entry.name} className="flex items-center gap-2 text-sm">
                     <span className="min-w-0 flex-1 truncate font-mono text-xs">{entry.name}</span>
                     <select

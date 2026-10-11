@@ -79,3 +79,56 @@ describe('Settings → Tools (#308)', () => {
     expect(within(row).getByRole('checkbox', { name: 'Enable web_search' })).toBeDisabled()
   })
 })
+
+describe('Settings → Tools, the remote MCP half (#312)', () => {
+  const MCP_TOOLS = [
+    { server: 'notes', name: 'search' },
+    { server: 'notes', name: 'read' },
+    { server: 'github', name: 'search' },
+  ]
+
+  it('lists remote tools grouped by their server, under their offered names', async () => {
+    renderSettings({ mcpTools: MCP_TOOLS })
+
+    const notes = await screen.findByText('MCP · notes')
+    const group = notes.closest('[data-slot="mcp-server-group"]') as HTMLElement
+    expect(group).toHaveAttribute('data-server', 'notes')
+    // Both of the notes server's tools are under its heading — `search` on two servers is two
+    // tools, told apart by the name the model calls them by.
+    expect(within(group).getByText('notes__search')).toBeInTheDocument()
+    expect(within(group).getByText('notes__read')).toBeInTheDocument()
+    expect(within(group).queryByText('github__search')).toBeNull()
+
+    const github = screen.getByText('MCP · github')
+    const githubGroup = github.closest('[data-slot="mcp-server-group"]') as HTMLElement
+    expect(within(githubGroup).getByText('github__search')).toBeInTheDocument()
+  })
+
+  it('shows a remote tool’s policy, and offers it no control to write the wrong map', async () => {
+    renderSettings({
+      mcpTools: MCP_TOOLS,
+      toolSettings: { builtin: {}, mcp: { notes__search: 'ask' } },
+    })
+
+    const row = await toolRow('notes__search')
+    expect(row).toHaveAttribute('data-source', 'mcp')
+    expect(within(row).getByText('MCP')).toBeInTheDocument()
+    expect(within(row).getByText('When called: ask (default)')).toBeInTheDocument()
+    // A remote tool has no on/off of its own and `PUT /v1/me/tools` keys its policy under `mcp`:
+    // the editing half of this screen is #313, so nothing here writes a `builtin` entry for it.
+    expect(within(row).queryByRole('checkbox')).toBeNull()
+    expect(within(row).queryByRole('combobox')).toBeNull()
+  })
+
+  it('lists this build’s own tools first, unchanged by a deployment offering remote ones', async () => {
+    renderSettings({ mcpTools: MCP_TOOLS })
+
+    const list = (await screen.findByText('web_fetch')).closest('[data-slot="tools-list"]')
+    expect(list).not.toBeNull()
+    expect(
+      within(list as HTMLElement)
+        .getAllByText(/web_fetch|web_search|todo_write/)
+        .map((node) => node.textContent),
+    ).toEqual(['web_fetch', 'web_search', 'todo_write'])
+  })
+})

@@ -83,47 +83,56 @@ the only way an event is ever removed together with its session.
 
 ## Routes
 
-| method   | path                                      | what it does                                                                                    |
-| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                 | liveness — always `{ status: 'ok' }` while the process lives; open                              |
-| `GET`    | `/ready`                                  | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open |
-| `GET`    | `/v1/auth-config`                         | unauthenticated: which providers are on, and whether dev login is                               |
-| `GET`    | `/v1/me`                                  | the signed-in user                                                                              |
-| `GET`    | `/v1/me/preferences`                      | the caller's preferences — the default model, the web theme and the context settings            |
-| `PUT`    | `/v1/me/preferences`                      | merge fields in; model ids, four theme names, the compaction share and pass limit               |
-| `GET`    | `/v1/me/tools`                            | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`     |
-| `PUT`    | `/v1/me/tools`                            | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                  |
-| `POST`   | `/v1/me/modes`                            | create a mode; `409` for a duplicate name or the twenty-first mode                              |
-| `GET`    | `/v1/me/modes`                            | list the caller's modes, oldest first (no cursor: at most 20)                                   |
-| `GET`    | `/v1/me/modes/{mode_id}`                  | read one mode                                                                                   |
-| `POST`   | `/v1/me/modes/{mode_id}`                  | update a mode; omitted fields keep their value, `null` clears one                               |
-| `DELETE` | `/v1/me/modes/{mode_id}`                  | delete one; answers `204`, and the chats that followed it keep their last model                 |
-| `POST`   | `/v1/agents`                              | create an agent                                                                                 |
-| `GET`    | `/v1/agents`                              | list agents, oldest first                                                                       |
-| `GET`    | `/v1/agents/{agent_id}`                   | read one agent                                                                                  |
-| `POST`   | `/v1/agents/{agent_id}`                   | update an agent; sessions already created keep their snapshot                                   |
-| `POST`   | `/v1/sessions`                            | create a session from a model and/or an agent (at least one)                                    |
-| `GET`    | `/v1/sessions`                            | list sessions, newest first (`agent_id` filters)                                                |
-| `GET`    | `/v1/sessions/{session_id}`               | read one session                                                                                |
-| `DELETE` | `/v1/sessions/{session_id}`               | delete it and its whole log; answers `204` with no body                                         |
-| `POST`   | `/v1/sessions/{session_id}/events`        | append user events; the server owns every other event type                                      |
-| `GET`    | `/v1/sessions/{session_id}/events`        | read the log, with `types[]`, `after_seq`, `limit` and `page`                                   |
-| `GET`    | `/v1/sessions/{session_id}/events/stream` | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                            |
-| `POST`   | `/v1/sessions/{session_id}/compact`       | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                      |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`   | AI SDK `useChat` compatibility — an extension, not the protocol                                 |
-| `PUT`    | `/v1/provider-credentials/{name}`         | add or replace one of the caller's credentials, under that name (write-only)                    |
-| `GET`    | `/v1/provider-credentials`                | list the caller's credential metadata; never the secrets                                        |
-| `DELETE` | `/v1/provider-credentials/{name}`         | delete one; answers `204` with no body                                                          |
-| `GET`    | `/v1/models`                              | the chat models the caller's own keys can use, with per-provider status                         |
-| `GET`    | `/v1/sessions/{session_id}/usage`         | what one session spent: totals, cost, and the per-model breakdown                               |
-| `GET`    | `/v1/me/usage`                            | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day          |
+| method   | path                                            | what it does                                                                                    |
+| -------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                       | liveness — always `{ status: 'ok' }` while the process lives; open                              |
+| `GET`    | `/ready`                                        | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open |
+| `GET`    | `/v1/auth-config`                               | unauthenticated: which providers are on, and whether dev login is                               |
+| `GET`    | `/v1/me`                                        | the signed-in user                                                                              |
+| `GET`    | `/v1/me/preferences`                            | the caller's preferences — the default model, the web theme and the context settings            |
+| `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit               |
+| `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`     |
+| `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                  |
+| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode                              |
+| `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                   |
+| `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                   |
+| `POST`   | `/v1/me/modes/{mode_id}`                        | update a mode; omitted fields keep their value, `null` clears one                               |
+| `DELETE` | `/v1/me/modes/{mode_id}`                        | delete one; answers `204`, and the chats that followed it keep their last model                 |
+| `POST`   | `/v1/agents`                                    | create an agent                                                                                 |
+| `GET`    | `/v1/agents`                                    | list agents, oldest first                                                                       |
+| `GET`    | `/v1/agents/{agent_id}`                         | read one agent                                                                                  |
+| `POST`   | `/v1/agents/{agent_id}`                         | update an agent; sessions already created keep their snapshot                                   |
+| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one)                                    |
+| `GET`    | `/v1/sessions`                                  | list sessions, newest first (`agent_id` filters)                                                |
+| `GET`    | `/v1/sessions/{session_id}`                     | read one session                                                                                |
+| `DELETE` | `/v1/sessions/{session_id}`                     | delete it and its whole log; answers `204` with no body                                         |
+| `POST`   | `/v1/sessions/{session_id}/events`              | append user events; the server owns every other event type                                      |
+| `GET`    | `/v1/sessions/{session_id}/events`              | read the log, with `types[]`, `after_seq`, `limit` and `page`                                   |
+| `GET`    | `/v1/sessions/{session_id}/events/stream`       | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                            |
+| `POST`   | `/v1/sessions/{session_id}/compact`             | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                      |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | AI SDK `useChat` compatibility — an extension, not the protocol                                 |
+| `PUT`    | `/v1/provider-credentials/{name}`               | add or replace one of the caller's credentials, under that name (write-only)                    |
+| `GET`    | `/v1/provider-credentials`                      | list the caller's credential metadata; never the secrets                                        |
+| `DELETE` | `/v1/provider-credentials/{name}`               | delete one; answers `204` with no body                                                          |
+| `POST`   | `/v1/me/mcp_servers`                            | register a remote MCP server (epic #303, X10); `409` for a duplicate name or the twenty-first   |
+| `GET`    | `/v1/me/mcp_servers`                            | list the caller's servers, oldest first (no cursor: at most 20)                                 |
+| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | read one server                                                                                 |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | update one; omitted fields keep their value, and `headers` replaces the sealed map              |
+| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | delete one and its pending OAuth states; `204`                                                  |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | run the connection check now: initialize, list tools, price their definitions                   |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                 |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                    |
+| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**    |
+| `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                         |
+| `GET`    | `/v1/sessions/{session_id}/usage`               | what one session spent: totals, cost, and the per-model breakdown                               |
+| `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day          |
 
 Every `/v1` resource belongs to the caller and is scoped to them.
 
 Paginated lists answer `{ data, next_page }` — `next_page` is an opaque cursor handed back as
 `page`, and `null` means there is nothing more. The credential list and the model catalog have
-no cursor: `/v1/provider-credentials` answers `{ data }` and `/v1/models` `{ data, providers }`,
-both bounded by the caller's own keys.
+no cursor: `/v1/provider-credentials`, `/v1/me/modes` and `/v1/me/mcp_servers` answer
+`{ data }` and `/v1/models` `{ data, providers }`, all bounded by the caller's own rows.
 
 ## Events
 
@@ -139,6 +148,8 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
 | `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                         |
 | `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
+| `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)     |
+| `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)         |
 | `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
 | `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
 | `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
@@ -212,8 +223,9 @@ what came back:
   `ask` is the pause: the call is stored, nothing runs it, and the turn ends with nothing left
   to do but wait for the user (see [Pausing for the user](#pausing-for-the-user-epic-303-x6-issue-309)).
 - **The tools a request offered are recorded on its span.** `span.model_request_start.tools`
-  is a `{ name, source }` per offered tool — `builtin` today, `mcp` with #312 — so the log says
-  what the model could have called, not only what it did. A request with no tools writes none.
+  is a `{ name, source }` per offered tool — `builtin` for this build's own, `mcp` (with the
+  server's name) for one of a remote MCP server's (#312) — so the log says what the model could
+  have called, not only what it did. A request with no tools writes none.
 - **Input is not streamed and a result's content is text.** The call is stored when it is
   complete, and a result carries text blocks. The loop itself is bounded: at most
   `OPENHARNESS_MAX_TOOL_STEPS` model requests per turn (50 by default), after which the turn
@@ -237,6 +249,48 @@ are `builtin` ones — a call's `input` is the JSON object below, and the result
 A `web_fetch` result **leads with the address it finally came from** and says the content is
 untrusted data from the web, not instructions: it is the one tool whose text arrives from a
 place nobody in this deployment chose, and the log records that the model was told so.
+
+#### Remote MCP tools (epic #303, X10; issue #312)
+
+A chat's tools are not only this build's. The **remote MCP servers** a user registered
+(see [Remote MCP servers](#remote-mcp-servers)) contribute theirs to every request, and a call
+to one is stored in its own pair so the log says which server answered:
+
+```json
+{ "type": "agent.mcp_tool_use",    "id": "sevt_…", "seq": 4, "processed_at": "…",
+  "mcp_server_name": "notes", "name": "search", "input": { "query": "roadmap" },
+  "evaluated_permission": "ask" }
+{ "type": "agent.mcp_tool_result", "id": "sevt_…", "seq": 7, "processed_at": "…",
+  "mcp_tool_use_id": "sevt_…", "content": [{ "type": "text", "text": "…" }], "is_error": false }
+```
+
+- **The pair is the same pair, with the server named.** `agent.mcp_tool_use`'s own id is the
+  call's id, `agent.mcp_tool_result.mcp_tool_use_id` names it, and a
+  [`user.tool_confirmation`](#pausing-for-the-user-epic-303-x6-issue-309) answers it the same
+  way — its `tool_use_id` is that id. `mcp_server_name` is the server's name and `name` is the
+  tool's own name **on that server**; the model-facing name is recomputed from the pair
+  (`mcpToolOfferedName`: `<server>__<tool>`, sanitized to what a provider accepts), which is
+  what a request's offer and `span.model_request_start.tools` (source `mcp`, plus `server`)
+  record.
+- **Every remote tool asks by default.** A server is a third party the user added, so a call to
+  one of its tools is evaluated under `ask` until the user says otherwise; `remember` at the
+  confirmation remembers it for the chat (`session`) or writes it as the user's
+  [policy](#per-user-tool-settings-epic-303-x4-issue-307) (`always`).
+- **The answer is text.** The server's text blocks become the result, its structured content is
+  rendered as JSON, and anything this protocol cannot carry — an image, a resource — becomes a
+  marker naming it. The result leads with a line saying which server and tool produced it and
+  that the content is third-party data, never instructions. A tool-level failure (`isError`) is
+  an `is_error` result like any other.
+- **A server that cannot be used never blocks the chat.** One that cannot be reached writes a
+  `session.error` of type `mcp_connection_failed_error`, one whose credentials are refused
+  writes `mcp_authentication_failed_error` (and is left `needs_reconnect`), and the turn carries
+  on without that server's tools. A server turned off, removed or connected applies from the
+  next request on; a call an inherited turn never answered is `execution lost`, like a
+  built-in's.
+- **Which servers are in play is the user's, and a mode may override it.** A server's `enabled`
+  is the user's own default and a mode's `tools.mcp_servers` map patches it, at **server**
+  granularity — there is no per-MCP-tool on/off, only the permission a call is evaluated under
+  (`ask` unless the user chose otherwise).
 
 #### Pausing for the user (epic #303, X6; issue #309)
 
@@ -328,11 +382,14 @@ at `/v1/me/tools`:
   { "name": "todo_write", "source": "builtin", "enabled": false, "policy": "ask",
     "default_policy": "allow", "available": true },
   { "name": "web_search", "source": "builtin", "enabled": true, "policy": "allow",
-    "default_policy": null, "available": false }
+    "default_policy": null, "available": false },
+  { "name": "notes__search", "source": "mcp", "enabled": true, "policy": "ask",
+    "default_policy": "ask", "available": true, "mcp_server": "notes" }
 ] }
 
 // PUT /v1/me/tools            — merges per tool; a tool the body does not name keeps its setting
-{ "builtin": { "web_search": { "enabled": false, "policy": "ask" } } }
+{ "builtin": { "web_search": { "enabled": false, "policy": "ask" } },
+  "mcp":     { "notes__search": "allow" } }
 ```
 
 - **`enabled` is whether the tool is offered at all**, and `policy` is what a call to it is
@@ -340,8 +397,14 @@ at `/v1/me/tools`:
   so a user who turns every tool off gets the same request a deployment with no tools builds. A
   tool that is on with `policy: "deny"` is offered, and every call to it is refused.
 - **A tool a user has never configured follows its own declared default**
-  (`default_policy`), which for every built-in tool is `allow` and for every MCP tool will be
+  (`default_policy`), which for every built-in tool is `allow` and for every remote MCP tool is
   `ask`. The settings are therefore a record of **choices**, not a complete list.
+- **A remote MCP tool is listed per server.** Its entry names the tool the model calls it by
+  (`<server>__<tool>`) and carries `mcp_server`, which is what a settings screen groups remote
+  tools by; its `enabled` is the **server's** effective on/off (the resource's `enabled`, with
+  the mode's override applied), because a remote tool has no on/off of its own. Its policy is
+  the `mcp` map's value for that name, and `PUT` writes it there — a permission and nothing
+  else. A policy for a tool no in-force server offers is listed with `available: false`.
 - **A tool this deployment does not register is listed as `available: false`** — a
   `web_search` whose operator key is missing, say — rather than hidden, and `default_policy` is
   `null` for it: nothing here declares it. It is never offered, whatever `enabled` says. So the
@@ -350,10 +413,11 @@ at `/v1/me/tools`:
   for.
 - **A mode may override which built-in tools are on** (a `tools` field on the mode,
   `{ "builtin": { "web_search": true } }` — a patch, so a tool it does not name follows the
-  user). It may **not** change a permission: a permission is the user's, because "always
-  allow" (#309) is remembered per tool. `GET /v1/me/tools?mode_id=…` answers as a chat on that
-  mode would see things, which is what a composer shows; a mode the caller does not own is the
-  same 404 every other mode read gives.
+  user). The same field's `mcp_servers` map does the same for the user's **remote MCP servers**
+  (#311), by server id. It may **not** change a permission: a permission is the user's, because
+  "always allow" (#309) is remembered per tool. `GET /v1/me/tools?mode_id=…` answers as a chat
+  on that mode would see things, which is what a composer shows; a mode the caller does not own
+  is the same 404 every other mode read gives.
 - **A chat reads the settings from the next request on**, so flipping a switch, or the mode a
   message switches to, applies to the next request the turn makes — the record of what a
   request offered is its own `span.model_request_start.tools`.
@@ -898,11 +962,26 @@ it (`POST /v1/sessions`) or continuing one (`POST …/events`) is the `422`
 `mode_unavailable_error`, with a message naming the mode and what to do about it, and nothing is
 stored. A mode is stored even when its model is not usable yet: the key may come later.
 
-**A mode may also carry a tool override.** `Mode.tools` is `{ "builtin": { "<tool>": true } }`
-or `null`: a per-tool on/off patch applied over the user's own `/v1/me/tools` choices, so a
-`deep` mode can insist on `web_search` and do without `todo_write` for every chat that follows
-it. It decides **which** tools a chat has, never what a call to one may do — permissions are the
-user's (see [Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)).
+**A mode may also carry a tool override.** `Mode.tools` is
+`{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false } }` or `null`: an on/off
+patch applied over the user's own choices, so a `deep` mode can insist on `web_search`, do
+without `todo_write`, and leave `notes` (a remote MCP server) out of every chat that follows it.
+It decides **which** tools and **which MCP servers** a chat has, never what a call to one may do
+— permissions are the user's (see
+[Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)).
+
+- **`builtin`** is keyed by tool name and patches the user's `/v1/me/tools` choices.
+- **`mcp_servers`** (epic #303, X10; #311) is a sibling key, keyed by a remote MCP server's
+  `mcps_` id, and patches the server's own `enabled` field — the user's default. A server the map
+  does not name follows the user; a mode that names one turns it on or off for the chats that
+  follow it, live, from the next request on. It is **server granularity, never per MCP tool**:
+  which of a server's tools a request offers, and under which permission, is the server's own
+  listing and the user's settings, not a mode's.
+- **A mode naming a server the caller no longer has is simply ignored.** The mode routes store
+  the map as written and do not check the id against the servers present, so deleting an MCP
+  server neither fails nor rewrites the modes that named it — the entry just matches nothing.
+  The servers in force for a request are resolved as _the user's `enabled`, overridden by the
+  mode_, per request.
 
 **Every request records what it ran under.** `span.model_request_start.mode` is `{ id, name }`
 — the mode the request ran under and the name it had then — beside the `model` and
@@ -1011,6 +1090,96 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
   `details` at all.- A turn whose model's provider half names no stored credential fails with a `session.error`
   whose type is `missing_provider_credential` — non-retryable, the message names the provider.
   The server never falls back to provider keys from the environment.
+
+### Remote MCP servers
+
+A user registers the remote **MCP** servers they operate (epic #303, X10): a URL, how requests
+authenticate, and whether the server is on by default. openharness is the MCP **client**; it
+never holds a server's tools as its own — they are listed per request and called on demand
+([Remote MCP tools](#remote-mcp-tools-epic-303-x10-issue-312)).
+
+```bash
+# An open server, checked on save: a server it cannot reach is still stored, in status error.
+curl -X POST localhost:3000/v1/me/mcp_servers \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"auth":"none","name":"notes","url":"https://mcp.example.com/mcp"}'
+# → 201 {"id":"mcps_01J…","type":"mcp_server","name":"notes","url":"https://mcp.example.com/mcp",
+#        "auth":"none","enabled":true,"status":"connected","last_error":null,"header_names":[],
+#        "tools":[{"name":"search","description":"Search notes","definition_tokens":41}, …],
+#        "definition_tokens":83,"last_tested_at":"…","created_at":"…","updated_at":"…"}
+
+# A server authenticated with headers. The values are sealed and never come back; only the
+# names do.
+curl -X POST localhost:3000/v1/me/mcp_servers \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"auth":"headers","name":"notes","url":"https://mcp.example.com/mcp",
+       "headers":{"Authorization":"Bearer sk-…"}}'
+# → 201 {… "header_names":["Authorization"], …}
+
+# An OAuth server: start the flow, then open the URL it answers.
+curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
+  -H "Authorization: Bearer $TOKEN"
+# → 200 {"authorization_url":"https://auth.example.com/authorize?…&code_challenge=…&state=…"}
+```
+
+- **Status.** `connected`, `needs_reconnect` (an OAuth server with no live tokens — never
+  connected, a failed refresh, a token the server itself refused, or a disconnect) or `error`
+  with `last_error`. Set by the connection check on save and on demand, and by a failed token
+  refresh. A failure here never blocks a chat: an MCP server that is down is a tool source that
+  is unavailable, not a failed turn — and when a chat cannot use one it says so with a
+  `session.error` and carries on without that server's tools.
+- **URL rules.** Streamable HTTP only, at an absolute `http(s)` URL. Every request goes through
+  `safeFetch`, so a private, loopback, link-local or metadata address is refused unless
+  `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` is on (the same self-host setting a custom
+  OpenAI-compatible endpoint reads, #249). A refused address is a `400`, and nothing is stored;
+  any other connection failure stores the server in `status: "error"`.
+- **Secrets.** A `headers` map and an OAuth server's tokens and registered client are sealed
+  with `@openharness/vault`, exactly like a provider credential, and never returned, logged or
+  put in an event or the model's context (epic #303, X11). A listing shows the header **names**
+  and the OAuth `status`, never a value.
+- **The connection check** runs on save and at `POST …/{id}/test`: it initializes the server,
+  lists its tools (following pagination) and reports each tool's name, description and an
+  **estimate** of its definition's token cost, plus the total. The estimate is the cheap
+  four-characters-per-token rule of thumb (the real tokenizer belongs to the model that will
+  read the definitions), so it says one server costs about 2k tokens and another about 200 —
+  which is what a settings screen shows (epic #303, X6).
+- **OAuth 2.1**, with openharness as the client for the web app and `oh` alike: discovery
+  (RFC 9728 protected-resource metadata, then RFC 8414 authorization-server metadata, with the
+  OIDC discovery document as a fallback), dynamic client registration (RFC 7591 — a server
+  without a `registration_endpoint` is a clear `422`; pre-registered clients are a follow-up),
+  and authorization code + PKCE. `POST …/{id}/connect` answers the authorization URL; the user
+  opens it, the provider redirects back to this server's own callback
+  (`GET /v1/me/mcp_servers/oauth/callback`), which exchanges the code and stores the tokens
+  sealed. Tokens are refreshed before they expire and once on a `401`, and a failed refresh
+  marks the server `needs_reconnect`.
+- **The callback is authenticated by the `state`, not by a session.** It is a browser
+  navigation, not an API call, and it is the one `/v1` route outside the auth guard besides
+  `/v1/auth-config`: `oh` starts the flow by opening the authorization URL in the **system
+  browser**, and that browser may never have signed in here (`oh` itself uses a bearer token
+  from the device flow). So the `state` — 32 random bytes, single use, ten minutes old and bound
+  in `mcp_oauth_states` to the user **and** the server it was minted for — is what completes the
+  flow: it is consumed atomically and answered for that user and server. A used, expired or
+  unknown state is a `400`; so is a state presented with a session belonging to a **different**
+  user, which is refused rather than completed (a confused flow). The state is consumed either
+  way, so a refused callback cannot be retried.
+- **The callback answers a page.** A success started from the web app is a `302` back to its
+  settings screen; one started from the CLI is a small self-contained HTML page ("Connected
+  `<server>`. You can close this tab and return to openharness."), because the CLI is waiting on
+  its own terminal. Failures — the authorization server's own `error`/`error_description`
+  included — are a readable HTML page with a `4xx` status. Every page carries
+  `Cache-Control: no-store`, and everything echoed into one (a server name, an error
+  description) is HTML-escaped. `POST …/{id}/connect` takes an optional `client` field, `"web"`
+  or `"cli"` — `web` when omitted, which is what the app sends — recording where the flow
+  started.
+- **A cap of twenty** `MAX_MCP_SERVERS_PER_USER`: every enabled server contributes its whole
+  tool list to every request once tools land (#312), so the cap is a context budget as much as
+  a row count. A duplicate name and the twenty-first server are the `409` a mode's are.
+- **`enabled` is the user default, and a mode may override it** (#307/#311): `Mode.tools`'s
+  `mcp_servers` map turns a whole server on or off for every chat that follows the mode, at
+  server granularity — there is no per-tool switch. The servers **in force for a request** are
+  therefore the caller's `enabled` ones with the mode's patch over them; a mode that names a
+  server the caller no longer has is ignored rather than refused, so deleting a server leaves
+  such a mode untroubled. See [Modes](#modes).
 
 ## The model catalog
 
@@ -1249,14 +1418,15 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
 
 ## Errors
 
-| status | type                          | when                                                                                    |
-| ------ | ----------------------------- | --------------------------------------------------------------------------------------- |
-| 400    | `invalid_request_error`       | the request does not match the protocol's schemas                                       |
-| 401    | `authentication_error`        | not signed in, or the session or bearer token is invalid/expired                        |
-| 403    | `permission_error`            | a cookie-authenticated write from an untrusted origin (CSRF)                            |
-| 404    | `not_found_error`             | the id names nothing, the route does not exist, or the resource belongs to another user |
-| 409    | `conflict_error`              | a mode name the caller already has, or the twenty-first mode; a rewind while running    |
-| 422    | `invalid_provider_credential` | a provider credential failed validation on save                                         |
-| 422    | `mode_unavailable_error`      | a chat starting or continuing on a mode whose model cannot be used (M6)                 |
-| 429    | `rate_limit_error`            | a cache-bypassing refresh (`/v1/models?refresh=true`) more than once a minute per user  |
-| 500    | `api_error`                   | an unexpected server failure — never a stack trace                                      |
+| status | type                          | when                                                                                                              |
+| ------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 400    | `invalid_request_error`       | the request does not match the protocol's schemas                                                                 |
+| 401    | `authentication_error`        | not signed in, or the session or bearer token is invalid/expired                                                  |
+| 403    | `permission_error`            | a cookie-authenticated write from an untrusted origin (CSRF)                                                      |
+| 404    | `not_found_error`             | the id names nothing, the route does not exist, or the resource belongs to another user                           |
+| 409    | `conflict_error`              | a mode or MCP server name the caller already has, or the twentieth/one-too-many of either; a rewind while running |
+| 422    | `invalid_provider_credential` | a provider credential failed validation on save                                                                   |
+| 422    | `mode_unavailable_error`      | a chat starting or continuing on a mode whose model cannot be used (M6)                                           |
+| 422    | `mcp_connection_error`        | an MCP server could not be reached, discovered or registered as an OAuth client (X10)                             |
+| 429    | `rate_limit_error`            | a cache-bypassing refresh (`/v1/models?refresh=true`) more than once a minute per user                            |
+| 500    | `api_error`                   | an unexpected server failure — never a stack trace                                                                |

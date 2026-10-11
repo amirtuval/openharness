@@ -169,9 +169,21 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
   )
 }
 
-/** What a mode's tool override says, as the row's one-line summary: "web_search on · todo_write off". */
+/**
+ * What a mode's tool override says, as the row's one-line summary: "web_search on · todo_write
+ * off", plus a count of the remote MCP servers it names (#312).
+ *
+ * A mode may also carry `mcp_servers` — a per-**server** on/off patch, keyed by an opaque
+ * `mcps_` id — which this editor does not offer yet (#313). Counting them rather than printing
+ * their ids is what keeps the line honest: a mode that says something about servers must not
+ * read as one that "follows your settings".
+ */
 function describeModeTools(mode: Mode): string {
   const builtin = mode.tools?.builtin ?? {}
   const parts = Object.entries(builtin).map(([name, on]) => `${name} ${on ? 'on' : 'off'}`)
+  const servers = Object.keys(mode.tools?.mcp_servers ?? {}).length
+  if (servers > 0) {
+    parts.push(servers === 1 ? '1 MCP server' : `${servers} MCP servers`)
+  }
   return parts.length === 0 ? 'follow your settings' : parts.join(' · ')
 }

@@ -54,11 +54,21 @@ describe('ToolCallLine (#308)', () => {
     expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
   })
 
-  it('badges an MCP call, so a remote server is told apart from a built-in', () => {
+  it('badges an MCP call, and names the server it came from', () => {
     render(
-      <ToolCallLine call={call({ name: 'srv_search', source: 'mcp', input: { query: 'x' } })} />,
+      <ToolCallLine
+        call={call({
+          name: 'notes__search',
+          source: 'mcp',
+          server: 'notes',
+          input: { query: 'x' },
+        })}
+      />,
     )
+    const row = screen.getByText('notes__search').closest('[data-slot="tool-call"]')
     expect(screen.getByText('MCP')).toBeInTheDocument()
+    expect(row).toHaveAttribute('data-server', 'notes')
+    expect(screen.getByText('MCP')).toHaveAttribute('title', 'notes')
   })
 
   it('opens to the full input and the result, and starts collapsed', async () => {

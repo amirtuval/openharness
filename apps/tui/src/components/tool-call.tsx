@@ -100,7 +100,12 @@ export function toolCallLines(
     { text: call.name, bold: true },
   ]
   if (call.source === 'mcp') {
-    head.push({ text: ' (mcp)', ...dimChrome(theme) })
+    // Which server a remote tool came from, after the marker — a terminal has no hover to hide
+    // it behind, and two servers' `search` are told apart by exactly this (#312).
+    head.push({
+      text: call.server === undefined ? ' (mcp)' : ` (mcp: ${call.server})`,
+      ...dimChrome(theme),
+    })
   }
   if (summary !== null) {
     head.push({ text: ' ', ...dimChrome(theme) })

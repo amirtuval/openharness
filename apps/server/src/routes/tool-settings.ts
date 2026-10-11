@@ -9,7 +9,7 @@ import type { UserToolSettings } from '@openharness/protocol'
 
 import type { AppEnv } from '../types'
 import { parseBody, parseQuery } from '../http/request'
-import { listToolSettings, toolSettingEntries } from '../tool-settings'
+import { listToolSettings } from '../tool-settings'
 import type { RouteDeps } from './deps'
 
 /**
@@ -19,9 +19,11 @@ import type { RouteDeps } from './deps'
  * the shape: preferences are one value of scalars — a default model, a theme, three compaction
  * controls — while tool settings are a **map** keyed by tool name that grows with the build,
  * whose entries a settings screen flips one at a time, and whose MCP half (#311/#312) will be
- * siblings of that map rather than more scalars. A `PUT` here merges per tool, the same "a
- * write changes what it names" rule the preferences route follows at the one granularity the
- * caller has.
+ * siblings of that map — a permission per MCP tool — rather than more scalars. What this route
+ * does not carry is which MCP **servers** are in play: that is the resource's own `enabled`
+ * (`/v1/me/mcp_servers`), which a mode may override (`tools.mcp_servers`, #311). A `PUT` here
+ * merges per tool, the same "a write changes what it names" rule the preferences route follows
+ * at the one granularity the caller has.
  *
  * Both verbs are owner-only, like every `/v1/me` route: the resource is the caller, and there
  * is no id in the path to get wrong. The `GET` takes an optional `mode_id` and answers as a
@@ -35,7 +37,10 @@ import type { RouteDeps } from './deps'
  * on is not working here.
  */
 export function registerToolSettingsRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
-  const settings = { store: deps.store, tools: deps.tools }
+  // The remote half reads the same services the turn does (#312): the registry this deployment
+  // registers, and the user's MCP servers, so a policy a chat evaluates and one a settings
+  // screen lists are one answer.
+  const settings = { store: deps.store, tools: deps.tools, mcpServers: deps.mcpServers }
 
   app.get(`${API_VERSION_PREFIX}/me/tools`, async (c) => {
     const { mode_id: modeId } = parseQuery(c, ListToolSettingsQuerySchema)
@@ -50,13 +55,16 @@ export function registerToolSettingsRoutes(app: Hono<AppEnv>, deps: RouteDeps): 
     // every other tool keeps what is stored, so flipping one switch never clears another. The
     // stored value is still written whole, which is the store's contract.
     const current = await deps.store.getToolSettings(userId)
-    const merged: UserToolSettings = { builtin: { ...current.builtin, ...body.builtin } }
-    const stored = await deps.store.putToolSettings(userId, merged)
+    const merged: UserToolSettings = {
+      builtin: { ...current.builtin, ...body.builtin },
+      mcp: { ...current.mcp, ...body.mcp },
+    }
+    await deps.store.putToolSettings(userId, merged)
     // No mode was named, so the answer is the caller's own settings — the same computation the
     // `GET` makes, which is what keeps the two verbs answering one shape.
     return c.json(
       ListToolSettingsResponseSchema.parse({
-        data: toolSettingEntries(settings.tools, stored, null),
+        data: await listToolSettings(settings, userId, undefined),
       }),
     )
   })

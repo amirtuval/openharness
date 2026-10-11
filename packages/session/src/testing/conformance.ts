@@ -12,6 +12,7 @@ import {
   encodeSeqCursor,
   isStoredEvent,
   newEventId,
+  newMcpServerId,
   partitionOf,
   SUMMARY_MODEL_SAME_AS_CHAT,
   type Agent,
@@ -323,10 +324,27 @@ export function runSessionStoreConformance(
 
       it('carries the tool override a mode may set, and null when it sets none (#307)', async () => {
         const { store } = await setup()
-        const override = { builtin: { web_search: true, todo_write: false } }
+        // The override's two halves: the built-in tools by name, and the user's MCP servers by
+        // id — a sibling key of `builtin`, never more entries in it (#311). A mode that names a
+        // server the user no longer has is stored as given and simply has no effect: nothing at
+        // this layer checks the id, which is what makes deleting a server leave such a mode
+        // alone.
+        const gone = newMcpServerId()
+        const override = {
+          builtin: { web_search: true, todo_write: false },
+          mcp_servers: { [newMcpServerId()]: true, [gone]: false },
+        }
         const withTools = await store.createMode(modeInput('deep', { tools: override }), OWNER_A)
         expect(withTools.tools).toEqual(override)
         expectExact(ModeSchema, withTools, 'a mode with a tool override')
+        // An override without the MCP half is the mode saying nothing about servers — the shape
+        // every mode stored before #311 has.
+        const builtinOnly = await store.createMode(
+          modeInput('builtins', { tools: { builtin: { web_fetch: false } } }),
+          OWNER_A,
+        )
+        expect(builtinOnly.tools).toEqual({ builtin: { web_fetch: false } })
+        expect(builtinOnly.tools).not.toHaveProperty('mcp_servers')
         // A mode that says nothing about tools has no override, not an empty one: the two mean
         // different things, and only `null` means "follow the user's settings".
         const plain = await store.createMode(
@@ -992,7 +1010,7 @@ export function runSessionStoreConformance(
 
     describe('tool settings (epic #303, X4; #307)', () => {
       /** No choice stored: every tool follows its own declared default. */
-      const defaults: UserToolSettings = { builtin: {} }
+      const defaults: UserToolSettings = { builtin: {}, mcp: {} }
 
       it('reads no choices for a user who has saved none', async () => {
         const { store } = await setup()
@@ -1010,6 +1028,8 @@ export function runSessionStoreConformance(
             web_fetch: { enabled: false, policy: 'deny' },
             todo_write: { enabled: true, policy: 'ask' },
           },
+          // The remote half of the same value (#312): a per-tool policy, and no on/off.
+          mcp: { notes__search: 'deny', notes__write: 'ask' },
         }
         const stored = await store.putToolSettings(OWNER_A, value)
         expect(stored).toEqual(value)
@@ -1021,27 +1041,33 @@ export function runSessionStoreConformance(
         const { store } = await setup()
         await store.putToolSettings(OWNER_A, {
           builtin: { web_search: { enabled: false, policy: 'deny' } },
+          mcp: { notes__search: 'allow' },
         })
         const replaced = await store.putToolSettings(OWNER_A, {
           builtin: { web_fetch: { enabled: true, policy: 'ask' } },
+          mcp: {},
         })
         // One value per user: the second put is the whole map, so a tool the second one does
         // not name is back to following its own declaration.
         expect(await store.getToolSettings(OWNER_A)).toEqual(replaced)
         expect(replaced.builtin).toEqual({ web_fetch: { enabled: true, policy: 'ask' } })
+        expect(replaced.mcp).toEqual({})
       })
 
       it('keeps two users’ tool settings apart', async () => {
         const { store } = await setup()
         await store.putToolSettings(OWNER_A, {
           builtin: { web_search: { enabled: false, policy: 'deny' } },
+          mcp: { notes__search: 'deny' },
         })
         expect(await store.getToolSettings(OWNER_B)).toEqual(defaults)
         await store.putToolSettings(OWNER_B, {
           builtin: { web_search: { enabled: true, policy: 'allow' } },
+          mcp: { notes__search: 'allow' },
         })
         expect(await store.getToolSettings(OWNER_A)).toEqual({
           builtin: { web_search: { enabled: false, policy: 'deny' } },
+          mcp: { notes__search: 'deny' },
         })
       })
 
@@ -1049,6 +1075,7 @@ export function runSessionStoreConformance(
         const { store } = await setup()
         const stored = await store.putToolSettings(OWNER_A, {
           builtin: { web_search: { enabled: true, policy: 'allow' } },
+          mcp: { notes__search: 'allow' },
         })
         const read = await store.getToolSettings(OWNER_A)
         expect(Object.isFrozen(stored)).toBe(true)
@@ -1057,6 +1084,7 @@ export function runSessionStoreConformance(
         // None of it reached the store.
         expect(await store.getToolSettings(OWNER_A)).toEqual({
           builtin: { web_search: { enabled: true, policy: 'allow' } },
+          mcp: { notes__search: 'allow' },
         })
       })
     })
@@ -2618,6 +2646,43 @@ export function runSessionStoreConformance(
           name: 'web_search',
         })
         expect(searches.map((call) => call.name)).toEqual(['web_search'])
+      })
+
+      it('never counts a remote MCP call: the read is about this build’s own tools (#312)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        // A remote server may offer a tool called `web_search` — the offered name a request uses
+        // is `<server>__<tool>`, but the log records the server's own name — and either way it is
+        // an `agent.mcp_tool_use`, which is not a call this read counts: the daily allowance is
+        // about the operator's search API, and an MCP server is the user's own.
+        const call = newEventId()
+        const stored = await append(store, session.id, [
+          {
+            id: call,
+            type: EVENT_TYPES.agentMcpToolUse,
+            mcp_server_name: 'notes',
+            name: 'web_search',
+            input: {},
+            evaluated_permission: 'allow',
+          },
+          {
+            type: EVENT_TYPES.agentMcpToolResult,
+            mcp_tool_use_id: call,
+            content: [{ type: 'text', text: 'ok' }],
+            is_error: false,
+          },
+        ])
+        expect(stored).toHaveLength(2)
+
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toEqual([])
+        expect(
+          await store.listToolUses({
+            ...toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND),
+            name: 'web_search',
+          }),
+        ).toEqual([])
       })
 
       it('is owner-scoped: another user’s calls are never in the answer', async () => {

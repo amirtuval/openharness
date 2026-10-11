@@ -13,15 +13,19 @@ import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_SUMMARY_PASSES } from '@openh
 import type { ToolRegistry } from '@openharness/hands'
 import {
   AgentNotFoundError,
+  DuplicateMcpServerNameError,
   DuplicateModeNameError,
+  InMemoryMcpServerStore,
+  McpServerLimitReachedError,
   ModeLimitReachedError,
   SessionNotFoundError,
+  type McpServerStore,
   type SessionStore,
 } from '@openharness/session'
 
 import { consoleLogger, type AppEnv, type Logger } from './types'
 import { createAuthGuard } from './auth-guard'
-import { rewriteDevLoginRequest, type BetterAuthInstance } from './auth'
+import { rewriteDevLoginRequest, type AuthUser, type BetterAuthInstance } from './auth'
 import { FORWARDED_FOR_HEADER, resolveClientIp, withClientIpHeader } from './client-ip'
 import { emptyRegistry, type ModelRegistry } from './catalog/registry'
 import { DefaultModelPicker } from './default-model'
@@ -35,6 +39,13 @@ import { registerAiSdkRoutes } from './routes/ai-sdk'
 import { registerCompactRoutes } from './routes/compact'
 import type { AuthDeps, RouteDeps } from './routes/deps'
 import { registerEventRoutes } from './routes/events'
+import { createMcpFetch } from './mcp/fetch'
+import {
+  createMcpServerService,
+  type McpServerService,
+  type McpServerServiceOptions,
+} from './mcp/service'
+import { registerMcpOAuthCallbackRoute, registerMcpServerRoutes } from './routes/mcp-servers'
 import { registerMeRoutes } from './routes/me'
 import { registerToolSettingsRoutes } from './routes/tool-settings'
 import { registerModeRoutes } from './routes/modes'
@@ -97,6 +108,12 @@ export interface AppOptions {
   }
   /** Where sealed provider credentials live, and how a saved key is validated (A5). */
   readonly credentialRoutes: ProviderCredentialDeps
+  /**
+   * The remote-MCP-server resource (epic #303, X10). Omitted, the routes run over an in-memory
+   * store with the guarded fetch off — enough for tests that do not exercise them; `main.ts`
+   * passes the durable store and the deployment's callback URL.
+   */
+  readonly mcpServers?: McpServersAppOptions
   /**
    * The model catalogue (epic #92): what `GET /v1/models` answers, and the per-provider cache
    * entry the credential PUT/DELETE routes drop (C4). `main.ts` builds it with the real
@@ -176,6 +193,40 @@ export interface AppOptions {
    */
   readonly tracer?: Tracer
   /** Where the app logs unexpected failures; defaults to the console. */
+  readonly logger?: Logger
+}
+
+/**
+ * How the MCP server routes are wired (epic #303, X10).
+ *
+ * The service is built inside {@link createApp} from these, over the same vault the provider
+ * credentials use: the routes only need to be told where the servers live, where the OAuth
+ * callback is, and whether a private address is reachable.
+ */
+export interface McpServersAppOptions {
+  /**
+   * The service the routes use, when the caller already built one (epic #303, X10; #312).
+   *
+   * `main.ts` builds the service once and hands the same instance to the turn options — the
+   * tool loop lists a chat's servers through it — so the routes and a chat cannot disagree
+   * about what the deployment offers. Absent, the service is built here from the fields below,
+   * which is what a test that only cares about the routes wants.
+   */
+  readonly service?: McpServerService
+  /** Where the servers and their sealed secrets live; an in-memory store when omitted. */
+  readonly store?: McpServerStore
+  /**
+   * The absolute URL of this server's OAuth callback route, registered at each authorization
+   * server. `main.ts` derives it from `BETTER_AUTH_URL`; tests pass their own.
+   */
+  readonly callbackUrl?: string
+  /** `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether an MCP server may live on a private address. */
+  readonly allowPrivateUrls?: boolean
+  /** The guarded fetch every MCP request goes through; overridden by a test with its own seams. */
+  readonly fetch?: McpServerServiceOptions['fetch']
+  /** The clock, for token expiry and timestamps; injectable for tests. */
+  readonly now?: () => Date
+  /** Where the service logs refresh failures; the app's logger by default. */
   readonly logger?: Logger
 }
 
@@ -391,12 +442,33 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   const registry = options.registry ?? emptyRegistry
   const revalidateSession = async (headers: Headers): Promise<boolean> =>
     (await options.auth.instance.api.getSession({ headers })) !== null
+  // The caller behind a request, when there is one. The OAuth callback is the route that asks
+  // (#311): it runs ahead of the guard, and a session is optional there.
+  const sessionUser = async (headers: Headers): Promise<AuthUser | null> =>
+    (await options.auth.instance.api.getSession({ headers }))?.user ?? null
 
   const deps: RouteDeps = {
     store: options.store,
     scheduler: options.scheduler,
     auth: { enabledProviders: options.auth.enabledProviders, devLogin: options.auth.devLogin },
     credentialRoutes: options.credentialRoutes,
+    mcpServers:
+      options.mcpServers?.service ??
+      createMcpServerService({
+        store: options.mcpServers?.store ?? new InMemoryMcpServerStore(),
+        vault: options.credentialRoutes.vault,
+        fetch:
+          options.mcpServers?.fetch ??
+          createMcpFetch({ allowPrivate: options.mcpServers?.allowPrivateUrls === true }),
+        callbackUrl:
+          options.mcpServers?.callbackUrl ??
+          new URL(
+            '/v1/me/mcp_servers/oauth/callback',
+            options.auth.trustedOrigins[0] ?? 'http://localhost',
+          ).href,
+        ...(options.mcpServers?.now === undefined ? {} : { now: options.mcpServers.now }),
+        logger: options.mcpServers?.logger ?? logger,
+      }),
     catalog: options.catalog,
     // The automatic default model (epic #116, U4) is built here, per app: the record of who
     // the server has picked for lives as long as this app does (see `default-model.ts`).
@@ -416,6 +488,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     tools: options.tools,
     revocations,
     revalidateSession,
+    sessionUser,
     ...(options.sseKeepaliveMs === undefined ? {} : { sseKeepaliveMs: options.sseKeepaliveMs }),
     ...(options.sessionRecheckMs === undefined
       ? {}
@@ -428,6 +501,18 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   app.get(`${API_VERSION_PREFIX}/auth-config`, (c) =>
     c.json({ providers: deps.auth.enabledProviders, dev_login: deps.auth.devLogin }),
   )
+
+  // The OAuth callback is the second `/v1` route registered ahead of the guard, and for the
+  // same reason: registration order is dispatch order, so the guard below never runs for it. It
+  // has to be — the epic's decision X10 has `oh` start the flow by opening the authorization URL
+  // in the system browser, and that browser may never have signed in here (`oh` authenticates
+  // with a bearer token from the device flow). The route authenticates itself by the `state`
+  // alone: high-entropy, single use, ten minutes old and bound to the user and the server it was
+  // minted for, so it completes the flow for that user — and a session that is present and
+  // belongs to somebody else refuses it (epic #303, X10; #311). It is this exact `GET` and
+  // nothing else: every other `/v1/me/mcp_servers` route is registered below, behind the guard
+  // and owner-scoped like the rest of the API.
+  registerMcpOAuthCallbackRoute(app, deps)
 
   // A2: everything else under /v1 — the SSE stream and the AI SDK adapter included — needs a
   // session, and a cookie-authenticated write needs a trusted Origin.
@@ -447,6 +532,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   registerCompactRoutes(app, deps)
   registerAiSdkRoutes(app, deps)
   registerProviderCredentialRoutes(app, deps)
+  registerMcpServerRoutes(app, deps)
   registerModelRoutes(app, deps)
   registerModeRoutes(app, deps)
 
@@ -457,10 +543,16 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     if (error instanceof SessionNotFoundError || error instanceof AgentNotFoundError) {
       return errorResponse(c, 'not_found_error', error.message)
     }
-    if (error instanceof DuplicateModeNameError || error instanceof ModeLimitReachedError) {
-      // A mode write the store refused: a name the caller already has, or the cap (#245, M6).
-      // Both are conflicts with the resource's current state, and the store's messages say
-      // which — `conflict_error` is the protocol's type for exactly that.
+    if (
+      error instanceof DuplicateModeNameError ||
+      error instanceof ModeLimitReachedError ||
+      error instanceof DuplicateMcpServerNameError ||
+      error instanceof McpServerLimitReachedError
+    ) {
+      // A mode or MCP-server write the store refused: a name the caller already has, or the
+      // cap (#245, M6; #303, X10). Both are conflicts with the resource's current state, and
+      // the store's messages say which — `conflict_error` is the protocol's type for exactly
+      // that.
       return errorResponse(c, 'conflict_error', error.message)
     }
     if (error instanceof RangeError) {

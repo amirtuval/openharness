@@ -2,6 +2,8 @@ import { z } from 'zod'
 
 import type { DeepReadonly } from '../readonly'
 import {
+  AgentMcpToolResultEventSchema,
+  AgentMcpToolUseEventSchema,
   AgentMessageEventSchema,
   AgentToolResultEventSchema,
   AgentToolUseEventSchema,
@@ -61,6 +63,8 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
   AgentMessageEventSchema,
   AgentToolUseEventSchema,
   AgentToolResultEventSchema,
+  AgentMcpToolUseEventSchema,
+  AgentMcpToolResultEventSchema,
   SessionStatusRunningEventSchema,
   SessionStatusIdleEventSchema,
   SessionStatusRescheduledEventSchema,

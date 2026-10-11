@@ -16,11 +16,12 @@ import type {
   Supersedes,
   TextBlock,
   ToolInput,
+  ToolCallEvent,
   ToolPermission,
   ToolReference,
   Truncation,
 } from '@openharness/protocol'
-import { EVENT_TYPES } from '@openharness/protocol'
+import { EVENT_TYPES, isMcpToolCall } from '@openharness/protocol'
 
 /**
  * The events a turn appends, built in one place.
@@ -422,6 +423,71 @@ export function agentToolResult(
     content: [...content],
     is_error: isError,
   }
+}
+
+/**
+ * The model asked for a remote MCP server's tool (epic #303, X10; #312).
+ *
+ * The MCP half of {@link agentToolUse}, with the two fields the pair carries that a built-in
+ * has no use for: `serverName` is the server the tool belongs to and `toolName` is the tool's
+ * own name **on that server** — not the model-facing name this build offered it under, which a
+ * reader recomputes from the pair (`mcpToolOfferedName`). The store assigns the id, which is
+ * the call's id, exactly as for a built-in call.
+ *
+ * @param serverName the MCP server's name, as the user configured it
+ * @param toolName the tool's own name on that server
+ * @param input the arguments, as a JSON object
+ * @param permission what the policy in force said about this call
+ */
+export function agentMcpToolUse(
+  serverName: string,
+  toolName: string,
+  input: ToolInput,
+  permission: ToolPermission,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentMcpToolUse,
+    mcp_server_name: serverName,
+    name: toolName,
+    input,
+    evaluated_permission: permission,
+  }
+}
+
+/** What a remote MCP tool call produced — always written, by the loop that ran it (#312). */
+export function agentMcpToolResult(
+  mcpToolUseId: EventId,
+  content: readonly TextBlock[],
+  isError: boolean,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentMcpToolResult,
+    mcp_tool_use_id: mcpToolUseId,
+    content: [...content],
+    is_error: isError,
+  }
+}
+
+/**
+ * The result a call is owed, in the pair the call belongs to (epic #303, X1/X10; #312).
+ *
+ * Every path that answers a call — a step's results, a confirmation's, a message that resolves
+ * a waiting call, the crash repair — goes through this rather than choosing a pair itself: a
+ * remote call answered with an `agent.tool_result` would be an event no reader pairs with it,
+ * which is exactly the bug the one abstraction exists to prevent.
+ *
+ * @param call the call being answered
+ * @param content the blocks the model is shown
+ * @param isError whether the call failed
+ */
+export function toolResultForCall(
+  call: ToolCallEvent,
+  content: readonly TextBlock[],
+  isError: boolean,
+): AppendableEvent {
+  return isMcpToolCall(call)
+    ? agentMcpToolResult(call.id, content, isError)
+    : agentToolResult(call.id, content, isError)
 }
 
 /**
