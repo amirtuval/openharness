@@ -707,8 +707,11 @@ there is **no operator key, no daily allowance, and no variable here at all**:
   their own key, and the provider prices them its own way (Anthropic charges $10 per 1,000
   searches on top of tokens; OpenAI and xAI include theirs in the model's own pricing). The
   model request's span records how many the provider reported (`searches`), and the usage routes
-  report the count beside the tokens — never a price, because no tool rate is in this
-  repository.
+  report the count beside the tokens. Anthropic's own $10 per 1,000 searches is a published
+  rate, so it is charged into `cost` with the tokens
+  (`@openharness/protocol`'s `SEARCH_PRICE_PER_CALL`, the one table — models.dev prices tokens
+  and records nothing about a tool); OpenAI's and xAI's search is priced through the model's own
+  rates and adds nothing.
 - **Which models have one is the model's business.** Anthropic's Claude models from 3.5 on
   (and a Claude on Vertex, through the basic tool version), OpenAI's `gpt-4o`/`gpt-4.1`/`gpt-5`
   and `o`-series, and xAI's `grok-3`/`grok-4`. **Everything else has no `web_search` at all**:

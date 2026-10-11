@@ -104,3 +104,38 @@ export function totalCost(costs: Iterable<number | null>): TotalCost {
   }
   return { cost: priced ? cost : null, unpriced_requests }
 }
+
+/**
+ * // extension: what one **provider-executed web search** costs, per provider (epic #303, X14;
+ * issue #335).
+ *
+ * A search runs inside the model request, on the user's own model key, and the model catalog is
+ * no help: models.dev prices tokens and records nothing about a tool. Two of the three providers
+ * this build can search with charge nothing *beside* the tokens — OpenAI and xAI price their
+ * search through the model's own rates, which `usageCost` already accounts for — and one charges
+ * a flat fee on top, recorded here from the provider's published price:
+ *
+ * | provider    | per search | source                                                  |
+ * | ----------- | ---------- | ------------------------------------------------------- |
+ * | `anthropic` | $0.01      | $10 per 1,000 searches, on top of tokens (published rate) |
+ *
+ * A provider **absent** from the table is not "unknown": it is a provider with no separate fee,
+ * which is a statement this table can make because it names every provider this build can attach
+ * a search tool to. A search is still counted wherever it cannot be priced (`searches` in the
+ * usage responses), so nothing is invented to fill a hole — and nothing is charged twice: the
+ * tokens a search's results add to the request are in the request's own counters.
+ */
+export const SEARCH_PRICE_PER_CALL: Readonly<Record<string, number>> = {
+  anthropic: 10 / 1_000,
+}
+
+/**
+ * What one request's provider-executed searches cost, in USD — `0` for a provider that charges
+ * nothing beside the tokens (`@openharness/protocol`'s `SEARCH_PRICE_PER_CALL`).
+ *
+ * @param provider the provider half of the request's model id
+ * @param searches how many searches the provider ran inside it
+ */
+export function searchCost(provider: string, searches: number): number {
+  return (SEARCH_PRICE_PER_CALL[provider] ?? 0) * searches
+}

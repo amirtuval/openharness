@@ -2,6 +2,7 @@ import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
   WEB_SEARCH_TOOL_NAME,
+  searchCost,
   totalCost,
   usageCost,
   type LocalDay,
@@ -274,6 +275,21 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
   }
 }
 
+/**
+ * The provider half of a request's model id, or `''` for a request the log does not attribute.
+ *
+ * An unattributed request is priced by nothing anyway (`usageCost` is given `null`), so its
+ * searches have no provider to charge either — and `''` names no provider in the table, which
+ * is what "no separate fee" reads as.
+ */
+function providerOfRequest(model: string | null): string {
+  if (model === null) {
+    return ''
+  }
+  const slash = model.indexOf('/')
+  return slash === -1 ? model : model.slice(0, slash)
+}
+
 /** What one session's log holds for a usage report: its requests, and how many searches it made. */
 interface SessionUsageRead {
   readonly requests: RecordedRequest[]
@@ -347,7 +363,13 @@ function assemble(
     addTo(totals, request.usage)
     // One price lookup per request, shared by the total and the breakdown: a request whose model
     // nobody prices is unpriced in both, and is never looked up twice for a different answer.
-    const cost = usageCost(request.usage, request.model === null ? null : prices(request.model))
+    // The request's own cost, tokens and any per-search fee: a search runs on the model's key,
+    // so its fee belongs on the request that spent it — and only where a rate is published.
+    const tokens = usageCost(request.usage, request.model === null ? null : prices(request.model))
+    const cost =
+      tokens === null
+        ? null
+        : tokens + searchCost(providerOfRequest(request.model), request.searches)
     costs.push(cost)
     if (request.model === null) {
       continue

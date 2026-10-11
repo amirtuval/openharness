@@ -317,10 +317,11 @@ export function mcpServerMarker(server: string | undefined): string {
  * chat counts it here without asking the usage route. The routes answer the same number the
  * other way round, from each request's span, and count the operator-key era's calls as well.
  *
- * Nothing is priced — a search runs on the chat's own model key and no tool rate is in this
- * repository — which is why it is a count drawn beside the cost rather than a term in it. A call
- * counts whether it succeeded or not: a search the provider reported as failed is still a search
- * the model made.
+ * It is a count and not a price here, because a screen that has the calls has no provider to
+ * attribute a fee to — the usage routes price the ones that carry a published rate
+ * (`@openharness/protocol`'s `SEARCH_PRICE_PER_CALL`) — which is why it is drawn beside the cost
+ * rather than as a term in it. A call counts whether it succeeded or not: a search the provider
+ * reported as failed is still a search the model made.
  */
 export function searchCount(calls: readonly TranscriptToolCall[]): number {
   return calls.filter((call) => call.name === WEB_SEARCH_TOOL).length

@@ -1490,13 +1490,18 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   million tokens, from the vendored models.dev snapshot (see `apps/server/AGENTS.md`).
 - **Cache tokens are priced separately.** `cache_read` and `cache_write` are their own rates at
   every provider that publishes them, not a fraction of the input rate.
-- **Searches are counted, and never priced** (epic #303, #305; #335). `searches` is a **count**,
-  summed from two places because a log may hold both: the `web_search` **calls** a session made
-  in the operator-key era — the call and its successful result, so a refused, failed or
-  never-answered call is not one — and the count each request's own `span.model_request_end`
-  carries, which is what a provider-executed search is. No rate for either is in this
-  repository, so no money is invented for them; it is a sibling of the totals rather than a
-  member of them, and every per-day entry of `by_day` carries its own.
+- **Searches are counted, and priced where a rate is published** (epic #303, #305; #335).
+  `searches` is a **count**, summed from two places because a log may hold both: the
+  `web_search` **calls** a session made in the operator-key era — the call and its successful
+  result, so a refused, failed or never-answered call is not one — and the count each request's
+  own `span.model_request_end` carries, which is what a provider-executed search is. The count
+  is a sibling of the totals rather than a member of them, and every per-day entry of `by_day`
+  carries its own.
+  Anthropic charges $10 per 1,000 searches **on top of** the tokens, and that fee is in `cost`
+  like any other published rate (`@openharness/protocol`'s `SEARCH_PRICE_PER_CALL` — the one
+  table, because models.dev prices tokens and records nothing about a tool). OpenAI and xAI
+  charge nothing beside the tokens: the table says so by naming no rate for them, which is not
+  the same as not knowing one, and their searches are counted all the same.
 - **Usage is broken down by model, never by mode.** A session may switch models mid-conversation
   (U3), so `by_model` is what separates the cheap requests from the expensive ones. The per-user
   route adds `by_day`; there is no third axis.

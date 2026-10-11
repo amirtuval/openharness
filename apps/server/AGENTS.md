@@ -946,7 +946,8 @@ prices each request with the registry's rates, and assembles the totals and the 
   `input_tokens` these totals carry is the **uncached** input — the counters are disjoint, which
   is what makes the per-counter pricing correct — because the brain normalizes each provider
   family into them at the model seam (epic #277, K2; `packages/brain/src/model.ts`).
-- **Searches are counted and never priced** (epic #303, #305; #335). Every usage answer carries
+- **Searches are counted, and priced where a rate is published** (epic #303, #305; #335). Every
+  usage answer carries
   `searches` beside its totals, and the log holds two kinds of them: the `web_search` **calls** a
   log stored in the operator-key era carries, which count when their result exists and is not an
   error (the rule `listToolUses` reads by), and the searches each request's own

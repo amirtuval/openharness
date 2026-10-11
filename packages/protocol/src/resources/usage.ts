@@ -19,10 +19,11 @@ import { ModelUsageSchema } from '../events/span'
  *   `span.model_request_end`; a price is not in the log at all. So a response is assembled when
  *   it is asked for, from the tokens the log holds and the model catalog's prices, and nothing
  *   about cost is ever written down (epic #245).
- * - **Searches are counted, and never priced** (epic #303, #305). `searches` is how many
- *   `web_search` calls the covered log holds — the operator pays the search provider, and no
- *   rate for that is in this repository — so a reader is shown a count rather than a made-up
- *   cost.
+ * - **Searches are counted, and priced where a rate is published** (epic #303, #305; #335).
+ *   `searches` is how many the covered log holds, and the fee a provider charges **beside** the
+ *   tokens goes into the same `cost` the token rates do (`./cost.ts`'s `SEARCH_PRICE_PER_CALL`)
+ *   — a count for the providers that charge nothing extra, and never a made-up number for one
+ *   nobody publishes a rate for.
  * - **A price nobody published is named, not guessed.** A request whose model the catalog has no
  *   price for contributes its tokens and nothing to the cost; a total **sums the priced requests
  *   and counts the unpriced ones** (`unpriced_requests`), and its `cost` is `null` only when

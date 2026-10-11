@@ -48,7 +48,7 @@ export type ContentBlocks = z.infer<typeof ContentBlocksSchema>
  * So this is the one `sources` list a client renders. It is a **readable** record and nothing
  * else: it is never sent back to a provider (the provider's own unreadable form — an encrypted
  * index, an encrypted result body — is replayed from
- * `agent.opaque_content` instead), and it is never priced.
+ * `agent.opaque_content` instead), and it carries no cost of its own.
  */
 export const SourceSchema = z.object({
   /** The page's URL, absolute, as the provider gave it. */

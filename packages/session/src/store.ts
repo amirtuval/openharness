@@ -1227,8 +1227,9 @@ export interface ModelRequestUsage {
    *
    * A provider-executed search is not a call of ours, so the log's `agent.tool_use` events do
    * not count it; the count is the provider's own report, written on the span that spent it
-   * (`@openharness/brain`). A count and never a price: the search runs on the request's own
-   * model key, and no tool rate is in this repository.
+   * (`@openharness/brain`). A count, and never a price: this is a log read, and what one
+   * search costs is the usage reader's — it prices the providers that publish a rate
+   * (`@openharness/protocol`'s `SEARCH_PRICE_PER_CALL`) out of this number.
    */
   readonly searches: number
 }

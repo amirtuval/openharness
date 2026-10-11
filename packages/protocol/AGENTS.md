@@ -852,7 +852,8 @@ client gets its rates); `SessionModelUsage` (`events/session.ts`) carries the pe
 count beside its tokens, which is what lets a reader of the running `session.usage` totals count
 unpriced requests the way the routes do without storing any money.
 
-**Searches are counted, not priced** (#305; #335). Every usage shape carries `searches`: how
+**Searches are counted, and priced only where a rate is published** (#305; #335). Every usage
+shape carries `searches`: how
 many `web_search` calls the covered log holds. Two kinds make up the count — the `web_search`
 calls a log stored in the operator-key era carries as ordinary `agent.tool_use` events, and the
 searches a provider ran inside its request, which each request's `span.model_request_end`
