@@ -538,7 +538,8 @@ export function describeConfig(config: ServerConfig): string[] {
     // credential type, so a deployment that set it should see that it did (#249, M4).
     lines.push(
       `custom provider URLs: PRIVATE ADDRESSES ALLOWED ` +
-        `(${ENV_VARS.allowPrivateProviderUrls}=1; custom OpenAI-compatible credentials only)`,
+        `(${ENV_VARS.allowPrivateProviderUrls}=1; custom OpenAI-compatible credentials and ` +
+        'remote MCP servers)',
     )
   }
   // Observability (#158): which shape the output is in, and whether spans are exported — the

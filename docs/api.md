@@ -148,6 +148,8 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
 | `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                         |
 | `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
+| `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)     |
+| `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)         |
 | `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
 | `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
 | `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
@@ -221,8 +223,9 @@ what came back:
   `ask` is the pause: the call is stored, nothing runs it, and the turn ends with nothing left
   to do but wait for the user (see [Pausing for the user](#pausing-for-the-user-epic-303-x6-issue-309)).
 - **The tools a request offered are recorded on its span.** `span.model_request_start.tools`
-  is a `{ name, source }` per offered tool — `builtin` today, `mcp` with #312 — so the log says
-  what the model could have called, not only what it did. A request with no tools writes none.
+  is a `{ name, source }` per offered tool — `builtin` for this build's own, `mcp` (with the
+  server's name) for one of a remote MCP server's (#312) — so the log says what the model could
+  have called, not only what it did. A request with no tools writes none.
 - **Input is not streamed and a result's content is text.** The call is stored when it is
   complete, and a result carries text blocks. The loop itself is bounded: at most
   `OPENHARNESS_MAX_TOOL_STEPS` model requests per turn (50 by default), after which the turn
@@ -246,6 +249,48 @@ are `builtin` ones — a call's `input` is the JSON object below, and the result
 A `web_fetch` result **leads with the address it finally came from** and says the content is
 untrusted data from the web, not instructions: it is the one tool whose text arrives from a
 place nobody in this deployment chose, and the log records that the model was told so.
+
+#### Remote MCP tools (epic #303, X10; issue #312)
+
+A chat's tools are not only this build's. The **remote MCP servers** a user registered
+(see [Remote MCP servers](#remote-mcp-servers)) contribute theirs to every request, and a call
+to one is stored in its own pair so the log says which server answered:
+
+```json
+{ "type": "agent.mcp_tool_use",    "id": "sevt_…", "seq": 4, "processed_at": "…",
+  "mcp_server_name": "notes", "name": "search", "input": { "query": "roadmap" },
+  "evaluated_permission": "ask" }
+{ "type": "agent.mcp_tool_result", "id": "sevt_…", "seq": 7, "processed_at": "…",
+  "mcp_tool_use_id": "sevt_…", "content": [{ "type": "text", "text": "…" }], "is_error": false }
+```
+
+- **The pair is the same pair, with the server named.** `agent.mcp_tool_use`'s own id is the
+  call's id, `agent.mcp_tool_result.mcp_tool_use_id` names it, and a
+  [`user.tool_confirmation`](#pausing-for-the-user-epic-303-x6-issue-309) answers it the same
+  way — its `tool_use_id` is that id. `mcp_server_name` is the server's name and `name` is the
+  tool's own name **on that server**; the model-facing name is recomputed from the pair
+  (`mcpToolOfferedName`: `<server>__<tool>`, sanitized to what a provider accepts), which is
+  what a request's offer and `span.model_request_start.tools` (source `mcp`, plus `server`)
+  record.
+- **Every remote tool asks by default.** A server is a third party the user added, so a call to
+  one of its tools is evaluated under `ask` until the user says otherwise; `remember` at the
+  confirmation remembers it for the chat (`session`) or writes it as the user's
+  [policy](#per-user-tool-settings-epic-303-x4-issue-307) (`always`).
+- **The answer is text.** The server's text blocks become the result, its structured content is
+  rendered as JSON, and anything this protocol cannot carry — an image, a resource — becomes a
+  marker naming it. The result leads with a line saying which server and tool produced it and
+  that the content is third-party data, never instructions. A tool-level failure (`isError`) is
+  an `is_error` result like any other.
+- **A server that cannot be used never blocks the chat.** One that cannot be reached writes a
+  `session.error` of type `mcp_connection_failed_error`, one whose credentials are refused
+  writes `mcp_authentication_failed_error` (and is left `needs_reconnect`), and the turn carries
+  on without that server's tools. A server turned off, removed or connected applies from the
+  next request on; a call an inherited turn never answered is `execution lost`, like a
+  built-in's.
+- **Which servers are in play is the user's, and a mode may override it.** A server's `enabled`
+  is the user's own default and a mode's `tools.mcp_servers` map patches it, at **server**
+  granularity — there is no per-MCP-tool on/off, only the permission a call is evaluated under
+  (`ask` unless the user chose otherwise).
 
 #### Pausing for the user (epic #303, X6; issue #309)
 
@@ -337,11 +382,14 @@ at `/v1/me/tools`:
   { "name": "todo_write", "source": "builtin", "enabled": false, "policy": "ask",
     "default_policy": "allow", "available": true },
   { "name": "web_search", "source": "builtin", "enabled": true, "policy": "allow",
-    "default_policy": null, "available": false }
+    "default_policy": null, "available": false },
+  { "name": "notes__search", "source": "mcp", "enabled": true, "policy": "ask",
+    "default_policy": "ask", "available": true, "mcp_server": "notes" }
 ] }
 
 // PUT /v1/me/tools            — merges per tool; a tool the body does not name keeps its setting
-{ "builtin": { "web_search": { "enabled": false, "policy": "ask" } } }
+{ "builtin": { "web_search": { "enabled": false, "policy": "ask" } },
+  "mcp":     { "notes__search": "allow" } }
 ```
 
 - **`enabled` is whether the tool is offered at all**, and `policy` is what a call to it is
@@ -349,8 +397,14 @@ at `/v1/me/tools`:
   so a user who turns every tool off gets the same request a deployment with no tools builds. A
   tool that is on with `policy: "deny"` is offered, and every call to it is refused.
 - **A tool a user has never configured follows its own declared default**
-  (`default_policy`), which for every built-in tool is `allow` and for every MCP tool will be
+  (`default_policy`), which for every built-in tool is `allow` and for every remote MCP tool is
   `ask`. The settings are therefore a record of **choices**, not a complete list.
+- **A remote MCP tool is listed per server.** Its entry names the tool the model calls it by
+  (`<server>__<tool>`) and carries `mcp_server`, which is what a settings screen groups remote
+  tools by; its `enabled` is the **server's** effective on/off (the resource's `enabled`, with
+  the mode's override applied), because a remote tool has no on/off of its own. Its policy is
+  the `mcp` map's value for that name, and `PUT` writes it there — a permission and nothing
+  else. A policy for a tool no in-force server offers is listed with `available: false`.
 - **A tool this deployment does not register is listed as `available: false`** — a
   `web_search` whose operator key is missing, say — rather than hidden, and `default_policy` is
   `null` for it: nothing here declares it. It is never offered, whatever `enabled` says. So the
@@ -1041,7 +1095,8 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
 
 A user registers the remote **MCP** servers they operate (epic #303, X10): a URL, how requests
 authenticate, and whether the server is on by default. openharness is the MCP **client**; it
-never holds a server's tools as its own, and this resource does not call them yet (#312 does).
+never holds a server's tools as its own — they are listed per request and called on demand
+([Remote MCP tools](#remote-mcp-tools-epic-303-x10-issue-312)).
 
 ```bash
 # An open server, checked on save: a server it cannot reach is still stored, in status error.
@@ -1068,10 +1123,11 @@ curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
 ```
 
 - **Status.** `connected`, `needs_reconnect` (an OAuth server with no live tokens — never
-  connected, a failed refresh, or a disconnect) or `error` with `last_error`. Set by the
-  connection check on save and on demand, and by a failed token refresh. A failure here never
-  blocks a chat: an MCP server that is down is a tool source that is unavailable, not a failed
-  turn.
+  connected, a failed refresh, a token the server itself refused, or a disconnect) or `error`
+  with `last_error`. Set by the connection check on save and on demand, and by a failed token
+  refresh. A failure here never blocks a chat: an MCP server that is down is a tool source that
+  is unavailable, not a failed turn — and when a chat cannot use one it says so with a
+  `session.error` and carries on without that server's tools.
 - **URL rules.** Streamable HTTP only, at an absolute `http(s)` URL. Every request goes through
   `safeFetch`, so a private, loopback, link-local or metadata address is refused unless
   `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` is on (the same self-host setting a custom

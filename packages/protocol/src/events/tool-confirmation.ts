@@ -39,7 +39,9 @@ export type ToolConfirmationResult = z.infer<typeof ToolConfirmationResultSchema
  *   confirmation is part of the log: the event **is** the record, so the answer survives
  *   compaction and replay, and an edit that rewinds past it takes it back with the branch.
  * - `always` — the same, and the user's stored setting for that tool becomes `allow`, which
- *   is what makes the next chat inherit it (that write is the server's, on the append).
+ *   is what makes the next chat inherit it (that write is the server's, on the append). A call
+ *   to a remote MCP tool writes the *policy* the user's settings hold for that tool (#312): a
+ *   remote tool has no on/off of its own, only the permission a call is evaluated under.
  *
  * Absent means `once`: the field is an extension, and every confirmation stored before it
  * existed means what it always meant.
@@ -50,7 +52,10 @@ export type ToolConfirmationRemember = z.infer<typeof ToolConfirmationRememberSc
 
 /** The fields both the stored and the client-sent confirmation carry. */
 const confirmationBody = {
-  /** The `agent.tool_use` this answers — its event id, which is the call's id. */
+  /**
+   * The call this answers — the event id of the `agent.tool_use` or `agent.mcp_tool_use` it
+   * names, which is the call's own id.
+   */
   tool_use_id: EventIdSchema,
   /** What the user decided: `allow` runs the call (or carries its answers), `deny` refuses it. */
   result: ToolConfirmationResultSchema,

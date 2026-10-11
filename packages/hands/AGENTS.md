@@ -55,6 +55,8 @@ repo.
 | `openMcpClient(options)`                                                                                                                                                                                | open and initialize a Streamable HTTP connection to a remote MCP server                                                                                                                                                                                               |
 | `McpClientSession`, `McpClientOptions`, `McpFetch`                                                                                                                                                      | the session (`listTools()`, `client`, `close()`), its options and the injected fetch                                                                                                                                                                                  |
 | `mcpToolDefinition(tool)`, `MCP_CLIENT_NAME`, `MCP_CLIENT_VERSION`                                                                                                                                      | one SDK tool as this protocol's definition, and the identity this client announces                                                                                                                                                                                    |
+| `createMcpTool(options)`, `McpToolOptions`                                                                                                                                                              | one remote tool as an ordinary `ToolDefinition` (#312): the offered name, the server's own JSON Schema, the `ask` default, and a `run` that opens a connection, calls, shapes and closes                                                                              |
+| `mcpResult(answer, options)`, `McpResultOptions`, `DEFAULT_MCP_TOOL_TIMEOUT_MS`                                                                                                                         | an MCP answer as this protocol's result — text, structured content as JSON, a marker for anything else, the provenance line — and the ceiling a remote call runs under (60 s)                                                                                         |
 | `PACKAGE_NAME`                                                                                                                                                                                          | `'@openharness/hands'`                                                                                                                                                                                                                                                |
 | `PROTOCOL_DEPENDENCY`                                                                                                                                                                                   | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge                                                                                                                                                                                                |
 | `createToolRegistry(tools)`                                                                                                                                                                             | a registry over a host's tools: look one up by name, or run one call                                                                                                                                                                                                  |
@@ -264,6 +266,38 @@ wrapper, so a user-supplied URL is guarded. stdio, the deprecated HTTP+SSE trans
 SDK's own OAuth provider are all unused: the server is the OAuth client, and its tokens are
 sealed in the deployment's vault, so the flow is the server's.
 
+### Calling a remote tool (epic #303, X10; #312)
+
+`createMcpTool(options)` turns one tool of a listed server into an ordinary `ToolDefinition`, so
+the registry runs a remote call exactly as it runs a local one — the permission, the timeout
+race, the abort signal and the secret scrubbing are all the registry's, and nothing downstream
+learns which tools are local.
+
+- **The name is the model-facing one.** A remote tool is offered as `<server>__<tool>`
+  (`@openharness/protocol`'s `mcpToolOfferedName`), never under the server's own spelling: two
+  servers may each have a `search`, and a provider refuses a name outside `[a-zA-Z0-9_-]{1,64}`.
+- **The model is shown the server's own JSON Schema.** `ToolDefinition.inputJson` carries it and
+  a request offers it as received — translating an MCP tool's schema into zod would drop
+  whatever the translator did not model — while `inputSchema` is a permissive `z.looseObject({})`
+  so the registry validates that a call is an object and nothing more. The remote server is the
+  authority on its own arguments.
+- **The default policy is `ask`** (`DEFAULT_MCP_TOOL_PERMISSION`): a remote server is somebody
+  else's code, so the user is asked the first time and may remember the answer (#309).
+- **The answer is shaped, not passed through.** `mcpResult` renders text blocks as text, MCP's
+  `structuredContent` as pretty-printed JSON, and anything this protocol cannot carry — an
+  image, an audio clip, an embedded resource — as a marker naming what is not there; a
+  `resource_link` becomes a marker carrying its address. The result leads with a line naming the
+  server and the tool and saying the content is third-party data, never instructions (X11) — the
+  same rule `web_fetch` states. MCP's `isError` becomes the result's `isError`.
+- **Every header the call was made with is scrubbed out of its answer and its errors**, so a
+  server that echoes the request back stores `[REDACTED]` rather than a token.
+- **A call opens its own connection and closes it again**, and a failure — unreachable, refused,
+  timed out — comes back as an `is_error` result rather than an exception, like every other way
+  a call can end. `DEFAULT_MCP_TOOL_TIMEOUT_MS` (60 s) is the ceiling, which the host's own
+  per-turn limit can lower. Nothing here caches a connection, an address or a token: MCP session
+  state is the remote server's, and a client kept alive across a turn would have to be
+  re-validated after every sleep, timeout and abort.
+
 ## Allowed `@openharness/*` dependencies
 
 Only these (see the table in `docs/architecture.md`):
@@ -336,6 +370,15 @@ dependency table.
   carries the headers it was given, makes every request through the injected fetch, and closes.
   It uses the platform `fetch`, because `safeFetch` and the credential are the server's to
   inject.
+- `mcp-tool.test.ts` runs `createMcpTool` through the **real registry** against a stateless stub
+  MCP server on loopback: the offered name and the default `ask`, the server's own JSON Schema
+  offered and a permissive validation, a call answered with the provenance line and its
+  structured content, an `isError` answer, an image and an embedded resource each replaced by a
+  marker, a `resource_link` rendered with its address, an unknown content type named rather than
+  dropped, the headers carried to the server and scrubbed out of an answer that quotes them, a
+  server that cannot be reached answered `is_error` rather than thrown, and a call cut short by
+  the turn's ceiling. The stub is stateless — a fresh server and transport per request — because
+  that is what the tool's open-call-close shape meets.
 - `index.test.ts` covers the barrel.
 
 ## Rules
