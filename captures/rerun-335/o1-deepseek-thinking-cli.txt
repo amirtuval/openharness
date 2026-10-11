@@ -2,13 +2,13 @@
 
 prompt: Fetch https://example.com with web_fetch and answer in one short sentence about what it says.
 
-    if (Date.now() > deadline) throw new Error(`never saw ${text}\n---\n${screen.slice(-1500)}`)
-                                     ^
-Error: never saw ● web_search|✗ web_search
----
 Fetch https://example.com with web_fetch and answer in one short sentence about what it says.
 ● web_fetch https://example.com · done
 It says this domain is for use in documentation examples without needing permission.
 2.7s · 371 tokens · —
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────
 DeepSeek-V4-Pro · sesn_…Z0CHPD · — · 4% of context used · idle
+❯
+
+(the `—` cost is the unpriced model: the sandbox's OpenAI-compatible endpoint is not in
+models.dev, so its tokens are counted and no money is claimed.)
