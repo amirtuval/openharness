@@ -596,7 +596,7 @@ export function McpServersScreen({
 
       {confirming && current !== undefined ? (
         <Text color="red">{`Delete ${current.name}? Its tools leave every chat that had them. y/N`}</Text>
-      ) : (
+      ) : face === 'tools' ? null : (
         <Text dimColor>
           ↑/↓ choose · Enter edit · n new · space on/off · t Test · c Connect/Reconnect · x
           Disconnect · d Delete · p tools · Esc done
