@@ -66,6 +66,21 @@ describe('Settings → Tools (#308)', () => {
     expect(await within(row).findByText('Default is allow.')).toBeInTheDocument()
   })
 
+  it('says why a tool cannot be offered, when the server gives a reason (#335)', async () => {
+    renderSettings({
+      toolsAvailable: { web_search: false },
+      toolsReason: { web_search: 'This model has no web search.' },
+    })
+
+    const row = await toolRow('web_search')
+    // The tool is declared — `web_search` follows `allow` like every built-in — so its default
+    // is named as usual, and the server's own sentence is what says why it is not on offer.
+    expect(row).toHaveAttribute('data-available', 'false')
+    expect(within(row).getByText('Default (allow).')).toBeInTheDocument()
+    expect(within(row).getByText('This model has no web search.')).toBeInTheDocument()
+    expect(within(row).getByRole('checkbox', { name: 'Enable web_search' })).toBeDisabled()
+  })
+
   it('lists a tool this deployment does not register as unavailable', async () => {
     renderSettings({ toolsAvailable: { web_search: false } })
 

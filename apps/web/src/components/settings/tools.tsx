@@ -21,9 +21,11 @@ import { Label } from '../ui/label'
  * - **the permission** — `allow` runs a call, `ask` pauses the turn for the reader (#309 answers
  *   it; the prompt itself is #310), and `deny` refuses every call. The tool's own declared
  *   permission is the third choice, shown as "Default (allow)";
- * - **whether it is here at all** — a tool this deployment does not register (`web_search` with
- *   no operator key, say) is listed as unavailable rather than hidden, with its default named as
- *   unknown, so a reader sees why it does nothing. It is never offered whatever the switch says.
+ * - **whether it can be offered at all** — a tool the server cannot give a chat is listed as
+ *   unavailable rather than hidden, so a reader sees why it does nothing, and the server's own
+ *   `reason` is what says it (`web_search` on a model whose provider has none, #335) — or, when
+ *   it has none to give, `No default — this server does not register it.` for a tool nothing
+ *   declares. It is never offered whatever the switch says.
  *
  * A write is per tool: the server merges, so flipping one row never rewrites the others, and the
  * answer it returns (the effective list) replaces what the card shows.
@@ -269,8 +271,8 @@ function ToolRow({
               : `Default is ${entry.default_policy}.`}
         </span>
         {unavailable ? (
-          <span className="text-xs text-muted-foreground">
-            A chat never offers it, whatever the switch says.
+          <span className="text-xs text-muted-foreground" data-slot="tool-unavailable-reason">
+            {entry.reason ?? 'A chat never offers it, whatever the switch says.'}
           </span>
         ) : null}
       </div>

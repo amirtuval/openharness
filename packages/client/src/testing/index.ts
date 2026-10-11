@@ -295,6 +295,13 @@ export interface FakeClientOptions {
    */
   toolsAvailable?: Readonly<Record<string, boolean>>
   /**
+   * Why a tool is unavailable, by name, over the default of none — the server's own sentence
+   * (`ToolSettingEntry.reason`, #335). A fake that says a tool is unavailable without saying why
+   * is the unregistered-tool state; one that names a reason is the server answering about a
+   * model, which is what `web_search` on a model with no native search tool gets.
+   */
+  toolsReason?: Readonly<Record<string, string>>
+  /**
    * The remote MCP tools this fake deployment offers, over the default of none (#312).
    *
    * Each becomes one `GET /v1/me/tools` entry — `source: 'mcp'`, its `<server>__<tool>` offered
@@ -1748,15 +1755,19 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     }
     const entries: ToolSettingEntry[] = FAKE_TOOLS.map((tool) => {
       const choice = toolSettings.builtin[tool.name]
+      const reason = options.toolsReason?.[tool.name]
       return {
         name: tool.name,
         source: 'builtin' as const,
         // A mode's override is on/off only (#307); the user's choice, else on.
         enabled: override?.builtin[tool.name] ?? choice?.enabled ?? true,
         policy: choice?.policy ?? tool.policy,
-        // A tool this deployment does not register has no declaration to report.
-        default_policy: toolsAvailable[tool.name] === false ? null : tool.policy,
+        // A tool this deployment does not register has no declaration to report; one it does
+        // declare and cannot offer — a `reason` is what says so (#335) — still has one.
+        default_policy:
+          toolsAvailable[tool.name] !== false || reason !== undefined ? tool.policy : null,
         available: toolsAvailable[tool.name] !== false,
+        ...(reason === undefined ? {} : { reason }),
       }
     })
     // A stored setting for a tool this deployment does not register is listed, by name, after

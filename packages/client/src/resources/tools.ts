@@ -19,9 +19,9 @@ import type { Transport } from '../http'
  * A per-user choice about which of the build's tools a chat may use, and under which permission
  * (`allow`, `ask` or `deny`). The read is the **effective** answer a chat would get: a mode's
  * on/off override applied over the user's own choices when `mode_id` names one, a tool's own
- * declared permission where the user chose none, and `available: false` for a tool this
- * deployment does not register — a `web_search` with no operator key, say — listed rather than
- * hidden so a settings screen can say why it is not working.
+ * declared permission where the user chose none, and `available: false`, with a `reason`, for a
+ * tool this chat cannot be offered — `web_search` on a model whose provider has none (#335) —
+ * listed rather than hidden so a settings screen can say why it is not working.
  *
  * An entry is a tool of either source since #312: this build's own (`source: 'builtin'`) or a
  * remote MCP server's (`source: 'mcp'`, with the server named on `mcp_server` and its
@@ -39,7 +39,9 @@ export interface ToolsResource {
   /**
    * Read the effective tool settings, one entry per tool.
    *
-   * @param params `mode_id` answers the read as a chat on that mode would see it
+   * @param params `mode_id` answers the read as a chat on that mode would see it, and
+   *   `model_id` as a chat running that model would — which is what decides whether
+   *   `web_search` can be offered at all (#335)
    * @param options request options (cancellation)
    */
   list(params?: ListToolSettingsQuery, options?: RequestOptions): Promise<ListToolSettingsResponse>
@@ -62,7 +64,7 @@ export function createToolsResource(transport: Transport): ToolsResource {
       return transport.json(ListToolSettingsResponseSchema, {
         method: 'GET',
         path,
-        query: { mode_id: params?.mode_id },
+        query: { mode_id: params?.mode_id, model_id: params?.model_id },
         signal: options?.signal,
       })
     },
