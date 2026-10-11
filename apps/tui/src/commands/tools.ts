@@ -1,4 +1,4 @@
-import type { Client } from '@openharness/client'
+import { mcpToolPolicyBody, type Client } from '@openharness/client'
 import type { ToolPermission, ToolSettingEntry } from '@openharness/protocol'
 
 import type { ToolsPatch } from '../args'
@@ -16,6 +16,13 @@ import { reportFailure, type CommandIo } from './io'
  * A tool this deployment does not register is printed rather than hidden, with `not available`
  * beside it: it is never offered to a model whatever the switch says, and a reader who wonders
  * why their search does nothing has the answer on this line.
+ *
+ * A **remote MCP tool** (`source: 'mcp'`) is the one shape whose settings are not a built-in's:
+ * `--policy` writes the `mcp` map under the offered name — the map a remote tool's permission
+ * really lives in — and `--on`/`--off` is refused, because whether a remote tool is in play is
+ * its server's `enabled`, which is `/mcp`'s to change. Writing `builtin` for one would store a
+ * choice the server lists as an unavailable tool and never applies to the call (epic #303, #307;
+ * fixed in #314).
  */
 export async function runTools(client: Client, io: CommandIo, patch: ToolsPatch): Promise<number> {
   try {
@@ -34,6 +41,28 @@ export async function runTools(client: Client, io: CommandIo, patch: ToolsPatch)
     if (current === undefined) {
       io.stderr(`oh: no tool named ${patch.name} is registered on this server.`)
       return 1
+    }
+
+    // A remote MCP tool's on/off is its server's, so `--on`/`--off` name the wrong thing for
+    // one — that is what `/mcp` (and its server row) is for. Its permission does live in the
+    // per-tool settings, in the `mcp` map keyed by the offered name, which is a different map
+    // than a built-in's: writing `builtin` here would store a choice the server lists as an
+    // unavailable tool and never applies to the call.
+    if (current.source === 'mcp') {
+      if (patch.enabled !== undefined) {
+        io.stderr(
+          `oh: ${patch.name} is a remote MCP tool; turn the server it belongs to on or off with \`/mcp\`.`,
+        )
+        return 2
+      }
+      const after = await client.tools.put(
+        mcpToolPolicyBody(patch.name, patch.policy ?? current.policy),
+      )
+      io.stdout(`Saved ${patch.name}: ${patch.policy ?? current.policy}.`)
+      for (const line of formatTools(after.data)) {
+        io.stdout(line)
+      }
+      return 0
     }
 
     const after = await client.tools.put({

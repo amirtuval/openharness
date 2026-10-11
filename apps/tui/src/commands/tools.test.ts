@@ -117,4 +117,39 @@ describe('runTools (#308)', () => {
     expect(await runTools(fake, io, { name: 'nope', enabled: true })).toBe(1)
     expect(err[0]).toContain('no tool named nope')
   })
+
+  it('writes a remote MCP tool’s permission to the `mcp` map, not `builtin` (#314)', async () => {
+    const fake = createFakeClient({ mcpTools: [{ server: 'notes', name: 'search' }] })
+    const { io, out } = recorder()
+
+    expect(await runTools(fake, io, { name: 'notes__search', policy: 'deny' })).toBe(0)
+    expect(out[0]).toBe('Saved notes__search: deny.')
+
+    const entry = (await fake.tools.list()).data.find(
+      (candidate) => candidate.name === 'notes__search',
+    )
+    // The permission really moved, on the remote entry — with the old `builtin` write it stayed
+    // at the tool's own `ask` declaration and a stray, unavailable built-in row appeared beside
+    // it instead.
+    expect(entry?.policy).toBe('deny')
+    expect(entry?.default_policy).toBe('ask')
+    expect(entry?.available).toBe(true)
+    expect(
+      (await fake.tools.list()).data.filter((candidate) => candidate.name === 'notes__search'),
+    ).toHaveLength(1)
+  })
+
+  it('refuses --on/--off for a remote MCP tool, pointing at /mcp (#314)', async () => {
+    const fake = createFakeClient({ mcpTools: [{ server: 'notes', name: 'search' }] })
+    const { io, err } = recorder()
+
+    expect(await runTools(fake, io, { name: 'notes__search', enabled: false })).toBe(2)
+    expect(err[0]).toContain('/mcp')
+
+    // Nothing was written: the tool still follows its own `ask` declaration.
+    const entry = (await fake.tools.list()).data.find(
+      (candidate) => candidate.name === 'notes__search',
+    )
+    expect(entry?.policy).toBe('ask')
+  })
 })
