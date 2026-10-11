@@ -102,6 +102,40 @@ export const MOCK_TOOL_MARKER = '__tool__'
 export const MOCK_ASK_MARKER = '__ask__'
 
 /**
+ * The marker that makes the model call a **remote MCP tool** (epic #303, X10; #312).
+ *
+ * The text after it is `<the tool's offered name> <the arguments as JSON>`, so a test can drive
+ * a whole remote tool turn — the tool listed from a stub server, the call stored, the tool
+ * called over the wire, the result stored and answered — through the real server, scheduler,
+ * brain and store. It is the one marker whose call is not this process's own tool, which is
+ * exactly what makes it worth having.
+ */
+export const MOCK_MCP_MARKER = '__mcp__'
+
+/**
+ * The tool call a `__mcp__` prompt makes: the name it names, and the arguments it carries.
+ *
+ * A prompt with no arguments (or ones that are not JSON) calls the tool with `{}` — a test's
+ * own typo is not something a test model should fail a turn over.
+ */
+export function mcpCallOf(message: string): { name: string; input: Record<string, unknown> } {
+  const rest = message.slice(MOCK_MCP_MARKER.length).trim()
+  const space = rest.indexOf(' ')
+  const name = space === -1 ? rest : rest.slice(0, space)
+  const json = space === -1 ? '{}' : rest.slice(space + 1)
+  let input: Record<string, unknown> = {}
+  try {
+    const parsed: unknown = JSON.parse(json)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      input = parsed as Record<string, unknown>
+    }
+  } catch {
+    input = {}
+  }
+  return { name, input }
+}
+
+/**
  * The question a `__ask__` prompt asks: one choice, one free-text — the two shapes an e2e test
  * can answer without inventing a UI, and enough to pin that the answers are validated against
  * the question they answer.
@@ -220,6 +254,9 @@ export function planFor(message: string, attempt: number): ModelPlan {
       delayMs: 0,
       toolCalls: [{ name: ASK_USER_TOOL_NAME, input: MOCK_ASK_INPUT }],
     }
+  }
+  if (message.startsWith(MOCK_MCP_MARKER)) {
+    return { chunks: [], delayMs: 0, toolCalls: [mcpCallOf(message)] }
   }
   if (message.startsWith(MOCK_TOOL_MARKER)) {
     // The text after the marker, or the marker-less message when the caller wrote none: either

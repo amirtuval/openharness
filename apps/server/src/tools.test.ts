@@ -95,6 +95,7 @@ describe('createTurnRegistry and createTurnTools', () => {
     const { turn } = turnTools({ store, registry: createTestToolRegistry() })
     await store.putToolSettings('user_a', {
       builtin: { [TEST_TOOL_NAME]: { enabled: false, policy: 'deny' } },
+      mcp: {},
     })
 
     expect(await turn.toolSettings?.('user_a', null)).toEqual({
