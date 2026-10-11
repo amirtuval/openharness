@@ -230,6 +230,20 @@ what came back:
   complete, and a result carries text blocks. The loop itself is bounded: at most
   `OPENHARNESS_MAX_TOOL_STEPS` model requests per turn (50 by default), after which the turn
   ends with a `session.error` of type `tool_steps_exhausted_error` rather than retrying.
+- **A model repeating one failing call is a second bound** (issue #331). A run of the newest
+  calls in the turn with the same tool name and byte-identical arguments is a **streak**: at 5
+  identical calls the next request carries a one-time reminder to change approach — worded for
+  identical results or for a call that keeps failing — and at 8 identical **failing** calls the
+  turn ends with a `session.error` of type `tool_loop_stuck_error` (`retry_status: "terminal"`),
+  the step limit's shape. A policy `deny`, the user's own denial and an interrupt do not count as
+  failures. Nothing is stored beside the log: the streak is recomputed from it, so a resumed turn
+  sees the same one.
+- **The current todo list rides every request** (issue #331). When the session has one
+  (`todo_write`'s newest successful call), the request carries it after the history as a reminder
+  the model sees on every request — never a message in the log — and the request's span records
+  it in `reminders`. An empty list sends nothing. Where a deployment turns it on
+  (`OPENHARNESS_TODO_NUDGE`), a chat with no list and no tool call yet instead gets a one-line
+  nudge to write one for a task with several steps.
 - **A tool is never re-run.** A brain that inherits a call with no result writes an `is_error`
   result for it and lets the model decide what to do next — except a call the user has not
   answered yet, which is still open and simply keeps waiting.
@@ -504,7 +518,10 @@ it, the older history is summarized with the recent quarter of the budget kept v
 `user.message` boundary so no turn is split — and never between a tool call and the result that
 answers it (X9), whatever arrived in between. A summarizer is never paid for on a context the old
 tool results' clearing brings back under the share: what it measures is the request the context
-strategy will build (#306). A provider that still refuses a request as too long
+strategy will build (#306), and since #331 clearing is itself gated on the request being over a
+**soft** share of the budget (`OPENHARNESS_CLEAR_THRESHOLD`, `0.5` by default, below the
+compaction one), with the cleared boundary stepping by a whole recent tail so it holds still for
+the requests in between. A provider that still refuses a request as too long
 gets one more attempt after a tighter compaction; if that fails too the turn ends with
 `session.error { retry_status: "exhausted" }` rather than looping — and the message says which
 of the three things happened, so an error never claims a compaction that the engine, finding
@@ -602,7 +619,8 @@ capped (epic #303, X9) and the old ones it cleared:
     "tokens_after": 30000,
     "results": [{ "seq": 38, "tool": "web_fetch", "tokens_before": 9000, "tokens_after": 2000 }]
   },
-  "cleared": { "results": 2, "tokens": 12000 }
+  "cleared": { "results": 2, "tokens": 12000 },
+  "reminders": [{ "kind": "todo", "tokens": 40 }]
 }
 ```
 
@@ -612,10 +630,16 @@ silently disappear. `results` lists every tool result the request capped: a resu
 smaller of what its tool declares and a fifth of the chat model's budget, and the log keeps the
 whole of it. `cleared` says how many old tool results — those older than the recent quarter of
 the budget the summary engine keeps verbatim — had their bodies replaced by
-`result cleared, N tokens`: clearing them is what the brain tries **before** summarizing, so a
-context that clearing alone brings back under the threshold needs no summary at all. All three
-fields are absent for a request that had to shorten and clear nothing, which is every session
-stored before #277 and #306.
+`result cleared, N tokens — call the tool again if you need it` (issue #331): clearing them is
+what the brain tries **before** summarizing, so a context that clearing alone brings back under
+the threshold needs no summary at all — and, since #331, only once the request is over the soft
+clearing threshold, so a chat at 30% of its budget keeps its older results. `reminders` (issue
+#331) names the blocks the request carried besides the history — `kind: "todo"` for the session's
+current todo list, `kind: "stuck"` for the one-time reminder a model repeating one call earns —
+with what each cost. None is a message in the log: they are rebuilt from the log on every
+request, and the span is the only record that the model was told. All four fields are absent for
+a request that had to shorten, clear and remind nothing, which is every session stored before
+#277, #306 and #331.
 
 **The token counters are disjoint, and that is what `usage` prices.** `ModelUsage.input_tokens`
 is the **uncached** input (the way Anthropic's own `input_tokens` reads) and the two cache
