@@ -72,6 +72,7 @@ import {
 } from './model'
 import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
 import { redactSecrets } from './redact'
+import { stuckEnd } from './stuck'
 import type { ToolSecretResolver, ToolSettingsResolver, ToolSupportFor } from './tools'
 import {
   DEFAULT_MAX_TOOL_STEPS,
@@ -407,6 +408,23 @@ export interface RunTurnOptions {
    * goes idle rather than retrying.
    */
   readonly maxToolSteps?: number
+  /**
+   * // extension: the share of the chat model's budget at which old tool results are cleared
+   * (#331); {@link DEFAULT_CLEAR_THRESHOLD} when absent.
+   *
+   * The soft threshold before the compaction one: below it a request carries its old tool results
+   * as they were stored (still capped, X9), at or above it the oldest are cleared to a placeholder.
+   * It is handed to both the context strategy and the size estimate, so the request that is
+   * measured and the request that is built clear on the same condition. The server wires it from
+   * `OPENHARNESS_CLEAR_THRESHOLD`, next to the compaction controls (#282).
+   */
+  readonly clearThreshold?: number
+  /**
+   * // extension: whether to nudge the model to write a todo list before its first tool call
+   * (#331). `false` — the default — means no nudge, which is where the study leaves it: the
+   * benefit is real but small, and a line on every session's first request is not free.
+   */
+  readonly todoNudge?: boolean
   /**
    * Where this request's remote MCP tools come from (epic #303, X10; #312), asked once per
    * request with the session's owner and the tool override of the mode the request resolved to
@@ -828,6 +846,8 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         system: requestSystem,
         budget: contextBudget,
         ...(available === undefined ? {} : { tools: available }),
+        ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
+        ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
       })
     let read = await readLog(store, sessionId)
     // ---- The user's answers, and the calls still waiting on them (epic #303, X6; #309).
@@ -942,6 +962,26 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         await append([statusIdle()])
         return { outcome: 'idle' }
       }
+    }
+    // A model repeating one failing call is a loop the step limit would only catch at fifty
+    // (epic #303, X2; #331). A run of the newest calls in the turn with the same name and the
+    // same arguments, all failing — a policy or user denial and an interrupt do not count as
+    // failures — ends the turn here with the step limit's shape: a notice carrying a sentence for
+    // the user, the session idle, and no retry, because the same call would fail the same way.
+    const stuck = stuckEnd(read)
+    if (stuck !== null) {
+      await append([
+        sessionError({
+          type: 'tool_loop_stuck_error',
+          message:
+            `The model called ${stuck.name} with the same arguments ${stuck.length} times ` +
+            'and it failed every time, so the turn was ended. Send a message with a different ' +
+            'instruction or approach to carry on.',
+          retry_status: { type: 'terminal' },
+        }),
+        statusIdle(),
+      ])
+      return { outcome: 'error' }
     }
     if (steps >= maxSteps) {
       // A request is due and the turn has no budget left for it (epic #303, X2). This is a
@@ -1072,6 +1112,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // stored is capped and cleared by its tool's declaration whatever this request offers
       // (X9), and a remote tool declares its own cap (X9; #312).
       ...(available === undefined ? {} : { tools: available }),
+      // The soft clearing threshold and the todo nudge (#331), handed to the strategy as they
+      // are to the size estimate above, so the request measured and the request built agree.
+      ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
+      ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
     })
     // The tools this request offers (epic #303, X2/X4; #307), if any: a deployment with no
     // registry has nothing to offer, a model the registry marks as tool-less gets none, and a
@@ -1097,6 +1141,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         ...(mode === null ? {} : { mode }),
         ...(context.truncated === undefined ? {} : { truncated: context.truncated }),
         ...(context.cleared === undefined ? {} : { cleared: context.cleared }),
+        ...(context.reminders === undefined ? {} : { reminders: context.reminders }),
         ...(toolRegistry === undefined ? {} : { tools: offeredTools(toolRegistry, mcp.refs) }),
       }),
     ])

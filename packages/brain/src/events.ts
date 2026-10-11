@@ -8,6 +8,7 @@ import type {
   ModelRequestPurpose,
   ModelUsage,
   ReasoningEffortRun,
+  RequestReminder,
   SessionCompactionOutcome,
   SessionError,
   SessionModelUsage,
@@ -128,7 +129,7 @@ export function spanStart(
   model: string,
   options: SpanStartOptions = {},
 ): AppendableEvent {
-  const { reasoningEffort, mode, truncated, cleared, purpose, tools } = options
+  const { reasoningEffort, mode, truncated, cleared, purpose, tools, reminders } = options
   return {
     type: EVENT_TYPES.modelRequestStart,
     consumes: [...consumes],
@@ -139,6 +140,7 @@ export function spanStart(
     ...(cleared === undefined ? {} : { cleared }),
     ...(purpose === undefined ? {} : { purpose }),
     ...(tools === undefined || tools.length === 0 ? {} : { tools: [...tools] }),
+    ...(reminders === undefined || reminders.length === 0 ? {} : { reminders: [...reminders] }),
   }
 }
 
@@ -180,6 +182,12 @@ export interface SpanStartOptions {
    * still says what it could have called.
    */
   readonly tools?: readonly ToolReference[]
+  /**
+   * The reminders the request carried besides the history (#331): the session's current todo list
+   * and the stuck reminder a repeating model earns, as `{ kind, tokens }` each. Omitted when the
+   * request carried none, which is every request of a session with no list and no streak.
+   */
+  readonly reminders?: readonly RequestReminder[]
 }
 
 /**

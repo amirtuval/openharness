@@ -18,6 +18,7 @@ import { TEST_MODEL_ID, TEST_SYSTEM } from './testing/harness'
 import type { ContextSizeBaseline } from './context'
 import {
   CHARS_PER_TOKEN,
+  CLEARED_TOOL_RESULT,
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   OMISSION_MARKER,
   createContextStrategy,
@@ -962,7 +963,7 @@ describe('sizing a tool result in a request (epic #303, X9; #306)', () => {
     const { messages, cleared, truncated } = strategy(events, { model: MODEL, system: null })
 
     // The old body is what it cost, and the fresh one is untouched.
-    expect(toolResultTextsOf(messages)).toEqual(['result cleared, 100 tokens', 'c'.repeat(80)])
+    expect(toolResultTextsOf(messages)).toEqual([CLEARED_TOOL_RESULT(100), 'c'.repeat(80)])
     expect(cleared).toEqual({ results: 1, tokens: 100 })
     expect(truncated).toBeUndefined()
     // Both pairs are intact: each call is in an assistant message of its own.
@@ -990,7 +991,7 @@ describe('sizing a tool result in a request (epic #303, X9; #306)', () => {
         type: 'tool-result',
         toolCallId: call.id,
         toolName: 'fetch',
-        output: { type: 'error-text', value: 'result cleared, 100 tokens' },
+        output: { type: 'error-text', value: CLEARED_TOOL_RESULT(100) },
       },
     ])
   })

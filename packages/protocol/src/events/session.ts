@@ -185,6 +185,20 @@ export const SessionErrorTypeSchema = z.enum([
    * the same request again would run out of steps again.
    */
   'tool_steps_exhausted_error',
+  /**
+   * // extension: the turn ended because the model repeated the same failing call (#331).
+   *
+   * A turns' tool steps are watched for a **streak**: a run of the newest calls in the turn with
+   * the same tool name and byte-identical arguments. A streak of five identical calls earns the
+   * model a one-time reminder to change approach; a streak of eight **failing** identical calls —
+   * results that are errors, with a policy or user denial and an interrupt not counting as one —
+   * ends the turn here rather than letting the model loop until the step limit. It follows
+   * `tool_steps_exhausted_error`'s shape: a notice with a sentence for the user, `end_turn` as
+   * the stop reason, and no retry — the same call again would fail the same way.
+   *
+   * **Non-retryable**: `session.status_idle` follows, and `retry_status.type` is `terminal`.
+   */
+  'tool_loop_stuck_error',
 ])
 
 export type SessionErrorType = z.infer<typeof SessionErrorTypeSchema>
