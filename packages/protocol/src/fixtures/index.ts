@@ -14,6 +14,7 @@ import type {
   AgentMcpToolResultEvent,
   AgentMcpToolUseEvent,
   AgentMessageEvent,
+  AgentOpaqueContentEvent,
   AgentToolResultEvent,
   AgentToolUseEvent,
   ContentDelta,
@@ -565,6 +566,36 @@ export function makeAgentMcpToolResult(
     mcp_tool_use_id: call.id,
     content: [{ type: 'text', text }],
     is_error: false,
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `agent.opaque_content`: the parts of a step only its provider can read back
+ * (epic #303, X13; issue #334).
+ *
+ * The default is one Anthropic-style reasoning part with a signature — the shape a thinking
+ * model's tool-calling step stores, and the one a scripted model in the brain's tests answers
+ * with — so a test can build a log whose next request must carry it back.
+ *
+ * @param model the `provider/model` that produced the parts
+ * @param provider the client family they may be replayed to
+ * @param parts the parts themselves, in the order the provider produced them
+ * @param overrides fields to replace on the event
+ */
+export function makeAgentOpaqueContent(
+  overrides: Partial<AgentOpaqueContentEvent> = {},
+): AgentOpaqueContentEvent {
+  const event: AgentOpaqueContentEvent = {
+    id: newEventId(),
+    type: 'agent.opaque_content',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    provider: 'anthropic',
+    model: 'anthropic/claude-sonnet-5',
+    parts: [
+      { type: 'reasoning', text: 'weighing the options', provider_options: { signature: 'sig' } },
+    ],
   }
   return { ...event, ...overrides }
 }
