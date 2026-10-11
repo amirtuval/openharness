@@ -174,7 +174,8 @@ src/
                                required, a preselected sole model, a loading skeleton, the
                                catalog's error, or the "add a provider key" state when there
                                are no providers and no models
-    settings-screen.tsx        Providers, Default model, Modes, Context, Appearance, Usage, Advanced
+    settings-screen.tsx        Providers, Default model, Modes, Context, Tools, Appearance,
+                               Usage, Advanced
                                — the server URL, collapsed (#209, #245)
     sign-in-screen.tsx         one button per provider, the dev form when offered
     device-screen.tsx          the device-approval page `oh login` opens
@@ -243,14 +244,14 @@ the build, which is why its rasterizer is a devDependency rather than a dependen
 
 ### Routes
 
-| route                       | screen                                              |
-| --------------------------- | --------------------------------------------------- |
-| `#/`                        | New chat — or the first-run flow with no key (#209) |
-| `#/s/<sessionId>`           | the chat                                            |
-| `#/new`                     | new chat: an empty composer on the default model    |
-| `#/settings`                | Providers, Default model, Appearance, Advanced      |
-| `#/signin`                  | sign in (`?next=<hash>` to return there)            |
-| `#/device?user_code=<code>` | the device-approval page `oh login` opens           |
+| route                       | screen                                                                       |
+| --------------------------- | ---------------------------------------------------------------------------- |
+| `#/`                        | New chat — or the first-run flow with no key (#209)                          |
+| `#/s/<sessionId>`           | the chat                                                                     |
+| `#/new`                     | new chat: an empty composer on the default model                             |
+| `#/settings`                | Providers, Default model, Modes, Context, Tools, Appearance, Usage, Advanced |
+| `#/signin`                  | sign in (`?next=<hash>` to return there)                                     |
+| `#/device?user_code=<code>` | the device-approval page `oh login` opens                                    |
 
 There is no `#/agents` route since #91: chatting is model-first, agents are hidden from the
 UI, and an old bookmark to that screen lands on the root route. There is no **Home** screen
