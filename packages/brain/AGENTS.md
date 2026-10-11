@@ -62,6 +62,8 @@ src/
                         waiting for an answer, read off the log (epic #277, K8; #283)
   pausing.ts            the pause: the calls the user has to answer, the one confirmation that
                         answers them, and what each answer means (#309)
+  stuck.ts              stuck detection (#331): the identical run of newest calls in a turn,
+                        the one-time reminder it earns, and the eight-call failing end
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
   reasoning.ts          the reasoning effort: per provider, gated by the injected resolver
@@ -98,7 +100,7 @@ emits what that reaches.
 | export                                                                                                                                                                                                                                            | what it is                                                                                                                                                                                                                                                                                                                                                                                     |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `runTurn(sessionId, options)`                                                                                                                                                                                                                     | run one turn; resolves to a `TurnOutcome`                                                                                                                                                                                                                                                                                                                                                      |
-| `RunTurnOptions`                                                                                                                                                                                                                                  | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry?, tools?, toolSettings?, toolSupportFor?, resolveToolSecrets?, maxToolSteps? }`                                                                                                                                                                                               |
+| `RunTurnOptions`                                                                                                                                                                                                                                  | `{ store, model, resolveCredential, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry?, tools?, toolSettings?, toolSupportFor?, resolveToolSecrets?, maxToolSteps?, clearThreshold?, todoNudge? }`                                                                                                                                                                  |
 | `McpToolProvider`, `McpToolOffer`, `McpOfferedTool`, `McpListingFailure`, `McpFailureKind`, `resolveMcpTools()`, `ResolvedMcpTools`, `McpToolRef`, `combineTools()`, `NO_MCP_TOOLS`                                                               | the remote MCP half of the loop (#312): where a request's remote tools come from (asked per request with the owner and the mode's override), the one registry the deployment's and the remote tools share, the pair behind each offered name, and the servers that could not be listed                                                                                                         |
 | `runToolStep(options)`, `ToolStepOptions`                                                                                                                                                                                                         | one step's tool calls (epic #303, X2; #307): the permission read off the request's settings, the calls stored, run concurrently through the registry and answered in call order                                                                                                                                                                                                                |
 | `repairLostExecutions(events, append)`, `lostExecutions(events)`, `pendingToolUse(events)`                                                                                                                                                        | the crash rule (X3): the calls the log holds with no answer **and no user waiting on them**, and the `execution lost` results a brain that inherited them writes — never running them again                                                                                                                                                                                                    |
@@ -110,7 +112,7 @@ emits what that reaches.
 | `ToolDecision`, `ToolSettings`, `ToolSettingsResolver`, `ToolSupportFor`, `ToolSecretResolver`                                                                                                                                                    | the injected seams around tools: the settings in force per request — an `enabled` and a `permission` per tool name, asked with the owner and the mode's override (#307) — whether a model can call tools at all (models.dev's `tool_call`), and where a turn's per-user values come from (#311)                                                                                                |
 | `TurnOutcome`, `TurnOutcomeKind`                                                                                                                                                                                                                  | `{ outcome: 'idle' \                                                                                                                                                                                                                                                                                                                                                                           | 'noop' \                     | 'interrupted' \                                                                                                                                 | 'error' }` |
 | `ResolvedMode`, `ModeResolver`                                                                                                                                                                                                                    | a mode as the host resolved it — id, name, model, effort, prompt addition, and the tool override it imposes (#245, M6; #307) — and where a request's mode comes from                                                                                                                                                                                                                           |
-| `ContextStrategy`, `ContextStrategyOptions`, `ContextStrategyResult`                                                                                                                                                                              | `(events, { model, system, tools? }) => { messages, truncated?, cleared? }` — the messages, what the strategy had to cap to fit (epic #277, K6) and the tool results it capped and cleared (epic #303, X9; #306). `tools` is the registry whose declarations carry the per-result cap                                                                                                          |
+| `ContextStrategy`, `ContextStrategyOptions`, `ContextStrategyResult`                                                                                                                                                                              | `(events, { model, system, tools?, clearThreshold?, todoNudge? }) => { messages, truncated?, cleared?, reminders? }` — the messages, what the strategy had to cap to fit (epic #277, K6), the tool results it capped and cleared (epic #303, X9; #306), and the reminders it carried beside the history (the todo list and the stuck one, #331). `tools` is the registry whose declarations carry the per-result cap; `clearThreshold` and `todoNudge` are the per-request settings of #331 |
 | `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                                                                                                                                         | the default strategy: the conversation, summarized where the log says so (#277 K1), trimmed to a token budget resolved per model, with an oversized newest item capped (K6), a tool result capped to its tool's declaration (X9) and an old one cleared (X9)                                                                                                                                   |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                                                                                                                                     | its defaults                                                                                                                                                                                                                                                                                                                                                                                   |
 | `estimateTokens(text)`                                                                                                                                                                                                                            | the chars/4 estimate the budget is measured in                                                                                                                                                                                                                                                                                                                                                 |
@@ -126,7 +128,9 @@ emits what that reaches.
 | `cutAtUserBoundary(items, tailTokens)`, `ContextCutRule`, `ContextCutItem`                                                                                                                                                                        | K12's one replaceable function: where history may be cut — the default keeps a recent tail, never splits a turn and never splits a tool call from its answer, steering or not (#306)                                                                                                                                                                                                           |
 | `conversationItems(events, afterSeq, cap)`, `toolResultCap(tools, budget)`, `ToolResultCap`                                                                                                                                                       | the visible conversation as cut items — messages, calls and results, a result naming the call it answers — measured as a request would carry it (X9); and the cap one result may cost, by tool (X9)                                                                                                                                                                                            |
 | `SUMMARY_SIZE_RATIO`, `RECENT_TAIL_RATIO`, `OVERFLOW_RECENT_TAIL_RATIO`, `SUMMARY_ITEM_CAP_RATIO`, `SUMMARY_SLICE_RATIO`, `SUMMARY_SIZE_BUDGET_RATIO`, `SUMMARY_INPUT_MARGIN`, `MIN_SLICE_TOKENS`, `MIN_SUMMARY_TOKENS`, `SUMMARY_PROMPT_VERSION` | the engine's numbers and the version of the summary prompt it records (`context-summary-v2` since #306; K5/K6/K7)                                                                                                                                                                                                                                                                              |
-| `TOOL_RESULT_BUDGET_RATIO`, `CLEARED_TOOL_RESULT(tokens)`                                                                                                                                                                                         | the share of the chat model's budget no single tool result may take (X9, #306), and what a cleared result's body is replaced by                                                                                                                                                                                                                                                                |
+| `TOOL_RESULT_BUDGET_RATIO`, `CLEARED_TOOL_RESULT(tokens)`                                                                                                                                                                                         | the share of the chat model's budget no single tool result may take (X9, #306), and what a cleared result's body is replaced by (with the "call the tool again" way back since #331)                                                                                                                                                                                                            |
+| `DEFAULT_CLEAR_THRESHOLD`, `CLEAR_STEP_RATIO`, `clearingCut(items, budget)`                                                                                                                                                                        | the soft share of the budget at which clearing turns on (a half, #331), the step the boundary moves in (a whole tail), and the rule that snaps the cut to it                                                                                                                                                                                                                                    |
+| `canonicalJson(value)`, `stuckStreak(events)`, `stuckReminder(events)`, `stuckEnd(events)`, `isFailure(call, result)`, `stuckResultsReminder(name, count)`, `stuckErrorsReminder(name, count)`, `STUCK_REMINDER_STREAK`, `STUCK_END_STREAK`, `StuckStreak`, `StuckReminder` | stuck detection (#331): the identical run of newest calls in the turn (canonical argument JSON, built-in and remote alike), the one-time reminder it earns at five (and its two wordings), the eight-failing-call end, and what counts as a failure (a denial or an interrupt does not)                                                                                                          |
 | `ModelCredential`                                                                                                                                                                                                                                 | `{ type: 'api_key', apiKey }`, `{ type: 'azure_openai', apiKey, endpoint }`, `{ type: 'openai_compatible', apiKey, baseUrl }`, `{ type: 'bedrock', accessKeyId, secretAccessKey, sessionToken?, region }` or `{ type: 'vertex', project, location, serviceAccount }` — one request's credential                                                                                                |
 | `VertexModelCredential`                                                                                                                                                                                                                           | the Vertex shape on its own: the project, the location, and the service-account key document as text                                                                                                                                                                                                                                                                                           |
 | `credentialSecrets(credential)`                                                                                                                                                                                                                   | every secret a credential carries, for redaction — a Bedrock credential has three, a Vertex one its private key PEM                                                                                                                                                                                                                                                                            |
@@ -227,7 +231,10 @@ LOOP — once per model request
                                     was over the model's budget (#277 K6), and the tool results
                                     it capped (epic #303, X9),
                                     cleared: the old tool results whose bodies were replaced by a
-                                    placeholder so no summary was needed (X9) }
+                                    placeholder so no summary was needed (X9),
+                                    reminders: the todo block and the stuck one the request
+                                    carried besides the history (#331) — absent when it
+                                    carried none }
      (the append IS the claim: atomic, fenced, refused whole with ClaimConflictError)
   6. stream ............................................... stored event_start under a fresh
                                                              sevt_ id, then one stored
@@ -623,17 +630,22 @@ written it, so it is sized twice, and **both are the request's alone**: the stor
   result — so a client can show a notice. `truncated`'s `seq`/`tokens_before`/`tokens_after`
   still describe the newest item the request shortened: the newest message when it had to be
   capped (K6), and otherwise the newest result that was (X9).
-- **A result older than the verbatim tail is cleared, before anything is summarized (X9).** Its
-  body is replaced by `CLEARED_TOOL_RESULT(n)` — "result cleared, N tokens" — and the count and
-  the tokens are recorded on the span as `cleared: { results, tokens }`. Old tool output is what
-  a request can most afford to give up, and giving it up costs no model call: **clearing is the
-  first answer to a filling context**, which is why `estimateContextSize` measures the request
-  with the placeholder in it and a context it brings back under the threshold is never
-  summarized at all.
+- **A result older than the verbatim tail is cleared, before anything is summarized (X9)** —
+  and, since #331, **only once the context is past the soft clearing threshold**. Its body is
+  replaced by `CLEARED_TOOL_RESULT(n)` — "result cleared, N tokens — call the tool again if you
+  need it" — and the count and the tokens are recorded on the span as `cleared: { results,
+  tokens }`. Old tool output is what a request can most afford to give up, and giving it up
+  costs no model call: **clearing is the first answer to a filling context**, which is why
+  `estimateContextSize` measures the request with the placeholder in it and a context it brings
+  back under the threshold is never summarized at all. The placeholder names the way back to
+  the content — calling the tool again — because nothing else tells the model that a fetch it
+  once ran is one call away, and the study's finding that a `recall` tool goes unused is what
+  makes saying so the whole of the answer rather than adding a tool for it.
 - **"Old" is the K4 tail** — the recent quarter of the chat model's budget, cut at a
   `user.message` boundary by the same rule the engine cuts with — so a context small enough to be
   all tail clears nothing, and a result is cleared exactly when it is history the engine's cut
-  would have covered.
+  would have covered. The boundary is then **snapped to a step** and the whole thing is gated
+  (see "The harness tuning" below).
 - **The rules are derived, not recorded.** Both are computed from the log, the budget and the
   registry's declarations, by one function (`resultPolicy`), which is what lets the measurement
   the trigger takes build the same request the strategy is about to. A host that gives the
@@ -645,6 +657,60 @@ written it, so it is sized twice, and **both are the request's alone**: the stor
   the tail walk over the whole history — and a history nobody can cut is a history nobody can
   clear. The _text_ the summarizer is handed is still the stored one: a summary stands in for
   what the tools said, so it has to be able to read it.
+
+### The harness tuning (epic #303, X12; #331)
+
+Three behaviours the harness-design study (Fan et al., 2026) argues for, all derived from the
+log: a **soft clearing threshold** and a stepped boundary, the **current todo list on every
+request**, and **stuck detection**. `./stuck` is the streak half; the rest is `./context` and
+the loop.
+
+**1. Clearing is gated and stepped.** #306 cleared every result older than the verbatim tail on
+_every_ request, whatever the context's size — a chat at 30% of its budget lost older output for
+nothing, and the boundary moved with each turn, invalidating a provider's prompt cache with it.
+
+- **The gate.** Old results are cleared only once the request would be at or above
+  `DEFAULT_CLEAR_THRESHOLD` of the budget: **a half**. The study staged its two levers — eliding
+  tool output at 0.6 of the window and summarizing at 0.85 — and 0.6/0.85 ≈ 0.71, so this sits at
+  the same ~0.71 of this deployment's own summarization threshold (`DEFAULT_COMPACTION_THRESHOLD`,
+  0.7) ≈ 0.5. It is measured on the request **as it would be without clearing**, so the decision
+  does not depend on its own outcome, and both the strategy and `estimateContextSize` read the
+  one function (`clearingBoundary`), which is what keeps #306's invariant. The threshold is
+  configurable next to the compaction settings: `RunTurnOptions.clearThreshold`, wired from
+  `OPENHARNESS_CLEAR_THRESHOLD` (below the compaction one, and needing no setting).
+- **The step.** The cleared span is rounded **up** to a whole `CLEAR_STEP_RATIO` of the budget,
+  and the ratio is **a whole `RECENT_TAIL_RATIO` (0.25) — one tail**. A turn leaving the tail
+  does so in about a tail's worth of tokens, so a step of the same size is the smallest that can
+  hold the boundary across a turn rather than follow it: the boundary sits on a fixed grid of the
+  log's prefix, moves about once per tail's worth of new history, and holds still for the
+  requests in between — which is what keeps the request prefix, and the prompt cache on it,
+  usable. It is derived from the log and the budget alone (`clearingCut`), so a second brain on a
+  partition computes the same one. The `cleared` record on the span is unchanged.
+
+**2. The current todo list rides every request.** The list lives only as the newest successful
+`todo_write` call's own input (`readTodoList`), so once a summary covers that call the model
+would see it only as prose. The strategy rebuilds it per request, after the history, as one
+trailing `user` message and **never as a log message**; the span records it
+(`reminders: [{ kind: 'todo', tokens }]`) and its size counts in K2. An **empty** list — a model
+that cleared it — sends nothing.
+
+- **The nudge**, off by default (`RunTurnOptions.todoNudge`, `OPENHARNESS_TODO_NUDGE`): before
+  the model's first tool call, with no list yet, a one-line reminder to write one for a task with
+  several steps. The study's benefit is real but small, so it stays off unless a deployment asks.
+
+**3. Stuck detection.** A **streak** is the run of the newest tool calls **in the turn** (since
+the last `session.status_idle`) with the same name and byte-identical arguments, compared as
+canonical JSON so key order is not a difference; a call with other arguments ends it. Built-in
+and remote MCP calls are one sequence (#312). `STUCK_REMINDER_STREAK` (5) identical calls earn a
+one-time reminder on the next request — worded for identical results ("you already have this
+result, move on") or identical errors ("it keeps failing the same way; read the error and try
+something different") — and `STUCK_END_STREAK` (8) identical **failing** calls end the turn with a
+`tool_loop_stuck_error` notice, the step limit's shape rather than a retry loop. Nothing is stored
+beside the log: the streak is recomputed, and the one-time property is read off the span that
+recorded the reminder, so a resumed turn neither reminds twice nor forgets that it did. A
+**failure** is an `is_error` result the tool really produced: a policy `deny`, the user's own
+denial, an interrupt and a call a message ended are not failures. The reminder rides the same
+trailing message as the todo block and is recorded the same way (`kind: 'stuck'`).
 
 ### Pausing for the user (epic #303, X6; #309)
 

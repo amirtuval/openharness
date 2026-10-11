@@ -4,11 +4,13 @@ import { makeModelEntry } from '@openharness/protocol/fixtures'
 
 import {
   TOOL_STEPS_EXHAUSTED_NOTICE,
+  TOOL_LOOP_STUCK_NOTICE,
   clearedResultsNotice,
   formatToolInput,
   mcpServerMarker,
   modelSupportsTools,
   stepLimitNotice,
+  stuckNotice,
   toolCallStatus,
   toolCallSummary,
   toolStatusLabel,
@@ -156,6 +158,18 @@ describe('notices', () => {
     expect(stepLimitNotice({ type: 'tool_steps_exhausted_error', message: '' })).toBe(
       TOOL_STEPS_EXHAUSTED_NOTICE,
     )
+  })
+
+  it('takes the brain’s own stuck-loop sentence, falling back to its own', () => {
+    expect(stuckNotice(null)).toBeNull()
+    expect(stuckNotice({ type: 'model_error', message: 'boom' })).toBeNull()
+    expect(
+      stuckNotice({
+        type: 'tool_loop_stuck_error',
+        message: 'The model called fetch with the same arguments 8 times',
+      }),
+    ).toBe('The model called fetch with the same arguments 8 times')
+    expect(stuckNotice({ type: 'tool_loop_stuck_error', message: '' })).toBe(TOOL_LOOP_STUCK_NOTICE)
   })
 })
 

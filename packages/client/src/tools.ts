@@ -418,6 +418,30 @@ export function stepLimitNotice(
   return error.message.length > 0 ? error.message : TOOL_STEPS_EXHAUSTED_NOTICE
 }
 
+/** The sentence a turn the model looped on is reported with (epic #303, #331). */
+export const TOOL_LOOP_STUCK_NOTICE =
+  'This turn repeated the same failing tool call too many times, so it was ended.'
+
+/**
+ * The stuck-loop notice from the log's last error, or `null` (epic #303, issue #331).
+ *
+ * The brain sends its own sentence in the `session.error` (`tool_loop_stuck_error`) — what the
+ * model kept calling and that a new message carries on — so that message is what a reader is
+ * shown; {@link TOOL_LOOP_STUCK_NOTICE} is only the fallback for one that carried none. It is
+ * the same shape as {@link stepLimitNotice}: a turn that ended on a loop says so rather than
+ * being drawn as a red error.
+ *
+ * @param error the transcript's `lastError`
+ */
+export function stuckNotice(
+  error: { readonly type: string; readonly message: string } | null,
+): string | null {
+  if (error === null || error.type !== 'tool_loop_stuck_error') {
+    return null
+  }
+  return error.message.length > 0 ? error.message : TOOL_LOOP_STUCK_NOTICE
+}
+
 /** The sentence shown when the chat's model cannot call tools at all (epic #303, X2; #308). */
 export const TOOLS_UNSUPPORTED_NOTICE = "This model can't use tools."
 

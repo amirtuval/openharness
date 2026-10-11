@@ -80,6 +80,14 @@ export interface SessionRunnerOptions {
    * which is what a host that wires none runs. See {@link TurnToolOptions}.
    */
   readonly tools?: TurnToolOptions
+  /**
+   * The share of the chat model's budget at which old tool results are cleared (#331), passed to
+   * every turn; `runTurn`'s own default (`DEFAULT_CLEAR_THRESHOLD`) when omitted. The server
+   * wires it from `OPENHARNESS_CLEAR_THRESHOLD`, next to the compaction controls (#282).
+   */
+  readonly clearThreshold?: number
+  /** Whether a turn nudges the model to write a todo list (#331); off when omitted. */
+  readonly todoNudge?: boolean
 }
 
 /** What one call to {@link SessionRunner.run} adds to the runner's configuration. */
@@ -163,6 +171,11 @@ export class SessionRunner {
   /** The tools every turn may offer (epic #303), or `undefined` for a chat with none. */
   readonly #tools: TurnToolOptions | undefined
 
+  /** The clearing threshold and the todo nudge (#331), or `undefined` for the brain's defaults. */
+  readonly #clearThreshold: number | undefined
+
+  readonly #todoNudge: boolean | undefined
+
   readonly #turns = new Map<SessionId, TurnHandle>()
 
   #stopped = false
@@ -177,6 +190,8 @@ export class SessionRunner {
     this.#reasoningSupportFor = options.reasoningSupportFor
     this.#resolveMode = options.resolveMode
     this.#tools = options.tools
+    this.#clearThreshold = options.clearThreshold
+    this.#todoNudge = options.todoNudge
   }
 
   /** Whether the runner has been told to stop and no longer starts passes. */
@@ -389,6 +404,8 @@ export class SessionRunner {
               ? {}
               : { reasoningSupportFor: this.#reasoningSupportFor }),
             ...(this.#resolveMode === undefined ? {} : { resolveMode: this.#resolveMode }),
+            ...(this.#clearThreshold === undefined ? {} : { clearThreshold: this.#clearThreshold }),
+            ...(this.#todoNudge === undefined ? {} : { todoNudge: this.#todoNudge }),
             // The field names are `RunTurnOptions`' own, so the whole group goes over as it is.
             ...(this.#tools === undefined ? {} : this.#tools),
           })

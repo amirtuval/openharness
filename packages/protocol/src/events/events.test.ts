@@ -1079,3 +1079,47 @@ describe('the readonly event types (D9)', () => {
     expect(typed.content.map((block) => block.text)).toEqual(['hi'])
   })
 })
+
+describe('the harness-tuning extensions (#331)', () => {
+  it('accepts the stuck-loop error as a session.error type', () => {
+    const error = SessionErrorSchema.parse({
+      type: 'tool_loop_stuck_error',
+      message: 'the model repeated one failing call',
+      retry_status: { type: 'terminal' },
+    })
+    expect(error.type).toBe('tool_loop_stuck_error')
+    // It is not the missing-credential pairing: any retry status a terminal error takes is fine,
+    // and the schema refuses none of them here.
+    expect(
+      SessionErrorSchema.safeParse({
+        type: 'tool_loop_stuck_error',
+        message: 'x',
+        retry_status: { type: 'exhausted' },
+      }).success,
+    ).toBe(true)
+  })
+
+  it('carries the reminders a request sent beside the history', () => {
+    const base = storedSamples['span.model_request_start']
+    const withReminders = StoredEventSchema.parse({
+      ...base,
+      reminders: [
+        { kind: 'todo', tokens: 40 },
+        { kind: 'stuck', tokens: 22 },
+      ],
+    })
+    expect(withReminders).toMatchObject({
+      reminders: [
+        { kind: 'todo', tokens: 40 },
+        { kind: 'stuck', tokens: 22 },
+      ],
+    })
+    // Absent when the request carried none, which is every request before #331.
+    expect(StoredEventSchema.safeParse({ ...base, reminders: [] }).success).toBe(true)
+    expect(StoredEventSchema.safeParse({ ...base, reminders: undefined }).success).toBe(true)
+    // A kind this build does not know is refused.
+    expect(
+      StoredEventSchema.safeParse({ ...base, reminders: [{ kind: 'other', tokens: 1 }] }).success,
+    ).toBe(false)
+  })
+})

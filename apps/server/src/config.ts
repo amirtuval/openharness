@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 
-import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_TOOL_STEPS } from '@openharness/brain'
+import {
+  DEFAULT_CLEAR_THRESHOLD,
+  DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_TOOL_STEPS,
+} from '@openharness/brain'
 import { BRAVE_SEARCH_PROVIDER, SUPPORTED_SEARCH_PROVIDERS } from '@openharness/hands'
 import type { SearchProviderName } from '@openharness/hands'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
@@ -55,6 +59,8 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_DELTA_RETENTION_MS`    | how long superseded chunks are kept before compaction deletes them; `3600000` |
  * | `OPENHARNESS_COMPACT_INTERVAL_MS`   | how often compaction runs; `300000` by default, `0` disables it  |
  * | `OPENHARNESS_COMPACTION_THRESHOLD`  | the share of the chat model's context budget at which history is summarized; `0.7` (epic #277, C2) |
+ * | `OPENHARNESS_CLEAR_THRESHOLD`       | the share of the chat model's budget at which old tool results are cleared; `0.5` (#331)       |
+ * | `OPENHARNESS_TODO_NUDGE`            | `1` nudges the model to write a todo list before its first tool call; off by default (#331)     |
  * | `OPENHARNESS_LOG_FORMAT`            | `text` (default, the readable one-line format) or `json` (Cloud Logging) (#158) |
  * | `OPENHARNESS_TRACING`               | `off` (default) or `cloud-trace`: export spans to Cloud Trace (#158) |
  * | `OPENHARNESS_TRACE_SAMPLE_RATE`     | the fraction of traces kept when tracing is on; `0.1` (#158)      |
@@ -112,6 +118,8 @@ export const ENV_VARS = {
   deltaRetentionMs: 'OPENHARNESS_DELTA_RETENTION_MS',
   compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
   compactionThreshold: 'OPENHARNESS_COMPACTION_THRESHOLD',
+  clearThreshold: 'OPENHARNESS_CLEAR_THRESHOLD',
+  todoNudge: 'OPENHARNESS_TODO_NUDGE',
   maxToolSteps: 'OPENHARNESS_MAX_TOOL_STEPS',
   searchProvider: 'OPENHARNESS_SEARCH_PROVIDER',
   searchApiKey: 'OPENHARNESS_SEARCH_API_KEY',
@@ -217,6 +225,26 @@ export interface ServerConfig {
    * Anything outside `0..1` fails the boot rather than being accepted as a setting nobody meant.
    */
   readonly compactionThreshold: number
+  /**
+   * `OPENHARNESS_CLEAR_THRESHOLD`: the share of the chat model's budget at which the brain
+   * clears the oldest tool results before it summarizes (issue #331).
+   *
+   * The soft threshold before {@link compactionThreshold}: below it a request carries its old
+   * tool results as they were stored (still capped, X9), at or above it the oldest are replaced
+   * by a placeholder. A fraction in `0..1`; the default is the brain's
+   * (`DEFAULT_CLEAR_THRESHOLD`, a half), and anything outside `0..1` fails the boot. It is
+   * deliberately under the compaction threshold — clearing is the cheaper answer that comes
+   * first.
+   */
+  readonly clearThreshold: number
+  /**
+   * `OPENHARNESS_TODO_NUDGE`: whether a turn nudges the model to write a todo list before its
+   * first tool call (issue #331).
+   *
+   * Off by default: the study's benefit for showing a plan is real but small, and a line on
+   * every session's first request is not free. `1` or `true` turns it on.
+   */
+  readonly todoNudge: boolean
   /**
    * `OPENHARNESS_MAX_TOOL_STEPS`: the most model requests one turn may make (epic #303, X2).
    *
@@ -449,6 +477,15 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
       DEFAULT_COMPACTION_THRESHOLD,
       { min: 0, max: 1 },
     ),
+    // The clearing threshold (#331): the share of the chat model's budget at which old tool
+    // results are cleared, before the compaction threshold summarizes. A fraction like the
+    // one above, and the same "the default needs no setting".
+    clearThreshold: readNumber(env, ENV_VARS.clearThreshold, DEFAULT_CLEAR_THRESHOLD, {
+      min: 0,
+      max: 1,
+    }),
+    // The todo nudge (#331): off unless the deployment asks for it.
+    todoNudge: readFlag(env, ENV_VARS.todoNudge),
     // The tool loop's budget (epic #303, X2): how many model requests one turn may make. At
     // least one — a turn that may make no request could not answer a message at all.
     maxToolSteps: readInteger(env, ENV_VARS.maxToolSteps, DEFAULT_MAX_TOOL_STEPS, { min: 1 }),
@@ -531,6 +568,11 @@ export function describeConfig(config: ServerConfig): string[] {
       ? 'compaction: disabled'
       : `compaction: every ${config.compactIntervalMs}ms, ` +
           `retaining superseded chunks ${config.deltaRetentionMs}ms`,
+  )
+  lines.push(
+    `context: clears old tool results at ${config.clearThreshold} of the budget, ` +
+      `summarizes at ${config.compactionThreshold}` +
+      (config.todoNudge ? ', nudges for a todo list' : ''),
   )
   lines.push(config.webDir === undefined ? 'web assets: none' : `web assets: ${config.webDir}`)
   if (config.allowPrivateProviderUrls) {

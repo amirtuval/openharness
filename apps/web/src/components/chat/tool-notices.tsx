@@ -8,10 +8,12 @@ import type { ReactNode } from 'react'
  * Four things the log says that no message says, drawn together at the foot of the transcript
  * where the newest thing happened:
  *
- * - **the step limit** — the turn reached its model-request budget before the model finished
- *   (X2). The brain's own `session.error` carries the sentence ("This turn reached its limit of
- *   50 …"), and `stepLimitNotice` hands it over; the chat draws this instead of the red error
- *   banner for that one error type, because it is a notice rather than a failure to retry.
+ * - **the step limit, or a stuck loop** — the turn reached its model-request budget before the
+ *   model finished (X2), or the model repeated one failing call too many times (#331). The
+ *   brain's own `session.error` carries the sentence ("This turn reached its limit of 50 …"),
+ *   and `stepLimitNotice` / `stuckNotice` hand it over; the chat draws this instead of the red
+ *   error banner for those two error types, because they are notices rather than failures to
+ *   retry.
  * - **this model can't use tools** — the catalog's `tool_call` is `false`, so no request will
  *   offer one, and the reader should not wait for a call that cannot come.
  * - **results were shortened**, and **old results were cleared** — the request had to cap a

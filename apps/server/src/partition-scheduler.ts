@@ -152,6 +152,9 @@ export interface PostgresPartitionSchedulerOptions {
   readonly resolveMode?: ModeResolver
   /** The tools a turn may offer, and the loop's decisions about them (epic #303, X4). */
   readonly tools?: TurnToolOptions
+  /** The clearing threshold and the todo nudge (#331), passed to every turn. */
+  readonly clearThreshold?: number
+  readonly todoNudge?: boolean
   /**
    * Called when a pass rejects, and when a background tick fails. Never throws.
    *
@@ -277,6 +280,10 @@ export class PostgresPartitionScheduler implements SessionScheduler {
             : { reasoningSupportFor: options.reasoningSupportFor }),
           ...(options.resolveMode === undefined ? {} : { resolveMode: options.resolveMode }),
           ...(options.tools === undefined ? {} : { tools: options.tools }),
+          ...(options.clearThreshold === undefined
+            ? {}
+            : { clearThreshold: options.clearThreshold }),
+          ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
         }),
       ...(options.maxConcurrentSessions === undefined
         ? {}
