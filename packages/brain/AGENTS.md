@@ -603,10 +603,12 @@ this: …`), and an `ask_user` call has its answers written as its result — va
 - **A session sitting on an answer looks idle.** A confirmation is not a queued user event, so
   `getPendingUserEvents` does not list it and the turn state is `idle`; the loop's no-op guard
   asks one targeted read for the newest tool event instead (a `user.tool_confirmation` there is
-  work, and `answeredWaiting` is the same question asked of a whole log). Nothing sweeps for it:
-  the route signals the scheduler, and a signal is a hint — a confirmation appended by an
-  instance that died before its turn started is picked up by the store's work scan only if the
-  session has a queued event or an open turn (see the note in the package's follow-ups).
+  work, and `answeredWaiting` is the same question asked of a whole log). Nothing _sweeps_ for
+  it: the route signals the scheduler, and a signal is a hint. A confirmation appended by an
+  instance that died before its turn started is therefore found again only when the session gets
+  a message: the store's work scan still calls a session busy on a queued event or an open turn,
+  and teaching it to treat an answered waiting call as work is a `@openharness/session` change
+  of its own.
 
 ### The seams the rest of the epic plugs into
 
