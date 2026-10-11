@@ -93,8 +93,10 @@ import type {
   ListEventsOptions,
   ListModelRequestsOptions,
   ListSessionsOptions,
+  ListToolUsesOptions,
   ModelRequestUsage,
   OwnerScope,
+  ToolUseRecord,
   UnscopedListEventsOptions,
   PartitionFence,
   PartitionLease,
@@ -661,6 +663,45 @@ export class InMemorySessionStore implements SessionStore {
       }
     }
     return resolved(requests)
+  }
+
+  listToolUses(options: ListToolUsesOptions): Promise<ToolUseRecord[]> {
+    const { fromMs, toMs } = usageWindowOf(options)
+    const calls: ToolUseRecord[] = []
+    const sessions = [...this.#sessions.values()]
+      .filter((record) => matchesOwner(record.session, options))
+      .sort((left, right) => compareIds(left.session.id, right.session.id))
+    for (const record of sessions) {
+      const ranges = this.#supersessions.get(record.session.id)
+      // Whether a call's result said it failed, keyed by the id the result names — the pair the
+      // Postgres read joins on `tool_use_id`. A call with no entry here was never answered.
+      const failed = new Map<EventId, boolean>()
+      for (const entry of record.events) {
+        if (entry.event.type === EVENT_TYPES.agentToolResult) {
+          failed.set(entry.event.tool_use_id, entry.event.is_error)
+        }
+      }
+      for (const entry of record.events) {
+        const event = entry.event
+        if (event.type !== EVENT_TYPES.agentToolUse) {
+          continue
+        }
+        const atMs = new Date(event.processed_at).getTime()
+        if (atMs < fromMs || atMs >= toMs || isSuperseded(event, ranges)) {
+          continue
+        }
+        // Only a call that was answered successfully counts: a refused, failed, interrupted or
+        // never-answered call did not do what it asked for.
+        if (failed.get(event.id) !== false) {
+          continue
+        }
+        if (options.name !== undefined && event.name !== options.name) {
+          continue
+        }
+        calls.push(deepFreeze({ name: event.name, processed_at: event.processed_at }))
+      }
+    }
+    return resolved(calls)
   }
 
   compact(options: CompactOptions): Promise<number> {

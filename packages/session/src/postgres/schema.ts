@@ -23,7 +23,7 @@ import { timestampAt } from '../clock'
 import type { SealedProviderCredential } from '../credentials'
 import { isUserEventType } from '../events'
 import { deepFreeze } from '../freeze'
-import type { AppendableEvent, ModelRequestUsage, PartitionSignal } from '../store'
+import type { AppendableEvent, ModelRequestUsage, PartitionSignal, ToolUseRecord } from '../store'
 
 /**
  * How the Postgres store's tables look to Kysely, and how a row becomes a protocol value.
@@ -67,7 +67,7 @@ export interface ModesTable {
   system_prompt_addition: string | null
   /**
    * Which built-in tools a chat on this mode has on or off, or `null` for no override
-   * (`0026_tool_settings.sql`; epic #303, X4; #307). `jsonb`, so its shape is the writer's —
+   * (`0027_tool_settings.sql`; epic #303, X4; #307). `jsonb`, so its shape is the writer's —
    * the protocol's `ModeToolOverrideSchema` is the only spelling of it.
    */
   tools: ModeToolOverride | null
@@ -314,7 +314,7 @@ export interface UserPreferencesTable {
 export interface UserToolSettingsTable {
   /** The `user.id` the settings belong to (Better Auth's opaque text). */
   user_id: string
-  /** The built-in tool choices, keyed by tool name (`0026_tool_settings.sql`). */
+  /** The built-in tool choices, keyed by tool name (`0027_tool_settings.sql`). */
   builtin: UserToolSettings['builtin']
   updated_at: Date
 }
@@ -570,6 +570,27 @@ export function modelRequestFromRow(row: ModelRequestRow): ModelRequestUsage {
     usage: row.model_usage as ModelUsage,
     processed_at: timestampOf(row.processed_at),
   })
+}
+
+/**
+ * A row of the per-user tool-call read (epic #303, #305): one `agent.tool_use` inside the
+ * caller's window that its `agent.tool_result` answered without an error.
+ *
+ * Two columns and nothing else — the name the call carried, and the instant the call was
+ * stored — which is what a usage report of searches counts and groups.
+ */
+export interface ToolUseRow {
+  /** The tool's name, out of the call event's payload. */
+  readonly name: string
+  /** The call event's `processed_at`: when the call was made. */
+  readonly processed_at: Date
+}
+
+/**
+ * The tool call a row carries, deep-frozen like every other answer this package hands out.
+ */
+export function toolUseFromRow(row: ToolUseRow): ToolUseRecord {
+  return deepFreeze({ name: row.name, processed_at: timestampOf(row.processed_at) })
 }
 
 // --------------------------------------------------------------------- channels

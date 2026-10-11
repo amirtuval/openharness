@@ -88,7 +88,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0023 a credential's public, per-type details (#249, #250, #251),
                         0024 the per-user modes, and the mode a session follows (#245, M6),
                         0025 the compaction controls on the per-user preferences (#282),
-                        0026 the per-user tool settings, and the tool override a mode carries (#307)
+                        0026 the index behind the per-user tool-call read (#305),
+                        0027 the per-user tool settings, and the tool override a mode carries (#307)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -600,7 +601,7 @@ the server's own, `summary_model` `same-as-chat` by default, `summary_max_passes
 the engine's own; `on delete cascade` from `"user"`; see `0016`, `0019` and `0025`) and
 `user_tool_settings` (one row per user: the built-in tool choices as a `builtin jsonb` map of
 tool name to `{ enabled, policy }`, empty by default; `on delete cascade` from `"user"`; see
-`0026`). Five are
+`0027`). Five are
 **Better Auth's**, created by the same migrations and read and written by Better Auth itself
 (decision A1): `user`, `session`, `account`, `verification` and `deviceCode`.
 
@@ -792,9 +793,22 @@ default 'same-as-chat'` is a real column default instead, the rule `0019` uses: 
   The reader is total anyway: a row a hand edit left outside the protocol's shapes reads back as
   the default, so a preferences read cannot break.
 
-The per-user tool settings (epic #303, X4; issue #307) added the newest one:
+The built-in tools' usage read (epic #303, #305) added one:
 
-- **`0026_tool_settings.sql` — the per-user tool settings, and a mode's tool override** (#307):
+- **`0026_agent_tool_use_usage.sql` — the index behind `listToolUses`** (#305): a **partial**
+  index, `(session_id, processed_at) where type = 'agent.tool_use'`. Counting a user's daily
+  `web_search` calls (#305) narrows to the caller's sessions and then to a UTC day's window,
+  and `(session_id, seq)` (0003) seeks by position, not by time — so without this the read
+  would walk every event of every one of the caller's sessions, which is the cost the read
+  exists to remove. The same shape and the same reasoning as `0021`'s, one event type over.
+  Partial because only `agent.tool_use` rows are read that way, and idempotent because an
+  index is built, not migrated: a re-run leaves it (and the log) exactly as it was. **It keeps
+  the number 0026** — it is earlier in the tools stack than #307's file, which took `0027`
+  when the two met, because both branches wrote a `0026` from the same base.
+
+The per-user tool settings (epic #303, X4; issue #307) added one after it:
+
+- **`0027_tool_settings.sql` — the per-user tool settings, and a mode's tool override** (#307):
   a `create table if not exists user_tool_settings` — `user_id` primary key, `builtin jsonb not
 null default '{}'`, `updated_at`, `on delete cascade` from `"user"` — and one
   `alter table modes add column if not exists tools jsonb`. The choices live in **one `jsonb`
@@ -957,7 +971,10 @@ dependency table.
   The per-user usage read (#247) is in the suite too: the start/end pairing that names each
   request's model, the half-open window (`from` in, `to` out), owner scoping, the `model: null`
   a request nothing attributes gets, the `(session_id, seq)` order, a rewind's branch left out,
-  and the `RangeError` a window that is not one raises. The modes (#245, M6) are there as well:
+  and the `RangeError` a window that is not one raises. The per-user tool-call read (#305) is in
+  the suite beside it: a call its result answered, a failed call and one nothing answered both
+  left out, the `name` filter, owner scoping, the half-open window, the `(session_id, seq)`
+  order and the rewind rule. The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,
@@ -974,8 +991,8 @@ dependency table.
   chunk another store appended delivered to this store's subscriber, a deleted session's rows
   really gone from `events`, `event_claims` and `event_supersessions` while another session's
   are untouched, its `session.deleted` announced to a different store's subscriber,
-  idempotent migrations (`0016`, `0017`, `0018` and `0026` included — the tables and the
-  columns they add are exercised after a re-run),
+  idempotent migrations (`0016`, `0017`, `0018`, `0026` and `0027` included — the tables,
+  indexes and columns they add are exercised after a re-run),
   the #93 backfill over a session row written the pre-#93 way (the agent's model and system
   copied into the new columns, the row read back as the protocol's session), `close()` leaving
   a borrowed pool alone, the raw `events.processed_at` column staying `NULL`

@@ -9,8 +9,8 @@ import { ModelUsageSchema } from '../events/span'
  * (epic #245, A2; issue #247) — the shapes of what a session and a user spent.
  *
  * ```
- * GET /v1/sessions/{session_id}/usage  -> { session_id, totals, cost, by_model }
- * GET /v1/me/usage?from=&to=&tz=       -> { from, to, tz, totals, cost, by_model, by_day }
+ * GET /v1/sessions/{session_id}/usage  -> { session_id, totals, cost, by_model, searches }
+ * GET /v1/me/usage?from=&to=&tz=       -> { from, to, tz, totals, cost, by_model, by_day, searches }
  * ```
  *
  * Both are **reads of the log**, and both answer in the same currency of facts:
@@ -19,6 +19,10 @@ import { ModelUsageSchema } from '../events/span'
  *   `span.model_request_end`; a price is not in the log at all. So a response is assembled when
  *   it is asked for, from the tokens the log holds and the model catalog's prices, and nothing
  *   about cost is ever written down (epic #245).
+ * - **Searches are counted, and never priced** (epic #303, #305). `searches` is how many
+ *   `web_search` calls the covered log holds — the operator pays the search provider, and no
+ *   rate for that is in this repository — so a reader is shown a count rather than a made-up
+ *   cost.
  * - **A price nobody published is named, not guessed.** A request whose model the catalog has no
  *   price for contributes its tokens and nothing to the cost; a total **sums the priced requests
  *   and counts the unpriced ones** (`unpriced_requests`), and its `cost` is `null` only when
@@ -105,6 +109,22 @@ export const ModelUsageBreakdownSchema = z.object({
 export type ModelUsageBreakdown = z.infer<typeof ModelUsageBreakdownSchema>
 
 /**
+ * How many searches an answer covers (epic #303, #305).
+ *
+ * A count and not a price: the deployment pays the search provider, the operator's plan is not
+ * in this repository, and inventing a rate for one would be exactly the estimate the usage
+ * surface refuses to make (epic #245). So a search is counted — the number of `web_search`
+ * calls the log holds — and no money is claimed for it.
+ *
+ * It is a sibling of the token totals rather than a member of them, because tokens and searches
+ * are not the same kind of thing: `totals` is a `ModelUsage` of four counters, and a reader that
+ * summed a search count into one would be adding apples to oranges.
+ */
+export const UsageSearchesSchema = z.number().int().nonnegative()
+
+export type UsageSearches = z.infer<typeof UsageSearchesSchema>
+
+/**
  * Response of `GET /v1/sessions/{session_id}/usage`: everything one session spent.
  *
  * Owner-scoped: another user's session is the 404 an unknown id gets (A4). The route reads the
@@ -113,7 +133,7 @@ export type ModelUsageBreakdown = z.infer<typeof ModelUsageBreakdownSchema>
  *
  * A session whose log holds no `span.model_request_end` at all (a chat with no reply yet)
  * answers zeroed totals, an empty `by_model` and a `null` cost: nothing was spent, and nothing
- * was priced either.
+ * was priced either. `searches` is `0` in that case too — a count, which has no unknown.
  */
 export const SessionUsageSchema = z.object({
   /** The session these totals are for. */
@@ -124,6 +144,8 @@ export const SessionUsageSchema = z.object({
   ...TotalCostSchema.shape,
   /** The same totals per model, biggest first. */
   by_model: z.array(ModelUsageBreakdownSchema),
+  /** How many `web_search` calls this session made; see {@link UsageSearchesSchema}. */
+  searches: UsageSearchesSchema,
 })
 
 export type SessionUsage = z.infer<typeof SessionUsageSchema>
@@ -143,6 +165,8 @@ export const DailyUsageSchema = z.object({
   totals: UsageTotalsSchema,
   /** What `totals` cost that day, and how many of its requests had no price. */
   ...TotalCostSchema.shape,
+  /** How many `web_search` calls that day made. */
+  searches: UsageSearchesSchema,
 })
 
 export type DailyUsage = z.infer<typeof DailyUsageSchema>
@@ -178,6 +202,8 @@ export const UserUsageSchema = z.object({
   by_model: z.array(ModelUsageBreakdownSchema),
   /** The range's totals per local day, ascending; days with no request are absent. */
   by_day: z.array(DailyUsageSchema),
+  /** How many `web_search` calls the range made; see {@link UsageSearchesSchema}. */
+  searches: UsageSearchesSchema,
 })
 
 export type UserUsage = z.infer<typeof UserUsageSchema>

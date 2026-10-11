@@ -21,6 +21,7 @@
   "dependencies": {
     "@openh/cli": "workspace:*",
     "@openharness/client": "workspace:*",
+    "@openharness/hands": "workspace:*",
     "@openharness/protocol": "workspace:*",
     "@openharness/server": "workspace:*",
     "@openharness/session": "workspace:*",

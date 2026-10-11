@@ -26,6 +26,7 @@ describe('SessionUsageSchema', () => {
       cost: 0.0045,
       unpriced_requests: 0,
       by_model: [entry],
+      searches: 0,
     }
     expect(SessionUsageSchema.parse(usage)).toEqual(usage)
   })
@@ -40,6 +41,7 @@ describe('SessionUsageSchema', () => {
       cost: 0.0045,
       unpriced_requests: 3,
       by_model: [entry, { ...entry, model: 'acme/mystery-1', cost: null, unpriced_requests: 3 }],
+      searches: 2,
     }
     expect(SessionUsageSchema.parse(usage)).toEqual(usage)
   })
@@ -53,6 +55,7 @@ describe('SessionUsageSchema', () => {
       cost: null,
       unpriced_requests: 1,
       by_model: [{ ...entry, cost: null, unpriced_requests: 1 }],
+      searches: 0,
     })
     expect(parsed.cost).toBeNull()
     expect(parsed.unpriced_requests).toBe(1)
@@ -69,8 +72,9 @@ describe('SessionUsageSchema', () => {
         cost: null,
         unpriced_requests: 0,
         by_model: [],
+        searches: 0,
       }),
-    ).toMatchObject({ cost: null, unpriced_requests: 0, by_model: [] })
+    ).toMatchObject({ cost: null, unpriced_requests: 0, by_model: [], searches: 0 })
   })
 
   it('refuses a negative count, a fractional request count and a negative cost', () => {
@@ -80,6 +84,7 @@ describe('SessionUsageSchema', () => {
       cost: 0,
       unpriced_requests: 0,
       by_model: [],
+      searches: 0,
     }
     expect(SessionUsageSchema.safeParse({ ...base, cost: -1 }).success).toBe(false)
     expect(SessionUsageSchema.safeParse({ ...base, unpriced_requests: -1 }).success).toBe(false)
@@ -106,7 +111,8 @@ describe('UserUsageSchema', () => {
       cost: 0.0045,
       unpriced_requests: 0,
       by_model: [entry],
-      by_day: [{ day: '2026-10-08', totals, cost: 0.0045, unpriced_requests: 0 }],
+      by_day: [{ day: '2026-10-08', totals, cost: 0.0045, unpriced_requests: 0, searches: 1 }],
+      searches: 1,
     }
     expect(UserUsageSchema.parse(usage)).toEqual(usage)
   })
@@ -120,7 +126,10 @@ describe('UserUsageSchema', () => {
       cost: null,
       unpriced_requests: 0,
       by_model: [],
-      by_day: [{ day: '2026-10-08T10:00:00Z', totals, cost: null, unpriced_requests: 0 }],
+      by_day: [
+        { day: '2026-10-08T10:00:00Z', totals, cost: null, unpriced_requests: 0, searches: 0 },
+      ],
+      searches: 0,
     }
     expect(UserUsageSchema.safeParse(usage).success).toBe(false)
   })

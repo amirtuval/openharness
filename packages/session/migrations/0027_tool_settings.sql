@@ -1,4 +1,4 @@
--- 0026_tool_settings.sql — the per-user *tool settings*, and the tool override a mode carries
+-- 0027_tool_settings.sql — the per-user *tool settings*, and the tool override a mode carries
 -- (epic #303, X4; issue #307).
 --
 -- Two pieces of the same decision — which built-in tools a chat has, and what a call to one

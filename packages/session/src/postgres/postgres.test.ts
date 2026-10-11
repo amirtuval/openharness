@@ -505,17 +505,28 @@ if (target === null) {
       const files = await migrate(db)
       expect(files.length).toBeGreaterThan(0)
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
-      // `create table if not exists` (#111, #122), and `0018_credential_key_provider.sql`,
-      // `0019_user_preferences_theme.sql` and `0025_user_preferences_compaction.sql` one or
-      // more `add column if not exists` (#150, #203, #282): a re-run has to leave the tables
-      // and the columns working, which the store calls below prove.
+      // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
+      // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql` and
+      // `0027_tool_settings.sql` one or more `add column if not exists` (#150, #203, #282,
+      // #307), and `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql` and
+      // `0027_tool_settings.sql` build an index or a table (#247, #305, #307): a re-run has to
+      // leave the tables, the indexes and the columns working, which the store calls below
+      // prove.
       expect(files).toContain('0016_user_preferences.sql')
       expect(files).toContain('0017_scheduler_instances.sql')
       expect(files).toContain('0018_credential_key_provider.sql')
       expect(files).toContain('0019_user_preferences_theme.sql')
       expect(files).toContain('0020_rewind_supersessions.sql')
+      expect(files).toContain('0021_model_request_end_usage.sql')
       expect(files).toContain('0025_user_preferences_compaction.sql')
-      expect(files).toContain('0026_tool_settings.sql')
+      // Both names exist since the tools stack met: #305's index keeps `0026` (it is earlier
+      // in the stack) and #307's settings file was renumbered to `0027` — the check that the
+      // numbers are unique and ordered is that both files are here, in this order.
+      expect(files).toContain('0026_agent_tool_use_usage.sql')
+      expect(files).toContain('0027_tool_settings.sql')
+      expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
+        files.indexOf('0027_tool_settings.sql'),
+      )
       expect(await migrate(db)).toEqual(files)
 
       const { store, session } = await seeded()

@@ -75,9 +75,9 @@ export interface SessionRunnerOptions {
    */
   readonly resolveMode?: ModeResolver
   /**
-   * The tools a turn may offer, and the loop's decisions about them (epic #303, X4); omitted
-   * means a chat with no tools, which is what every deployment on a real provider model runs
-   * until #305's built-ins land. See {@link TurnToolOptions}.
+   * The tools a turn may offer, and the loop's decisions about them (epic #303, X4; the
+   * built-ins are #305, the per-user settings are #307); omitted means a chat with no tools,
+   * which is what a host that wires none runs. See {@link TurnToolOptions}.
    */
   readonly tools?: TurnToolOptions
 }

@@ -11,9 +11,10 @@ import {
 import { InMemorySessionStore } from '@openharness/session'
 import type { RetryPolicy } from '@openharness/brain'
 
+import { createProviderFetch } from './catalog/provider-fetch'
 import { createBundledRegistry } from './catalog/registry'
 import { LocalScheduler } from './scheduler'
-import { createTurnRegistry, createTurnTools, TEST_TOOL_NAME } from './tools'
+import { createTurnTools, TEST_TOOL_NAME } from './tools'
 import {
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
@@ -59,15 +60,18 @@ async function runTurn(
     resolveCredential: resolveTestSessionCredential,
     onError: () => {},
     ...(options.retry === undefined ? {} : { retry: options.retry }),
-    // The tools as `main.ts` wires them: the test registry for the mock model, and the support
-    // gate over the registry (epic #303).
+    // The tools as `main.ts` wires them: the built-ins plus the test `echo` tool for the mock
+    // model (epic #303; the built-ins are #305), and the support gate over the registry. No
+    // search is configured, so nothing here reaches the operator's key.
     ...(options.tools === true
       ? {
           tools: createTurnTools({
             config,
-            tools: createTurnRegistry('mock'),
+            kind: 'mock',
             store,
             registry: createBundledRegistry(),
+            searchTransport: createProviderFetch(),
+            allowance: undefined,
           }),
         }
       : {}),

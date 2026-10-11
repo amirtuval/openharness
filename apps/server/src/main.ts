@@ -36,6 +36,7 @@ import { ModelCatalog } from './catalog/catalog'
 import { createMaxOutputResolver, createTokenBudgetResolver } from './catalog/context-budget'
 import { createProviderFetch } from './catalog/provider-fetch'
 import { createReasoningSupportResolver } from './catalog/reasoning-support'
+import { createSearchAllowance } from './searches'
 import { createContextCompactionResolver } from './context-compaction'
 import { createModeResolver } from './modes'
 import { createBundledRegistry, type ModelRegistry } from './catalog/registry'
@@ -50,7 +51,7 @@ import {
   type ProviderCredentialValidator,
 } from './provider-validation'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
-import { createTurnRegistry, createTurnTools, type TurnToolOptions } from './tools'
+import { createTurnTools, type TurnToolOptions } from './tools'
 
 /**
  * Starting the server: the environment, the store, sign-in, the scheduler, the app, and the
@@ -258,15 +259,26 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // applies whatever this answers.
   const resolveMode = createModeResolver({ store, credentials })
 
-  // The tools a turn may offer (epic #303, X4), and the per-user settings over them (#307).
-  // This build registers one — the test `echo` tool — and only behind
-  // `OPENHARNESS_TEST_MODEL=mock`, so a deployment on a provider model runs exactly the chat it
-  // ran before #304; #305's built-ins are what changes that. Which models may call tools at all
-  // comes from the same registry, as `models.dev`'s `tool_call`. The registry is built once and
-  // handed to both readers — the turn options and the `/v1/me/tools` routes (`createApp`) — so
-  // a tool the settings screen calls available is one a chat can really call.
-  const turnRegistry = createTurnRegistry(resolvedModel.kind)
-  const turnTools = createTurnTools({ config, tools: turnRegistry, store, registry })
+  // The tools a turn may offer (epic #303, X4; the built-ins are #305, the per-user settings
+  // are #307): `web_fetch` and `todo_write` for every deployment, `web_search` where an
+  // operator configured a search API, and the test `echo` tool behind
+  // `OPENHARNESS_TEST_MODEL=mock`. Which models may call tools at all comes from the same
+  // registry, as `models.dev`'s `tool_call`. The registry is built once here and handed to both
+  // readers — the turn options and the `/v1/me/tools` routes (`createApp`) — so a tool the
+  // settings screen calls available is one a chat can really call.
+  const turnTools = createTurnTools({
+    config,
+    kind: resolvedModel.kind,
+    registry,
+    // The search request goes out through the server's egress, like every provider call
+    // (#270); the fixed endpoint and the operator's key are the only things it carries.
+    searchTransport: createProviderFetch(),
+    allowance:
+      config.search === null
+        ? undefined
+        : createSearchAllowance({ store, dailyLimit: config.search.dailyLimit }),
+    store,
+  })
 
   const scheduler = createScheduler(
     config,
@@ -335,7 +347,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     catalog,
     registry,
     // The tools `/v1/me/tools` reports on: the same registry the turn options were built from.
-    ...(turnRegistry === undefined ? {} : { tools: turnRegistry }),
+    tools: turnTools.tools,
     // The preferences response reports it as the default a user who has not chosen a compaction
     // share follows (C3, #282).
     compactionThreshold: config.compactionThreshold,
