@@ -637,6 +637,52 @@ divider above is the outcome. The words are the client's (`manualCompactionNotic
 app and the terminal say the same thing; the "Compacting…" wait between the ask and the answer
 is the status field's, next to the summarising pass count.
 
+### The pause, in `oh` (epic #303, X6; issues #309, #310)
+
+A terminal has no disclosure control and no pointer, so everything the web draws as an approval
+prompt or an `ask_user` form is **one flat list of rows** here (`components/pending-prompt.tsx`),
+drawn under the transcript with the notices and above the prompt. The wording, the choices and the
+one `user.tool_confirmation` each row builds come from `@openharness/client`'s `src/approvals.ts`,
+so `oh` and the page cannot disagree about what a reader is being asked.
+
+| key             | what it does                                                      |
+| --------------- | ----------------------------------------------------------------- |
+| ↑ / ↓           | move the cursor                                                   |
+| Enter           | take the highlighted row — allow, choose, toggle, submit, decline |
+| Tab / Shift+Tab | jump to the next / previous question                              |
+| Esc             | decline the call the highlighted row belongs to                   |
+| Space           | toggle a multiple-choice option                                   |
+
+- **The list owns the keyboard while something waits, and that is one deliberate deviation from
+  the brief's key list.** The brief asks for space _and_ for a message that can be typed instead of
+  answered, and a prompt cannot have both: a space typed into the message would also be the list's
+  toggle. So the list takes every key (`PromptInput`'s `captureKeys`) and the way out is its own
+  last row, **Write a message instead** — which hands the keyboard back, after which the prompt
+  says nothing until the reader types. The hint under the list says what sending a message does
+  (`pendingCallsNotice` is the web's version of the same sentence, and the status line's own
+  `dismissed` word is what the call then reads).
+- **Free text has no field here either**, so a row that needs some — a `text` question, a choice's
+  write-in, a denial's message — opens the prompt slot's one-line `TextEntry`
+  (`components/text-entry.tsx`), the same mechanism `/model` and `/providers` use. It echoes what
+  is typed (nothing here is a secret), Esc settles `null` for "never mind", and the list comes back
+  with what it settled.
+- **The rows are a pure function** (`pendingRows(entries, drafts)`) and so are the lines
+  (`pendingPromptLines`), so the keyboard model is testable without a terminal — as
+  `toolCallLines` and `todoLines` are. An approval contributes its four choices plus the
+  deny-with-a-message row; a question contributes a row per option (plus the write-in the type
+  always allows), a text row, or a yes/no pair; each `ask_user` call ends with Submit (whose hint
+  is what the protocol's own check still wants) and Decline.
+- **A call whose confirmation is in the log is off the list** — it has been answered and the turn
+  is on its way — which is what makes `oh -s` into a paused chat land where a live one left off.
+  `ChatViewState.answering` covers the moment between the key and the stream's echo, so a second
+  Enter cannot send the same answer twice.
+- **Several approvals are answerable together.** Two or more get an **Allow all N** and a
+  **Deny all N** row at the end of the list — one event per call, in one request, and "allow all"
+  is the **once** approval for each, because answering several at once must not hand out a
+  remembered permission nobody chose. One approval gets no bulk row: it would be a second copy of
+  its own four choices. A question never joins either — `ask_user` cannot be allowed without its
+  answers, and the server refuses an approval carrying none.
+
 ### The tools, in the transcript (epic #303, X1/X2/X5/X9; issue #308)
 
 The terminal's half of the tool UI, all of it from the transcript's `toolCalls`, `todos` and the
@@ -806,9 +852,12 @@ src/
                          and compaction-notice (what a manual `/compact` came to, #283),
                          tool-call (a call's compact line and the reason a failed one owes,
                          X5; #308), todo-panel (the chat's task list as a compact block,
-                         X5; #305; #308) and tool-notices (the step limit, a model that
+                         X5; #305; #308), tool-notices (the step limit, a model that
                          cannot use tools, and what a request shortened or cleared,
-                         X2/X5/X9; #308)
+                         X2/X5/X9; #308), pending-prompt (the approvals and questions
+                         waiting on the reader, as one keyboard-driven list, X6; #310)
+                         and text-entry (the one-line field a pending row's free text
+                         goes through, #310)
   update/
     index.ts             the auto-update: the notice, and the decision to check
     decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
@@ -971,6 +1020,9 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/todo-panel.test.tsx`              | the task list (#303, X5; #305; #308): `todoLines`' header, marks and states, a cleared list drawn as cleared, the truncation, and the block a frame draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/tool-notices.test.tsx`            | the four tool notices (#303, X2/X5/X9; #308): nothing when there is nothing to say, the step limit in the amber, the two result lines in chrome, and the words keeping without colour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `src/components/transcript-view-tools.test.tsx`   | a call in the transcript (#303, X5; #308): drawn between the messages with one blank line around it, kept live while it runs and settled once it does not, and a failed call's reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/components/pending-prompt.test.tsx`          | the pending list (#303, X6; #310): `pendingRows` and the lines it draws — an approval's four choices and its deny-with-a-message row, a question's options with the mark that says what is chosen, the write-in and the text row, the Submit hint naming what is still missing, the bulk rows, and the truncation a narrow terminal gets — then the component at the keyboard: Enter sends an approval (and ↓ moves to the next one), Esc declines the row's call, space and Enter choose and toggle, Tab crosses to the next question, a text row opens the slot's entry, the message row hands the keyboard back, and nothing is read when it is not the list's                                                                                                                                                                                                                                                                                                                          |
+| `src/components/text-entry.test.tsx`              | the one-line entry (#303, #310): what is typed is echoed and settled on Enter, it starts from what was said before so an answer can be corrected, Esc and Ctrl+C settle nothing, an empty line is a real answer, and a pasted several-line string stays on one line                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `src/chat/pausing.test.tsx`                       | the pause end to end in `oh` (#303, X6; #310): a **reloaded** paused chat drawing its questions with the keys that answer them, the answers taken with arrows/Tab/Enter and sent as one confirmation, Esc's decline, the keyboard staying with the list until "write a message instead" hands it back, a message sent that way declining what waited, and a free-text question answered through the prompt slot's entry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |     |
 | `src/commands/tools.test.ts`                      | `oh tools` (#303 X4; #307; #308): `formatTools`' columns and its "not available" case, a plain read, one tool turned off without touching the others, a permission-only change, and a name nothing registers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |

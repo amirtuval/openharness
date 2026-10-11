@@ -591,9 +591,7 @@ export function ChatScreen({
             <PendingPromptView
               entries={waiting}
               active={!composing}
-              onRespond={(input) => {
-                respond([input])
-              }}
+              onRespond={respond}
               onText={askText}
               onFocusComposer={() => {
                 setComposing(true)

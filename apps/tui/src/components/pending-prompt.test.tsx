@@ -92,6 +92,18 @@ afterEach(() => {
   cleanup()
 })
 
+/** Press ↓ until the frame shows the row with the cursor on it. */
+async function walkTo(instance: TestInstance, marker: string): Promise<void> {
+  for (let step = 0; step < 24; step += 1) {
+    if (frameOf(instance).includes(marker)) {
+      return
+    }
+    pressKey(instance, 'down')
+    await tick()
+  }
+  throw new Error(`the cursor never reached ${marker}. The frame was:\n${frameOf(instance)}`)
+}
+
 /** Render the list with a fresh drafts map, and wait for its keys to be live. */
 async function show(
   entries: readonly PendingCall[],
@@ -216,19 +228,21 @@ describe('PendingPromptView, at the keyboard (#310)', () => {
     const instance = await show([APPROVAL_ENTRY], { onRespond })
 
     pressKey(instance, 'enter')
-    expect(onRespond).toHaveBeenCalledWith({
-      type: 'user.tool_confirmation',
-      tool_use_id: 'sevt_call',
-      result: 'allow',
-    })
+    expect(onRespond).toHaveBeenCalledWith([
+      {
+        type: 'user.tool_confirmation',
+        tool_use_id: 'sevt_call',
+        result: 'allow',
+      },
+    ])
 
     // ↓ moves to the next choice, which remembers the answer for this chat.
     pressKey(instance, 'down')
     await tick()
     pressKey(instance, 'enter')
-    expect(onRespond).toHaveBeenLastCalledWith(
+    expect(onRespond).toHaveBeenLastCalledWith([
       expect.objectContaining({ result: 'allow', remember: 'session' }),
-    )
+    ])
   })
 
   it('declines the call a row belongs to on Esc', async () => {
@@ -239,11 +253,13 @@ describe('PendingPromptView, at the keyboard (#310)', () => {
     // A lone ESC is a byte Ink cannot place until the parser has looked ahead, so the key
     // lands a moment after it is written.
     await tick(50)
-    expect(onRespond).toHaveBeenCalledWith({
-      type: 'user.tool_confirmation',
-      tool_use_id: 'sevt_call',
-      result: 'deny',
-    })
+    expect(onRespond).toHaveBeenCalledWith([
+      {
+        type: 'user.tool_confirmation',
+        tool_use_id: 'sevt_call',
+        result: 'deny',
+      },
+    ])
   })
 
   it('chooses an option, toggles a multiple choice one, and submits', async () => {
@@ -273,12 +289,12 @@ describe('PendingPromptView, at the keyboard (#310)', () => {
     pressKey(instance, 'down')
     await tick()
     pressKey(instance, 'enter')
-    expect(onRespond).toHaveBeenCalledWith(
+    expect(onRespond).toHaveBeenCalledWith([
       expect.objectContaining({
         result: 'allow',
         answers: [{ question: CHECKS.question, labels: ['tests', 'lint'] }],
       }),
-    )
+    ])
   })
 
   it('tab jumps to the next question rather than the next option', async () => {
@@ -304,6 +320,31 @@ describe('PendingPromptView, at the keyboard (#310)', () => {
     pressKey(instance, 'enter')
     await tick()
     expect(onText).toHaveBeenCalledWith({ label: TEXT.question, initial: '' })
+  })
+
+  it('answers several approvals together, one event per call', async () => {
+    const second: PendingCall = {
+      call: approval('sevt_two', 'web_search'),
+      kind: 'approval',
+      questions: [],
+    }
+    const onRespond = vi.fn()
+    const instance = await show([APPROVAL_ENTRY, second], { onRespond })
+
+    expect(frameOf(instance)).toContain('Allow all 2')
+    expect(frameOf(instance)).toContain('Deny all 2')
+
+    await walkTo(instance, '▸ · Deny all 2')
+    pressKey(instance, 'enter')
+    expect(onRespond).toHaveBeenCalledWith([
+      { type: 'user.tool_confirmation', tool_use_id: 'sevt_call', result: 'deny' },
+      { type: 'user.tool_confirmation', tool_use_id: 'sevt_two', result: 'deny' },
+    ])
+  })
+
+  it('leaves a single approval to its own rows rather than a bulk one', async () => {
+    const instance = await show([APPROVAL_ENTRY])
+    expect(frameOf(instance)).not.toContain('Allow all 1')
   })
 
   it('hands the keyboard back when the reader would rather write a message', async () => {

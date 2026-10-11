@@ -5,6 +5,7 @@ import {
   answersFrom,
   approvalChoiceLabel,
   approvalConfirmation,
+  approvalConfirmations,
   declineConfirmation,
   draftComplete,
   draftProblems,
@@ -61,7 +62,16 @@ import { useTerminalTheme } from './theme'
 
 /** What one row of the list is, and what taking it does. */
 export type PendingRowKind =
-  'approval' | 'option' | 'other' | 'text' | 'submit' | 'deny' | 'deny-message' | 'message'
+  | 'approval'
+  | 'option'
+  | 'other'
+  | 'text'
+  | 'submit'
+  | 'deny'
+  | 'deny-message'
+  | 'allow-all'
+  | 'deny-all'
+  | 'message'
 
 /** One row of the pending prompt. */
 export interface PendingRow {
@@ -210,6 +220,29 @@ export function pendingRows(
       detail: 'the model is told you would not answer',
     })
   }
+  // Several approvals are answerable together (epic #303, #310) — one event per call, in one
+  // request — while a single one is left to its own rows: a bulk row for one call would be a
+  // second copy of the same choice. A question never joins: `ask_user` cannot be allowed
+  // without its answers.
+  const approvals = entries.filter((entry) => entry.kind === 'approval')
+  if (approvals.length > 1) {
+    rows.push({
+      id: 'allow-all',
+      callId: approvals[0]!.call.id,
+      kind: 'allow-all',
+      label: `Allow all ${approvals.length}`,
+      // The **once** approval for each: answering several at once must not hand out a
+      // remembered permission nobody chose.
+      detail: 'once each, for this call only',
+    })
+    rows.push({
+      id: 'deny-all',
+      callId: approvals[0]!.call.id,
+      kind: 'deny-all',
+      label: `Deny all ${approvals.length}`,
+      detail: 'the model learns nothing but that you said no',
+    })
+  }
   if (entries.length > 0) {
     rows.push({
       id: 'message',
@@ -338,8 +371,11 @@ export function PendingPromptView({
    * arrives.
    */
   readonly active?: boolean | undefined
-  /** Send one confirmation. The screen sends the event and folds in what comes back. */
-  readonly onRespond: (input: UserToolConfirmationEventInput) => void
+  /**
+   * Send one or more confirmations. The screen sends them and folds in what comes back; a bulk
+   * row sends one event per call in one request, which is what "answer them together" means.
+   */
+  readonly onRespond: (events: readonly UserToolConfirmationEventInput[]) => void
   /** Ask for a line of text; the promise settles with it, or `null` when it was cancelled. */
   readonly onText: (options: {
     readonly label: string
@@ -400,11 +436,29 @@ export function PendingPromptView({
   const take = (target: PendingRow | undefined): void => {
     if (target === undefined) return
     if (target.kind === 'approval' && target.choice !== undefined) {
-      onRespond(approvalConfirmation(target.callId, target.choice))
+      onRespond([approvalConfirmation(target.callId, target.choice)])
       return
     }
     if (target.kind === 'deny') {
-      onRespond(declineConfirmation(target.callId))
+      onRespond([declineConfirmation(target.callId)])
+      return
+    }
+    if (target.kind === 'allow-all') {
+      onRespond(
+        approvalConfirmations(
+          entries.filter((entry) => entry.kind === 'approval').map((entry) => entry.call),
+          'allow-once',
+        ),
+      )
+      return
+    }
+    if (target.kind === 'deny-all') {
+      onRespond(
+        approvalConfirmations(
+          entries.filter((entry) => entry.kind === 'approval').map((entry) => entry.call),
+          'deny',
+        ),
+      )
       return
     }
     if (target.kind === 'message') {
@@ -414,7 +468,7 @@ export function PendingPromptView({
     if (target.kind === 'deny-message') {
       void onText({ label: 'Why not? (optional)', initial: '' }).then((message) => {
         if (message !== null) {
-          onRespond(declineConfirmation(target.callId, message))
+          onRespond([declineConfirmation(target.callId, message)])
         }
       })
       return
@@ -424,7 +478,7 @@ export function PendingPromptView({
       if (entry === undefined) return
       const callDrafts = draftFor(target)
       if (draftComplete(entry.questions, callDrafts)) {
-        onRespond(answerConfirmation(target.callId, answersFrom(entry.questions, callDrafts)))
+        onRespond([answerConfirmation(target.callId, answersFrom(entry.questions, callDrafts))])
       }
       return
     }
@@ -509,7 +563,7 @@ export function PendingPromptView({
       return jump(key.shift ? -1 : 1)
     }
     if (key.escape) {
-      onRespond(declineConfirmation(current?.callId ?? all[0]!.callId))
+      onRespond([declineConfirmation(current?.callId ?? all[0]!.callId)])
       return
     }
     if (input === ' ' || key.return) {
