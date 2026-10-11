@@ -88,7 +88,9 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0023 a credential's public, per-type details (#249, #250, #251),
                         0024 the per-user modes, and the mode a session follows (#245, M6),
                         0025 the compaction controls on the per-user preferences (#282),
-                        0026 the per-user tool settings, and the tool override a mode carries (#307)
+                        0026 the index behind the per-user tool-call read (#305),
+                        0027 the per-user tool settings, and the tool override a mode carries (#307),
+                        0028 the index behind the paused-confirmation work scan (#309)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -372,7 +374,9 @@ A turn is open when nothing closed it: the last status event is `session.status_
 `session.status_rescheduled`, and no `session.status_idle` follows. So a brain that inherits a
 session acts on anything other than `idle`: it closes `openSpan` if there is one
 (`span.model_request_end` with `error: { type: "brain_lost" }`, pointing at it) and runs the
-turn again. `findSessionsNeedingWork` treats both open states as work.
+turn again. `findSessionsNeedingWork` treats both open states as work — and, beside pending
+user events, a third case: a session whose last turn ended `requires_action` and which holds a
+`user.tool_confirmation` answering one of the calls it waits on (epic #303, X6; #309).
 
 **Usage reads** (#247) are the one place the contract asks a question of many sessions at
 once, and the reason it is a method rather than a caller's loop. `listModelRequests({ ownerId,
@@ -435,7 +439,12 @@ announcement.
 partition at that moment, once each; a signal nobody is listening for is dropped, because
 signals are a latency optimization and not a durable queue. No flow may depend on one
 arriving: a partition's new owner recovers by asking `findSessionsNeedingWork`, which reports
-the sessions with pending user events or an open turn, oldest first.
+the sessions with pending user events, an open turn, or a pause whose answer has landed
+(epic #303, X6; #309) — a session whose last turn ended `requires_action` and which now holds
+a `user.tool_confirmation` naming one of the calls it waits on, oldest first. That third case
+is what keeps a missed signal from stranding an answer: the server writes a confirmation
+processed, so it is not a queued user event and the session reads idle, and an instance that
+died before its turn began would otherwise leave the chat stuck until the next message.
 
 **Auth-session revocations are hints too** (epic #65, A2; issue #76).
 `notifyAuthSessionRevoked(authSessionId)` announces that a Better Auth session's row is gone —
@@ -600,7 +609,7 @@ the server's own, `summary_model` `same-as-chat` by default, `summary_max_passes
 the engine's own; `on delete cascade` from `"user"`; see `0016`, `0019` and `0025`) and
 `user_tool_settings` (one row per user: the built-in tool choices as a `builtin jsonb` map of
 tool name to `{ enabled, policy }`, empty by default; `on delete cascade` from `"user"`; see
-`0026`). Five are
+`0027`). Five are
 **Better Auth's**, created by the same migrations and read and written by Better Auth itself
 (decision A1): `user`, `session`, `account`, `verification` and `deviceCode`.
 
@@ -792,9 +801,22 @@ default 'same-as-chat'` is a real column default instead, the rule `0019` uses: 
   The reader is total anyway: a row a hand edit left outside the protocol's shapes reads back as
   the default, so a preferences read cannot break.
 
-The per-user tool settings (epic #303, X4; issue #307) added the newest one:
+The built-in tools' usage read (epic #303, #305) added one:
 
-- **`0026_tool_settings.sql` — the per-user tool settings, and a mode's tool override** (#307):
+- **`0026_agent_tool_use_usage.sql` — the index behind `listToolUses`** (#305): a **partial**
+  index, `(session_id, processed_at) where type = 'agent.tool_use'`. Counting a user's daily
+  `web_search` calls (#305) narrows to the caller's sessions and then to a UTC day's window,
+  and `(session_id, seq)` (0003) seeks by position, not by time — so without this the read
+  would walk every event of every one of the caller's sessions, which is the cost the read
+  exists to remove. The same shape and the same reasoning as `0021`'s, one event type over.
+  Partial because only `agent.tool_use` rows are read that way, and idempotent because an
+  index is built, not migrated: a re-run leaves it (and the log) exactly as it was. **It keeps
+  the number 0026** — it is earlier in the tools stack than #307's file, which took `0027`
+  when the two met, because both branches wrote a `0026` from the same base.
+
+The per-user tool settings (epic #303, X4; issue #307) added one after it:
+
+- **`0027_tool_settings.sql` — the per-user tool settings, and a mode's tool override** (#307):
   a `create table if not exists user_tool_settings` — `user_id` primary key, `builtin jsonb not
 null default '{}'`, `updated_at`, `on delete cascade` from `"user"` — and one
   `alter table modes add column if not exists tools jsonb`. The choices live in **one `jsonb`
@@ -807,6 +829,18 @@ null default '{}'`, `updated_at`, `on delete cascade` from `"user"` — and one
   no tool override before this, so a chat on one followed its owner's settings and still does.
   `user_id` is Better Auth's opaque text and takes no `collate "C"`; nothing orders by it.
   Both statements are idempotent, so the runner can re-run the file.
+
+Pausing for the user (epic #303, X6; issue #309) added the newest one:
+
+- **`0028_paused_confirmation_work.sql` — the index behind the paused-confirmation work scan**
+  (#309): a **partial** index, `(session_id) where type = 'user.tool_confirmation'`.
+  `findSessionsNeedingWork` gained a third case — a session whose last turn ended
+  `requires_action` and which holds a confirmation naming one of the calls it waits on — and
+  finding that confirmation narrows to one session and one event type. `(session_id, seq)`
+  (0003) seeks a session's log by position rather than by type, so without this the lookup
+  would walk every event of the session. Partial, like `0021`'s and `0026`'s, because only
+  `user.tool_confirmation` rows are ever read that way; only the session is needed, since the
+  scan asks "does this session have one?". Idempotent because an index is built, not migrated.
 
 The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:
 
@@ -957,7 +991,10 @@ dependency table.
   The per-user usage read (#247) is in the suite too: the start/end pairing that names each
   request's model, the half-open window (`from` in, `to` out), owner scoping, the `model: null`
   a request nothing attributes gets, the `(session_id, seq)` order, a rewind's branch left out,
-  and the `RangeError` a window that is not one raises. The modes (#245, M6) are there as well:
+  and the `RangeError` a window that is not one raises. The per-user tool-call read (#305) is in
+  the suite beside it: a call its result answered, a failed call and one nothing answered both
+  left out, the `name` filter, owner scoping, the half-open window, the `(session_id, seq)`
+  order and the rewind rule. The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,
@@ -974,8 +1011,8 @@ dependency table.
   chunk another store appended delivered to this store's subscriber, a deleted session's rows
   really gone from `events`, `event_claims` and `event_supersessions` while another session's
   are untouched, its `session.deleted` announced to a different store's subscriber,
-  idempotent migrations (`0016`, `0017`, `0018` and `0026` included — the tables and the
-  columns they add are exercised after a re-run),
+  idempotent migrations (`0016`, `0017`, `0018`, `0026`, `0027` and `0028` included — the
+  tables, indexes and columns they add are exercised after a re-run),
   the #93 backfill over a session row written the pre-#93 way (the agent's model and system
   copied into the new columns, the row read back as the protocol's session), `close()` leaving
   a borrowed pool alone, the raw `events.processed_at` column staying `NULL`

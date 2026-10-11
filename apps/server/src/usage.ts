@@ -1,3 +1,4 @@
+import { WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
 import { EVENT_TYPES, MAX_PAGE_LIMIT, totalCost, usageCost } from '@openharness/protocol'
 import type {
   LocalDay,
@@ -125,7 +126,12 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
   const { store, prices } = options
 
   /** The two span event types a usage read needs and nothing else. */
-  const spans = [EVENT_TYPES.modelRequestStart, EVENT_TYPES.modelRequestEnd]
+  const countedTypes = [
+    EVENT_TYPES.modelRequestStart,
+    EVENT_TYPES.modelRequestEnd,
+    EVENT_TYPES.agentToolUse,
+    EVENT_TYPES.agentToolResult,
+  ]
 
   /** Every request a log holds, in `seq` order, paired start-with-end. */
   const requestsOf = (events: readonly StoredEvent[]): RecordedRequest[] => {
@@ -148,24 +154,32 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
     )
   }
 
-  /** A page-walk over one session's span events, through the caller's own scope. */
+  /**
+   * A page-walk over one session's events, through the caller's own scope.
+   *
+   * The pages are counted as they arrive rather than kept: what this returns is what a usage
+   * report needs — the requests, and how many searches the log holds — and a session's log can
+   * be long, so nothing is held that the answer does not carry.
+   */
   const readSession = async (
     sessionId: SessionId,
     options: OwnerScope,
-  ): Promise<RecordedRequest[]> => {
+  ): Promise<SessionUsageRead> => {
     const requests: RecordedRequest[] = []
+    const searches = searchCounter()
     let page: string | undefined
     for (;;) {
       const response = await store.listEvents(sessionId, {
         ...options,
         order: 'asc',
-        types: spans,
+        types: countedTypes,
         limit: MAX_PAGE_LIMIT,
         ...(page === undefined ? {} : { page }),
       })
       requests.push(...requestsOf(response.data))
+      searches.observe(response.data)
       if (response.next_page === null) {
-        return requests
+        return { requests, searches: searches.count() }
       }
       page = response.next_page
     }
@@ -173,7 +187,8 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
 
   return {
     async session(sessionId, options) {
-      return { session_id: sessionId, ...assemble(await readSession(sessionId, options), prices) }
+      const { requests, searches } = await readSession(sessionId, options)
+      return { session_id: sessionId, ...assemble(requests, prices, searches) }
     },
 
     async user(userId, range) {
@@ -181,12 +196,29 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
       // UTC window the range's local days span, so a month of heavy use is a window rather
       // than every session read page by page. The days are grouped here — the window is UTC,
       // and which day a request fell on is the reader's zone.
-      const requests = await store.listModelRequests({
+      const window = utcWindowOf(range)
+      const requests = await store.listModelRequests({ ownerId: userId, ...window })
+      // The searches are the second read of the same window (#305): a count of the calls that
+      // were answered, grouped by the day they fell on in the caller's zone exactly as the
+      // requests are — and never priced.
+      const searches = await store.listToolUses({
         ownerId: userId,
-        ...utcWindowOf(range),
+        name: WEB_SEARCH_TOOL_NAME,
+        ...window,
       })
       const byDay = new Map<LocalDay, RecordedRequest[]>()
       const inRange: RecordedRequest[] = []
+      const searchesByDay = new Map<LocalDay, number>()
+      let totalSearches = 0
+
+      for (const call of searches) {
+        const day = localDayOf(new Date(call.processed_at), range.tz)
+        if (!dayInRange(day, range)) {
+          continue
+        }
+        totalSearches += 1
+        searchesByDay.set(day, (searchesByDay.get(day) ?? 0) + 1)
+      }
 
       for (const request of requests) {
         const at = new Date(request.processed_at)
@@ -210,15 +242,63 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
         from: range.from,
         to: range.to,
         tz: range.tz,
-        ...assemble(inRange, prices),
+        ...assemble(inRange, prices, totalSearches),
         by_day: [...byDay]
           .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
           .map(([day, requests]) => {
-            const { totals, cost, unpriced_requests } = assemble(requests, prices)
-            return { day, totals, cost, unpriced_requests }
+            const { totals, cost, unpriced_requests } = assemble(
+              requests,
+              prices,
+              searchesByDay.get(day) ?? 0,
+            )
+            return { day, totals, cost, unpriced_requests, searches: searchesByDay.get(day) ?? 0 }
           }),
       }
     },
+  }
+}
+
+/** What one session's log holds for a usage report: its requests, and how many searches it made. */
+interface SessionUsageRead {
+  readonly requests: RecordedRequest[]
+  /** How many `web_search` calls the log holds — the calls that were answered (#305). */
+  readonly searches: number
+}
+
+/**
+ * Counts the `web_search` calls a log holds, as its events are read (epic #303, #305).
+ *
+ * The same rule the store's per-user read follows, applied to one session's log: a call counts
+ * when its `agent.tool_result` exists and does not carry `is_error`. A call a policy refused,
+ * one the tool could not run and one a crashed turn never answered are not searches.
+ *
+ * A call and its result are one identity (the result names the call's event id, epic #303 X1),
+ * and the pair can straddle a page boundary — so the calls seen so far are kept, and dropped
+ * as their answers arrive. That is one entry per unanswered call, never the whole log.
+ */
+function searchCounter(): {
+  observe(events: readonly StoredEvent[]): void
+  count(): number
+} {
+  const waiting = new Set<string>()
+  let answered = 0
+  return {
+    observe(events) {
+      for (const event of events) {
+        if (event.type === EVENT_TYPES.agentToolUse) {
+          if (event.name === WEB_SEARCH_TOOL_NAME) {
+            waiting.add(event.id)
+          }
+        } else if (
+          event.type === EVENT_TYPES.agentToolResult &&
+          !event.is_error &&
+          waiting.delete(event.tool_use_id)
+        ) {
+          answered += 1
+        }
+      }
+    },
+    count: () => answered,
   }
 }
 
@@ -235,6 +315,7 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
 function assemble(
   requests: readonly RecordedRequest[],
   prices: ModelPriceLookup,
+  searches: number,
 ): Omit<SessionUsage, 'session_id'> {
   const totals = emptyUsage()
   const byModel = new Map<string, ModelTotals>()
@@ -261,6 +342,7 @@ function assemble(
     totals,
     cost: total.cost,
     unpriced_requests: total.unpriced_requests,
+    searches,
     by_model: [...byModel]
       .map(([model, entry]): ModelUsageBreakdown => {
         const modelCost = totalCost(entry.costs)

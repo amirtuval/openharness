@@ -1,3 +1,4 @@
+import { WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
 import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
 import { ASK_USER_TOOL_NAME, EVENT_TYPES } from '@openharness/protocol'
 import type {
@@ -72,12 +73,21 @@ describe('a tool turn', () => {
 
     // The step's own request offered the tools before one was called, and the answer bought a
     // second request — which is where the model's reply to the result comes from.
-    expect(spans).toHaveLength(2)
-    expect(spans[0]?.tools).toEqual([
+    //
+    // The offer is the process's whole registry (epic #303, #305, #309): `ask_user`, which every
+    // deployment gets, beside the test `echo` tool and the built-ins. `web_search` is not among
+    // them, because this server runs with no `OPENHARNESS_SEARCH_API_KEY` — a deployment with
+    // no search provider offers no search tool rather than one that always fails.
+    const offered = [
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: TEST_TOOL_NAME, source: 'builtin' },
-    ])
-    expect(spans[1]?.tools).toEqual(spans[0]?.tools)
+      { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
+      { name: 'todo_write', source: 'builtin' },
+    ]
+    expect(spans).toHaveLength(2)
+    expect(spans[0]?.tools).toEqual(offered)
+    expect(spans[1]?.tools).toEqual(offered)
+    expect(spans[0]?.tools?.map((tool) => tool.name)).not.toContain(WEB_SEARCH_TOOL_NAME)
 
     // The order the log holds is the order the loop ran in.
     const types = typesOf(log)

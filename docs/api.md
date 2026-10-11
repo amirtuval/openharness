@@ -225,6 +225,19 @@ what came back:
   `tool_call`, and a model whose registry entry says `false` chats exactly as it did before
   tools existed.
 
+The tools this build offers (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305))
+are `builtin` ones — a call's `input` is the JSON object below, and the result is text:
+
+| tool         | input                                                    | what it does                                                                                                                                                                                                                          |
+| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web_fetch`  | `{ "url": "https://…" }`                                 | GETs one `http`/`https` URL through the SSRF guard (every redirect hop re-checked) and answers its main content as Markdown. Text and JSON pass through; anything else is an error.                                                   |
+| `web_search` | `{ "query": "…", "count": 5 }`                           | One search of the deployment's search API, as titles, URLs and snippets. **Offered only where an operator configured a provider**; each user has a daily allowance of searches, and a call over it is an `is_error` result saying so. |
+| `todo_write` | `{ "todos": [{ "content": "…", "status": "pending" }] }` | Replaces the model's whole task list. The list is the newest successful call's own input — nothing is stored beside it — and `readTodoList` in `@openharness/protocol` reads it back out of a log.                                    |
+
+A `web_fetch` result **leads with the address it finally came from** and says the content is
+untrusted data from the web, not instructions: it is the one tool whose text arrives from a
+place nobody in this deployment chose, and the log records that the model was told so.
+
 #### Pausing for the user (epic #303, X6; issue #309)
 
 A turn can stop because it is waiting for you. Two things make a call wait: the user's policy
@@ -304,17 +317,17 @@ instead.` — and the turn carries on with your message; an interrupt resolves t
 
 #### Per-user tool settings (epic #303, X4; issue #307)
 
-Which tools a chat may use is a **per-user choice**, stored beside the log and managed at
-`/v1/me/tools`:
+Which of those tools a chat may use is a **per-user choice**, stored beside the log and managed
+at `/v1/me/tools`:
 
 ```json
 // GET /v1/me/tools            (optionally ?mode_id=<the mode the chat follows>)
 { "data": [
-  { "name": "web_search", "source": "builtin", "enabled": true, "policy": "allow",
+  { "name": "web_fetch",  "source": "builtin", "enabled": true, "policy": "allow",
     "default_policy": "allow", "available": true },
   { "name": "todo_write", "source": "builtin", "enabled": false, "policy": "ask",
     "default_policy": "allow", "available": true },
-  { "name": "web_fetch",  "source": "builtin", "enabled": true, "policy": "deny",
+  { "name": "web_search", "source": "builtin", "enabled": true, "policy": "allow",
     "default_policy": null, "available": false }
 ] }
 
@@ -330,9 +343,11 @@ Which tools a chat may use is a **per-user choice**, stored beside the log and m
   (`default_policy`), which for every built-in tool is `allow` and for every MCP tool will be
   `ask`. The settings are therefore a record of **choices**, not a complete list.
 - **A tool this deployment does not register is listed as `available: false`** — a
-  `web_search` whose key is missing, say — rather than hidden, and `default_policy` is `null`
-  for it: nothing here declares it. It is never offered, whatever `enabled` says. So the
-  `data` list is the deployment's tools plus any tool the caller has a setting for.
+  `web_search` whose operator key is missing, say — rather than hidden, and `default_policy` is
+  `null` for it: nothing here declares it. It is never offered, whatever `enabled` says. So the
+  `data` list is the deployment's tools — `web_fetch` and `todo_write` always, `web_search` and
+  the test `echo` where the deployment registered them — plus any tool the caller has a setting
+  for.
 - **A mode may override which built-in tools are on** (a `tools` field on the mode,
   `{ "builtin": { "web_search": true } }` — a patch, so a tool it does not name follows the
   user). It may **not** change a permission: a permission is the user's, because "always
@@ -400,7 +415,7 @@ rewind has superseded, then every event after `covers.to_seq`.
   "reason": "threshold",
   "tokens_before": 51200,
   "summary_model": "anthropic/claude-sonnet-5",
-  "prompt_version": "compact-v1",
+  "prompt_version": "context-summary-v2",
   "passes": 1
 }
 ```
@@ -408,7 +423,9 @@ rewind has superseded, then every event after `covers.to_seq`.
 `reason` is `threshold` (the context reached the share of the model's budget that triggers a
 summary), `overflow` (the provider refused a request as too long) or `manual` (the user asked
 for it). `tokens_before` is how full the context was, and `summary_model`, `prompt_version` and
-`passes` record what wrote the summary and how — with an optional `fallback_reason` when the
+`passes` record what wrote the summary and how — `prompt_version` is `context-summary-v2`, the
+prompt whose tool-work section accounts for the pages fetched, the searches made, the actions
+taken and the tool errors (#306) — — with an optional `fallback_reason` when the
 chat's own model summarized instead of the summary model the user chose (no credential for it,
 or it would have needed more passes than the limit allows). A `session.rewind` that reaches back
 before a summary supersedes it along with the rest of the tail it covered, so it disappears from
@@ -420,7 +437,10 @@ boundary, before the request: it measures the context the request is about to ma
 previous request's real prompt size plus an estimate of what is new, and compares it against
 `OPENHARNESS_COMPACTION_THRESHOLD` (default `0.7`) of the **chat** model's context budget. Over
 it, the older history is summarized with the recent quarter of the budget kept verbatim, cut at a
-`user.message` boundary so no turn is split. A provider that still refuses a request as too long
+`user.message` boundary so no turn is split — and never between a tool call and the result that
+answers it (X9), whatever arrived in between. A summarizer is never paid for on a context the old
+tool results' clearing brings back under the share: what it measures is the request the context
+strategy will build (#306). A provider that still refuses a request as too long
 gets one more attempt after a tighter compaction; if that fails too the turn ends with
 `session.error { retry_status: "exhausted" }` rather than looping — and the message says which
 of the three things happened, so an error never claims a compaction that the engine, finding
@@ -501,7 +521,8 @@ stored.
 **A message too big to send is shortened, never dropped.** If the newest message alone is over
 the chat model's budget, summarizing cannot help — that message has to stay verbatim — so the
 request carries it capped to a head and a tail with an `[… N tokens omitted …]` marker, and the
-request's `span.model_request_start` records it:
+request's `span.model_request_start` records it — together with the tool results the request
+capped (epic #303, X9) and the old ones it cleared:
 
 ```json
 {
@@ -511,13 +532,26 @@ request's `span.model_request_start` records it:
   "processed_at": "…",
   "consumes": ["sevt_…"],
   "model": "anthropic/claude-sonnet-5",
-  "truncated": { "seq": 41, "tokens_before": 40000, "tokens_after": 30000 }
+  "truncated": {
+    "seq": 41,
+    "tokens_before": 40000,
+    "tokens_after": 30000,
+    "results": [{ "seq": 38, "tool": "web_fetch", "tokens_before": 9000, "tokens_after": 2000 }]
+  },
+  "cleared": { "results": 2, "tokens": 12000 }
 }
 ```
 
-`seq` names the event whose text was cut, and the two counts bracket what it cost before and
-after — so a client can tell the user their message was shortened rather than let it silently
-disappear. The field is absent for every request whose newest message fits.
+`seq` names the newest event whose text was cut, and the two counts bracket what it cost before
+and after — so a client can tell the user their message was shortened rather than let it
+silently disappear. `results` lists every tool result the request capped: a result is cut to the
+smaller of what its tool declares and a fifth of the chat model's budget, and the log keeps the
+whole of it. `cleared` says how many old tool results — those older than the recent quarter of
+the budget the summary engine keeps verbatim — had their bodies replaced by
+`result cleared, N tokens`: clearing them is what the brain tries **before** summarizing, so a
+context that clearing alone brings back under the threshold needs no summary at all. All three
+fields are absent for a request that had to shorten and clear nothing, which is every session
+stored before #277 and #306.
 
 **The token counters are disjoint, and that is what `usage` prices.** `ModelUsage.input_tokens`
 is the **uncached** input (the way Anthropic's own `input_tokens` reads) and the two cache
@@ -1146,8 +1180,8 @@ prices when the request is answered, and nothing about cost is ever written down
 session does not have to ask.
 
 ```
-GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, unpriced_requests, by_model }
-GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced_requests, by_model, by_day }
+GET /v1/sessions/{session_id}/usage    -> { session_id, totals, cost, unpriced_requests, by_model, searches }
+GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced_requests, by_model, by_day, searches }
 ```
 
 ```json
@@ -1161,6 +1195,7 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   },
   "cost": 0.002792,
   "unpriced_requests": 0,
+  "searches": 1,
   "by_model": [
     {
       "model": "anthropic/claude-sonnet-5",
@@ -1190,6 +1225,12 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   million tokens, from the vendored models.dev snapshot (see `apps/server/AGENTS.md`).
 - **Cache tokens are priced separately.** `cache_read` and `cache_write` are their own rates at
   every provider that publishes them, not a fraction of the input rate.
+- **Searches are counted, and never priced** (epic #303, #305). `searches` is how many
+  `web_search` calls the covered log holds — the call and its successful result, so a refused,
+  failed or never-answered call is not one — and it is a **count**: the operator pays the search
+  provider, no rate for that is in this repository, and inventing one would be the estimate the
+  rest of this surface refuses to make. It is a sibling of the totals rather than a member of
+  them, and every per-day entry of `by_day` carries its own.
 - **Usage is broken down by model, never by mode.** A session may switch models mid-conversation
   (U3), so `by_model` is what separates the cheap requests from the expensive ones. The per-user
   route adds `by_day`; there is no third axis.

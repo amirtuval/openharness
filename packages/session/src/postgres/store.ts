@@ -94,8 +94,10 @@ import type {
   ListEventsOptions,
   ListModelRequestsOptions,
   ListSessionsOptions,
+  ListToolUsesOptions,
   ModelRequestUsage,
   OwnerScope,
+  ToolUseRecord,
   UnscopedListEventsOptions,
   PartitionFence,
   PartitionLease,
@@ -131,6 +133,7 @@ import {
   sessionChannel,
   sessionFromRow,
   timestampOf,
+  toolUseFromRow,
   type AgentRow,
   type EventsTable,
   type EventWithClaimRow,
@@ -889,6 +892,46 @@ export class PostgresSessionStore implements SessionStore {
     return rows.map(modelRequestFromRow)
   }
 
+  async listToolUses(options: ListToolUsesOptions): Promise<ToolUseRecord[]> {
+    const { fromMs, toMs } = usageWindowOf(options)
+    // The companion read (#305): the owner's sessions, their tool calls inside the window, and
+    // the result each call is answered by — joined on `tool_use_id`, the id the result names
+    // (the call's own event id, epic #303 X1). The join is an `inner` one, which is exactly the
+    // rule this read follows: a call with no result was never run, and one whose result is an
+    // error did not do what it asked for, so neither is a call this answers.
+    // The join is on the event id alone: an event id identifies one event for the whole store
+    // (the primary key says so), so the result a call is answered by cannot belong to another
+    // session.
+    const rows = await this.#db
+      .selectFrom('events as e')
+      .innerJoin('sessions as se', 'se.id', 'e.session_id')
+      .innerJoin('events as r', (join) => join.on(sql<SqlBool>`r.payload ->> 'tool_use_id' = e.id`))
+      .select(sql<string>`e.payload ->> 'name'`.as('name'))
+      .select(sql<Date>`e.processed_at`.as('processed_at'))
+      .where('se.owner_id', '=', options.ownerId)
+      .where('e.type', '=', EVENT_TYPES.agentToolUse)
+      .where('e.processed_at', '>=', instant(fromMs))
+      .where('e.processed_at', '<', instant(toMs))
+      .where('r.type', '=', EVENT_TYPES.agentToolResult)
+      .where(sql<SqlBool>`(r.payload ->> 'is_error') = 'false'`)
+      .$if(options.name !== undefined, (query) =>
+        query.where(sql<SqlBool>`e.payload ->> 'name' = ${options.name ?? ''}`),
+      )
+      .where(
+        sql<SqlBool>`not exists (
+        select 1
+          from event_supersessions s
+         where s.session_id = e.session_id
+           and s.kind = ${REWIND_KIND}
+           and e.seq between s.from_seq and s.to_seq
+      )`,
+      )
+      .orderBy('e.session_id', 'asc')
+      .orderBy('e.seq', 'asc')
+      .execute()
+    return rows.map(toolUseFromRow)
+  }
+
   async compact(options: CompactOptions): Promise<number> {
     const cutoff = cutoffOf(options)
     // One statement: delete what a recorded supersession covers that is old enough — and
@@ -1075,6 +1118,44 @@ export class PostgresSessionStore implements SessionStore {
               order by e2.seq desc
               limit 1
            ), ${EVENT_TYPES.sessionStatusIdle}) <> ${EVENT_TYPES.sessionStatusIdle}
+           -- A pause whose answer has landed (#309): the last turn ended requires_action
+           -- and a user.tool_confirmation names one of the calls it waits on. The server
+           -- writes a confirmation processed — it is not a queued user event, and the session
+           -- is idle — so an instance that died before its turn began (or never heard the
+           -- signal) would leave the answer with nothing to pick it up; this is what finds it.
+           or exists (
+             select 1
+               from events st
+              where st.session_id = s.id
+                and st.type = ${EVENT_TYPES.sessionStatusIdle}
+                and st.seq = (
+                  select max(e3.seq)
+                    from events e3
+                   where e3.session_id = s.id
+                     and e3.type in (
+                       ${EVENT_TYPES.sessionStatusRunning},
+                       ${EVENT_TYPES.sessionStatusIdle},
+                       ${EVENT_TYPES.sessionStatusRescheduled}
+                     )
+                )
+                and st.payload -> 'stop_reason' ->> 'type' = 'requires_action'
+                and exists (
+                  select 1
+                    from events c
+                   where c.session_id = s.id
+                     and c.type = ${EVENT_TYPES.userToolConfirmation}
+                     -- A confirmation a rewind replaced (#238) is not an answer.
+                     and not exists (
+                       select 1
+                         from event_supersessions x
+                        where x.session_id = c.session_id
+                          and x.kind = ${REWIND_KIND}
+                          and c.seq between x.from_seq and x.to_seq
+                     )
+                     and (st.payload -> 'stop_reason' -> 'event_ids')
+                       @> jsonb_build_array(c.payload ->> 'tool_use_id')
+                )
+           )
          )
        order by s.created_at asc, s.id asc
     `.execute(this.#db)

@@ -1,5 +1,6 @@
 import type { AppendableEvent } from '@openharness/session'
 import type {
+  ClearedResults,
   ContextSummaryCovers,
   ContextSummaryReason,
   EventId,
@@ -126,7 +127,7 @@ export function spanStart(
   model: string,
   options: SpanStartOptions = {},
 ): AppendableEvent {
-  const { reasoningEffort, mode, truncated, purpose, tools } = options
+  const { reasoningEffort, mode, truncated, cleared, purpose, tools } = options
   return {
     type: EVENT_TYPES.modelRequestStart,
     consumes: [...consumes],
@@ -134,6 +135,7 @@ export function spanStart(
     ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
     ...(mode === undefined ? {} : { mode: { id: mode.id, name: mode.name } }),
     ...(truncated === undefined ? {} : { truncated }),
+    ...(cleared === undefined ? {} : { cleared }),
     ...(purpose === undefined ? {} : { purpose }),
     ...(tools === undefined || tools.length === 0 ? {} : { tools: [...tools] }),
   }
@@ -157,6 +159,13 @@ export interface SpanStartOptions {
    * can write it, which is why it travels here rather than being written by the strategy.
    */
   readonly truncated?: Truncation
+  /**
+   * The old tool results this request cleared, and what they cost (epic #303, X9; #306), or
+   * `undefined` when it cleared none. The strategy answers it — the results are still whole in
+   * the log — and the loop records it here, so a reader can tell that the model was not given
+   * an answer that is in the log.
+   */
+  readonly cleared?: ClearedResults
   /**
    * Why this request was made, when it is not the chat's own (epic #277, C2): `'summary'` marks
    * a request the compaction engine made. Omitted for every ordinary request, and the field the

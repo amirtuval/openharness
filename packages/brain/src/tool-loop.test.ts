@@ -694,6 +694,49 @@ describe('a turn that inherits a lost execution', () => {
   })
 })
 
+describe('sizing a tool result in the request (epic #303, X9; #306)', () => {
+  it('caps an oversized answer before the next request, and the span records it', async () => {
+    const { store, sessionId } = await newSession([message('fetch it')])
+    const body = `HEAD${'a'.repeat(4_000)}TAIL`
+    const { tool } = echo({ maxResultTokens: 100, run: () => textResult(body) })
+    const { factory, calls } = mockModel(
+      { toolCalls: [{ name: 'echo', input: { text: 'hi' } }] },
+      { text: ['It said hi.'] },
+    )
+
+    await runTurn(sessionId, {
+      store,
+      model: factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([tool]),
+    })
+
+    const log = await logOf(store, sessionId)
+    // The log keeps the whole answer: only the request was shortened.
+    const result = of(log, EVENT_TYPES.agentToolResult)[0]
+    expect(textOfEvent(result)).toHaveLength(body.length)
+    // The step the answer bought carries a head and a tail around the omission marker, and the
+    // call it answers is still there, right in front of it.
+    const carried = promptParts(calls[1]!)
+      .filter((part) => part.type === 'tool-result')
+      .map((part) => part.output?.value)
+    expect(carried).toHaveLength(1)
+    expect(carried[0]).toMatch(/^HEAD/)
+    expect(carried[0]).toMatch(/\[… \d+ tokens omitted …\]/)
+    expect(typeof carried[0] === 'string' ? carried[0].endsWith('TAIL') : false).toBe(true)
+    expect(promptParts(calls[1]!).filter((part) => part.type === 'tool-call')).toHaveLength(1)
+
+    // The request's span says what it had to cut, so a client can tell the user.
+    const spans = of(log, EVENT_TYPES.modelRequestStart)
+    expect(spans[1]?.truncated).toMatchObject({
+      seq: result?.seq,
+      tokens_before: 1_002,
+      results: [{ seq: result?.seq, tool: 'echo', tokens_before: 1_002 }],
+    })
+    expect(spans[0]?.truncated).toBeUndefined()
+  })
+})
+
 describe('steering during a tool step', () => {
   it('folds a message that arrives while a tool runs into the next request', async () => {
     const { store, sessionId } = await newSession([message('start')])

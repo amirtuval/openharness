@@ -5,7 +5,8 @@ something, so this is the document that says what that changes and what stands i
 It was written with the tools epic ([#303](https://github.com/amirtuval/openharness/issues/303))
 and is the pair every later sub-issue is held to; the loop it describes is
 [#304](https://github.com/amirtuval/openharness/issues/304), the built-in tools are
-[#305](https://github.com/amirtuval/openharness/issues/305) and the MCP client is
+[#305](https://github.com/amirtuval/openharness/issues/305) — built: `web_fetch`, `web_search`
+and `todo_write` — and the MCP client is
 [#311](https://github.com/amirtuval/openharness/issues/311)–[#312](https://github.com/amirtuval/openharness/issues/312).
 
 ## What is trusted, and what is data
@@ -54,9 +55,10 @@ the proxy resolves the target. This is the same caveat the guard's own documenta
 (`packages/hands/AGENTS.md`).
 
 Nothing else in the tools epic invents an address: every provider, catalogue and credential
-endpoint is a constant the server wrote, `web_search` will call one fixed API
-([#305](https://github.com/amirtuval/openharness/issues/305)), and an MCP server's URL is one the
-user typed when they added it — a user-supplied address, which `safeFetch` is what guards.
+endpoint is a constant the server wrote, `web_search` calls one fixed API the operator
+configured ([#305](https://github.com/amirtuval/openharness/issues/305)) — a URL that is not a
+user's to choose — and an MCP server's URL is one the user typed when they added it, a
+user-supplied address, which `safeFetch` is what guards.
 
 ## Exfiltration: a URL is a way out
 
@@ -93,20 +95,22 @@ that lives in the vault like a provider key. Two rules follow from the trust bei
 
 Written honestly, so nothing here is read as a promise the code does not keep:
 
-| control                                                                      | where it stands today                                                                                                                                                         |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| tool results are data, never instructions                                    | the loop never reads one as an instruction ([#304](https://github.com/amirtuval/openharness/issues/304))                                                                      |
-| a per-call policy, recorded as `evaluated_permission`                        | built (#304); `allow` and `deny` are honoured, `ask` refuses until [#309](https://github.com/amirtuval/openharness/issues/309) lands                                          |
-| `safeFetch` for a user-supplied URL                                          | built ([#245](https://github.com/amirtuval/openharness/issues/245)); the tools that use it arrive with [#305](https://github.com/amirtuval/openharness/issues/305)            |
-| secrets scrubbed out of every tool result                                    | built (`@openharness/hands`)                                                                                                                                                  |
-| the per-user policy store: on/off and `allow`/`ask`/`deny` per tool          | built ([#307](https://github.com/amirtuval/openharness/issues/307)); the built-in tools it applies to arrive with [#305](https://github.com/amirtuval/openharness/issues/305) |
-| `web_fetch` defaulting to allow, and the user setting that to ask            | [#305](https://github.com/amirtuval/openharness/issues/305) and [#307](https://github.com/amirtuval/openharness/issues/307)                                                   |
-| the approval UI a paused turn needs                                          | [#310](https://github.com/amirtuval/openharness/issues/310)                                                                                                                   |
-| MCP servers: the resource, OAuth, and the loop                               | [#311](https://github.com/amirtuval/openharness/issues/311), [#312](https://github.com/amirtuval/openharness/issues/312)                                                      |
-| capping and clearing old tool results, so a huge page cannot flood a context | [#306](https://github.com/amirtuval/openharness/issues/306)                                                                                                                   |
+| control                                                                      | where it stands today                                                                                                                                                                    |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| tool results are data, never instructions                                    | the loop never reads one as an instruction ([#304](https://github.com/amirtuval/openharness/issues/304))                                                                                 |
+| a per-call policy, recorded as `evaluated_permission`                        | built (#304); `allow` and `deny` are honoured, `ask` refuses until [#309](https://github.com/amirtuval/openharness/issues/309) lands                                                     |
+| `safeFetch` for a user-supplied URL                                          | built ([#245](https://github.com/amirtuval/openharness/issues/245)), and `web_fetch` is the tool that uses it on every hop ([#305](https://github.com/amirtuval/openharness/issues/305)) |
+| secrets scrubbed out of every tool result                                    | built (`@openharness/hands`): the operator's search key travels the same per-user channel, and a result that quoted it stores `[REDACTED]`                                               |
+| the per-user policy store: on/off and `allow`/`ask`/`deny` per tool          | built ([#307](https://github.com/amirtuval/openharness/issues/307)), over the built-in tools of [#305](https://github.com/amirtuval/openharness/issues/305)                              |
+| `web_fetch` defaulting to allow, and the user setting that to ask            | the default is `allow` ([#305](https://github.com/amirtuval/openharness/issues/305)); the setting is [#307](https://github.com/amirtuval/openharness/issues/307)'s                       |
+| the approval UI a paused turn needs                                          | [#310](https://github.com/amirtuval/openharness/issues/310)                                                                                                                              |
+| MCP servers: the resource, OAuth, and the loop                               | [#311](https://github.com/amirtuval/openharness/issues/311), [#312](https://github.com/amirtuval/openharness/issues/312)                                                                 |
+| capping and clearing old tool results, so a huge page cannot flood a context | built ([#306](https://github.com/amirtuval/openharness/issues/306)): a tool declares its own `maxResultTokens`, and a request that carries too many old results clears the oldest        |
 
 There is **no sandbox** in this epic, deliberately (the sandboxed tools moved to
 [#315](https://github.com/amirtuval/openharness/issues/315)): a tool runs in the server process,
-so a tool that is unsafe to run there must not be registered at all. That is why nothing beyond a
-test `echo` tool ships with #304 and why each built-in arrives with its own review of what it
-may touch.
+so a tool that is unsafe to run there must not be registered at all. That is why #304 shipped
+nothing beyond a test `echo` tool, and why each built-in of #305 arrived with its own review of
+what it may touch: `web_fetch` reaches only what `safeFetch` lets it and says in its own result
+that the page is data; `web_search` reaches one fixed API and is offered only where an operator
+configured one; `todo_write` reaches nothing at all.

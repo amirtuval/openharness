@@ -18,7 +18,11 @@ import type { ToolRegistry } from '@openharness/hands'
 import type { LanguageModel } from 'ai'
 
 import type { ContextStrategy } from './context'
-import { DEFAULT_CONTEXT_STRATEGY, estimateContextSize } from './context'
+import {
+  DEFAULT_CONTEXT_STRATEGY,
+  DEFAULT_CONTEXT_TOKEN_BUDGET,
+  estimateContextSize,
+} from './context'
 import {
   agentMessage,
   compactionOutcome,
@@ -133,7 +137,7 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  *      session's owner and the mode's override; a tool turned off drops out of the offer
  *   8. ............. span.model_request_start { consumes, model,
  *                                    tools: the { name, source } of every tool offered,
- *                                    reasoning_effort, mode, truncated }
+ *                                    reasoning_effort, mode, truncated, cleared }
  *   9. stream ....... stored event_start (one sevt_ id), then one stored event_delta per chunk
  *  10. text streamed ......... agent.message { supersedes: the chunk range }
  *      no text ................................... (no message; the span end supersedes)
@@ -733,6 +737,23 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // both the engine and the trigger measure the context the strategy will build from it and
     // the two have to agree on what the prompt is.
     const requestSystem = withModePrompt(current.system, mode?.systemPromptAddition ?? null)
+    // How big the request this boundary is about to make is (K2/K6/X9), measured with the two
+    // numbers the strategy's own caps are read against: the chat model's history budget, from the
+    // same resolver the engine plans with (#246) — the strategy resolves its budget from the
+    // configuration it was built with, and the server hands both the same resolver, so the
+    // measurement and the request agree about what a result may cost and what is old enough to
+    // clear — and the registry, whose declarations carry the per-tool cap.
+    const contextBudget =
+      compaction === null
+        ? DEFAULT_CONTEXT_TOKEN_BUDGET
+        : (compaction.tokenBudgetFor?.(requestModel.id) ?? DEFAULT_CONTEXT_TOKEN_BUDGET)
+    const sizeOf = (events: readonly StoredEvent[]): number =>
+      estimateContextSize(events, {
+        model: requestModel.id,
+        system: requestSystem,
+        budget: contextBudget,
+        ...(options.tools === undefined ? {} : { tools: options.tools }),
+      })
     let read = await readLog(store, sessionId)
     // ---- The user's answers, and the calls still waiting on them (epic #303, X6; #309).
     //
@@ -801,16 +822,14 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     if (compaction !== null) {
       const manual = pendingManualCompaction(read)
       if (manual !== null) {
-        const sized = estimateContextSize(read, {
-          model: requestModel.id,
-          system: requestSystem,
-        })
+        const sized = sizeOf(read)
         const manualResult = await summarizeContext({
           chatModel: requestModel.id,
           reason: 'manual',
           events: read,
           system: requestSystem,
           estimatedTokens: sized,
+          ...(options.tools === undefined ? {} : { tools: options.tools }),
           config: compaction,
           guidance: manual.instructions,
           model,
@@ -910,16 +929,14 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // the threshold share of the **chat** model's budget. Over it, older history is summarized
       // before the request — which is what keeps the provider from refusing it — and the log is
       // re-read so the prompt below is built from the summary, not the history it replaced.
-      const estimated = estimateContextSize(read, {
-        model: requestModel.id,
-        system: requestSystem,
-      })
+      const estimated = sizeOf(read)
       const outcome = await summarizeContext({
         chatModel: requestModel.id,
         reason: 'threshold',
         events: read,
         system: requestSystem,
         estimatedTokens: estimated,
+        ...(options.tools === undefined ? {} : { tools: options.tools }),
         config: compaction,
         model,
         resolveCredential,
@@ -973,6 +990,9 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     const context = strategy(answered, {
       model: requestModel,
       system: requestSystem,
+      // The registry, not `toolRegistry` below: a result an earlier step stored is capped and
+      // cleared by its tool's declaration whatever this request offers (X9).
+      ...(options.tools === undefined ? {} : { tools: options.tools }),
     })
     // The tools this request offers (epic #303, X2/X4; #307), if any: a deployment with no
     // registry has nothing to offer, a model the registry marks as tool-less gets none, and a
@@ -997,6 +1017,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         ...(reasoning.record === undefined ? {} : { reasoningEffort: reasoning.record }),
         ...(mode === null ? {} : { mode }),
         ...(context.truncated === undefined ? {} : { truncated: context.truncated }),
+        ...(context.cleared === undefined ? {} : { cleared: context.cleared }),
         ...(toolRegistry === undefined ? {} : { tools: offeredTools(toolRegistry) }),
       }),
     ])
@@ -1085,16 +1106,14 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           statusRescheduled(),
         ])
         const fresh = await readLog(store, sessionId)
-        const estimate = estimateContextSize(fresh, {
-          model: requestModel.id,
-          system: requestSystem,
-        })
+        const estimate = sizeOf(fresh)
         const outcome = await summarizeContext({
           chatModel: requestModel.id,
           reason: 'overflow',
           events: fresh,
           system: requestSystem,
           estimatedTokens: estimate,
+          ...(options.tools === undefined ? {} : { tools: options.tools }),
           config: compaction,
           model,
           resolveCredential,

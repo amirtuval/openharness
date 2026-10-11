@@ -175,8 +175,8 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 | `providerCredentials.delete(provider, options?)` | `DELETE /v1/provider-credentials/{provider}`                                                        | `void` (the wire answers `204`)                              |
 | `models.list(params?, options?)`                 | `GET /v1/models`                                                                                    | `{ data: ModelEntry[], providers: ProviderCatalogStatus[] }` |
 | `preferences.get(options?)`                      | `GET /v1/me/preferences`                                                                            | `{ default_model }` (`null` when none is set)                |
-| `usage.session(id, options?)`                    | `GET /v1/sessions/{id}/usage`                                                                       | `{ session_id, totals, cost, by_model }`                     |
-| `usage.me(params?, options?)`                    | `GET /v1/me/usage` (`from`, `to`, `tz`)                                                             | `{ from, to, totals, cost, by_model, by_day }`               |
+| `usage.session(id, options?)`                    | `GET /v1/sessions/{id}/usage`                                                                       | `{ session_id, totals, cost, by_model, searches }`           |
+| `usage.me(params?, options?)`                    | `GET /v1/me/usage` (`from`, `to`, `tz`)                                                             | `{ from, to, totals, cost, by_model, by_day, searches }`     |
 | `preferences.put(preferences, options?)`         | `PUT /v1/me/preferences`                                                                            | `{ default_model }` (the stored value)                       |
 | `modes.create(body, options?)`                   | `POST /v1/me/modes`                                                                                 | `Mode`; 409 for a duplicate name or the 21st mode            |
 | `modes.get(id, options?)`                        | `GET /v1/me/modes/{id}`                                                                             | `Mode`, or a 404 for another user's                          |
@@ -292,7 +292,9 @@ which a Refresh button should surface to the user rather than retry in a loop.
 session's totals and `usage.me({ from, to, tz })` for the caller's own, by model and by day.
 Both are owner-scoped server-side (another user's session is a 404, and there is no id in the
 per-user path), and both answer **cost** — computed by the server from the log's tokens and its
-vendored prices, `null` for a model nobody prices.
+vendored prices, `null` for a model nobody prices. Both also carry `searches`, how many
+`web_search` calls the covered log holds (epic #303, #305): a count and never a price, because
+the operator pays the search provider and no rate for that is in this repository.
 
 The transcript carries the same numbers for a screen that is already following a session, which
 is why a client rarely needs either route:
@@ -855,7 +857,8 @@ matches the real route's (a base URL's host). The recommendation table the serve
 one thing the fake does not restate.
 
 The usage reads are answered from the fake's own logs (#247), the way the server answers them
-from a real one: `fakeRequestsOf` pairs a session's spans (through the replay read, so a rewound
+from a real one — and `searches` is `0`, because the fake's brain runs no tool loop and so serves
+a chat that asks for no searches (#305; the real count is the server's): `fakeRequestsOf` pairs a session's spans (through the replay read, so a rewound
 branch is not counted), `fakeUsage` prices them with the catalog the fake lists and assembles the
 totals and the per-model split, and `usage.me` groups the caller's requests by the local day they
 fell on in the zone it was given (`fakeUsageRange`/`fakeLocalDay`, `Intl` as the server uses it).

@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { createToolRegistry, textResult } from '@openharness/hands'
+import {
+  WEB_FETCH_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+  createToolRegistry,
+  textResult,
+} from '@openharness/hands'
 import type { ToolDefinition } from '@openharness/hands'
 import {
   API_VERSION_PREFIX,
+  ASK_USER_TOOL_NAME,
   EVENT_TYPES,
   ListToolSettingsResponseSchema,
   ModeSchema,
@@ -17,7 +23,10 @@ import {
 } from '@openharness/protocol'
 import { z } from 'zod'
 
+import { createProviderFetch } from './catalog/provider-fetch'
 import { createBundledRegistry } from './catalog/registry'
+import { createTurnRegistry } from './tools'
+import type { SearchConfig } from './config'
 import {
   asUser,
   createTestApp,
@@ -31,11 +40,13 @@ import {
  * Tool settings over HTTP (epic #303, X4; issue #307): `/v1/me/tools`, and the request a chat
  * makes under them.
  *
- * The tools here are test tools of the test's own — #305's built-ins are a different issue — so
- * the registry a deployment would register is injected, and everything else is the production
- * path: the routes, the mode override, the settings resolver the runner hands the brain, and
- * the log the turn writes. A tool a setting turns off has to be absent from the request's
- * `span.model_request_start.tools`, which is the log's own record of what was offered.
+ * Most of the tools here are test tools of the test's own, so the registry a deployment would
+ * register is injected and the settings are exercised over a small, known set; the last block
+ * runs the same paths over #305's real built-ins, which is what the two features meeting looks
+ * like. Everything else is the production path: the routes, the mode override, the settings
+ * resolver the runner hands the brain, and the log the turn writes. A tool a setting turns off
+ * has to be absent from the request's `span.model_request_start.tools`, which is the log's own
+ * record of what was offered.
  */
 
 const TOOLS = `${API_VERSION_PREFIX}/me/tools`
@@ -190,8 +201,9 @@ describe('GET /v1/me/tools', () => {
   })
 
   it('lists a stored setting for a tool that is not registered as unavailable', async () => {
-    // A deployment with no tools at all — what a provider-model process runs until #305 — can
-    // still hold a setting for one: a `web_search` whose key this deployment lacks.
+    // An app that registers no tools at all — a test's harness, not any deployment, since #305
+    // gives every one the built-ins — can still hold a setting for one: a `web_search` whose
+    // key this deployment lacks.
     const test = createTestApp()
     await putTools(test, { builtin: { web_search: { enabled: true, policy: 'deny' } } })
 
@@ -462,5 +474,142 @@ describe('a chat under the settings', () => {
       type: EVENT_TYPES.sessionStatusIdle,
       stop_reason: { type: 'requires_action', event_ids: [call?.id] },
     })
+  })
+})
+
+describe('the built-in tools under the settings (#305 × #307)', () => {
+  /** The registry a deployment on a provider model really runs (`main.ts`'s `createTurnRegistry`). */
+  function builtins(search: SearchConfig | null = null) {
+    return createTurnRegistry({
+      config: { search },
+      kind: 'provider',
+      searchTransport: createProviderFetch(),
+    })
+  }
+
+  it('lists the built-ins a deployment really registers, and offers them to a chat', async () => {
+    const test = createTestApp({
+      tools: builtins(),
+      registry: createBundledRegistry(),
+      replies: [{ text: ['ok'] }],
+    })
+
+    expect((await getTools(test)).map((entry) => entry.name)).toEqual([
+      ASK_USER_TOOL_NAME,
+      WEB_FETCH_TOOL_NAME,
+      'todo_write',
+    ])
+
+    const session = await createSession(test, { model: { id: 'openai/gpt-5-mini' } })
+    await send(test, session.id, message('hello'))
+    await waitForIdle(test.store, session.id)
+
+    expect((await spans(test, session.id))[0]?.tools).toEqual([
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
+      { name: 'todo_write', source: 'builtin' },
+    ])
+  })
+
+  it('does not offer a built-in tool the user turned off', async () => {
+    const test = createTestApp({
+      tools: builtins(),
+      registry: createBundledRegistry(),
+      replies: [{ text: ['ok'] }],
+    })
+    const session = await createSession(test, { model: { id: 'openai/gpt-5-mini' } })
+    await putTools(test, {
+      builtin: { [WEB_FETCH_TOOL_NAME]: { enabled: false, policy: 'allow' } },
+    })
+
+    await send(test, session.id, message('hello'))
+    await waitForIdle(test.store, session.id)
+
+    // A tool that is off is not in the offer at all — the model cannot see it — and the span
+    // records what was really offered.
+    expect((await spans(test, session.id))[0]?.tools).toEqual([
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: 'todo_write', source: 'builtin' },
+    ])
+  })
+
+  it('lists a web_search this deployment has no key for as available: false', async () => {
+    const test = createTestApp({ tools: builtins() })
+    await putTools(test, {
+      builtin: { [WEB_SEARCH_TOOL_NAME]: { enabled: true, policy: 'allow' } },
+    })
+
+    // The tool is not registered — an operator configured no search API — so a stored setting
+    // for it is listed as unavailable rather than hidden, and never offered.
+    expect(await getTools(test)).toEqual([
+      {
+        name: ASK_USER_TOOL_NAME,
+        source: 'builtin',
+        enabled: true,
+        policy: 'allow',
+        default_policy: 'allow',
+        available: true,
+      },
+      {
+        name: WEB_FETCH_TOOL_NAME,
+        source: 'builtin',
+        enabled: true,
+        policy: 'allow',
+        default_policy: 'allow',
+        available: true,
+      },
+      {
+        name: 'todo_write',
+        source: 'builtin',
+        enabled: true,
+        policy: 'allow',
+        default_policy: 'allow',
+        available: true,
+      },
+      {
+        name: WEB_SEARCH_TOOL_NAME,
+        source: 'builtin',
+        enabled: true,
+        policy: 'allow',
+        default_policy: null,
+        available: false,
+      },
+    ])
+  })
+
+  it('registers web_search where an operator configured one, and a mode can turn it off', async () => {
+    const search: SearchConfig = { provider: 'brave', apiKey: 'operator-key', dailyLimit: 5 }
+    const test = createTestApp({
+      tools: builtins(search),
+      search,
+      registry: createBundledRegistry(),
+      replies: [{ text: ['ok'] }],
+    })
+
+    expect((await getTools(test)).map((entry) => entry.name)).toEqual([
+      ASK_USER_TOOL_NAME,
+      WEB_FETCH_TOOL_NAME,
+      'todo_write',
+      WEB_SEARCH_TOOL_NAME,
+    ])
+
+    // Continuing a chat on a mode checks the mode's model is usable, so its provider needs a key.
+    await putKey(test, 'openai')
+    const mode = await createMode(test, {
+      name: 'quiet',
+      model: 'openai/gpt-5-mini',
+      tools: { builtin: { [WEB_SEARCH_TOOL_NAME]: false } },
+    })
+    const session = await createSession(test, { model: { id: 'openai/gpt-5-mini' } })
+    await send(test, session.id, message('on the mode', { mode: mode.id }))
+    await waitForIdle(test.store, session.id)
+
+    // The mode's override is applied over the user's settings (which say nothing here), so the
+    // search tool #305 registered is not offered — the two features meeting in one offer.
+    expect((await spans(test, session.id))[0]?.tools).toEqual([
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
+      { name: 'todo_write', source: 'builtin' },
+    ])
   })
 })

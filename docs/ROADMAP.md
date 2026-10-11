@@ -253,21 +253,27 @@ separate from #46's event-store compaction.
 
 The third pillar of the architecture (the "hands"), without a sandbox yet: everything here runs
 in-process on the server. **Status:** in progress — the loop itself
-([#304](https://github.com/amirtuval/openharness/issues/304)) is **built**: the events, the tool
+([#304](https://github.com/amirtuval/openharness/issues/304)), the built-in tools
+([#305](https://github.com/amirtuval/openharness/issues/305)), tool context management
+([#306](https://github.com/amirtuval/openharness/issues/306)) and the per-user settings
+([#307](https://github.com/amirtuval/openharness/issues/307)) are **built**: the events, the tool
 registry in `@openharness/hands`, the brain's loop and step limit, the policy hook, the crash
-rule and a test tool behind the mock model; the per-user settings
-([#307](https://github.com/amirtuval/openharness/issues/307)) and pausing
-([#309](https://github.com/amirtuval/openharness/issues/309)) are built too. The built-in tools
-(#305) and MCP (#311/#312) are the rest of the epic's sub-issues.
+rule, a test tool behind the mock model, `web_fetch`, `web_search` and `todo_write`, the caps
+and clearing a request applies to tool results, `/v1/me/tools` with a mode's override, and
+pausing for the user
+([#309](https://github.com/amirtuval/openharness/issues/309)). MCP (#311/#312) is the rest of
+the epic's sub-issues.
 
 1. **The tool loop.** The brain owns the loop, one model request per step: `agent.tool_use` →
    execute through `hands` (`execute(name, input, ctx)`) → `agent.tool_result` → the next
    request. A turn has a step limit, an interrupt stops running tools, and a tool is never
-   re-run after a crash: the next brain records "execution lost". Built next:
-   `web_fetch` (through `safeFetch`), `web_search` (one search API with the operator's key, a
-   daily cap per user, counted in usage) and `todo_write` (its state is the latest result in
-   the log).
-2. **Pausing for the user** (#309) — **built**: `session.status_idle
+   re-run after a crash: the next brain records "execution lost". **The built-in tools are
+   built** ([#305](https://github.com/amirtuval/openharness/issues/305)): `web_fetch` (through
+   `safeFetch`, HTML converted to Markdown, the output capped), `web_search` (one search API
+   with the operator's key, a daily cap per user, counted in usage) and `todo_write` (the whole
+   list each call, its state the latest call in the log).
+2. **Pausing for the user**
+   ([#309](https://github.com/amirtuval/openharness/issues/309)) — **built**: `session.status_idle
 {stop_reason: {type: "requires_action", event_ids}}`, answered by one client event,
    `user.tool_confirmation`:
    - approvals for tools whose policy is `ask`: allow once, for this chat (`remember:
@@ -291,8 +297,12 @@ settings turn built-in tools and MCP servers on or off and give each tool a poli
 
 **Context management for tools** ([#276](https://github.com/amirtuval/openharness/issues/276)):
 a tool call and its result are never split by a cut, results are capped, old results are
-cleared before summarizing, and the summary prompt covers tool work. What to re-inject after a
-compaction waits for sandboxed tools.
+cleared before summarizing, and the summary prompt covers tool work. **Built**
+([#306](https://github.com/amirtuval/openharness/issues/306)): each tool declares
+`ToolDefinition.maxResultTokens`, a request caps the results it carries to the smaller of that
+and a fifth of the model's budget, old results are cleared before anything is summarized, and
+the summary prompt covers tool work. What to re-inject after a compaction waits for sandboxed
+tools.
 
 **Not in this phase:** client-defined custom tools (they wait for programmatic access), local
 (stdio) MCP servers, tool search, and an `auto` permission mode.

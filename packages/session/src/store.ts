@@ -692,6 +692,36 @@ export interface SessionStore {
   listModelRequests(options: ListModelRequestsOptions): Promise<ModelRequestUsage[]>
 
   /**
+   * Read the **tool calls** one owner's sessions completed in a half-open UTC window
+   * (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305)).
+   *
+   * The companion of {@link SessionStore.listModelRequests}, and a method for the same reason:
+   * what a `web_search` cost the operator's key is answered from the log, and answering it by
+   * walking the owner's sessions and every one of their events is the read this pair exists to
+   * avoid. The window is half-open — an end at exactly `from` is in the answer, one at exactly
+   * `to` is not — and which local day a call fell on is the caller's question, so a caller
+   * converts its days into a window like this one and groups what comes back.
+   *
+   * A call is here when it was **answered successfully**: an `agent.tool_use` whose
+   * `agent.tool_result` exists and does not carry `is_error`. A call the policy refused, one
+   * the registry could not run, one that timed out or was interrupted, and one a crashed turn
+   * never answered are all left out — none of them did what the call asked for, and counting
+   * them would bill a user for work that never happened. It is the same rule the usage surface
+   * follows about tokens, one level up.
+   *
+   * **Owner-scoped, and the owner is required** (epic #65, A4): only the owner's sessions are
+   * read. A call a `session.rewind` replaced is **not** in the answer (#238), exactly as it is
+   * not in a replay. The answer is ordered by `(session_id, seq)` — the log's own order, session
+   * by session — so two reads of an unchanged log hand back the same list.
+   *
+   * @param options.name only calls of this tool; every tool's calls when absent
+   * @param options.from the window's start, inclusive
+   * @param options.to the window's end, exclusive
+   * @throws RangeError when a bound is not an instant, or `from` is after `to`
+   */
+  listToolUses(options: ListToolUsesOptions): Promise<ToolUseRecord[]>
+
+  /**
    * Delete the stored events a supersession covers — older than the retention window — and
    * return how many went.
    *
@@ -765,12 +795,20 @@ export interface SessionStore {
   onPartitionSignal(partition: number, listener: PartitionSignalListener): Promise<Unsubscribe>
 
   /**
-   * The sessions in `partitions` that need work: pending user events, or an open turn.
+   * The sessions in `partitions` that need work: pending user events, an open turn, or a
+   * pause whose answer has landed.
    *
    * This is recovery's starting point, and it is deliberately log-derived — it does not consult
    * leases, signals or any other transient state, so it answers the same thing for a partition
    * that has just been taken over as it does for one that is running normally. A session with
    * pending user events *and* an open turn is returned once.
+   *
+   * The third case is the pause (epic #303, X6; #309): a session whose last turn ended
+   * `requires_action` and which now holds a `user.tool_confirmation` naming one of the calls it
+   * waits on. A confirmation is written by the server already processed, so it is not a queued
+   * user event and the session reads idle — the signal that would start the answering turn is a
+   * hint, and one an instance lost before it began leaves the chat stuck until another message.
+   * Asking the log here is what keeps a missed signal from stranding an answer.
    *
    * The result is ordered by `(created_at, id)` ascending: oldest session first.
    */
@@ -1182,6 +1220,32 @@ export interface ModelRequestUsage {
    * the caller groups by — the window filters on it — and it is the end's, so a request counts
    * on the day it ended.
    */
+  readonly processed_at: Timestamp
+}
+
+/** Query of {@link SessionStore.listToolUses} (epic #303, #305). */
+export interface ListToolUsesOptions extends OwnerScope {
+  /** Only calls of this tool, by the name the call's event carried; every tool when absent. */
+  readonly name?: string
+  /** The window's start, inclusive — a UTC instant, as the caller's local day was converted. */
+  readonly from: Date
+  /** The window's end, exclusive. */
+  readonly to: Date
+}
+
+/**
+ * One tool call the log recorded and answered, as {@link SessionStore.listToolUses} reads it
+ * (epic #303, #305).
+ *
+ * Two facts and nothing else: which tool the model called, and when the call was stored —
+ * which is the instant the window filters on and the day a caller groups by. The result's
+ * content is deliberately not here: a usage read counts calls, and what a call said is the
+ * model's business, not a report's.
+ */
+export interface ToolUseRecord {
+  /** The tool's name, as the call's `agent.tool_use` carried it. */
+  readonly name: string
+  /** When the call was stored: the call event's `processed_at`. */
   readonly processed_at: Timestamp
 }
 

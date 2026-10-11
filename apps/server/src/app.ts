@@ -153,12 +153,12 @@ export interface AppOptions {
    */
   readonly sessionRecheckMs?: number
   /**
-   * The tools this deployment registers (epic #303, X4; issue #307), or `undefined` for a
-   * process that registers none — which is every deployment on a provider model until #305's
-   * built-ins land. `main.ts` builds it once (`createTurnRegistry`) and hands the same registry
-   * to the turn options and to the `/v1/me/tools` routes, so "a tool is available" and "a chat
-   * can call it" are one answer. A test injects a registry of its own to exercise the settings
-   * without a built-in tool.
+   * The tools this deployment registers (epic #303, X4; the built-ins are #305), or `undefined`
+   * for a process that registers none — which is a test's own app, since every deployment now
+   * registers the built-ins. `main.ts` builds it once (`createTurnRegistry`) and hands the same
+   * registry to the turn options and to the `/v1/me/tools` routes, so "a tool is available" and
+   * "a chat can call it" are one answer. A test injects a registry of its own to exercise the
+   * settings with a small, known set of tools.
    */
   readonly tools?: ToolRegistry
   /**

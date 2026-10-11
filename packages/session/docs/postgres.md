@@ -160,32 +160,35 @@ consequence is that **a migration file must never be edited once it has been app
 anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
 databases while applying to new ones. Add a new file instead.
 
-| file                                   | what it creates                                                                                                       |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `0001_agents.sql`                      | `agents`, and the `(created_at, id)` index the agent list pages through                                               |
-| `0002_sessions.sql`                    | `sessions`, plus the indexes for the three ways sessions are queried                                                  |
-| `0003_events.sql`                      | `events`, its uniqueness constraint and its two secondary indexes                                                     |
-| `0004_partition_leases.sql`            | `partition_leases`                                                                                                    |
-| `0005_events_id_unique.sql`            | the `unique` index that states the id guarantee (`events_id_key`) by name                                             |
-| `0006_session_previews.sql`            | a previews table, dropped again by `0010` before release                                                              |
-| `0007_event_claims.sql`                | `event_claims`, the insert-only record of which events a turn claimed (D9)                                            |
-| `0008_event_claims_backfill.sql`       | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                            |
-| `0009_event_supersessions.sql`         | `event_supersessions`, the insert-only record of the ranges events replace                                            |
-| `0020_rewind_supersessions.sql`        | `event_supersessions.kind` (`chunks` / `rewind`, #238) and its check                                                  |
-| `0010_drop_session_previews.sql`       | drops `session_previews`; the chunks of a reply are rows of `events` since D9                                         |
-| `0011_better_auth.sql`                 | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                       |
-| `0012_ownership.sql`                   | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                   |
-| `0013_provider_credentials.sql`        | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                          |
-| `0014_auth_session_revocation.sql`     | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                       |
-| `0015_session_model.sql`               | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93) |
-| `0016_user_preferences.sql`            | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                      |
-| `0017_scheduler_instances.sql`         | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                         |
-| `0018_credential_key_provider.sql`     | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                       |
-| `0021_model_request_end_usage.sql`     | the partial index behind `listModelRequests`: `(session_id, processed_at)` where the type is a request end (#247)     |
-| `0022_credential_name.sql`             | `provider_credentials.provider` renamed to `name`, unique per `(user_id, name)` (#248)                                |
-| `0023_credential_details.sql`          | `details jsonb` on `provider_credentials`: the non-secret facts a credential's type publishes (#249, #250, #251)      |
-| `0025_user_preferences_compaction.sql` | the compaction controls on `user_preferences`: `compaction_threshold`, `summary_model`, `summary_max_passes` (#282)   |
-| `0024_modes.sql`                       | `modes`, a user's named presets, and `sessions.mode`, the mode a chat follows (#245, M6)                              |
+| file                                   | what it creates                                                                                                         |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `0001_agents.sql`                      | `agents`, and the `(created_at, id)` index the agent list pages through                                                 |
+| `0002_sessions.sql`                    | `sessions`, plus the indexes for the three ways sessions are queried                                                    |
+| `0003_events.sql`                      | `events`, its uniqueness constraint and its two secondary indexes                                                       |
+| `0004_partition_leases.sql`            | `partition_leases`                                                                                                      |
+| `0005_events_id_unique.sql`            | the `unique` index that states the id guarantee (`events_id_key`) by name                                               |
+| `0006_session_previews.sql`            | a previews table, dropped again by `0010` before release                                                                |
+| `0007_event_claims.sql`                | `event_claims`, the insert-only record of which events a turn claimed (D9)                                              |
+| `0008_event_claims_backfill.sql`       | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                              |
+| `0009_event_supersessions.sql`         | `event_supersessions`, the insert-only record of the ranges events replace                                              |
+| `0020_rewind_supersessions.sql`        | `event_supersessions.kind` (`chunks` / `rewind`, #238) and its check                                                    |
+| `0010_drop_session_previews.sql`       | drops `session_previews`; the chunks of a reply are rows of `events` since D9                                           |
+| `0011_better_auth.sql`                 | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                         |
+| `0012_ownership.sql`                   | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                     |
+| `0013_provider_credentials.sql`        | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                            |
+| `0014_auth_session_revocation.sql`     | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                         |
+| `0015_session_model.sql`               | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93)   |
+| `0016_user_preferences.sql`            | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                        |
+| `0017_scheduler_instances.sql`         | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                           |
+| `0018_credential_key_provider.sql`     | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                         |
+| `0021_model_request_end_usage.sql`     | the partial index behind `listModelRequests`: `(session_id, processed_at)` where the type is a request end (#247)       |
+| `0022_credential_name.sql`             | `provider_credentials.provider` renamed to `name`, unique per `(user_id, name)` (#248)                                  |
+| `0023_credential_details.sql`          | `details jsonb` on `provider_credentials`: the non-secret facts a credential's type publishes (#249, #250, #251)        |
+| `0025_user_preferences_compaction.sql` | the compaction controls on `user_preferences`: `compaction_threshold`, `summary_model`, `summary_max_passes` (#282)     |
+| `0024_modes.sql`                       | `modes`, a user's named presets, and `sessions.mode`, the mode a chat follows (#245, M6)                                |
+| `0026_agent_tool_use_usage.sql`        | the partial index behind `listToolUses`: `(session_id, processed_at)` where the type is a tool call (#305)              |
+| `0027_tool_settings.sql`               | `user_tool_settings`, one row per user's tool choices, and `modes.tools`, a mode's tool override (#307)                 |
+| `0028_paused_confirmation_work.sql`    | the partial index behind the paused-confirmation work scan: `(session_id)` where the type is a tool confirmation (#309) |
 
 To run them outside an application:
 

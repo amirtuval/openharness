@@ -30,13 +30,17 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@mozilla/readability": "0.6.0",
     "@openharness/protocol": "workspace:*",
+    "linkedom": "0.18.13",
+    "turndown": "7.2.4",
     "undici": "8.11.2",
     "zod": "4.6.5"
   },
   "devDependencies": {
     "@openharness/config": "workspace:*",
     "@types/node": "26.6.3",
+    "@types/turndown": "^5.0.6",
     "eslint": "10.11.0",
     "prettier": "3.9.9",
     "tsdown": "0.23.0",
