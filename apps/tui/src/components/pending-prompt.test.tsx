@@ -371,5 +371,7 @@ describe('PendingPromptView, at the keyboard (#310)', () => {
 
     expect(onRespond).not.toHaveBeenCalled()
     expect(frameOf(instance)).toContain('sending a message will decline it')
+    // No cursor either: the list is what is waiting, not something to answer from any more.
+    expect(frameOf(instance)).not.toContain('▸')
   })
 })

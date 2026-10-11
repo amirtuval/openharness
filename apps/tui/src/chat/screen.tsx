@@ -1,6 +1,7 @@
 import {
   clearedResultsNotice,
   compactionThreshold,
+  confirmationSummary,
   contextMeter,
   manualCompactionNotice,
   modelSupportsTools,
@@ -549,6 +550,14 @@ export function ChatScreen({
         messages={view.transcript.messages}
         summaries={view.transcript.summaries}
         toolCalls={view.transcript.toolCalls}
+        // How a call that waited on the reader came to run (epic #303, #310): the decision is
+        // the log's own record, and the words are the client's, so `oh` and the page agree.
+        decisionOf={(call) => {
+          const decision = view.transcript.confirmations.find(
+            (candidate) => candidate.toolUseId === call.id,
+          )
+          return decision === undefined ? null : confirmationSummary(decision)
+        }}
         currentModel={currentModel}
         costOf={costOf}
         // A reply settles into Ink's static output once and never redraws (#208, X2), so it is
@@ -590,7 +599,10 @@ export function ChatScreen({
           {waiting.length > 0 && (
             <PendingPromptView
               entries={waiting}
-              active={!composing}
+              // A flow in the prompt slot owns the keys while it is up (#207) — the one-line
+              // entry a text row opens settles on Enter, and the list must not read that same
+              // Enter and open the entry again.
+              active={element === null && !composing}
               onRespond={respond}
               onText={askText}
               onFocusComposer={() => {

@@ -284,13 +284,10 @@ export function pendingPromptLines(
 ): Line[] {
   const rows = pendingRows(entries, state.drafts)
   const width = Math.max(1, columns - CURSOR_COLUMNS)
-  const cursor =
-    state.cursorId === null
-      ? 0
-      : Math.max(
-          0,
-          rows.findIndex((row) => row.id === state.cursorId),
-        )
+  // `null` is "no cursor was set", which starts at the top — what a test that only wants the
+  // words passes. An id that matches no row is "there is no cursor at all": the list is not what
+  // is reading keys any more (the reader asked to write a message instead).
+  const cursor = state.cursorId === null ? 0 : rows.findIndex((row) => row.id === state.cursorId)
   const lines: Line[] = []
 
   rows.forEach((row, index) => {
@@ -578,7 +575,7 @@ export function PendingPromptView({
         entries,
         // Without the keyboard there is no cursor: the list is what is waiting, not something
         // to answer from any more.
-        { drafts, cursorId: active ? (row?.id ?? null) : null },
+        { drafts, cursorId: active ? (row?.id ?? null) : '' },
         columns,
         theme,
       ).map((line, position) => (

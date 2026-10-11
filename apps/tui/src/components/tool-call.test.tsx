@@ -119,4 +119,15 @@ describe('ToolCallView (#308)', () => {
     expect(frame).toContain('web_fetch')
     expect(frame).toContain('done')
   })
+
+  it('says how a call that waited on the reader came to run (#310)', () => {
+    const lines = toolCallLines(
+      { ...call(), permission: 'ask', status: 'done' },
+      80,
+      DARK,
+      'Allowed for this chat',
+    )
+    const text = lines.map((line) => line.map((span) => span.text).join('')).join('\n')
+    expect(text).toContain('done · Allowed for this chat')
+  })
 })

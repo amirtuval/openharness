@@ -73,6 +73,7 @@ export function TranscriptView({
   messages,
   summaries = [],
   toolCalls = [],
+  decisionOf,
   width,
   currentModel,
   costOf,
@@ -84,6 +85,12 @@ export function TranscriptView({
   readonly summaries?: readonly TranscriptSummary[] | undefined
   /** The tool calls in the conversation, in order (epic #303, X5; #308). */
   readonly toolCalls?: readonly TranscriptToolCall[] | undefined
+  /**
+   * What the reader decided about a call that waited on them, or `null` (epic #303, #310): the
+   * words come from the client's `confirmationSummary`, and the screen is what holds the
+   * transcript's decisions.
+   */
+  readonly decisionOf?: ((call: TranscriptToolCall) => string | null) | undefined
   /** How wide the terminal is; the tests draw at a width they can read (see `MessageView`). */
   readonly width?: number | undefined
   /** The model the session runs, for the per-reply metadata lines (issue #208). */
@@ -142,7 +149,7 @@ export function TranscriptView({
       // brings its own blank line like a divider does, and draws nothing under it.
       <Fragment key={entry.call.id}>
         {setsOffBlock(previous) && <Text> </Text>}
-        <ToolCallView call={entry.call} width={width} />
+        <ToolCallView call={entry.call} decision={decisionOf?.(entry.call) ?? null} width={width} />
       </Fragment>
     ) : (
       <Fragment key={entry.message.id}>
