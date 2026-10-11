@@ -14,7 +14,7 @@ import {
   toolResultCap,
 } from './context'
 import type { ContextCutItem } from './context'
-import { agentToolResult, agentToolUse, contextSummary } from './events'
+import { agentOpaqueContent, agentToolResult, agentToolUse, contextSummary } from './events'
 import type { ModelFactory, ResolveCredential } from './model'
 import type { ContextCompactionConfig } from './summarize'
 import { resolveContextCompaction, SUMMARY_PROMPT_VERSION, summarizeContext } from './summarize'
@@ -1092,5 +1092,43 @@ describe('clearing old results before summarizing (epic #303, X9; #306)', () => 
     expect(sent).toContain('## Tool work')
     expect(sent).toContain('Tool call fetch:')
     expect(sent).toContain('Tool result from fetch:')
+  })
+})
+
+describe('summarizeContext — a step’s opaque parts (epic #303, X13; #334)', () => {
+  it('never folds an entry into a summary, and leaves the event exactly where it was', async () => {
+    // A history long enough to cut, with a step of the covered part that stored opaque parts.
+    // A summary stands in for the conversation; a step's provider parts are not conversation,
+    // and the engine is not their reader — so nothing of them reaches the summarizer, and
+    // nothing of the log moves.
+    const session = await newSession(messages(6, 1_000))
+    const [entry] = await session.store.appendEvents(session.sessionId, [
+      agentOpaqueContent('anthropic', CHAT_MODEL, [
+        { type: 'reasoning', text: 'OPAQUELABEL', provider_options: { signature: 'sig-1' } },
+      ]),
+    ])
+    await session.store.appendEvents(session.sessionId, [...messages(6, 1_000)])
+    const scripts = scriptedModels([{ text: ['## Goal\nsummarized'] }])
+
+    const result = await runEngine(session, { scripts })
+
+    expect(result.outcome).toBe('summarized')
+    const prompt = readPrompt(scripts.summary.calls[0]!)
+    expect(prompt.map((one) => one.text).join('\n')).not.toContain('OPAQUELABEL')
+
+    const events = await logOf(session.store, session.sessionId)
+    const stored = events.filter((event) => event.type === 'agent.opaque_content')
+    expect(stored).toHaveLength(1)
+    expect(stored[0]?.seq).toBe(entry?.seq)
+    // The entry sits inside the turn it belongs to, so the range the summary covers either
+    // holds it whole or does not hold it — never half of it.
+    const summary = contextSummaryOf(events)!
+    const covered = entry!.seq <= summary.covers.to_seq
+    expect(covered).toBe(true)
+    expect(
+      events.some(
+        (event) => event.type === 'agent.opaque_content' && event.seq > summary.covers.to_seq,
+      ),
+    ).toBe(false)
   })
 })

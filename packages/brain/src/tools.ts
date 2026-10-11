@@ -513,8 +513,22 @@ const MAX_TOOL_INPUT_DEPTH = 32
  * what tells the model so.
  */
 export function asToolInput(value: unknown): ToolInput {
+  return asJsonObject(value) ?? {}
+}
+
+/**
+ * A value as the JSON object the protocol stores, or `undefined` when it is not one.
+ *
+ * {@link asToolInput}'s walker without the "must be an object, so `{}` will do" fallback: a
+ * provider's opaque metadata — a reasoning part's signature, its item id, its encrypted
+ * content — is stored exactly as it arrived, and a value that cannot survive the round trip is
+ * dropped rather than stored as something no reader could read back (epic #303, X13; #334).
+ * Reading a *stored* payload back through this is also what turns a deep-readonly value into
+ * the plain one the AI SDK's part options take.
+ */
+export function asJsonObject(value: unknown): Record<string, JsonValue> | undefined {
   const walked = jsonValueOf(value, 0)
-  return isJsonObject(walked) ? walked : {}
+  return isJsonObject(walked) ? walked : undefined
 }
 
 /** One value as JSON, or `undefined` when it cannot be one. */

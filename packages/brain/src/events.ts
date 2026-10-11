@@ -7,6 +7,7 @@ import type {
   ModeReference,
   ModelRequestPurpose,
   ModelUsage,
+  OpaquePart,
   ReasoningEffortRun,
   RequestReminder,
   SessionCompactionOutcome,
@@ -381,6 +382,39 @@ export function agentMessage(id: EventId, text: string, supersedes?: Supersedes)
     id,
     content: [{ type: 'text', text }],
     ...(supersedes === undefined ? {} : { supersedes }),
+  }
+}
+
+/**
+ * The parts of a step only its own provider can read back (epic #303, X13; #334).
+ *
+ * One event per step, written whether or not the step streamed text — the step this exists for
+ * is a thinking model's call, which streams none. `provider` is the client family the parts may
+ * be replayed to and `model` the `provider/model` that produced them, which are the two things
+ * the context strategy checks before it puts them back in a request (`./opaque`); `dropped` is
+ * written only when an oversized step kept none of its parts.
+ *
+ * @param provider the family the parts must be replayed to
+ * @param model the model id that produced them
+ * @param parts the parts, in the order the provider produced them, or `[]` when all were dropped
+ * @param dropped how many parts were dropped for size, when any were
+ */
+export function agentOpaqueContent(
+  provider: string,
+  model: string,
+  parts: readonly OpaquePart[],
+  dropped = 0,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentOpaqueContent,
+    provider,
+    model,
+    parts: parts.map((part) => ({
+      type: part.type,
+      text: part.text,
+      ...(part.provider_options === undefined ? {} : { provider_options: part.provider_options }),
+    })),
+    ...(dropped === 0 ? {} : { dropped }),
   }
 }
 

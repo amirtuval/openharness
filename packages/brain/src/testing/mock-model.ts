@@ -1,5 +1,5 @@
 import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider'
-import type { ModelUsage } from '@openharness/protocol'
+import type { JsonValue, ModelUsage } from '@openharness/protocol'
 import { FIXTURE_MODEL_USAGE } from '@openharness/protocol/fixtures'
 import { APICallError } from 'ai'
 import type { LanguageModel } from 'ai'
@@ -21,6 +21,15 @@ export interface MockModelScript {
   /** The text chunks to stream, in order. Default: no text at all. */
   readonly text?: readonly string[]
   /**
+   * The reasoning the step streams before its text, in order (epic #303, X13; #334) — the part
+   * of a thinking model's step that only its own provider can read back.
+   *
+   * Each block streams as the AI SDK's own `reasoning-start` / `-delta` / `-end`, with the
+   * metadata on a fragment of its own and no text — the shape a provider uses for a
+   * `signature_delta`, and the one that makes the loop merge a block's fragments.
+   */
+  readonly reasoning?: readonly MockReasoningBlock[]
+  /**
    * The tool calls this step makes, in order, after the text (epic #303).
    *
    * `input` is an object here; the wire carries it as JSON text, which is what the mock streams
@@ -40,6 +49,18 @@ export interface MockModelScript {
   readonly usage?: Partial<ModelUsage>
   /** Called as each text chunk is about to be served — a test can abort or append here. */
   readonly onChunk?: (chunk: string, index: number) => Promise<void> | void
+}
+
+/** One reasoning block a scripted model streams (epic #303, X13; #334). */
+export interface MockReasoningBlock {
+  /** The block's thinking, streamed as one fragment. Default: none — a redacted block. */
+  readonly text?: string
+  /**
+   * The provider metadata the block carries, keyed the way the provider's client files it
+   * (`{ anthropic: { signature } }`, `{ openai: { itemId, reasoningEncryptedContent } }`,
+   * `{ bedrock: { signature } }`). Streamed on a fragment of its own, with no text.
+   */
+  readonly metadata?: Record<string, Record<string, JsonValue>>
 }
 
 /** One tool call a scripted model makes (epic #303). */
@@ -155,8 +176,37 @@ export function mockModel(...scripts: MockModelScript[]): MockModel {
 function streamOf(script: MockModelScript): ReadableStream<LanguageModelV4StreamPart> {
   const usage = { ...FIXTURE_MODEL_USAGE, ...script.usage }
   const calls = script.toolCalls ?? []
+  const reasoning = (script.reasoning ?? []).flatMap((block, index) => {
+    const id = `mock-reasoning-${index + 1}`
+    return [
+      (): Promise<LanguageModelV4StreamPart> =>
+        Promise.resolve({ type: 'reasoning-start' as const, id }),
+      ...(block.text === undefined
+        ? []
+        : [
+            (): Promise<LanguageModelV4StreamPart> =>
+              Promise.resolve({ type: 'reasoning-delta' as const, id, delta: block.text ?? '' }),
+          ]),
+      // The metadata rides its own fragment, with no text of its own — Anthropic's
+      // `signature_delta` — so the loop has to merge a block's fragments to read it.
+      ...(block.metadata === undefined
+        ? []
+        : [
+            (): Promise<LanguageModelV4StreamPart> =>
+              Promise.resolve({
+                type: 'reasoning-delta' as const,
+                id,
+                delta: '',
+                providerMetadata: block.metadata,
+              }),
+          ]),
+      (): Promise<LanguageModelV4StreamPart> =>
+        Promise.resolve({ type: 'reasoning-end' as const, id }),
+    ]
+  })
   const steps: (() => Promise<LanguageModelV4StreamPart>)[] = [
     () => Promise.resolve({ type: 'stream-start', warnings: [] }),
+    ...reasoning,
     () => Promise.resolve({ type: 'text-start', id: TEXT_ID }),
     ...(script.text ?? []).map((chunk, index) => async (): Promise<LanguageModelV4StreamPart> => {
       await script.onChunk?.(chunk, index)
@@ -281,4 +331,39 @@ export function readPrompt(call: LanguageModelV4CallOptions): PromptMessage[] {
         ? message.content
         : message.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join(''),
   }))
+}
+
+/** The parts of one assistant message, as `streamText` built them for the provider. */
+export type AssistantPromptParts = ReadonlyArray<
+  Extract<
+    Extract<LanguageModelV4CallOptions['prompt'][number], { role: 'assistant' }>['content'],
+    readonly unknown[]
+  >[number]
+>
+
+/**
+ * Every assistant message a recorded request carried, as its parts.
+ *
+ * What a request really sent, in its own order — the shape an assertion about an opaque part
+ * needs, because a `reasoning` part carries no text of the reply and is invisible to
+ * {@link readPrompt}: a replayed signature is a part with its provider options, and the part
+ * before the text and the calls is what a provider reads it as (epic #303, X13; #334).
+ *
+ * @param call one entry of `MockModel.calls`
+ */
+export function readAssistantParts(
+  call: LanguageModelV4CallOptions,
+): readonly AssistantPromptParts[] {
+  const messages: AssistantPromptParts[] = []
+  for (const message of call.prompt) {
+    if (message.role !== 'assistant') {
+      continue
+    }
+    messages.push(
+      typeof message.content === 'string'
+        ? [{ type: 'text', text: message.content }]
+        : message.content,
+    )
+  }
+  return messages
 }
