@@ -203,6 +203,19 @@ guidance for the summary (`/compact keep the API decisions`); the outcome — su
 to summarize, or a failure — is printed above the status line. `apps/tui/AGENTS.md` documents
 the keys and the exit codes.
 
+**A chat can use tools** (epic #303). The model may fetch a URL, search the web (where the
+deployment has a search key) or keep a task list, and every call is in the transcript: one
+compact line per call — what it was asked, and whether it is running, waiting for you, done,
+failed, denied, interrupted or lost — which the web app expands to the full input and result
+and `oh` draws with the reason a failed one owes. A list the model writes with `todo_write` is
+shown while the chat has one — a pinned panel in the web app, a compact block in `oh` — and
+updates as it is rewritten. Which tools a chat may use, and what a call to one may do
+(`allow`, `ask` or `deny`), is **your** per-user setting: the web app's **Settings → Tools** and
+`oh tools` list and set it, a mode can turn a tool on or off for the chats that follow it, and a
+tool this deployment does not register (a `web_search` with no key) is listed as unavailable
+rather than hidden. A model that cannot call tools says so. `oh settings` prints the context
+settings and `oh tools` the tool settings; both are the same stored values the web app shows.
+
 The web app and `oh` speak to the server through the same client
 ([`packages/client`](./packages/client/AGENTS.md)), so a behaviour one of them has, the other
 has too.

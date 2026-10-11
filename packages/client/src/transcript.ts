@@ -25,12 +25,7 @@ import type {
 } from '@openharness/protocol'
 
 import { contextAfterSummary } from './compaction'
-import {
-  clearedResultsFrom,
-  searchCount,
-  toolCallStatus,
-  truncatedResultsFrom,
-} from './tools'
+import { clearedResultsFrom, searchCount, toolCallStatus, truncatedResultsFrom } from './tools'
 import type {
   ClearedToolResults,
   ToolCallResult,

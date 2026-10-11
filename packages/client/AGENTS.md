@@ -58,6 +58,9 @@ src/
   transcript.ts         TranscriptState, reduceTranscript, selectors, createTranscript
   compaction.ts         how full the context is: the per-model budget, the threshold, the
                         meter both frontends draw, and the estimate a summary leaves (#280)
+  tools.ts              the tool-call view both frontends share (#303, X5; #308): the
+                        derived status, the summary and the words a call line is drawn
+                        with, the result notices, and the search count
   providers.ts          PROVIDERS: the frontends' view of the shared provider list — the
                         protocol's id/name/key URL/credential type, plus free-tier and
                         key-format hints (#209, #245)
@@ -66,6 +69,8 @@ src/
   resources/models.ts   models.list: the model catalog (epic #92)
   resources/modes.ts    modes.create/get/list/update/delete: the caller's modes (#245, M6)
   resources/preferences.ts  preferences.get/put: the caller's default model (#111)
+  resources/tools.ts    tools.list/put: which built-in tools a chat may use, and the
+                        permission each call is evaluated under (#303, X4; #307)
   resources/provider-credentials.ts  providerCredentials.list/put/delete
   resources/sessions.ts sessions.create/get/list/delete + sessions.events.send/list/iterate/stream
   resources/usage.ts    usage.session/usage.me: what a session and the caller spent (#247)
@@ -92,6 +97,7 @@ src/
 | `ProviderCredentialsResource`                                                                                                                                                                                                                                                                                                                                                               | `providerCredentials.list/put/delete`                                                                                                                                                                        |
 | `ModelsResource`                                                                                                                                                                                                                                                                                                                                                                            | `models.list`: the chat models the caller's keys can use (epic #92)                                                                                                                                          |
 | `ModesResource`                                                                                                                                                                                                                                                                                                                                                                             | `modes.create/get/list/update/delete`: the caller's named presets (#245, M6)                                                                                                                                 |
+| `ToolsResource`                                                                                                                                                                                                                                                                                                                                                                             | `tools.list/put`: which built-in tools a chat may use and the permission each call runs under, effective and per mode (#303, X4; #307; #308)                                                                 |
 | `PreferencesResource`                                                                                                                                                                                                                                                                                                                                                                       | `preferences.get/put`: the caller's stored default model (#111)                                                                                                                                              |
 | `UsageResource`                                                                                                                                                                                                                                                                                                                                                                             | `usage.session(id)` and `usage.me(range)`: what was spent, priced on the server (#247)                                                                                                                       |
 | `AuthResource`                                                                                                                                                                                                                                                                                                                                                                              | `auth.startDeviceLogin/pollDeviceLogin/signOut`                                                                                                                                                              |
@@ -108,8 +114,11 @@ src/
 | `SessionUsage`, `SessionModelUsage`, `SessionUsageTotals`, `ModelPriceLookup`                                                                                                                                                                                                                                                                                                               | the session's totals as the transcript keeps them, and how a frontend prices them (#247)                                                                                                                     |
 | `selectSessionUsage()`, `sessionUsageOf()`, `sessionCost()`, `replyCost()`                                                                                                                                                                                                                                                                                                                  | what a session and a reply cost, from the log's tokens and the catalog's rates (#247)                                                                                                                        |
 | `selectSummaries()`, `selectSummarizing()`, `selectContext()`, `selectTruncation()`, `selectManualCompaction()`                                                                                                                                                                                                                                                                             | what the compaction is doing, from the transcript (#280)                                                                                                                                                     |
-| `selectTranscriptEntries()`, `transcriptEntries()`, `TranscriptEntry`                                                                                                                                                                                                                                                                                                                       | the messages and the summary dividers as one ordered list a frontend renders (#280)                                                                                                                          |
+| `selectTranscriptEntries()`, `transcriptEntries()`, `TranscriptEntry`                                                                                                                                                                                                                                                                                                                       | the messages, the tool calls and the summary dividers as one ordered list a frontend renders (#280; #308)                                                                                                    |
 | `TranscriptSummary`, `TranscriptSummarizing`, `TranscriptContext`, `TranscriptTruncation`                                                                                                                                                                                                                                                                                                   | the four shapes that state is kept in (#280)                                                                                                                                                                 |
+| `selectToolCalls()`, `selectTodos()`, `selectTruncatedToolResults()`, `selectClearedToolResults()`, `selectSearchCount()`, `TranscriptToolCall`                                                                                                                                                                                                                                             | the tool calls a conversation holds, the chat's task list, the newest request's result notices and its search count (#303, X1/X5/X9; #308)                                                                   |
+| `toolCallStatus()`, `toolCallSummary()`, `toolStatusLabel()`, `formatToolInput()`, `ToolCallStatus`, `ToolCallResult`, `TruncatedToolResult`, `ClearedToolResults`, `ToolResultsNotice`                                                                                                                                                                                                     | one call's derived status, its short summary, the words for a status, the pretty-printed input, and the shapes those are kept in (#308)                                                                      |
+| `truncatedResultsNotice()`, `clearedResultsNotice()`, `stepLimitNotice()`, `modelSupportsTools()`, `searchCount()`, `TOOL_STEPS_EXHAUSTED_NOTICE`, `TOOLS_UNSUPPORTED_NOTICE`                                                                                                                                                                                                               | the sentences a tool-aware screen is owed: shortened and cleared results, the step limit, "this model can't use tools", and how many searches a chat made (#303, X2/X5/X9; #308)                             |
 | `contextMeter()`, `ContextMeter`, `contextTokenBudget()`, `contextAfterSummary()`, `estimateTokens()`, `summaryDescription()`, `compactionThreshold()`, `modelContextBudget()`, `COMPACTING_LABEL`, `manualCompactionNotice()`, `summaryModelFallback()`, `SummaryModelFallback`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`, `OUTPUT_RESERVE_RATIO` | how full the context is, the words both frontends draw it in, and the pass math the settings warn with (#277, #280, #282)                                                                                    |
 | `contextTokenBudget()`, `contextAfterSummary()`, `estimateTokens()`, `DEFAULT_COMPACTION_THRESHOLD`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`, `OUTPUT_RESERVE_RATIO`                                                                                                                                                                                                              | the meter's arithmetic: the server's per-model budget rule restated, and the estimate a summary leaves (#280)                                                                                                |
 | `PROVIDERS`, `providerInfo()`, `providerName()`, `ProviderInfo`                                                                                                                                                                                                                                                                                                                             | the model providers a form or a tile needs (#209; built from the shared list, #245)                                                                                                                          |
@@ -471,16 +480,23 @@ interface TranscriptState {
   deleted: boolean // a `session.deleted` arrived: the session is gone (#111)
   model: string | null // the model the log last said the session runs (#111, seeded per #268)
   pendingRequests: PendingModelRequest[] // bookkeeping for `meta`; empty between turns (#201)
+  toolCalls: TranscriptToolCall[] // the model's calls and what answered them (#303, #308)
+  todos: TodoList | null // the last successful `todo_write` call's list (#305, #308)
+  // plus the compaction state (summaries, summarizing, context, truncation, manualCompaction,
+  // the newest request's truncated/cleared tool results) — see "Context visibility" and "The
+  // tool-call view"
 }
 ```
 
 **A message is typed parts, not text** (epic #201, X1). `parts: readonly MessagePart[]` is a
 discriminated union on `type`; only `{ type: 'text', text }` exists today, and `thinking`,
-`tool_use`, `tool_result`, `question` and `approval` are the members the next phases add —
-named in the type's TSDoc, deliberately not implemented, with no protocol event behind them
-yet. `text` stays `parts.join('')` of the text parts, so a caller that only wants the words
-does not change. Both frontends render `message.parts` through a `Record<MessagePart['type'],
-Renderer>`, so the new members are a compile error until each frontend has drawn them.
+`question` and `approval` are the members the next phases add — named in the type's TSDoc,
+deliberately not implemented, with no protocol event behind them yet. `text` stays
+`parts.join('')` of the text parts, so a caller that only wants the words does not change. Both
+frontends render `message.parts` through a `Record<MessagePart['type'], Renderer>`, so the new
+members are a compile error until each frontend has drawn them. **A tool call is not a message
+part** (#308): its events are its own, so it is a `TranscriptEntry` of `kind: 'tool'` — see
+"The tool-call view".
 
 **Since #280 the state also carries what the compaction is doing**, in the same plain-data
 shape (`summaries`, `summarizing`, `context`, `truncation` — see "Context visibility" below).
@@ -630,6 +646,56 @@ budget comes from the server`). It is written twice because the rule lives in a 
   `tokens_before`) less the text the summary replaced, plus the summary's own text. It is
   flagged (`estimated`, and a `~` on the label) and it errs high — the covered text is
   estimated, and the framing a real prompt pays for is not in it.
+
+## The tool-call view (epic #303, X1/X5/X9; issue #308)
+
+The tools work is only visible if the transcript says what the model asked for and what came
+back, and both frontends must say the same thing. The reducer lives in `src/transcript.ts`, the
+words and the derivation in `src/tools.ts`, and the wire read in `resources/tools.ts` — this is
+the whole of it.
+
+| state                           | set by                                              | cleared by                                             |
+| ------------------------------- | --------------------------------------------------- | ------------------------------------------------------ |
+| `toolCalls` (`selectToolCalls`) | `agent.tool_use`, updated by `agent.tool_result`    | a `session.rewind` whose range covers the call's `seq` |
+| `todos` (`selectTodos`)         | any `agent.tool_use` / `agent.tool_result`          | a rewind over the calls the list was read from         |
+| `truncatedToolResults`          | `span.model_request_start.truncated.results` (#306) | the next real request's start, a rewind                |
+| `clearedToolResults`            | `span.model_request_start.cleared` (#306)           | the next real request's start, a rewind                |
+
+- **A call is its own entry, not a message part.** The model's call is an event of its own
+  (`agent.tool_use`), so a step that made four calls and wrote no words is four calls and no
+  message — which is why they live in `toolCalls` and reach a renderer as a
+  `TranscriptEntry` of `kind: 'tool'`, ordered among the messages by `transcriptEntries`. The
+  two frontends render that one list, so a call line lands in the same place in both.
+- **The status is derived, never stored.** `toolCallStatus(permission, result, { waiting,
+running })` reads it off the call's `evaluated_permission`, whether a result has landed and
+  what that result says — the brain's own sentences are the record (`Interrupted by the user.`,
+  `execution lost`, `Permission to use … has been denied.`, `The user denied this…`), so a
+  `deny` reads `denied`, an interrupt `interrupted`, and a call nothing answered on a turn that
+  has ended `execution lost`. `waiting` is a call whose `evaluated_permission` is `ask` (which
+  is what `ask_user` and a policy-`ask` call both record): the pause #310 answers, and the state
+  a caller draws its approval prompt from. The reducer recomputes the statuses when a turn starts
+  or ends, so a call with no result is `running` while the turn works and `lost` once it is over.
+- **A call's `source` comes from the request's own record.** The span's `tools` list is folded
+  into the state's `toolSources` and stamped on each call as it lands, so a #313 MCP call says
+  `source: 'mcp'` without the reader of the log re-interpreting it — the same rule the log's
+  other per-request records follow.
+- **The words are the client's.** `toolStatusLabel` ("waiting for you", "execution lost"),
+  `toolCallSummary` (a URL, a query, a task count, a question, else the first string value) and
+  `formatToolInput` are the same in both frontends, and so are the notices:
+  `truncatedResultsNotice`, `clearedResultsNotice`, `stepLimitNotice` (which hands over the
+  brain's own sentence when it sent one) and `modelSupportsTools` (the catalog's `tool_call`,
+  `null` when the catalog says nothing).
+- **The task list is read with the protocol's rule.** `selectTodos` is `readTodoList` over the
+  tool events the state keeps — the newest successful `todo_write` call's own input, or `null`
+  when none has taken effect — so the list a frontend draws is exactly the one the brain
+  computes, and an empty list is told apart from none.
+
+`client.tools` is the wire half: `list({ mode_id? })` is `GET /v1/me/tools` (a mode's on/off
+override applied over the caller's choices, which is what a composer shows for a chat that
+follows one) and `put(body)` is `PUT /v1/me/tools`, which merges per tool. Both answer the
+effective list — one entry per tool, with `policy`, `default_policy` and `available` — and the
+fake client backs both (a registered set of three built-ins, a seeded `toolSettings`, and a
+`toolsAvailable` over which of them this fake deployment registers).
 
 ## Provider metadata (#209, #245)
 
@@ -840,8 +906,15 @@ not picked up by the fake's next turn.
 A mode carries the **tool override** of #307 (`tools`) like any other mode field: the fake
 stores what a create or update carries, defaults it to `null`, and keeps it when an update
 omits it — the resource is the protocol's, so there is nothing else for the fake to do with it.
-There is **no `client.tools` resource yet**: `/v1/me/tools` is reached by the API only, and the
-screen that asks for it is #308.
+
+`client.tools` is an in-memory store behind `/v1/me/tools` (#308): the fake registers three
+built-ins (`web_fetch`, `web_search`, `todo_write`, each declared `allow`), seeded with
+`createFakeClient({ toolSettings })` and with `createFakeClient({ toolsAvailable })` saying which
+of them **this** deployment registers (`false` is listed as `available: false` with no default,
+the state a screen says "not configured" for). `list({ mode_id })` applies a mode's on/off
+override over the stored choices — never a permission — and `put` merges per tool. What the fake
+does not do is run a tool loop: its brain answers in one turn, so a component test of the tool
+_UI_ drives the transcript or the components directly rather than through a scripted call.
 
 The credentials are configurable too: `createFakeClient({ credentials })` seeds the store with
 metadata-only rows, which is what a screen that behaves differently for an account **with** a key
@@ -956,6 +1029,15 @@ picks and the default it leaves alone, a deleted fake session's final event
 and the 404s that follow it, and the fake against the real client on the same scripted
 scenario (the fake's events are replayed to the real client as an SSE body, and the two
 transcripts must be equal — a retried reply's metadata included).
+
+The tool half (#303, X5; #308) is `src/tools.test.ts` (the status matrix — a result's own
+sentences, `ask` as `waiting`, a turn that ended as `lost` — the per-tool summaries, the result
+and step-limit notices, and `modelSupportsTools`) and `src/transcript-tools.test.ts` (a call's
+entry and its position among the messages, the status moving with each result, the source
+stamped from the request's offered tools, `waiting` kept across an idle, the truncated/cleared
+records and their clearing, a rewind dropping the calls it covers, and the todo list read with
+`readTodoList`'s rule). `src/client.test.ts` holds `client.tools`' two routes and the fake's own
+`tools` store is in `src/testing/fake.test.ts`.
 
 `src/transcript.test.ts` also holds the epics #277/#280 half: the divider and where it draws,
 a summary a rewind took back (and one it did not reach), the progress lifecycle (the summary
