@@ -508,10 +508,10 @@ if (target === null) {
       // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
       // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql` and
       // `0027_tool_settings.sql` one or more `add column if not exists` (#150, #203, #282,
-      // #307), and `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql` and
-      // `0027_tool_settings.sql` build an index or a table (#247, #305, #307): a re-run has to
-      // leave the tables, the indexes and the columns working, which the store calls below
-      // prove.
+      // #307), and `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
+      // `0027_tool_settings.sql` and `0028_paused_confirmation_work.sql` build an index or a
+      // table (#247, #305, #307, #309): a re-run has to leave the tables, the indexes and the
+      // columns working, which the store calls below prove.
       expect(files).toContain('0016_user_preferences.sql')
       expect(files).toContain('0017_scheduler_instances.sql')
       expect(files).toContain('0018_credential_key_provider.sql')
@@ -524,8 +524,14 @@ if (target === null) {
       // numbers are unique and ordered is that both files are here, in this order.
       expect(files).toContain('0026_agent_tool_use_usage.sql')
       expect(files).toContain('0027_tool_settings.sql')
+      // `0028_paused_confirmation_work.sql` builds the fourth partial index on the log's event
+      // types (#309), and must come after the files the tools stack already numbered.
+      expect(files).toContain('0028_paused_confirmation_work.sql')
       expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
         files.indexOf('0027_tool_settings.sql'),
+      )
+      expect(files.indexOf('0027_tool_settings.sql')).toBeLessThan(
+        files.indexOf('0028_paused_confirmation_work.sql'),
       )
       expect(await migrate(db)).toEqual(files)
 

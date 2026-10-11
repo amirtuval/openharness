@@ -410,7 +410,7 @@ describe('the tool loop', () => {
     ])
   })
 
-  it('refuses a call a setting asks about, and says the approval it needs is not there yet', async () => {
+  it('pauses on a call a setting asks about, instead of running or refusing it', async () => {
     const { store, sessionId } = await newSession([message('maybe')])
     const { tool, run } = echo()
     const { factory } = mockModel(
@@ -418,7 +418,7 @@ describe('the tool loop', () => {
       { text: ['Fine.'] },
     )
 
-    await runTurn(sessionId, {
+    const outcome = await runTurn(sessionId, {
       store,
       model: factory,
       resolveCredential: resolveTestCredential,
@@ -426,16 +426,19 @@ describe('the tool loop', () => {
       toolSettings: () => ({ echo: { enabled: true, permission: 'ask' } }),
     })
 
-    // `ask` is the pause of #309; until pausing exists the safe reading is "do not run it" —
-    // and the model is told that, rather than that a user denied a call no user saw (#307).
+    // `ask` is the pause of #309: the call is stored, nothing runs it, no result is written and
+    // the turn ends idle naming the call it waits on. `pausing.test.ts` drives every way it is
+    // answered from here.
+    expect(outcome).toEqual({ outcome: 'paused' })
     expect(run).not.toHaveBeenCalled()
     const log = await logOf(store, sessionId)
-    expect(of(log, EVENT_TYPES.agentToolUse)[0]).toMatchObject({ evaluated_permission: 'ask' })
-    const result = of(log, EVENT_TYPES.agentToolResult)[0]
-    expect(result).toMatchObject({ is_error: true })
-    expect(textOfEvent(result)).toBe(
-      'Permission to use echo requires your approval, which is not available yet.',
-    )
+    const use = of(log, EVENT_TYPES.agentToolUse)[0]
+    expect(use).toMatchObject({ evaluated_permission: 'ask' })
+    expect(of(log, EVENT_TYPES.agentToolResult)).toEqual([])
+    expect(log.at(-1)).toMatchObject({
+      type: EVENT_TYPES.sessionStatusIdle,
+      stop_reason: { type: 'requires_action', event_ids: [use?.id] },
+    })
   })
 
   it('asks the settings once per request, with the owner and the mode’s override', async () => {

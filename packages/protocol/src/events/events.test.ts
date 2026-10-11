@@ -62,6 +62,14 @@ const storedSamples = {
     seq: 2,
     processed_at: null,
   },
+  'user.tool_confirmation': {
+    id: eventId(),
+    type: 'user.tool_confirmation',
+    seq: 3,
+    processed_at: '2026-03-15T10:00:00Z',
+    tool_use_id: eventId(),
+    result: 'allow',
+  },
   'agent.message': {
     id: eventId(),
     type: 'agent.message',

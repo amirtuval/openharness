@@ -89,7 +89,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0024 the per-user modes, and the mode a session follows (#245, M6),
                         0025 the compaction controls on the per-user preferences (#282),
                         0026 the index behind the per-user tool-call read (#305),
-                        0027 the per-user tool settings, and the tool override a mode carries (#307)
+                        0027 the per-user tool settings, and the tool override a mode carries (#307),
+                        0028 the index behind the paused-confirmation work scan (#309)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -373,7 +374,9 @@ A turn is open when nothing closed it: the last status event is `session.status_
 `session.status_rescheduled`, and no `session.status_idle` follows. So a brain that inherits a
 session acts on anything other than `idle`: it closes `openSpan` if there is one
 (`span.model_request_end` with `error: { type: "brain_lost" }`, pointing at it) and runs the
-turn again. `findSessionsNeedingWork` treats both open states as work.
+turn again. `findSessionsNeedingWork` treats both open states as work — and, beside pending
+user events, a third case: a session whose last turn ended `requires_action` and which holds a
+`user.tool_confirmation` answering one of the calls it waits on (epic #303, X6; #309).
 
 **Usage reads** (#247) are the one place the contract asks a question of many sessions at
 once, and the reason it is a method rather than a caller's loop. `listModelRequests({ ownerId,
@@ -436,7 +439,12 @@ announcement.
 partition at that moment, once each; a signal nobody is listening for is dropped, because
 signals are a latency optimization and not a durable queue. No flow may depend on one
 arriving: a partition's new owner recovers by asking `findSessionsNeedingWork`, which reports
-the sessions with pending user events or an open turn, oldest first.
+the sessions with pending user events, an open turn, or a pause whose answer has landed
+(epic #303, X6; #309) — a session whose last turn ended `requires_action` and which now holds
+a `user.tool_confirmation` naming one of the calls it waits on, oldest first. That third case
+is what keeps a missed signal from stranding an answer: the server writes a confirmation
+processed, so it is not a queued user event and the session reads idle, and an instance that
+died before its turn began would otherwise leave the chat stuck until the next message.
 
 **Auth-session revocations are hints too** (epic #65, A2; issue #76).
 `notifyAuthSessionRevoked(authSessionId)` announces that a Better Auth session's row is gone —
@@ -822,6 +830,18 @@ null default '{}'`, `updated_at`, `on delete cascade` from `"user"` — and one
   `user_id` is Better Auth's opaque text and takes no `collate "C"`; nothing orders by it.
   Both statements are idempotent, so the runner can re-run the file.
 
+Pausing for the user (epic #303, X6; issue #309) added the newest one:
+
+- **`0028_paused_confirmation_work.sql` — the index behind the paused-confirmation work scan**
+  (#309): a **partial** index, `(session_id) where type = 'user.tool_confirmation'`.
+  `findSessionsNeedingWork` gained a third case — a session whose last turn ended
+  `requires_action` and which holds a confirmation naming one of the calls it waits on — and
+  finding that confirmation narrows to one session and one event type. `(session_id, seq)`
+  (0003) seeks a session's log by position rather than by type, so without this the lookup
+  would walk every event of the session. Partial, like `0021`'s and `0026`'s, because only
+  `user.tool_confirmation` rows are ever read that way; only the session is needed, since the
+  scan asks "does this session have one?". Idempotent because an index is built, not migrated.
+
 The vault's key provider (issue #150, deployment epic #148 decision D6) added one before it:
 
 - **`0018_credential_key_provider.sql` — which provider wrapped a credential** (#150): one
@@ -991,8 +1011,8 @@ dependency table.
   chunk another store appended delivered to this store's subscriber, a deleted session's rows
   really gone from `events`, `event_claims` and `event_supersessions` while another session's
   are untouched, its `session.deleted` announced to a different store's subscriber,
-  idempotent migrations (`0016`, `0017`, `0018`, `0026` and `0027` included — the tables,
-  indexes and columns they add are exercised after a re-run),
+  idempotent migrations (`0016`, `0017`, `0018`, `0026`, `0027` and `0028` included — the
+  tables, indexes and columns they add are exercised after a re-run),
   the #93 backfill over a session row written the pre-#93 way (the agent's model and system
   copied into the new columns, the row read back as the protocol's session), `close()` leaving
   a borrowed pool alone, the raw `events.processed_at` column staying `NULL`

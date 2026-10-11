@@ -185,6 +185,9 @@ export {
 } from './main'
 export {
   createMockModelFactory,
+  MOCK_ASK_ANSWERS,
+  MOCK_ASK_INPUT,
+  MOCK_ASK_MARKER,
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
   MOCK_HOLD_TEXT,
@@ -234,6 +237,7 @@ export {
   type TurnToolOptions,
   type TurnToolsOptions,
 } from './tools'
+export { askUserTool, withAlwaysApprovals } from './pausing'
 export {
   createSearchAllowance,
   type SearchAllowance,
