@@ -24,6 +24,13 @@ locals {
   # and its one container.
   cloudsql_filter  = "resource.type=\"cloudsql_database\" AND resource.label.project_id=\"${var.project_id}\""
   container_filter = "resource.type=\"k8s_container\" AND resource.label.project_id=\"${var.project_id}\""
+
+  # The restart policy watches the app's namespace only. GKE's own system
+  # DaemonSets (`kube-system`, `gke-gmp-system`) restart once on every Autopilot
+  # node replacement — their logs show the apiserver unreachable while the node's
+  # network is not up yet — and that churn is normal, so paging on it is noise.
+  # The app crash loops this alert exists for run in `var.app_namespace` (#325).
+  container_restarts_filter = "${local.container_filter} AND resource.label.namespace_name=\"${var.app_namespace}\""
 }
 
 # --- the channel the alerts go to -------------------------------------------------
@@ -221,7 +228,10 @@ resource "google_monitoring_alert_policy" "cloudsql_disk" {
   }
 }
 
-# Containers restarting: a crash loop, or a health probe the deployment cannot pass.
+# Containers restarting in the app's namespace: a crash loop, or a health probe
+# the deployment cannot pass. Deliberately not project-wide: GKE's system
+# DaemonSets restart once on every Autopilot node replacement, and paging on that
+# is noise (issue #325).
 resource "google_monitoring_alert_policy" "container_restarts" {
   count = local.enabled ? 1 : 0
 
@@ -234,7 +244,7 @@ resource "google_monitoring_alert_policy" "container_restarts" {
     display_name = "container restarts"
 
     condition_threshold {
-      filter          = "metric.type=\"kubernetes.io/container/restart_count\" AND ${local.container_filter}"
+      filter          = "metric.type=\"kubernetes.io/container/restart_count\" AND ${local.container_restarts_filter}"
       comparison      = "COMPARISON_GT"
       threshold_value = var.container_restart_threshold
       # Any increase over the hour fires: a container that restarts once has either
@@ -254,6 +264,6 @@ resource "google_monitoring_alert_policy" "container_restarts" {
 
   documentation {
     mime_type = "text/markdown"
-    content   = "A container restarted more than ${var.container_restart_threshold} times in the last hour. `kubectl -n openharness get pods` and `kubectl -n openharness describe pod <pod>` carry the reason (OOMKilled, a failed readiness probe, a crash at boot); the pod's logs are JSON with the boot lines that say what it was doing."
+    content   = "A container in the `${var.app_namespace}` namespace restarted more than ${var.container_restart_threshold} times in the last hour. `kubectl -n ${var.app_namespace} get pods` and `kubectl -n ${var.app_namespace} describe pod <pod>` carry the reason (OOMKilled, a failed readiness probe, a crash at boot); the pod's logs are JSON with the boot lines that say what it was doing. GKE's system containers (`kube-system`, `gke-gmp-system`) are excluded on purpose: they restart once on every Autopilot node replacement, which is normal churn nobody can act on."
   }
 }

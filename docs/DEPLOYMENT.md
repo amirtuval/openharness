@@ -610,7 +610,8 @@ nothing.
   regions — always created, and what the console's uptime dashboard reads;
 - once `alert_email` is set: an **email notification channel**, and alert policies for the
   uptime check failing from every region for five minutes, a high load-balancer 5xx rate, Cloud
-  SQL CPU above 80%, Cloud SQL disk above 80%, and containers restarting.
+  SQL CPU above 80%, Cloud SQL disk above 80%, and containers restarting in the app's namespace
+  (`openharness`).
 
 `alert_email` is empty by default, and an empty value creates **no channel and no alert
 policies** — so the first apply of an environment succeeds before anyone has decided who is on
@@ -631,6 +632,15 @@ The thresholds are the module's own variables — `http_5xx_threshold` (5xx per 
 `db_cpu_threshold` and `db_disk_threshold` (utilization, 0..1), `container_restart_threshold`
 (restarts per hour; the default `0` means "any restart") — each with a default that fits this
 deployment. Override one by adding it to the `monitoring` module call.
+
+The restart policy is scoped to one namespace — `app_namespace`, defaulting to `openharness` —
+rather than every container in the project. Both clusters are Autopilot with the
+`OPTIMIZE_UTILIZATION` profile, so nodes are replaced often, and on each new node GKE's own
+DaemonSet containers (in `kube-system` and `gke-gmp-system` such as `netd`, `pdcsi-node` and
+`csi-secrets-store`) restart once before the node's network is up. That is normal churn nobody
+can act on, and alerting on it paged on every node replacement; the app crash loops the alert
+exists for run in the app's namespace (issue
+[#325](https://github.com/amirtuval/openharness/issues/325)).
 
 - **Where:** Monitoring → Alerting (the policies) and Monitoring → Uptime (the check); each
   policy's documentation links to what to look at when it fires.
