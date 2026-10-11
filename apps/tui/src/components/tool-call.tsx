@@ -124,18 +124,16 @@ export function toolCallLines(
  * The one line a call owes the reader beyond its status, or `null`.
  *
  * A failed or interrupted call says why — the brain's own sentence, cut to its first line, since
- * a result can be pages long. A call waiting on the reader says what it is waiting for: the page
- * draws its approval prompt here (#310).
+ * a result can be pages long. A call waiting on the reader says nothing extra: its status is
+ * already the line ("waiting for you"), and what it is waiting for is the question in its input,
+ * which #310's prompt draws under it.
  */
 export function callReason(call: TranscriptToolCall): string | null {
-  if (call.result !== undefined && call.result.isError) {
-    const first = call.result.content.split('\n')[0]?.trim() ?? ''
-    return first === '' ? null : first
+  if (call.result === undefined || !call.result.isError) {
+    return null
   }
-  if (call.status === 'waiting') {
-    return 'waiting for you'
-  }
-  return null
+  const first = call.result.content.split('\n')[0]?.trim() ?? ''
+  return first === '' ? null : first
 }
 
 /** The colour a status is drawn in: the alarm for a waiting or failed call, chrome otherwise. */

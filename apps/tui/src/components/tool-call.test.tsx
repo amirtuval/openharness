@@ -102,9 +102,9 @@ describe('callReason (#308)', () => {
     expect(callReason(call({ status: 'error', result: { content: 'boom', isError: true } }))).toBe(
       'boom',
     )
-    expect(callReason(call({ status: 'waiting', result: undefined, permission: 'ask' }))).toBe(
-      'waiting for you',
-    )
+    // A waiting call owes no second line: its status already says it, and the question is in
+    // the input (#310 draws its prompt there).
+    expect(callReason(call({ status: 'waiting', result: undefined, permission: 'ask' }))).toBeNull()
   })
 })
 
