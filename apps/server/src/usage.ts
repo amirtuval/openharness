@@ -3,6 +3,7 @@ import {
   MAX_PAGE_LIMIT,
   WEB_SEARCH_TOOL_NAME,
   searchCost,
+  toolCallSource,
   totalCost,
   usageCost,
   type LocalDay,
@@ -306,6 +307,10 @@ interface SessionUsageRead {
  * one a crashed turn never answered are not searches), and the count each request's own
  * `span.model_request_end` carries, which is what a provider-executed search is (#335).
  *
+ * A **provider-executed** search is the second kind alone: #335 writes it as a readable pair
+ * for a client to draw, but the search it records is the one the request's span already
+ * counted, so the pair is left to the span rather than counted here as well (issue #338).
+ *
  * A call and its result are one identity (the result names the call's event id, epic #303 X1),
  * and the pair can straddle a page boundary — so the calls seen so far are kept, and dropped
  * as their answers arrive. That is one entry per unanswered call, never the whole log.
@@ -320,7 +325,7 @@ function searchCounter(): {
     observe(events) {
       for (const event of events) {
         if (event.type === EVENT_TYPES.agentToolUse) {
-          if (event.name === WEB_SEARCH_TOOL_NAME) {
+          if (event.name === WEB_SEARCH_TOOL_NAME && toolCallSource(event) !== 'provider') {
             waiting.add(event.id)
           }
         } else if (event.type === EVENT_TYPES.modelRequestEnd) {

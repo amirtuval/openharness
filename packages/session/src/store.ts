@@ -709,6 +709,15 @@ export interface SessionStore {
    * them would bill a user for work that never happened. It is the same rule the usage surface
    * follows about tokens, one level up.
    *
+   * A **provider-executed** call (`source: 'provider'`, epic #303, X14; issue #335) is left out
+   * too, and for a different reason: it is not a call of this build's. #335 writes it as a
+   * readable pair for a client to draw, beside the provider's own call in the step's opaque
+   * content, and the request's `span.model_request_end.searches` is where the count of those
+   * searches lives — so counting the pair here would count one search twice (issue #338). The
+   * read stays the operator-key era's — the `web_search` calls a log stored before #335 holds,
+   * when the search was a tool of ours — and a remote MCP call is left out for its own reason
+   * (#312).
+   *
    * **Owner-scoped, and the owner is required** (epic #65, A4): only the owner's sessions are
    * read. A call a `session.rewind` replaced is **not** in the answer (#238), exactly as it is
    * not in a replay. The answer is ordered by `(session_id, seq)` — the log's own order, session

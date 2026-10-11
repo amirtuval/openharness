@@ -946,18 +946,21 @@ prices each request with the registry's rates, and assembles the totals and the 
   `input_tokens` these totals carry is the **uncached** input — the counters are disjoint, which
   is what makes the per-counter pricing correct — because the brain normalizes each provider
   family into them at the model seam (epic #277, K2; `packages/brain/src/model.ts`).
-- **Searches are counted, and priced where a rate is published** (epic #303, #305; #335). Every
-  usage answer carries
-  `searches` beside its totals, and the log holds two kinds of them: the `web_search` **calls** a
-  log stored in the operator-key era carries, which count when their result exists and is not an
-  error (the rule `listToolUses` reads by), and the searches each request's own
-  `span.model_request_end` counted, which is where a **provider-executed** search is — it leaves
-  no call of ours to pair with a result, so the span that spent it holds the number. The session
-  route counts both in the one log it already walks; the user route makes the calls' own windowed
-  read (`listToolUses`) beside the model requests, and groups them by the reader's local day
-  exactly as the requests are. Neither is priced — a provider-native search runs on the user's own
-  model key, and #305's operator plan is gone — so the number is a count and no money is claimed
-  for it.
+- **Searches are counted once each, and priced where a rate is published** (epic #303, #305;
+  #335). Every usage answer carries `searches` beside its totals, and the log holds two kinds of
+  them: the `web_search` **calls** a log stored in the operator-key era carries, which count when
+  their result exists and is not an error (the rule `listToolUses` reads by), and the searches
+  each request's own `span.model_request_end` counted, which is where a **provider-executed**
+  search is. The two never overlap: #335 writes a readable pair for a provider-executed search so
+  a client can draw it, and both counts leave that pair out — `listToolUses` skips a call whose
+  `source` is `provider`, and the session route's walk does the same — because the span that
+  spent the search already holds its number (issue #338). The session route counts both in the
+  one log it already walks; the user route makes the calls' own windowed read (`listToolUses`)
+  beside the model requests, and groups them by the reader's local day exactly as the requests
+  are. Where a rate is published the count is **priced into `cost`** — Anthropic charges $10 per
+  1,000 searches on top of tokens (`SEARCH_PRICE_PER_CALL`), and OpenAI's and xAI's search is
+  priced through the model's own rates — so the money is claimed exactly where the provider
+  published a rate, and the count stands on its own where none exists.
 - **The per-session route** is owner-scoped (another user's session is the store's
   `SessionNotFoundError`, which `app.onError` maps to the 404) and reads that session's whole
   log. **The per-user route** has no id in its path — it is always the caller — and is **one

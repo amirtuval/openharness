@@ -161,6 +161,8 @@ async function recordSearch(
     readonly name?: string
     readonly isError?: boolean
     readonly answered?: boolean
+    /** The readable pair #335 writes for a search the provider ran inside its own request. */
+    readonly source?: 'provider'
   } = {},
 ): Promise<void> {
   const [call] = await test.store.appendEvents(sessionId, [
@@ -169,6 +171,7 @@ async function recordSearch(
       name: options.name ?? WEB_SEARCH_TOOL_NAME,
       input: { query: 'anything' },
       evaluated_permission: 'allow',
+      ...(options.source === undefined ? {} : { source: options.source }),
     },
   ])
   if (call === undefined) {
@@ -321,6 +324,24 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
     await recordSearch(test, session.id, { answered: false })
 
     expect((await sessionUsage(test, session.id)).searches).toBe(1)
+  })
+
+  it('counts a provider-executed search once, from the span (#335; issue #338)', async () => {
+    const { test } = usageApp()
+    const session = await createSession(test, 'openai/gpt-5-mini')
+    await turn(test, session.id, { model: 'openai/gpt-5-mini' })
+    // #335 stores a provider-executed search twice — as the readable pair a client draws, and
+    // as the count on the request's own span — and they are **one** search. The readable pair
+    // is not an operator-key-era call, so the route counts it from the span alone.
+    await recordSearch(test, session.id, { source: 'provider' })
+    await recordSearch(test, session.id, { source: 'provider' })
+    await spanSearches(test, session.id, 2)
+
+    expect((await sessionUsage(test, session.id)).searches).toBe(2)
+    const user = (await (
+      await userUsageRequest(test, 'from=2026-10-01&to=2026-10-31&tz=UTC')
+    ).json()) as UserUsage
+    expect(user.searches).toBe(2)
   })
 
   it('prices a provider-executed search at the published rate, and counts one it cannot (#335)', async () => {

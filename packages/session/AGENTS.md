@@ -1066,7 +1066,10 @@ dependency table.
   the suite beside it: a call its result answered, a failed call and one nothing answered both
   left out, the `name` filter, owner scoping, the half-open window, the `(session_id, seq)`
   order, the rewind rule, and — since #312 — a remote MCP call never counting: the read is
-  about this build's own tools, and an MCP server is the user's own, whatever its tool is named. The modes (#245, M6) are there as well:
+  about this build's own tools, and an MCP server is the user's own, whatever its tool is named,
+  and — since #338 — a **provider-executed** call never counting either: it is the readable pair
+  #335 writes for a search the provider ran inside its own request, and the request's span
+  already counted that search (counting the pair would count one search twice). The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,

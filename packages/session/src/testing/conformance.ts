@@ -2706,6 +2706,32 @@ export function runSessionStoreConformance(
         ).toEqual([])
       })
 
+      it('never counts a provider-executed call: its request’s span counted it (#335)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        // #335 writes a readable pair for a search the provider ran inside its own request, so a
+        // client can draw it — but the search is counted from the request's
+        // `span.model_request_end.searches`, and counting this pair too would count it twice
+        // (issue #338).
+        const call = newEventId()
+        await append(store, session.id, [
+          {
+            id: call,
+            type: EVENT_TYPES.agentToolUse,
+            name: 'web_search',
+            input: {},
+            evaluated_permission: 'allow',
+            source: 'provider',
+          },
+          toolResult(call, false),
+        ])
+        await recordToolUse(store, session.id, 'web_search')
+
+        expect(
+          await store.listToolUses(toolWindow(OWNER_A, START_MS - SECOND, START_MS + SECOND)),
+        ).toEqual([{ name: 'web_search', processed_at: timestampAt(START_MS) }])
+      })
+
       it('is owner-scoped: another user’s calls are never in the answer', async () => {
         const { store } = await setup()
         const { session } = await seed(store)

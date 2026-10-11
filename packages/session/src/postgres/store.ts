@@ -921,6 +921,9 @@ export class PostgresSessionStore implements SessionStore {
       .where('e.type', '=', EVENT_TYPES.agentToolUse)
       .where('e.processed_at', '>=', instant(fromMs))
       .where('e.processed_at', '<', instant(toMs))
+      // A provider-executed call is a readable record of a search the provider ran inside its
+      // own request, and its request's span already counted it (#335; issue #338).
+      .where(sql<SqlBool>`(e.payload ->> 'source') is distinct from 'provider'`)
       .where('r.type', '=', EVENT_TYPES.agentToolResult)
       .where(sql<SqlBool>`(r.payload ->> 'is_error') = 'false'`)
       .$if(options.name !== undefined, (query) =>
