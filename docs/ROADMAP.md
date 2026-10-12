@@ -431,3 +431,12 @@ against each tool's docs.
   model plans and a cheaper one applies the edits.
 - **Recipes** (later, from Goose): saved, parameterized tasks with success checks, retries,
   failure-recovery steps and scheduling; close to outcomes and scheduled runs.
+- **The harness-design study** (sandboxed tools; tools follow-ups): [An Empirical Study of
+  Harness Design for Coding Agents](https://arxiv.org/abs/2609.20804) (Fan et al., 2026)
+  ablates context management, planning and the action space across models and context budgets.
+  What applies to the tools epic is in [#331](https://github.com/amirtuval/openharness/issues/331).
+  For sandboxed tools: whether file tools or `bash` alone works better depends on the model
+  (strong models were cheaper and slightly better with `bash` only, weak ones collapsed without
+  file tools), so plan both as tool profiles a mode picks; and the guards it holds fixed —
+  read-before-write with a content hash, a workspace-root path guard, and a quick lint appended
+  to the result of an edit.
