@@ -15,7 +15,7 @@ import {
 import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
 import type { Mode, UserToolConfirmationEventInput } from '@openharness/protocol'
 import { Trash2 } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useClient } from '../client-provider'
 import type { DeleteSessionResult } from '../../hooks/use-sessions'
@@ -354,25 +354,38 @@ export function ChatView({
     changeDraft('')
   }, [changeDraft])
 
+  // A chat's context-filled state and its tool screen are the transcript's own data, so the
+  // foot is memoized: a keystroke re-renders this screen, and `statusRow` as a fresh object
+  // would defeat {@link MessageList}'s memo and re-render every message in the conversation
+  // (#314). Its inputs are the log's, which is what makes the identity stable between
+  // keystrokes and *different* when the turn really changed — the rule `memo` compares with.
+  const newest = messages.at(-1)
+  const hasReplyText = newest?.role === 'agent' && newest.text.trim() !== ''
+  const retrying = lastError?.retryStatus === 'retrying'
+  const retryReason = lastError?.message
+  const compacting = manualCompaction?.pending === true
   // The transcript's own foot (U10). "No text has arrived" means the turn has not drawn
   // anything yet: an agent message is the newest one and it is still empty, so an ordinary
   // reply in flight (which is text on screen) gets no row.
-  const newest = messages.at(-1)
-  const statusRow = workingState({
-    status,
-    retrying: lastError?.retryStatus === 'retrying',
-    retryReason: lastError?.message,
-    interrupted,
-    hasReplyText: newest?.role === 'agent' && newest.text.trim() !== '',
-    // A compaction in flight is what the turn is doing (epic #277, K10): it outranks a plain
-    // "Working…" because it says how many passes are left, and a retry because it is the newer
-    // statement about the same wait.
-    summarizing,
-    // The ask is stored and answered later (#283), so between the two the row says what the
-    // reader is waiting for — unless the engine has already reported a pass, which is a more
-    // precise statement about the same wait.
-    compacting: manualCompaction?.pending === true,
-  })
+  const statusRow = useMemo(
+    () =>
+      workingState({
+        status,
+        retrying,
+        retryReason,
+        interrupted,
+        hasReplyText,
+        // A compaction in flight is what the turn is doing (epic #277, K10): it outranks a plain
+        // "Working…" because it says how many passes are left, and a retry because it is the newer
+        // statement about the same wait.
+        summarizing,
+        // The ask is stored and answered later (#283), so between the two the row says what the
+        // reader is waiting for — unless the engine has already reported a pass, which is a more
+        // precise statement about the same wait.
+        compacting,
+      }),
+    [status, retrying, retryReason, interrupted, hasReplyText, summarizing, compacting],
+  )
 
   const confirmDelete = async (): Promise<void> => {
     setDeleting(true)
