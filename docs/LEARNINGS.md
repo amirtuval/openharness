@@ -1316,6 +1316,22 @@ Terraform and tflint are version-pinned for the same reason the rest of this sec
 linter release failing a change nobody touched is a bad Tuesday
 ([#159](https://github.com/amirtuval/openharness/issues/159)).
 
+**Squash-merging a stack one PR at a time can resurrect what the last PR deleted.** We merged the
+tools stack by retargeting each PR to `main` and squashing it; once `main` held earlier squashes,
+each head needed `main` merged in, and we resolved the conflicts with `-X ours`. Three-way merges
+don't conflict on a file that one side added and the other never had, so files the top PR had
+deleted (the operator-key search adapter) and blocks it had rewritten came back — 1,453 lines
+nobody tested. Always compare `main`'s final tree with the commit that was tested
+(`git diff <tested-sha> main` must be empty) and restore it if not
+([#357](https://github.com/amirtuval/openharness/pull/357)). Merging a stack that was integrated
+forward by merges is simpler as one integration PR, or by merging each PR into `main` without
+squashing.
+
+**A merge to `main` redeploys staging from `main`.** Staging deploys every green `main` commit, so
+merging an unrelated docs PR while someone was hand-testing a feature branch on staging silently
+replaced that build (the tester saw `404 no route for GET /v1/me/tools`). Redeploy the branch after
+any merge to `main` during a branch test, and say so.
+
 ## Working with coding agents
 
 **A sub-run's prompt has to be self-contained.** The issue text, the decisions already taken and any

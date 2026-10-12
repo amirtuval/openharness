@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-10._
+_Last updated: 2026-10-12._
 
 ## Where we are
 
@@ -44,6 +44,12 @@ _Last updated: 2026-10-10._
   done (2026-10-10): long chats summarize their older history instead of silently dropping it,
   automatically at a share of the model's budget or on demand with `/compact`, with a summary
   divider, progress and a context meter on the web and in `oh`.
+- **Tools** ([epic #303](https://github.com/amirtuval/openharness/issues/303)) are done
+  (2026-10-12, PRs #316–#337): the brain's tool loop, `web_fetch`, the chat model's own
+  provider-native `web_search`, `todo_write`, tool context management, per-user tool settings
+  with a mode override, pausing for approval and `ask_user`, provider-opaque content replayed
+  (reasoning signatures, DeepSeek `reasoning_content`), and remote MCP servers with OAuth 2.1 —
+  on the web and in `oh`, hand-tested on staging.
 
 ## Order
 
@@ -53,8 +59,9 @@ _Last updated: 2026-10-10._
 4. Chat and TUI UX, pass 1 ([epic #201](https://github.com/amirtuval/openharness/issues/201)) — done
 5. Model selection and provider keys ([epic #245](https://github.com/amirtuval/openharness/issues/245)) — done,
    followed by context compaction ([epic #277](https://github.com/amirtuval/openharness/issues/277)) — done
-6. Tools: the loop, pausing for the user and remote MCP ([epic #303](https://github.com/amirtuval/openharness/issues/303))
-7. Extensibility and multiple agents (skills, subagents and the like), then sandboxed tools
+6. Tools: the loop, pausing for the user and remote MCP ([epic #303](https://github.com/amirtuval/openharness/issues/303)) — done
+7. Extensibility and multiple agents: subagents ([epic #340](https://github.com/amirtuval/openharness/issues/340)) and
+   skills ([epic #349](https://github.com/amirtuval/openharness/issues/349), which also replace custom slash commands), then sandboxed tools
 
 **Why this order:** identity and a running deployment are the foundations. Every later feature
 needs to know who owns what. The features that cost money or can act on the world (paid model
@@ -249,10 +256,10 @@ separate from #46's event-store compaction.
   ([#300](https://github.com/amirtuval/openharness/issues/300)).
 - Turning automatic compaction off per user.
 
-## 6. Tools: the loop, pausing for the user, remote MCP ([epic #303](https://github.com/amirtuval/openharness/issues/303))
+## 6. Tools: the loop, pausing for the user, remote MCP (done: [epic #303](https://github.com/amirtuval/openharness/issues/303))
 
 The third pillar of the architecture (the "hands"), without a sandbox yet: everything here runs
-in-process on the server. **Status:** in progress — the loop itself
+in-process on the server. **Status:** done (2026-10-12) — the loop itself
 ([#304](https://github.com/amirtuval/openharness/issues/304)), the built-in tools
 ([#305](https://github.com/amirtuval/openharness/issues/305)), tool context management
 ([#306](https://github.com/amirtuval/openharness/issues/306)) and the per-user settings
@@ -266,7 +273,9 @@ pausing for the user
 ([#309](https://github.com/amirtuval/openharness/issues/309)) and the remote MCP servers
 ([#311](https://github.com/amirtuval/openharness/issues/311),
 [#312](https://github.com/amirtuval/openharness/issues/312)) are **built**. The epic's
-sub-issues are done.
+sub-issues are done, and the epic's test plan
+([#314](https://github.com/amirtuval/openharness/issues/314)) and two rounds of hands-on testing on
+staging were run until clean.
 
 1. **The tool loop.** The brain owns the loop, one model request per step: `agent.tool_use` →
    execute through `hands` (`execute(name, input, ctx)`) → `agent.tool_result` → the next
@@ -338,8 +347,9 @@ tools.
   - SDKs in more languages.
 - **Session features:** rename, archive or delete, fork or branch (#46 does not assume a linear
   log), export and share.
-- **Extensibility:** slash commands, skills, custom agents, hooks, plugins.
-- **Multiple agents:** subagents, background and parallel agents.
+- **Extensibility:** skills (epic #349; they replace custom slash commands), custom agents, hooks,
+  plugins.
+- **Multiple agents:** subagents and background tasks (epic #340).
 - **Sandboxed tools** (`bash`, files) behind the same `hands` interface, after extensibility and
   multiple agents. The sandbox technology, and whether hands run in-process or as a separate
   worker, are decided then; re-injecting files after a compaction (#276) comes with them.

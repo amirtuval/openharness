@@ -8,14 +8,10 @@ See [`docs/architecture.md`](./docs/architecture.md) for the package map and
 
 v1 (chat server, web UI, TUI), authentication (epic #65: sign-in, ownership, per-user provider
 keys), model-first chat (epic #92), deployment (epic #148), Chat and TUI UX pass 1 (epic
-#201), model selection (epic #245), context compaction (epic #277) and the tools phase's loop,
-built-in tools, context management, per-user settings and pausing for the user (epic #303,
-[#304](https://github.com/amirtuval/openharness/issues/304),
-[#305](https://github.com/amirtuval/openharness/issues/305),
-[#306](https://github.com/amirtuval/openharness/issues/306),
-[#307](https://github.com/amirtuval/openharness/issues/307) and
-[#309](https://github.com/amirtuval/openharness/issues/309)) are built; the rest of that phase —
-MCP — is next
+#201), model selection (epic #245), context compaction (epic #277) and tools (epic #303: the
+tool loop, built-in tools, provider-native web search, context management, per-user settings,
+pausing for the user and remote MCP servers with OAuth) are built; subagents (epic #340) and
+skills (epic #349) are next
 ([`docs/ROADMAP.md`](./docs/ROADMAP.md)), and what a tool may reach is
 [`docs/threat-model.md`](./docs/threat-model.md). Each package's `AGENTS.md` describes what that
 package implements today.
