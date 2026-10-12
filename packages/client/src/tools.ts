@@ -46,11 +46,14 @@ export type ToolCallInput = DeepReadonly<ToolInput>
  * - `error` — the call failed (its tool's own error, a timeout, a schema refusal, or a call the
  *   reader moved on from).
  * - `denied` — a policy or the reader refused the call without running it.
+ * - `dismissed` — the call was waiting on the reader and a message or an interrupt resolved it
+ *   instead (#310): "The user sent a message instead" is not a failure and not a refusal, it
+ *   is the reader moving on.
  * - `interrupted` — the reader stopped the turn while the call was out.
  * - `lost` — the turn that started the call died before it ran, so it never ran.
  */
 export type ToolCallStatus =
-  'running' | 'waiting' | 'done' | 'error' | 'denied' | 'interrupted' | 'lost'
+  'running' | 'waiting' | 'done' | 'error' | 'denied' | 'dismissed' | 'interrupted' | 'lost'
 
 /**
  * What a call produced, as the transcript keeps it (epic #303, X1).
@@ -119,6 +122,7 @@ const STATUS_WORDS: Readonly<Record<ToolCallStatus, string>> = {
   done: 'done',
   error: 'failed',
   denied: 'denied',
+  dismissed: 'dismissed',
   interrupted: 'interrupted',
   lost: 'execution lost',
 }
@@ -178,6 +182,12 @@ function statusFromResult(result: ToolCallResult): ToolCallStatus {
   const text = result.content
   if (text.startsWith('Interrupted by the user.')) {
     return 'interrupted'
+  }
+  // A message that arrived while the call waited resolves it (epic #303, X6; #310): the brain's
+  // sentence for that is not a failure, it is the reader moving on — so it gets its own word
+  // rather than reading as "failed".
+  if (text.startsWith('The user sent a message instead.')) {
+    return 'dismissed'
   }
   if (text.includes('execution lost')) {
     return 'lost'
@@ -270,6 +280,22 @@ function isJsonObject(value: unknown): value is { readonly [key: string]: unknow
  */
 export function formatToolInput(input: ToolCallInput): string {
   return JSON.stringify(input, null, 2)
+}
+
+/**
+ * Where a remote tool came from, as the marker a call line and an approval prompt both draw
+ * (epic #303, X6; #308; #312).
+ *
+ * One spelling for one fact — `mcp: notes`, and plain `mcp` for a call the log does not say the
+ * server of — so the page and the terminal cannot answer "whose tool is this?" two ways. It is
+ * the parenthesized half, not the parentheses: the terminal writes `(mcp: notes)`, the web app
+ * keeps the badge's own words and puts this in its `title`. `call.server` is what the log
+ * records on an `agent.mcp_tool_use`, so a reader of the log alone arrives at the same marker.
+ *
+ * @param server the MCP server's name, or `undefined` when the log names none
+ */
+export function mcpServerMarker(server: string | undefined): string {
+  return server === undefined ? 'mcp' : `mcp: ${server}`
 }
 
 /**

@@ -1,14 +1,21 @@
 import {
+  ASK_USER_TOOL_NAME,
   DEFAULT_PAGE_LIMIT,
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
+  askUserAnswerProblems,
   encodeSeqCursor,
+  formatAskUserAnswers,
   isStoredEvent,
   newEventId,
+  parseAskUserInput,
   tryDecodePageCursor,
 } from '@openharness/protocol'
 import type {
   AgentMessageEvent,
+  AgentToolResultEvent,
+  AgentToolUseEvent,
+  AskUserInput,
   ContentBlock,
   EventId,
   ListEventsQuery,
@@ -33,6 +40,8 @@ import type {
   UserEventInput,
   UserInterruptEvent,
   UserMessageEvent,
+  UserToolConfirmationEvent,
+  UserToolConfirmationEventInput,
 } from '@openharness/protocol'
 
 import type { StreamOptions } from '../events/stream'
@@ -90,9 +99,19 @@ export interface FakeFailure {
   readonly delayMs: number | undefined
 }
 
+/** An `ask_user` call the fake's brain makes, and the pause it leaves behind (epic #303, #309). */
+export interface FakeAsk {
+  /** The questions the call asks, exactly as the model would have produced them. */
+  readonly input: AskUserInput
+  /** Milliseconds before the call is made; falls back to the client's `delayMs`. */
+  readonly delayMs: number | undefined
+}
+
 /** What the brain does for the next model request. */
 export type FakeScript =
-  { kind: 'reply'; reply: FakeReply } | { kind: 'failure'; failure: FakeFailure }
+  | { kind: 'reply'; reply: FakeReply }
+  | { kind: 'failure'; failure: FakeFailure }
+  | { kind: 'ask'; ask: FakeAsk }
 
 /**
  * Token usage every fake model request reports.
@@ -106,6 +125,13 @@ export const FAKE_MODEL_USAGE = {
   cache_creation_input_tokens: 0,
   cache_read_input_tokens: 0,
 } as const
+
+/** Why the fake refuses a `user.tool_confirmation`, as the server's 400 says it (epic #303, #309). */
+export type ConfirmationRefusal = 'not_waiting' | 'no_answers' | 'bad_answers' | 'remember'
+
+/** What answering a waiting call came to: the stored confirmation, or the server's refusal. */
+export type ConfirmationOutcome =
+  { readonly event: UserToolConfirmationEvent } | { readonly refusal: ConfirmationRefusal }
 
 /** The four token counters at zero — the starting point of every usage fold. */
 const EMPTY_USAGE: ModelUsage = {
@@ -492,6 +518,17 @@ export class FakeBrain {
     this.#interruptRequested = false
     this.#emit(this.#statusRunning())
     let retry = false
+    // The calls this turn left waiting on the reader (epic #303, #309): the idle event that
+    // ends it names them `requires_action`, which is the whole of what a client needs to draw
+    // the question or the approval prompt.
+    let waiting: readonly EventId[] = []
+
+    // A message that arrives while calls wait resolves them all (epic #303, #309) — the same
+    // rule the real brain applies, so a test that sends one sees the calls answered "The user
+    // sent a message instead." rather than left waiting for ever.
+    if (this.#waitingCalls().length > 0) {
+      this.#resolveWaitingForMessage()
+    }
 
     for (;;) {
       // An interrupt with nothing running — before the first request, or during a backoff —
@@ -525,12 +562,19 @@ export class FakeBrain {
         break
       }
 
+      if (script.kind === 'ask') {
+        // A question pauses the turn: the call is stored, nothing runs it, and the idle event
+        // below names it `requires_action` (epic #303, #309).
+        waiting = await this.#askUser(start, script.ask)
+        break
+      }
+
       if (await this.#streamReply(start, script.reply)) {
         break
       }
     }
 
-    this.#emit(this.#statusIdle())
+    this.#emit(waiting.length === 0 ? this.#statusIdle() : this.#statusPaused(waiting))
   }
 
   /** Emit a reply: the chunks as they stream, then the stored event; `true` when interrupted. */
@@ -621,6 +665,151 @@ export class FakeBrain {
       processed_at: this.#timestamp(),
       error,
     })
+  }
+
+  /**
+   * Ask the reader something: store the `ask_user` call, end the request, and leave the call
+   * waiting (epic #303, #309).
+   *
+   * The whole pause is in the log — the call with `evaluated_permission: ask`, nothing that
+   * answers it, and the idle event naming it — which is exactly what the real brain writes, so
+   * a frontend tested against the fake is tested against what the server stores. The call's id
+   * **is** the event's id, as everywhere else.
+   */
+  async #askUser(start: ModelRequestStartEvent, ask: FakeAsk): Promise<readonly EventId[]> {
+    await sleep(ask.delayMs ?? this.#delayMs)
+    const call: AgentToolUseEvent = {
+      id: newEventId(),
+      type: EVENT_TYPES.agentToolUse,
+      seq: this.#nextSeq(),
+      processed_at: this.#timestamp(),
+      name: ASK_USER_TOOL_NAME,
+      input: ask.input,
+      // `ask_user` always asks, whatever the policy says (#309): the reader's answers *are* the
+      // call's result, so `ask` is what its decision is recorded as.
+      evaluated_permission: 'ask',
+    }
+    this.#emit(call)
+    this.#emit(this.#modelRequestEnd(start, { is_error: null }))
+    this.#emit(this.#sessionUsage())
+    return [call.id]
+  }
+
+  /**
+   * Answer a waiting call with the reader's confirmation, the way the server and the brain do
+   * together (epic #303, #309).
+   *
+   * The route checks the call really is waiting before storing anything, and the brain turns
+   * the confirmation into the `agent.tool_result` the call is owed — an `ask_user` call's
+   * answers *are* that result, and a denial is the reader's own words. Nothing runs here.
+   *
+   * Returns the stored confirmation, or the reason the server would refuse the event.
+   */
+  answer(confirmation: UserToolConfirmationEventInput): ConfirmationOutcome {
+    const call = this.#log.find(
+      (event): event is AgentToolUseEvent =>
+        event.type === EVENT_TYPES.agentToolUse && event.id === confirmation.tool_use_id,
+    )
+    const answered =
+      call !== undefined &&
+      this.#log.some(
+        (event) => event.type === EVENT_TYPES.agentToolResult && event.tool_use_id === call.id,
+      )
+    if (call === undefined || answered || !this.#waiting(call)) {
+      return { refusal: 'not_waiting' }
+    }
+
+    const questions = call.name === ASK_USER_TOOL_NAME ? parseAskUserInput(call.input) : null
+    if (questions === null) {
+      // Only `ask_user` pauses in the fake — it has no tool registry to run an approved built-in
+      // — so a confirmation naming anything else is refused, as the server refuses one for a
+      // call that is not waiting on the user.
+      return { refusal: 'not_waiting' }
+    }
+    // A question is not an approval (epic #303, #309): `remember` would silence the next
+    // `ask_user` call, and an approval with no answers would answer nothing.
+    if (confirmation.remember !== undefined) {
+      return { refusal: 'remember' }
+    }
+    if (confirmation.result === 'allow' && confirmation.answers === undefined) {
+      return { refusal: 'no_answers' }
+    }
+    if (
+      confirmation.answers !== undefined &&
+      askUserAnswerProblems(questions, confirmation.answers).length > 0
+    ) {
+      return { refusal: 'bad_answers' }
+    }
+
+    const stored: UserToolConfirmationEvent = {
+      id: newEventId(),
+      type: EVENT_TYPES.userToolConfirmation,
+      seq: this.#nextSeq(),
+      // Never null: the server writes it once it has checked the call, so the event is a fact
+      // of the log the moment it exists rather than work waiting to be picked up.
+      processed_at: this.#timestamp(),
+      tool_use_id: confirmation.tool_use_id,
+      result: confirmation.result,
+      ...(confirmation.deny_message === undefined
+        ? {}
+        : { deny_message: confirmation.deny_message }),
+      ...(confirmation.remember === undefined ? {} : { remember: confirmation.remember }),
+      ...(confirmation.answers === undefined ? {} : { answers: confirmation.answers }),
+    }
+    this.#emit(stored)
+
+    const denied = confirmation.result === 'deny'
+    const text = denied
+      ? confirmation.deny_message === undefined
+        ? 'The user denied this.'
+        : `The user denied this: ${confirmation.deny_message}`
+      : formatAskUserAnswers(questions, confirmation.answers ?? [])
+    const result: AgentToolResultEvent = {
+      id: newEventId(),
+      type: EVENT_TYPES.agentToolResult,
+      seq: this.#nextSeq(),
+      processed_at: this.#timestamp(),
+      tool_use_id: call.id,
+      content: [{ type: 'text', text }],
+      is_error: denied,
+    }
+    this.#emit(result)
+    // The turn that answers a confirmation is a turn of its own, and it ends here: an
+    // `ask_user` call's result is its answers, so there is nothing left to ask the model for.
+    this.#emit(this.#statusIdle())
+    return { event: stored }
+  }
+
+  /** Resolve every waiting call with the brain's own sentence for a message that arrived. */
+  #resolveWaitingForMessage(): void {
+    for (const call of this.#waitingCalls()) {
+      this.#emit({
+        id: newEventId(),
+        type: EVENT_TYPES.agentToolResult,
+        seq: this.#nextSeq(),
+        processed_at: this.#timestamp(),
+        tool_use_id: call.id,
+        content: [{ type: 'text', text: 'The user sent a message instead.' }],
+        is_error: true,
+      })
+    }
+  }
+
+  /** The calls the log holds that wait on the reader: unanswered, and evaluated `ask`. */
+  #waitingCalls(): readonly AgentToolUseEvent[] {
+    return this.#log.filter(
+      (event): event is AgentToolUseEvent =>
+        event.type === EVENT_TYPES.agentToolUse &&
+        this.#waiting(event) &&
+        !this.#log.some(
+          (other) => other.type === EVENT_TYPES.agentToolResult && other.tool_use_id === event.id,
+        ),
+    )
+  }
+
+  /** Whether a call is one the reader has to answer (epic #303, #309). */
+  #waiting(call: AgentToolUseEvent): boolean {
+    return call.evaluated_permission === 'ask'
   }
 
   /** User messages the brain has not folded into a request yet. */
@@ -732,6 +921,23 @@ export class FakeBrain {
       processed_at: this.#timestamp(),
       stop_reason: { type: 'end_turn' },
       ...(consumes.length === 0 ? {} : { consumes: [...consumes] }),
+    }
+  }
+
+  /**
+   * The idle that ends a turn waiting on the reader (epic #303, #309).
+   *
+   * A pause is a turn end, not a new kind of waiting: the calls are in the log, the session is
+   * idle, nothing is held open — and `stop_reason` names the calls it waits on, which is the
+   * whole of what a client needs to draw the question or the approval prompt.
+   */
+  #statusPaused(waiting: readonly EventId[]): StoredEvent {
+    return {
+      id: newEventId(),
+      type: EVENT_TYPES.sessionStatusIdle,
+      seq: this.#nextSeq(),
+      processed_at: this.#timestamp(),
+      stop_reason: { type: 'requires_action', event_ids: [...waiting] },
     }
   }
 

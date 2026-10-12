@@ -78,6 +78,8 @@ export {
   selectLastMessage,
   selectManualCompaction,
   selectMessages,
+  selectConfirmation,
+  selectConfirmations,
   selectSessionUsage,
   selectStreamingMessage,
   selectSummaries,
@@ -102,6 +104,7 @@ export type {
   SessionUsageTotals,
   TextPart,
   Transcript,
+  TranscriptConfirmation,
   TranscriptContext,
   TranscriptEntry,
   TranscriptError,
@@ -144,6 +147,7 @@ export {
   TOOLS_UNSUPPORTED_NOTICE,
   clearedResultsNotice,
   formatToolInput,
+  mcpServerMarker,
   modelSupportsTools,
   searchCount,
   stepLimitNotice,
@@ -160,5 +164,31 @@ export type {
   TranscriptToolCall,
   TruncatedToolResult,
 } from './tools'
+
+export {
+  APPROVAL_CHOICES,
+  OTHER_CHOICE_LABEL,
+  answerConfirmation,
+  answersFrom,
+  approvalChoiceLabel,
+  approvalConfirmation,
+  approvalConfirmations,
+  askUserQuestions,
+  confirmationSummary,
+  declineConfirmation,
+  draftComplete,
+  draftProblems,
+  emptyDraft,
+  emptyDrafts,
+  pendingCallHeading,
+  pendingCallKind,
+  pendingCalls,
+  pendingCallsNotice,
+  withConfirmed,
+  withLabel,
+  withOther,
+  withText,
+} from './approvals'
+export type { ApprovalChoice, PendingCall, PendingCallKind, QuestionDraft } from './approvals'
 
 export type { StreamOptions } from './events/stream'

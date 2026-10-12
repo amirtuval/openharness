@@ -125,6 +125,7 @@ describe('reduceTranscript', () => {
       toolCalls: [],
       truncatedToolResults: [],
       clearedToolResults: null,
+      confirmations: [],
       toolSources: {},
       todos: null,
       todoEvents: [],

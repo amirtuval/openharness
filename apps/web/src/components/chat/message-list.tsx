@@ -1,5 +1,7 @@
 import type {
   ModelPriceLookup,
+  PendingCall,
+  TranscriptConfirmation,
   TranscriptEntry,
   TranscriptManualCompaction,
   TranscriptMessage,
@@ -7,13 +9,22 @@ import type {
   TranscriptToolCall,
   TranscriptTruncation,
 } from '@openharness/client'
-import { transcriptEntries } from '@openharness/client'
-import { ArrowDown, MessagesSquare } from 'lucide-react'
+import {
+  approvalConfirmations,
+  confirmationSummary,
+  pendingCalls,
+  transcriptEntries,
+} from '@openharness/client'
+import type { UserToolConfirmationEventInput } from '@openharness/protocol'
+import { ArrowDown, MessagesSquare, ShieldQuestion } from 'lucide-react'
 
 import { useStickToBottom } from '../../hooks/use-stick-to-bottom'
 import type { ModelNameLookup } from '../../lib/models'
+import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Skeleton } from '../ui/skeleton'
+import { ApprovalPrompt } from './approval-prompt'
+import { AskUserForm } from './ask-user-form'
 import { CompactionNotice } from './compaction-notice'
 import { MessageItem } from './message-item'
 import { previousReplyModels } from './message-meta'
@@ -62,6 +73,9 @@ export function MessageList({
   toolsUnsupported = false,
   truncatedResults = null,
   clearedResults = null,
+  confirmations = [],
+  answering = [],
+  onRespond,
   loading,
   nameOf,
   costOf,
@@ -90,6 +104,15 @@ export function MessageList({
   truncatedResults?: string | null
   /** What a request cleared, or `null` (epic #303, X9; #306; #308). */
   clearedResults?: string | null
+  /** The reader's decisions about calls that waited on them (epic #303, X6; #309; #310). */
+  confirmations?: readonly TranscriptConfirmation[]
+  /** The call ids whose confirmation is in flight (epic #303, #310). */
+  answering?: readonly string[]
+  /**
+   * Answer a call that is waiting on the reader (epic #303, #310). Omitted, no prompt is drawn
+   * — which is what a read-only view of a conversation (a test, a share) wants.
+   */
+  onRespond?: ((events: readonly UserToolConfirmationEventInput[]) => void) | undefined
   loading: boolean
   /** The catalog lookup for a model-change marker's display name. */
   nameOf?: ModelNameLookup | undefined
@@ -126,6 +149,67 @@ export function MessageList({
   // item; {@link previousReplyModels} keeps the rule itself out of this component. It is keyed
   // by message, because the entries below are interleaved with the dividers.
   const previous = previousReplyModels(messages)
+
+  // The calls waiting on the reader (epic #303, X6; #310), and the decisions the log already
+  // holds for them. A call with a confirmation of its own has been answered and the turn is on
+  // its way — that is what makes the prompt survive a reload in the state a live tab shows, and
+  // it is also what a bulk answer has to leave alone.
+  const pending = pendingCalls(toolCalls)
+  const answered = new Set(confirmations.map((confirmation) => confirmation.toolUseId))
+  const open = pending.filter((entry) => !answered.has(entry.call.id))
+  const openApprovals = open.filter((entry) => entry.kind === 'approval')
+  const deciding = new Set(answering)
+  const answer = (events: readonly UserToolConfirmationEventInput[]): void => {
+    onRespond?.(events)
+  }
+  /**
+   * The prompt one waiting call owes, drawn **under** its own line (epic #303, #310).
+   *
+   * The call's line is already the tool, with its input behind the disclosure, so the prompt
+   * belongs to it rather than to a panel of its own: what is being answered is right above.
+   * `null` while the reader is not the one who can answer — a read-only view, or a call whose
+   * confirmation is already in the log.
+   */
+  const promptFor = (call: TranscriptToolCall): React.ReactNode => {
+    const entry = open.find((candidate) => candidate.call.id === call.id)
+    if (entry === undefined || onRespond === undefined) {
+      return null
+    }
+    return (
+      <PendingPrompt
+        entry={entry}
+        busy={deciding.has(call.id)}
+        onRespond={(input) => answer([input])}
+      />
+    )
+  }
+  /**
+   * The decision a call was answered with, as the row's trailing control (epic #303, #310).
+   *
+   * The `user.tool_confirmation` is the log's record, so an approved call says **how** it was
+   * allowed — "Allowed for this chat", "Always allowed" — where its own result cannot; a
+   * denial and an answered question are silent here, because the result the brain wrote
+   * already says them.
+   */
+  const decisionAction = (call: TranscriptToolCall): React.ReactNode => {
+    if (deciding.has(call.id)) {
+      return (
+        <span data-slot="answering" className="text-2xs text-muted-foreground">
+          Answering…
+        </span>
+      )
+    }
+    const decision = confirmations.find((candidate) => candidate.toolUseId === call.id)
+    if (decision === undefined) {
+      return undefined
+    }
+    const summary = confirmationSummary(decision)
+    return summary === null ? undefined : (
+      <Badge data-slot="tool-decision" variant="outline" className="text-2xs">
+        {summary}
+      </Badge>
+    )
+  }
   const previousModels = new Map<string, string | undefined>(
     messages.map((message, index) => [message.id, previous[index]] as [string, string | undefined]),
   )
@@ -140,7 +224,10 @@ export function MessageList({
         className="h-full overflow-y-auto px-4 py-6"
       >
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-block">
-          {messages.length === 0 ? (
+          {/* "Empty" is nothing to say **and** nothing done: a call is an entry of its own
+              (epic #303, #308), so a transcript that holds one is a conversation whatever the
+              messages say — and a transcript that holds neither is the invitation. */}
+          {messages.length === 0 && toolCalls.length === 0 ? (
             loading ? (
               <TranscriptSkeleton />
             ) : (
@@ -160,13 +247,19 @@ export function MessageList({
                   className="flex w-full flex-col gap-1 rounded-lg border border-dashed px-2 py-1.5"
                 >
                   {entry.calls.map((call) => (
-                    <ToolCallLine key={call.id} call={call} />
+                    <div key={call.id} className="flex min-w-0 flex-col">
+                      <ToolCallLine call={call} action={decisionAction(call)} />
+                      {promptFor(call)}
+                    </div>
                   ))}
                 </div>
               ) : entry.kind === 'summary' ? (
                 <SummaryDivider key={entry.summary.id} summary={entry.summary} />
               ) : entry.kind === 'tool' ? (
-                <ToolCallLine key={entry.call.id} call={entry.call} />
+                <div key={entry.call.id} className="flex min-w-0 flex-col">
+                  <ToolCallLine call={entry.call} action={decisionAction(entry.call)} />
+                  {promptFor(entry.call)}
+                </div>
               ) : (
                 <MessageItem
                   key={entry.message.id}
@@ -187,6 +280,58 @@ export function MessageList({
               ),
             )
           )}
+          {/* Several approvals at once are answerable together (epic #303, #310) — one event per
+              call, in one batch — while a single one is left to its own prompt: a bar over a
+              lone call would be a second copy of the same buttons. */}
+          {openApprovals.length > 1 && onRespond !== undefined ? (
+            <div
+              data-slot="pending-bulk"
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed px-2.5 py-2 text-xs"
+            >
+              <ShieldQuestion aria-hidden="true" className="size-3.5 shrink-0 text-coral-ink" />
+              <span className="min-w-0 text-muted-foreground">
+                {openApprovals.length} calls are waiting on you.
+              </span>
+              <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                {/* "Allow all" is the **once** approval for each call: answering several at once
+                    must not hand out a remembered permission nobody asked for, so the two
+                    remembered choices stay every call's own decision. */}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="xs"
+                  disabled={answering.length > 0}
+                  onClick={() =>
+                    answer(
+                      approvalConfirmations(
+                        openApprovals.map((entry) => entry.call),
+                        'allow-once',
+                      ),
+                    )
+                  }
+                >
+                  Allow all
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  className="text-destructive"
+                  disabled={answering.length > 0}
+                  onClick={() =>
+                    answer(
+                      approvalConfirmations(
+                        openApprovals.map((entry) => entry.call),
+                        'deny',
+                      ),
+                    )
+                  }
+                >
+                  Deny all
+                </Button>
+              </div>
+            </div>
+          ) : null}
           {compaction === null ? null : <CompactionNotice compaction={compaction} />}
           <ToolNotices
             stepLimit={stepLimit}
@@ -239,6 +384,34 @@ function EmptyConversation() {
       <MessagesSquare aria-hidden="true" className="size-5 text-muted-foreground/70" />
       <p className="text-sm text-muted-foreground">Say something to start the conversation.</p>
     </div>
+  )
+}
+
+/**
+ * The prompt one waiting call owes (epic #303, X6; #310): an approval's four choices, or an
+ * `ask_user` call's questions.
+ *
+ * An `ask_user` call whose input is not a well-formed set of questions draws nothing: the brain
+ * answers such a call with an `is_error` result rather than pausing on it, so a form here would
+ * be a question nobody could have asked.
+ */
+function PendingPrompt({
+  entry,
+  busy,
+  onRespond,
+}: {
+  entry: PendingCall
+  busy: boolean
+  onRespond: (input: UserToolConfirmationEventInput) => void
+}) {
+  if (entry.kind === 'approval') {
+    return <ApprovalPrompt call={entry.call} busy={busy} onRespond={onRespond} />
+  }
+  if (entry.questions.length === 0) {
+    return null
+  }
+  return (
+    <AskUserForm call={entry.call} questions={entry.questions} busy={busy} onRespond={onRespond} />
   )
 }
 

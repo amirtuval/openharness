@@ -6,6 +6,7 @@ import {
   TOOL_STEPS_EXHAUSTED_NOTICE,
   clearedResultsNotice,
   formatToolInput,
+  mcpServerMarker,
   modelSupportsTools,
   stepLimitNotice,
   toolCallStatus,
@@ -50,7 +51,7 @@ describe('toolCallStatus', () => {
       ['The user denied this.', 'denied'],
       ['The user denied this: not that URL', 'denied'],
       ['Tool web_fetch timed out after 30s', 'error'],
-      ['The user sent a message instead.', 'error'],
+      ['The user sent a message instead.', 'dismissed'],
     ]
     for (const [content, expected] of cases) {
       expect(toolCallStatus('allow', { content, isError: true }, idle)).toBe(expected)
@@ -98,6 +99,13 @@ describe('toolCallSummary', () => {
 
   it('says nothing when the input holds no string and no known shape', () => {
     expect(toolCallSummary({ name: 'count', input: { n: 3 } })).toBeNull()
+  })
+})
+
+describe('mcpServerMarker (#312)', () => {
+  it('names the server a remote tool came from, and says `mcp` when the log names none', () => {
+    expect(mcpServerMarker('notes')).toBe('mcp: notes')
+    expect(mcpServerMarker(undefined)).toBe('mcp')
   })
 })
 
