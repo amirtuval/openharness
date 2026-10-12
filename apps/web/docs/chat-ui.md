@@ -476,6 +476,28 @@ which session state" an assertion instead of a render.
   measured ratios moved. The one pre-existing exception is still Dark's
   `--destructive-foreground` on `--destructive` at 2.8:1, unchanged by #203 and by this.
 
+## The document never scrolls
+
+One box per screen scrolls — the transcript, the settings pane, the chat list, the task list —
+and the page is not a scroller at all. The shell is `h-dvh` (the dynamic viewport height, so a
+phone's URL bar cannot leave a bar-shaped gap under the app), `overflow-clip`, and `relative`,
+and the root element is clipped behind it.
+
+The `relative` half is the one that was missing, and it is not cosmetic: a scroll pane clips
+its own content only for descendants whose containing block is inside it, and an absolutely
+positioned element with no positioned ancestor between it and the shell is laid out against the
+initial containing block — outside the pane, outside the clip. Every `sr-only` span is such an
+element, and this app has them in the transcript (the streaming caret) and in Settings (the
+theme radios, the usage table's caption), so the document grew a scroll area exactly as tall as
+wherever those spans happened to sit: ~2 400px on Settings, ~17 000px while a reply streamed
+with the reader scrolled up. The reader could scroll the whole app into that emptiness. Giving
+each pane `position: relative` makes the pane the containing block, so the pane clips its own
+absolute content, and the shell's clip is the backstop.
+
+`scroll-containers.test.tsx` pins the class contract (jsdom has no layout); the browser check is
+Playwright — `document.scrollingElement.scrollHeight === clientHeight`, with the panes still
+scrolling on their own.
+
 ## Auto-scroll
 
 `use-stick-to-bottom.ts` is ~40 lines and does exactly one thing: while the reader is at (or

@@ -75,7 +75,7 @@ export function TodoPanel({
         variant === 'side'
           ? // A column of its own beside the transcript: the chat keeps its full height, and a
             // long list scrolls here rather than in the conversation.
-            'hidden w-[280px] shrink-0 overflow-y-auto border-l bg-muted/20 px-3 py-4 xl:block'
+            'relative hidden w-[280px] shrink-0 overflow-y-auto border-l bg-muted/20 px-3 py-4 xl:block'
           : 'rounded-lg border bg-muted/30 px-3 py-2 xl:hidden',
       )}
     >

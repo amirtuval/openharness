@@ -45,7 +45,14 @@ export function SettingsScreen({ catalog, modes }: { catalog: ModelsView; modes:
   const [saved, setSaved] = useState(false)
 
   return (
-    <div className="h-full overflow-y-auto">
+    // The settings pane scrolls; the shell does not (#316). `relative` is what keeps this pane's
+    // own absolutely positioned content — the theme radios' `sr-only` inputs and the usage
+    // table's `sr-only` caption are both `position: absolute` — inside the pane it scrolls: with
+    // no positioned ancestor between them and the shell they were laid out against the initial
+    // containing block, escaped this box's clip, and gave the whole page a scrollbar over empty
+    // space. `min-h-0 flex-1` rather than `h-full`: this is a child of the shell's flex column,
+    // so it takes the height that is left after the bars above it instead of adding to them.
+    <div data-slot="settings-column" className="relative min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-xl space-y-6 px-6 py-6">
         <h1 className="text-base font-medium">Settings</h1>
 
