@@ -1079,8 +1079,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       // What the session runs (issue #93): the request's model and system, or the agent's when
       // the request named none — the protocol's refinement guarantees one of the two exists.
       const timestamp = now().toISOString()
+      // The tree (epic #340, S3) is the server's to write and a top-level session is its own
+      // root; the fake has no way to create a child, so every session it makes is depth 0.
+      const id = newSessionId()
       const session = SessionSchema.parse({
-        id: newSessionId(),
+        id,
         type: 'session',
         // Required since #61 (A4); the same signed-in user the agent belongs to.
         owner_id: user.id,
@@ -1093,6 +1096,13 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           resolvedMode === null ? (request.data.model ?? agent?.model) : { id: resolvedMode.model },
         system: request.data.system === undefined ? (agent?.system ?? null) : request.data.system,
         mode: resolvedMode?.mode.id ?? null,
+        // A person is on the other end unless the request said otherwise (epic #340, S1);
+        // nothing else in the fake reads it, because its brain never pauses anyway.
+        interactive: request.data.interactive ?? true,
+        parent_session_id: null,
+        parent_task_id: null,
+        root_session_id: id,
+        depth: 0,
         agent:
           agent === null
             ? null
