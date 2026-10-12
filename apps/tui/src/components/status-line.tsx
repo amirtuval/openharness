@@ -88,6 +88,15 @@ export interface StatusLineProps {
    */
   readonly costCompact?: string | undefined
   /**
+   * What the chat searched the web for (epic #303, X5; #305; #308), already formatted — `2
+   * searches`. Omitted when the chat has made none.
+   *
+   * It sits with the cost, where usage is shown, and is a **count and never a price**: the
+   * operator pays the search provider, and no rate for that is in this repository — the same
+   * statement the usage routes make.
+   */
+  readonly searches?: string | undefined
+  /**
    * How full the context is (epic #277, K10; #280), already formatted — `62% of context used`,
    * `~62% of context used` right after a summary. Omitted when nothing has measured a prompt:
    * a chat that has not answered has nothing to say about its context.
@@ -433,6 +442,11 @@ function lineSegments(
     { span: chrome(who), priority: PRIORITY.who },
     { span: chrome(shortSessionId(props.sessionId)), priority: PRIORITY.session },
     ...(cost === undefined ? [] : [{ span: chrome(cost), priority: PRIORITY.cost }]),
+    // Searches ride beside the cost (epic #303, X5; #308): the same weight, so a narrow terminal
+    // drops them together rather than leaving a count with no money next to it.
+    ...(props.searches === undefined
+      ? []
+      : [{ span: chrome(props.searches), priority: PRIORITY.cost }]),
     // The meter is the one part of the line that can be a warning rather than chrome: a context
     // at or past the share the chat compacts at is drawn in the alarm colour (#280).
     ...(context === undefined

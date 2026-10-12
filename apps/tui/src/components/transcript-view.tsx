@@ -4,6 +4,7 @@ import type {
   TranscriptEntry,
   TranscriptMessage,
   TranscriptSummary,
+  TranscriptToolCall,
 } from '@openharness/client'
 import { Static, Text } from 'ink'
 import { Fragment, useRef } from 'react'
@@ -11,6 +12,7 @@ import { Fragment, useRef } from 'react'
 import { draws, MessageView } from './message-view'
 import { replyMetaLines } from './reply-meta'
 import { SummaryDivider } from './summary-divider'
+import { ToolCallView } from './tool-call'
 
 /**
  * The conversation: what is settled goes through Ink's `<Static>`, what is still moving
@@ -70,6 +72,7 @@ import { SummaryDivider } from './summary-divider'
 export function TranscriptView({
   messages,
   summaries = [],
+  toolCalls = [],
   width,
   currentModel,
   costOf,
@@ -79,6 +82,8 @@ export function TranscriptView({
   readonly messages: readonly TranscriptMessage[]
   /** The summary dividers still in the conversation, in order (epic #277, K10; #280). */
   readonly summaries?: readonly TranscriptSummary[] | undefined
+  /** The tool calls in the conversation, in order (epic #303, X5; #308). */
+  readonly toolCalls?: readonly TranscriptToolCall[] | undefined
   /** How wide the terminal is; the tests draw at a width they can read (see `MessageView`). */
   readonly width?: number | undefined
   /** The model the session runs, for the per-reply metadata lines (issue #208). */
@@ -114,11 +119,12 @@ export function TranscriptView({
   // the client's `transcriptEntries` — the same function the web app orders its transcript
   // with, so a divider lands in the same place in both. A divider is *not* filtered by `draws`:
   // it always has something to say, whether or not the history under it draws.
-  const blocks: readonly TranscriptEntry[] = transcriptEntries(messages.filter(draws), summaries)
-  const firstLive =
-    holdAll === true
-      ? 0
-      : blocks.findIndex((entry) => entry.kind === 'message' && isLive(entry.message, holdLive))
+  const blocks: readonly TranscriptEntry[] = transcriptEntries(
+    messages.filter(draws),
+    summaries,
+    toolCalls,
+  )
+  const firstLive = holdAll === true ? 0 : blocks.findIndex((entry) => isLiveEntry(entry, holdLive))
   const settled = committedSettled(committed.current, blocks, firstLive)
   committed.current = settled
   const live = firstLive === -1 ? [] : blocks.slice(firstLive)
@@ -128,8 +134,15 @@ export function TranscriptView({
   const draw = (entry: TranscriptEntry, previous: TranscriptEntry | undefined) =>
     entry.kind === 'summary' ? (
       <Fragment key={entry.summary.id}>
-        {setsOffDivider(previous) && <Text> </Text>}
+        {setsOffBlock(previous) && <Text> </Text>}
         <SummaryDivider summary={entry.summary} width={width} />
+      </Fragment>
+    ) : entry.kind === 'tool' ? (
+      // A tool call is structure rather than something anyone said (epic #303, X5; #308), so it
+      // brings its own blank line like a divider does, and draws nothing under it.
+      <Fragment key={entry.call.id}>
+        {setsOffBlock(previous) && <Text> </Text>}
+        <ToolCallView call={entry.call} width={width} />
       </Fragment>
     ) : (
       <Fragment key={entry.message.id}>
@@ -188,9 +201,34 @@ function committedSettled(
   return [...kept, ...appended]
 }
 
-/** The id a block is written under: its message's, or its summary's (its `<Static>` key). */
+/**
+ * The id a block is written under: its message's, its call's, or its summary's (its `<Static>`
+ * key).
+ */
 function entryId(entry: TranscriptEntry): string {
-  return entry.kind === 'summary' ? entry.summary.id : entry.message.id
+  if (entry.kind === 'summary') {
+    return entry.summary.id
+  }
+  return entry.kind === 'tool' ? entry.call.id : entry.message.id
+}
+
+/**
+ * Whether a block may still change on screen, and so belongs in the live area.
+ *
+ * A message is live while the brain has not taken it or it is still being previewed (#208); a
+ * **tool call** is live while it is running or waiting on the reader (epic #303, #308), because
+ * its status and the reason line under it change as the turn goes on — and a settled block is
+ * written once and never redrawn, so a running call committed to the scrollback would stay
+ * "running" for the life of the screen. A divider never changes and settles where it lands.
+ */
+function isLiveEntry(entry: TranscriptEntry, holdLive: string | undefined): boolean {
+  if (entry.kind === 'message') {
+    return isLive(entry.message, holdLive)
+  }
+  if (entry.kind === 'tool') {
+    return entry.call.status === 'running' || entry.call.status === 'waiting'
+  }
+  return false
 }
 
 /**
@@ -223,13 +261,23 @@ function isLive(message: TranscriptMessage, holdLive: string | undefined): boole
  * there is excluded because it draws the line itself (see {@link blankAbove}).
  */
 function separates(previous: TranscriptEntry | undefined, entry: TranscriptEntry): boolean {
-  if (previous === undefined || entry.kind === 'summary') {
+  // A divider and a tool call bring their own line above themselves (they are structure, not a
+  // banded message), so nothing is drawn for them here.
+  if (previous === undefined || entry.kind !== 'message') {
     return false
   }
-  if (previous.kind === 'summary') {
-    return entry.message.role !== 'user'
-  }
-  return previous.message.role !== 'user' && entry.message.role !== 'user'
+  return !isUserMessage(previous) && entry.message.role !== 'user'
+}
+
+/**
+ * Whether a block is a user's message.
+ *
+ * Only a message can be one — a divider and a tool call are neither — and the three functions
+ * below ask the same question about whatever sits above them, which is why it is one helper
+ * rather than a `kind` check written three times.
+ */
+function isUserMessage(entry: TranscriptEntry | undefined): boolean {
+  return entry !== undefined && entry.kind === 'message' && entry.message.role === 'user'
 }
 
 /**
@@ -244,19 +292,16 @@ function blankAbove(previous: TranscriptEntry | undefined): boolean {
   if (previous === undefined) {
     return false
   }
-  return previous.kind === 'summary' || previous.message.role !== 'user'
+  return !isUserMessage(previous)
 }
 
 /**
- * Whether a divider is the block that draws the blank line above itself.
+ * Whether a block that draws its own leading blank line is the one that draws it.
  *
- * Always, except as the first block — a divider is drawn as structure rather than as a banded
- * message, so nothing above it brings a line of its own. A user's message above it is the
- * exception: that band already ends in a blank line.
+ * A divider and a tool call are drawn as structure rather than as banded messages, so nothing
+ * above them brings a line of their own — the exception is a user's message, whose band already
+ * ends in a blank line. And nothing is drawn above the first block of a transcript.
  */
-function setsOffDivider(previous: TranscriptEntry | undefined): boolean {
-  if (previous === undefined) {
-    return false
-  }
-  return previous.kind === 'summary' || previous.message.role !== 'user'
+function setsOffBlock(previous: TranscriptEntry | undefined): boolean {
+  return previous !== undefined && !isUserMessage(previous)
 }

@@ -27,6 +27,7 @@ Usage:
   oh providers remove <p>      forget a provider's key (asks; --yes skips)
   oh default-model [id]        print or set the default model for new chats
   oh settings [flags]          show or set the context (compaction) settings
+  oh tools [name] [flags]      show which tools your chats may use, or change one
   oh login                     sign in through the browser (the device flow)
   oh logout                    end the session and forget the token
   oh whoami                    print the signed-in user
@@ -46,6 +47,10 @@ Options:
                                (a provider/model id, or same-as-chat)
       --summary-passes <n>     with \`oh settings\`: passes before the chat model
                                summarizes instead (1–10), or 'default'
+      --on | --off             with \`oh tools <name>\`: offer the tool, or stop
+                               offering it
+      --policy <p>             with \`oh tools <name>\`: what a call is evaluated
+                               under — allow, ask or deny
       --yes                    with \`oh sessions delete\` / \`oh providers remove\`:
                                do not ask to confirm
       --server <url>           server root (default https://app.oharness.dev)

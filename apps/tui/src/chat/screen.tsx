@@ -1,11 +1,16 @@
 import {
+  clearedResultsNotice,
   compactionThreshold,
   contextMeter,
   manualCompactionNotice,
+  modelSupportsTools,
   providerName,
+  searchCount,
   selectManualCompaction,
   selectSessionUsage,
   sessionCost,
+  stepLimitNotice,
+  truncatedResultsNotice,
 } from '@openharness/client'
 import type { Client, TranscriptError } from '@openharness/client'
 import type { GetPreferencesResponse, Mode, ModelEntry } from '@openharness/protocol'
@@ -20,6 +25,8 @@ import { usePromptSlot } from '../components/prompt-slot'
 import { ProviderSetup } from '../components/provider-setup'
 import { formatCostTotal } from '../components/reply-meta'
 import { InputRule, modelLabel, modelPriceLookup, StatusLine } from '../components/status-line'
+import { TodoPanel } from '../components/todo-panel'
+import { ToolNoticesView } from '../components/tool-notices'
 import { lastDrawn, TranscriptView } from '../components/transcript-view'
 import { TruncationNotice } from '../components/truncation-notice'
 import type { PromptHistory } from '../history'
@@ -240,6 +247,13 @@ export function ChatScreen({
   const costCompact =
     costTotal === undefined ? undefined : formatCostTotal(costTotal, { compact: true })
 
+  // What the chat searched the web for (epic #303, X5; #305; #308): the same count the usage
+  // routes report, read off the calls the transcript already holds. A count and never a price —
+  // the operator pays the search provider — and nothing at all until one has run.
+  const searchTotal = searchCount(view.transcript.toolCalls)
+  const searches =
+    searchTotal === 0 ? undefined : `${searchTotal} ${searchTotal === 1 ? 'search' : 'searches'}`
+
   // A turn the server is retrying says so in the status line rather than in a notice of its
   // own (#208) — one line, not two about the same thing. An error that outlives its turn,
   // which is how a `session.error` reads back out of history, keeps the notice.
@@ -269,15 +283,39 @@ export function ChatScreen({
 
   // The lines that sit under the transcript: what a command printed or a hint, the turn's own
   // error when the status line is not already saying it (#208), the newest message's shortening
-  // (#280) and what a manual compaction came to (#283). The flag is what draws the block at all,
-  // so every one of them has to be in it — a compaction notice on its own is a notice.
+  // (#280), what a manual compaction came to (#283), and the tool notices (#303, X2/X5/X9; #308).
+  // The flag is what draws the block at all, so every one of them has to be in it — a tool notice
+  // on its own is a notice.
   const error = view.transcript.lastError
-  const failure = error !== null && retrying === undefined ? turnErrorNotice(error) : null
+  // The step limit is a notice rather than a failure to retry (X2), so its own line replaces the
+  // generic turn error for that one type — the reader is told once.
+  const stepLimit = stepLimitNotice(error)
+  const failure =
+    error !== null && retrying === undefined && stepLimit === null ? turnErrorNotice(error) : null
+  // The other tool notices (epic #303, X5/X9; #308): a model that cannot call tools, and what the
+  // newest request shortened or cleared. All of the words come from `@openharness/client`, so the
+  // page says the same thing.
+  const toolsUnsupported =
+    modelSupportsTools((catalog ?? []).find((entry) => entry.id === currentModel)) === false
+  const truncatedToolResults = truncatedResultsNotice(view.transcript.truncatedToolResults)
+  const clearedToolResults = clearedResultsNotice(view.transcript.clearedToolResults)
+  const hasToolNotices =
+    stepLimit !== null ||
+    toolsUnsupported ||
+    truncatedToolResults !== null ||
+    clearedToolResults !== null
+  // The chat's task list (epic #303, X5; #305; #308), drawn under the transcript while the model
+  // has one. It is chrome about the work rather than part of the conversation, so it sits outside
+  // the scroller with the notices — and it is `null`, never an empty list, once no `todo_write`
+  // call has taken effect.
+  const todos = view.transcript.todos
   const hasNotice =
     view.notice !== null ||
     failure !== null ||
     truncation !== null ||
-    manualCompactionNoticeDrawn !== null
+    manualCompactionNoticeDrawn !== null ||
+    hasToolNotices ||
+    todos !== null
 
   /**
    * Whether the transcript owes the block under it a blank line (issue #233).
@@ -291,7 +329,13 @@ export function ChatScreen({
    * (`transcript-view.tsx`), so the band above it is what the section is set off from.
    */
   const above = lastDrawn(view.transcript.messages)
-  const owesBlank = above !== undefined && above.role !== 'user'
+  // A tool call after the last drawn message is the last block: it ends in its own line, so the
+  // section below owes a blank line — the same statement an agent message makes (epic #303, #308).
+  const lastToolCall = view.transcript.toolCalls.at(-1)
+  const owesBlank =
+    (lastToolCall !== undefined &&
+      (above === undefined || lastToolCall.position > above.position)) ||
+    (above !== undefined && above.role !== 'user')
 
   /**
    * Wipe the screen, keeping the session (#206) — Ctrl+L, and `/clear` by another name.
@@ -438,6 +482,7 @@ export function ChatScreen({
       <TranscriptView
         messages={view.transcript.messages}
         summaries={view.transcript.summaries}
+        toolCalls={view.transcript.toolCalls}
         currentModel={currentModel}
         costOf={costOf}
         // A reply settles into Ink's static output once and never redraws (#208, X2), so it is
@@ -460,6 +505,18 @@ export function ChatScreen({
           )}
           {view.notice !== null && <NoticeView notice={view.notice} />}
           {failure !== null && <NoticeView notice={failure} />}
+          {hasToolNotices && (
+            <ToolNoticesView
+              stepLimit={stepLimit}
+              unsupported={toolsUnsupported}
+              truncated={truncatedToolResults}
+              cleared={clearedToolResults}
+            />
+          )}
+          {/* The task list (epic #303, X5; #308) sits with the notices, under the transcript: a
+              terminal has no pinned chrome, so this is where it can be redrawn in place as the
+              model rewrites it. */}
+          {todos !== null && <TodoPanel todos={todos} />}
         </>
       )}
       {/* The input area is its own section (issue #233): a blank line, a dim full-width rule,
@@ -475,6 +532,7 @@ export function ChatScreen({
         phase={view.phase}
         cost={cost}
         costCompact={costCompact}
+        searches={searches}
         context={meter?.label}
         contextCompact={meter?.shortLabel}
         contextNearThreshold={meter?.nearThreshold}

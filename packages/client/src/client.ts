@@ -31,6 +31,7 @@ import {
   sessionEventsPath,
   type SessionsResource,
 } from './resources/sessions'
+import { createToolsResource, type ToolsResource } from './resources/tools'
 import { createUsageResource, type UsageResource } from './resources/usage'
 
 /**
@@ -186,6 +187,16 @@ export interface Client {
    */
   readonly modes: ModesResource
 
+  /**
+   * The caller's own tool settings (epic #303, X4; #307): which built-in tools a chat may use,
+   * and the permission each call is evaluated under.
+   *
+   * `tools.list()` is `GET /v1/me/tools` (with an optional `mode_id`, so a chat following a mode
+   * reads the tools it would really get) and `tools.put` is `PUT /v1/me/tools`, which merges its
+   * per-tool choices over what is stored. Both answer the effective list, one entry per tool.
+   */
+  readonly tools: ToolsResource
+
   /** Signing in (the CLI's device flow) and signing out (epic #65, A6). */
   readonly auth: AuthResource
 
@@ -268,6 +279,7 @@ export function createClient(options: ClientOptions): Client {
     providerCredentials: createProviderCredentialsResource(transport),
     models: createModelsResource(transport),
     modes: createModesResource(transport),
+    tools: createToolsResource(transport),
     auth: createAuthResource(transport),
     preferences: createPreferencesResource(transport),
     usage: createUsageResource(transport),

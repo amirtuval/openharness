@@ -326,6 +326,41 @@ describe('parseArgs', () => {
     expect(errorOf(['default-model', '--summary-passes', '3'])).toContain('--summary-passes <n>')
   })
 
+  it('reads `oh tools` and each of its flags (#308)', () => {
+    // No flags and no name is a read of every tool.
+    expect(commandOf(['tools'])).toEqual({
+      kind: 'tools',
+      patch: {},
+      options: { debug: false, server: undefined },
+    })
+    expect(commandOf(['tools', 'web_search', '--off'])).toMatchObject({
+      kind: 'tools',
+      patch: { name: 'web_search', enabled: false },
+    })
+    expect(commandOf(['tools', 'todo_write', '--on', '--policy', 'ask'])).toMatchObject({
+      patch: { name: 'todo_write', enabled: true, policy: 'ask' },
+    })
+    // The permission alone is a change: the command keeps the tool's on/off state.
+    expect(commandOf(['tools', 'web_fetch', '--policy', 'deny'])).toMatchObject({
+      patch: { name: 'web_fetch', policy: 'deny' },
+    })
+  })
+
+  it('rejects a `tools` line it cannot read (#308)', () => {
+    expect(errorOf(['tools', 'web_search', 'todo_write'])).toContain('at most one tool name')
+    expect(errorOf(['tools', 'web_search', '--on', '--off'])).toContain('either --on or --off')
+    expect(errorOf(['tools', '--off'])).toContain('name a tool to change')
+    expect(errorOf(['tools', 'web_search', '--policy', 'maybe'])).toContain('allow, ask, deny')
+    expect(errorOf(['tools', 'web_search', '--model', 'openai/gpt-5-mini'])).toContain(
+      '--model <provider/model>',
+    )
+  })
+
+  it('rejects the tools flags everywhere but `oh tools` (#308)', () => {
+    expect(errorOf(['--off'])).toContain('only makes sense with `oh tools`')
+    expect(errorOf(['settings', '--policy', 'ask'])).toContain('--policy <allow|ask|deny>')
+  })
+
   it('rejects --session with --continue', () => {
     expect(errorOf(['--session', 'sesn_1', '--continue'])).toContain(
       'either --session <id> or --continue',

@@ -5,13 +5,17 @@ import {
   CreateModeRequestSchema,
   EVENT_TYPES,
   CreateSessionRequestSchema,
+  DEFAULT_MCP_TOOL_PERMISSION,
   DEFAULT_USER_THEME,
+  DEFAULT_USER_TOOL_SETTINGS,
   ListModelsResponseSchema,
+  ListToolSettingsResponseSchema,
   MODE_DEFAULT_MODEL,
   MAX_MODES_PER_USER,
   ModeSchema,
   ProviderCredentialSchema,
   PutPreferencesRequestSchema,
+  PutToolSettingsRequestSchema,
   PutProviderCredentialRequestSchema,
   SUMMARY_MODEL_SAME_AS_CHAT,
   parseServiceAccountKey,
@@ -22,9 +26,11 @@ import {
   UpdateModeRequestSchema,
   UserMessageEventInputSchema,
   UserPreferencesSchema,
+  UserToolSettingsSchema,
   UserUsageSchema,
   credentialDetails,
   encodeKeyCursor,
+  mcpToolOfferedName,
   newAgentId,
   newModeId,
   newProviderCredentialId,
@@ -43,12 +49,16 @@ import type {
   ListModesResponse,
   ListProviderCredentialsResponse,
   ListSessionsResponse,
+  ListToolSettingsResponse,
   Mode,
   ModeId,
   ModelEntry,
   ProviderCatalogStatus,
   PutProviderCredentialRequest,
   SessionUsage,
+  ToolPermission,
+  ToolSettingEntry,
+  UserToolSettings,
   UserUsage,
   ProviderCredential,
   SendEventsResponse,
@@ -246,6 +256,45 @@ export interface FakeClientOptions {
    * "my default model" resolves through.
    */
   modes?: readonly Mode[]
+  /**
+   * The tool settings {@link Client.tools} starts with, over the default of none.
+   *
+   * One entry per tool the reader chose for (`{ builtin: { web_search: { enabled: false,
+   * policy: 'ask' } } }`); a tool the map does not name follows its own declared default, the
+   * way the server reads it (#307). Seeded rather than put, like {@link credentials}, so a test
+   * of a settings screen renders from its first frame with a choice already made.
+   */
+  toolSettings?: UserToolSettings
+  /**
+   * Which tools this fake deployment registers and offers, over the default of the three
+   * built-ins. A tool named here with `false` is listed as `available: false` — the
+   * unregistered-tool state of #307 — which is how a screen that says "not configured" is seen.
+   */
+  toolsAvailable?: Readonly<Record<string, boolean>>
+  /**
+   * The remote MCP tools this fake deployment offers, over the default of none (#312).
+   *
+   * Each becomes one `GET /v1/me/tools` entry — `source: 'mcp'`, its `<server>__<tool>` offered
+   * name, the server's own `mcp_server`, and the `ask` policy a remote tool declares — which is
+   * what a screen that groups remote tools by server, or one that must not break on them,
+   * renders. Seeded rather than created, like a mode: there is no MCP route in the fake (the
+   * resource is #311's, and this fake restates the settings shape, not that API).
+   */
+  mcpTools?: readonly FakeMcpTool[]
+}
+
+/**
+ * One remote MCP tool the fake offers, as {@link FakeClientOptions.mcpTools} takes it (#312).
+ *
+ * Deliberately not the protocol's `McpServer` resource: the fake answers `GET /v1/me/tools`, and
+ * an entry needs no URL, auth or connection status — only the pair a remote tool's offered name
+ * is built from.
+ */
+export interface FakeMcpTool {
+  /** The MCP server's name, as the log and the settings record it. */
+  readonly server: string
+  /** The tool's own name on that server. */
+  readonly name: string
 }
 
 /** A device flow, as {@link FakeClient.scriptDeviceLogin} takes it. */
@@ -321,6 +370,26 @@ export interface ModelListCall {
   /** Whether the call asked to bypass the server's cache: `refresh: true`. */
   readonly refresh: boolean
 }
+
+/**
+ * The tools the fake deployment registers, in the order a request would offer them
+ * (epic #303, X4; #307).
+ *
+ * The names and declared permission match the real build's built-ins (`allow`), so a settings
+ * screen developed against the fake reads the same entries the server sends. The fake runs no
+ * tool loop, so this is only what `GET /v1/me/tools` answers — the same "the fake restates the
+ * shape, not the engine" line the fake's usage and compaction halves draw.
+ */
+const FAKE_TOOLS: readonly { readonly name: string; readonly policy: ToolPermission }[] = [
+  { name: 'web_fetch', policy: 'allow' },
+  { name: 'web_search', policy: 'allow' },
+  { name: 'todo_write', policy: 'allow' },
+]
+
+/** Every fake tool is registered unless {@link FakeClientOptions.toolsAvailable} says otherwise. */
+const FAKE_TOOLS_AVAILABLE: Readonly<Record<string, boolean>> = Object.fromEntries(
+  FAKE_TOOLS.map((tool) => [tool.name, true]),
+)
 
 /**
  * The fake client: a {@link Client} plus the scripting it needs to be a test double.
@@ -446,6 +515,19 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   // the way the credentials are. The fake has one user, so ownership is only ever that user's
   // — a mode the map does not hold is the 404 an unknown id gets.
   const modes = new Map<string, Mode>((options.modes ?? []).map((mode) => [mode.id, mode]))
+  // The caller's tool settings (epic #303, X4; #307): one in-memory map behind `/v1/me/tools`,
+  // seeded by option the way the credentials and modes are. A tool the map does not name
+  // follows the fake registry's declaration, exactly as the server reads it.
+  let toolSettings: UserToolSettings = UserToolSettingsSchema.parse(
+    options.toolSettings ?? DEFAULT_USER_TOOL_SETTINGS,
+  )
+  const toolsAvailable: Readonly<Record<string, boolean>> = {
+    ...FAKE_TOOLS_AVAILABLE,
+    ...options.toolsAvailable,
+  }
+  // The remote MCP tools this fake offers (#312), seeded by option: the tool-list read reports
+  // one entry per pair, which is what the settings screen's remote half renders.
+  const mcpTools: readonly FakeMcpTool[] = options.mcpTools ?? []
   const user = options.user ?? makeUser()
   // The fake is a stand-in for `GET /v1/models`, so it stamps the budget a real server would on
   // every entry it serves (epic #277, K10; #280) — a caller that passes one keeps it.
@@ -1181,6 +1263,106 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
   }
 
+  /** The effective tool list, as `GET /v1/me/tools` answers it (epic #303, X4; #307; #312). */
+  const toolEntries = (modeId: ModeId | undefined): ListToolSettingsResponse => {
+    const override = modeId === undefined ? null : (modes.get(modeId)?.tools ?? null)
+    if (modeId !== undefined && !modes.has(modeId)) {
+      throw notFoundMode(modeId)
+    }
+    const entries: ToolSettingEntry[] = FAKE_TOOLS.map((tool) => {
+      const choice = toolSettings.builtin[tool.name]
+      return {
+        name: tool.name,
+        source: 'builtin' as const,
+        // A mode's override is on/off only (#307); the user's choice, else on.
+        enabled: override?.builtin[tool.name] ?? choice?.enabled ?? true,
+        policy: choice?.policy ?? tool.policy,
+        // A tool this deployment does not register has no declaration to report.
+        default_policy: toolsAvailable[tool.name] === false ? null : tool.policy,
+        available: toolsAvailable[tool.name] !== false,
+      }
+    })
+    // A stored setting for a tool this deployment does not register is listed, by name, after
+    // the registered ones — the same "listed rather than hidden" rule the server follows.
+    const known = new Set(FAKE_TOOLS.map((tool) => tool.name))
+    const strays = Object.keys(toolSettings.builtin)
+      .filter((name) => !known.has(name))
+      .sort()
+    for (const name of strays) {
+      const choice = toolSettings.builtin[name] as { enabled: boolean; policy: ToolPermission }
+      entries.push({
+        name,
+        source: 'builtin',
+        enabled: choice.enabled,
+        policy: choice.policy,
+        default_policy: null,
+        available: false,
+      })
+    }
+    // The remote MCP tools come after this build's own, one entry each under the offered name
+    // the settings and the log are keyed by (#312). A remote tool has no on/off of its own —
+    // `enabled` is the server's, which the fake offers as on — and its `ask` declaration is what
+    // the user's policy falls back to, so the fake serves the shape the server sends without
+    // pretending to hold servers of its own.
+    for (const tool of mcpTools) {
+      const name = mcpToolOfferedName(tool.server, tool.name)
+      const policy = toolSettings.mcp[name] ?? DEFAULT_MCP_TOOL_PERMISSION
+      entries.push({
+        name,
+        source: 'mcp',
+        enabled: true,
+        policy,
+        default_policy: DEFAULT_MCP_TOOL_PERMISSION,
+        available: true,
+        mcp_server: tool.server,
+      })
+    }
+    // A stored policy for a remote tool nothing offers is listed the same way a stray built-in
+    // is: by name, unavailable, with no declaration and no server to name.
+    const offered = new Set(mcpTools.map((tool) => mcpToolOfferedName(tool.server, tool.name)))
+    for (const name of Object.keys(toolSettings.mcp)
+      .filter((each) => !offered.has(each))
+      .sort()) {
+      entries.push({
+        name,
+        source: 'mcp',
+        enabled: false,
+        policy: toolSettings.mcp[name] as ToolPermission,
+        default_policy: null,
+        available: false,
+      })
+    }
+    return ListToolSettingsResponseSchema.parse({ data: entries })
+  }
+
+  const toolsResource: Client['tools'] = {
+    list(params, requestOptions): Promise<ListToolSettingsResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      return Promise.resolve(toolEntries(params?.mode_id))
+    },
+
+    put(body, requestOptions): Promise<ListToolSettingsResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = PutToolSettingsRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      // The write merges per tool: a tool the body names replaces that tool's whole setting
+      // (so its `policy` is required by the schema), and every other tool keeps what is stored —
+      // including the whole remote half (#312), which a built-in write must not drop.
+      const builtin = { ...toolSettings.builtin, ...(request.data.builtin ?? {}) }
+      const mcp = { ...toolSettings.mcp, ...(request.data.mcp ?? {}) }
+      toolSettings = UserToolSettingsSchema.parse({ builtin, mcp })
+      return Promise.resolve(toolEntries(undefined))
+    },
+  }
+
   const preferencesResource: Client['preferences'] = {
     get(requestOptions): Promise<GetPreferencesResponse> {
       throwIfAborted(requestOptions)
@@ -1348,6 +1530,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     providerCredentials: providerCredentialsResource,
     models: modelsResource,
     modes: modesResource,
+    tools: toolsResource,
     usage: usageResource,
     auth: authResource,
     preferences: preferencesResource,
