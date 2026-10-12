@@ -1930,8 +1930,8 @@ describe('context summaries (#277, K10; #280)', () => {
     })
     // The tool builders allocate their own `seq` from the running counter, so the position is
     // set here — what the test is about is the record's two halves, not the fixture's counter.
-    const call = { ...makeAgentToolUse({ name: 'web_fetch', input: { url: 'https://x' } }), seq: 2 }
-    const result = { ...makeAgentToolResult(call, { content: 'a very long page' }), seq: 3 }
+    const call = makeAgentToolUse('web_fetch', { url: 'https://x' }, { seq: 2 })
+    const result = makeAgentToolResult(call, 'a very long page', { seq: 3 })
     const capped = makeModelRequestStart({
       seq: 4,
       consumes: [],
@@ -1958,8 +1958,8 @@ describe('context summaries (#277, K10; #280)', () => {
     const long = makeUserMessage('x'.repeat(400), { seq: 1, processed_at: fixtureTimestamp() })
     // The tool builders allocate their own `seq` from the running counter, so the position is
     // set here — what the test is about is the record's two halves, not the fixture's counter.
-    const call = { ...makeAgentToolUse({ name: 'web_fetch', input: { url: 'https://x' } }), seq: 2 }
-    const result = { ...makeAgentToolResult(call, { content: 'a very long page' }), seq: 3 }
+    const call = makeAgentToolUse('web_fetch', { url: 'https://x' }, { seq: 2 })
+    const result = makeAgentToolResult(call, 'a very long page', { seq: 3 })
     const capped = makeModelRequestStart({
       seq: 4,
       truncated: {

@@ -26,8 +26,8 @@ import type {
   ToolCallEvent,
   ToolReference,
   ToolResultEvent,
+  ToolResultTruncation,
   ToolSource,
-  Truncation,
   UserMessageEvent,
   RetryStatusType,
   SessionCompactionOutcome,
@@ -496,7 +496,17 @@ export interface TranscriptTruncation {
  * alone, and anything else is the newest message's — which is the only other thing `capNewest`
  * caps. No wire change is needed for this, and none is made: the record already said both.
  */
-function messageTruncation(truncated: Truncation, recordedAt: number): TranscriptTruncation | null {
+function messageTruncation(
+  // The event's own shape, read the way `truncatedResultsFrom` reads it: a stored event is
+  // deep-readonly, so the results list is declared readonly here rather than as the wire type.
+  truncated: {
+    readonly seq: number
+    readonly tokens_before: number
+    readonly tokens_after: number
+    readonly results?: readonly ToolResultTruncation[] | undefined
+  },
+  recordedAt: number,
+): TranscriptTruncation | null {
   const cappedResult = (truncated.results ?? []).some((result) => result.seq === truncated.seq)
   if (cappedResult) {
     return null

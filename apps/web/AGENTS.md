@@ -514,8 +514,13 @@ markup.
   `manualCompactionNotice` in `@openharness/client`, shared with `oh`.
 - **`truncation-notice.tsx`** is the one line about the reader's own message: "Your message was
   too long for this model and was shortened", at the foot above the working row, with how much
-  was left out in the `title`. The list's stick-to-bottom key includes it, so a reader already
-  at the bottom is shown it rather than left with it below the fold.
+  was left out in the `title`. The sentence and the count are `@openharness/client`'s
+  `truncationNotice`, so `oh` can say the same thing — and it is only ever drawn for a **message**'s
+  cut (#314): the transcript leaves `truncation` null when the request's record names a tool
+  result, because that cut is `tool-notices.tsx`'s line, and reading one record as both is what
+  made a shortened `web_fetch` answer report the reader's short question as too long. The list's
+  stick-to-bottom key includes it, so a reader already at the bottom is shown it rather than left
+  with it below the fold.
 
 ### The tools, on screen (epic #303, X1/X2/X4/X5/X9; issue #308)
 
