@@ -36,6 +36,10 @@ const KEYS = {
   ctrlE: '\u0005',
   ctrlK: '\u000B',
   ctrlL: '\u000C',
+  /** Ctrl+O — the detail view of a tool call (#308). */
+  ctrlO: '\u000F',
+  /** Ctrl+T — fold or unfold the task list (#308). */
+  ctrlT: '\u0014',
   ctrlR: '\u0012',
   ctrlU: '\u0015',
   ctrlW: '\u0017',
