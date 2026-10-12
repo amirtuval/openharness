@@ -218,20 +218,22 @@ compact line per call — what it was asked, and whether it is running, waiting 
 failed, denied, interrupted or lost — which the web app expands to the full input, the result
 and, for a search, the pages it found, and `oh` draws with the reason a failed one owes. A list
 the model writes with `todo_write` is
-shown while the chat has one — a pinned panel in the web app, a compact block in `oh` — and
+shown while the chat has one — a collapsible panel beside the chat in the web app (above the
+composer on narrow screens), and a list pinned above the prompt in `oh` (Ctrl+T folds it) — and
 updates as it is rewritten. Which tools a chat may use, and what a call to one may do
-(`allow`, `ask` or `deny`), is **your** per-user setting: the web app's **Settings → Tools** and
-`oh tools` list and set it, a mode can turn a tool on or off for the chats that follow it, and a
+(`allow`, `ask` or `deny`), is **your** per-user setting: the web app's **Settings → Tools**,
+`/tools` in an `oh` chat and `oh tools` list and set it, a mode can turn a tool on or off for the chats that follow it, and a
 tool that cannot be offered — `web_search` on a model with no native one — is listed as
 unavailable, with the reason, rather than hidden. A model that cannot call tools says so.
 `oh settings` prints the context
 settings and `oh tools` the tool settings; both are the same stored values the web app shows.
 
 **A chat can also reach your own remote MCP servers** (epic #303, X10). You register the ones
-you operate — a name, its Streamable HTTP URL, and how it authenticates (nothing, a header, or
-OAuth) — from the web app's **Settings → MCP servers** or `oh mcp`, and while a server is on its
-tools are offered to your chats as `<server>__<tool>`. Every call asks you first until you set
-that tool's permission (`allow`, `ask` or `deny`), each server shows the state it is in and why
+you operate — just its Streamable HTTP URL; the server probes it and detects whether it needs
+OAuth, nothing, or (under Advanced) a custom header — from the web app's **Settings → MCP
+servers** or `oh mcp` (`/mcp` in a chat), and while a server is on its tools are offered to your
+chats as `<server>__<tool>`. Every call asks you first until you set that tool's permission
+(`allow`, `ask` or `deny`) — per tool, or for all of a server's tools at once — and each server shows the state it is in and why
 it last failed, and both frontends can test one, turn it off, or run the OAuth flow again — a
 server that is down is a tool source that is missing, never a failed turn. An error that stops a
 turn is a notice with a **Reconnect** in the page and `Ctrl+R` in `oh`. `oh mcp` is the same

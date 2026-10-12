@@ -50,30 +50,41 @@ builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` an
 
 ## Commands
 
-| command                                | what it does                                                           |
-| -------------------------------------- | ---------------------------------------------------------------------- |
-| `oh`                                   | start a new chat on your default model                                 |
-| `oh -c` / `oh -s <id>`                 | resume the most recent session, or a particular one                    |
-| `oh sessions`                          | list your sessions; `oh sessions delete <id>` deletes one (asks first) |
-| `oh agents`                            | list saved agent presets; start one with `--agent <id\|name>`          |
-| `oh providers`                         | list the model-provider keys you have stored                           |
-| `oh providers add [provider]`          | connect a provider — paste its key into a hidden prompt                |
-| `oh providers remove <provider>`       | forget a key (asks first; `--yes` skips the question)                  |
-| `oh default-model [provider/model]`    | print or set the model a new chat starts on                            |
-| `oh modes`                             | list your modes; start a chat on one with `--mode <name>`              |
-| `oh settings`                          | show or set when a long chat is summarized, and by which model         |
-| `oh login` / `oh logout` / `oh whoami` | sign in (browser device flow), revoke, who am I                        |
-| `oh update`                            | install the newest published version now                               |
-| `oh --help`, `oh --version`            | print and stop                                                         |
+| command                                | what it does                                                              |
+| -------------------------------------- | ------------------------------------------------------------------------- |
+| `oh`                                   | start a new chat on your default model                                    |
+| `oh -c` / `oh -s <id>`                 | resume the most recent session, or a particular one                       |
+| `oh sessions`                          | list your sessions; `oh sessions delete <id>` deletes one (asks first)    |
+| `oh agents`                            | list saved agent presets; start one with `--agent <id\|name>`             |
+| `oh providers`                         | list the model-provider keys you have stored                              |
+| `oh providers add [provider]`          | connect a provider — paste its key into a hidden prompt                   |
+| `oh providers remove <provider>`       | forget a key (asks first; `--yes` skips the question)                     |
+| `oh default-model [provider/model]`    | print or set the model a new chat starts on                               |
+| `oh modes`                             | list your modes; start a chat on one with `--mode <name>`                 |
+| `oh settings`                          | show or set when a long chat is summarized, and by which model            |
+| `oh tools [name]`                      | list the built-in tools, or set one (`--on`/`--off`/`--policy`)           |
+| `oh mcp`                               | your remote MCP servers: add, connect (OAuth), test, set tool permissions |
+| `oh login` / `oh logout` / `oh whoami` | sign in (browser device flow), revoke, who am I                           |
+| `oh update`                            | install the newest published version now                                  |
+| `oh --help`, `oh --version`            | print and stop                                                            |
 
 Inside a chat: Enter sends (a message sent mid-reply steers it), and Ctrl+J or Alt+Enter
 inserts a newline. Type `/` for the command menu — ↑/↓ choose, Tab completes, Enter runs, Esc
 closes — which holds `/model` (switch models), `/providers` (connect a provider without leaving
 the chat), `/new` (start a new chat on the current model), `/compact [instructions]`
-(summarize the older history now, with optional guidance for the summary),
-`/clear` (clear the screen, keeping the session), `/help`, and `/exit`. A message that starts
+(summarize the older history now, with optional guidance for the summary), `/tools` (turn the
+built-in tools on or off and set what each may do: allow, ask or deny), `/mcp` (your remote MCP
+servers), `/clear` (clear the screen, keeping the session), `/help`, and `/exit`. A message that starts
 with `//` sends a literal `/`. Ctrl+C interrupts the reply; pressed again when idle, it leaves.
 On the way out, `oh` prints the `oh -s <id>` line that resumes the chat.
+
+The model can use tools: fetch a page, search the web (on providers that have a native search),
+keep a task list, ask you a question, and call the tools of your remote MCP servers. Each call is
+a line in the transcript with a `⎿` line under it saying what came back; Ctrl+O shows the full
+input and result of the calls still on screen. A task list stays pinned above the prompt (Ctrl+T
+folds it). A tool set to `ask`, and every MCP tool until you allow it, waits for your answer —
+allow once, for this chat, always, or deny — and a question from the model is answered with the
+arrow keys and Enter. If an MCP server needs signing in again mid-chat, Ctrl+R reconnects it.
 
 When a chat's context fills up, the server summarizes the older history and the chat carries on
 from the summary and the recent messages; the transcript keeps the whole conversation, with a
