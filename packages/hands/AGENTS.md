@@ -116,6 +116,13 @@ should _see_:
     heuristic, not a per-site rule.
   - **Every link is resolved** against the address the page was fetched from, so a model can
     follow it, and the page's own `<title>` is put back as a heading when `Readability` read one.
+  - **The shapes a converter renders as stray punctuation are fixed on the DOM, not the string.**
+    A news card is often one `<a>` wrapping a whole headline and teaser; the inlined-link rule
+    would render that as an orphan `[` at the start with its `](href)` hundreds of characters
+    below, so the link is pushed down into each block instead (`# [Headline](href)`). An icon
+    link (an empty `<a>`) or an undescribed image (no `alt`, Hacker News's spacer `s.gif`) would
+    render as `[](...)`/`![](...)`, so both are dropped: an element with no readable content
+    never reaches the converter.
 - **Text and JSON pass through** as they are; **anything else** (an image, a PDF) is refused
   with an `is_error` result naming the content type, because bytes that are not text are not
   something to store as if they were. A response that names no content type is read as text.
@@ -367,7 +374,10 @@ dependency table.
   front page yields its story titles as links with their addresses resolved, the Wikipedia
   article keeps its first paragraph, none of them keeps a `<script>`'s text or a `window.`
   string, and a consent banner's words are dropped while a page that merely mentions cookies is
-  kept.
+  kept. Every one of the five fixtures — the four above and the `windows-1255` Hebrew page —
+  is also checked for the **stray punctuation** a converter emits on the wrong shapes: the
+  Markdown never begins with an unmatched `[`/`]`, and carries no empty link or image (`[](`,
+  `[ ](`).
 - `web-fetch.test.ts` runs the tool against **local HTTP servers**, reached through the real
   guard with a resolver the test supplies — so the address checks and every redirect's re-check
   are the real ones and no test needs the internet. It covers the conversion a model reads (and

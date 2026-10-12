@@ -22,9 +22,10 @@ import { htmlToMarkdown } from './markdown'
  * tests are run.
  */
 
-/** A saved page fixture, read relative to this test file. */
-function fixture(name: string): string {
-  return readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
+/** A saved page fixture, read relative to this test file (all but one are UTF-8). */
+function fixture(name: string, encoding = 'utf-8'): string {
+  const bytes = readFileSync(new URL(`./fixtures/${name}`, import.meta.url))
+  return new TextDecoder(encoding).decode(bytes)
 }
 
 /** The main headline of the ynet homepage, as the page writes it. */
@@ -36,6 +37,52 @@ const REAL_PAGES = [
   { page: 'hacker news', file: 'hacker-news.html', url: 'https://news.ycombinator.com/' },
   { page: 'wikipedia', file: 'wikipedia.html', url: 'https://en.wikipedia.org/wiki/Israel' },
 ] as const
+
+/**
+ * Every saved page, each with its own `charset` and the address its relative links resolve
+ * against — the whole fixture set, for the properties that must hold on all of them.
+ */
+const FIXTURES = [
+  { page: 'ynet', file: 'ynet.html', encoding: 'utf-8', url: 'https://www.ynet.co.il/' },
+  {
+    page: 'hacker news',
+    file: 'hacker-news.html',
+    encoding: 'utf-8',
+    url: 'https://news.ycombinator.com/',
+  },
+  {
+    page: 'wikipedia',
+    file: 'wikipedia.html',
+    encoding: 'utf-8',
+    url: 'https://en.wikipedia.org/wiki/Israel',
+  },
+  { page: 'consent', file: 'consent.html', encoding: 'utf-8', url: 'https://recipes.example/cake' },
+  {
+    page: 'windows-1255',
+    file: 'windows-1255.html',
+    encoding: 'windows-1255',
+    url: 'https://example.test/he',
+  },
+] as const
+
+describe.each(FIXTURES)(
+  'htmlToMarkdown: no stray punctuation on the $page page',
+  ({ file, encoding, url }) => {
+    const markdown = htmlToMarkdown(fixture(file, encoding), url)
+
+    it('does not begin with an unmatched bracket', () => {
+      // An anchor wrapping a block once converted to `[` + the block + `](href)`, so the very
+      // first character the model read was the `[` of a link whose `](href)` was far below.
+      expect(markdown).not.toMatch(/^[[\]]/)
+    })
+
+    it('carries no empty link or image', () => {
+      // An icon link (an empty `<a>`) and an undescribed image both once converted to `[](...)`.
+      expect(markdown).not.toContain('[](')
+      expect(markdown).not.toContain('[ ](')
+    })
+  },
+)
 
 describe.each(REAL_PAGES)('htmlToMarkdown: the $page page', ({ file, url }) => {
   it('keeps no script text, no `window.` JS and no style', () => {

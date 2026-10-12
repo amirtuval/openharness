@@ -20,7 +20,7 @@
  * link. What comes back is a string that goes into a tool result, which is where the threat
  * model's rule applies — it is data the model is shown, never an instruction it follows.
  *
- * Four things are done here rather than by a library, because they are about *this* use:
+ * Five things are done here rather than by a library, because they are about *this* use:
  *
  * - **Chrome is dropped before anything reads the page.** `script`, `style`, `noscript`,
  *   `template`, `iframe`, `svg` and `canvas` are removed because `turndown` would otherwise emit
@@ -43,6 +43,11 @@
  * - **Relative links are made absolute** against the URL the page was actually fetched from, so
  *   a link a model is shown is one it can fetch — `Readability` resolves against a document URI
  *   this DOM does not have.
+ * - **The shapes that would convert to stray punctuation are normalized** before anything reads
+ *   the tree: an anchor wrapping a block (a news card is one `<a>` around a whole headline and
+ *   teaser) has its link pushed down into each block, so the output reads `# [Headline](href)`
+ *   instead of an orphan `[` with its `](href)` far below, and an anchor with nothing readable in
+ *   it (an icon button, an image with no `src`) is dropped, so no `[]()` is emitted.
  * - **The page's own `<title>` is put back as a heading** when `Readability` read one, because
  *   the article body does not carry it.
  */
@@ -174,6 +179,7 @@ export function htmlToMarkdown(html: string, url: string): string {
   dropChrome(dom)
   dropConsentChrome(dom)
   absolutizeUrls(dom, url)
+  normalizeMarkup(dom)
 
   const documentText = textLength(dom.documentElement?.textContent)
   const article = readMainContent(dom)
@@ -473,6 +479,120 @@ function absolutizeUrls(dom: Document, url: string): void {
         // value); the page's own spelling is kept.
       }
     }
+  }
+}
+
+/**
+ * The tags that make an element a block: content that the converter writes on its own line(s).
+ *
+ * Used by {@link reflowBlockLinks} to find the leaf blocks a link that wraps a whole block has to
+ * be pushed down into. `li` is here so a link over a list pushes into each item; `hr` is not,
+ * because it carries no content to carry a link.
+ */
+const BLOCK_SELECTOR =
+  'address,article,aside,blockquote,dd,details,div,dl,dt,fieldset,figcaption,figure,' +
+  'h1,h2,h3,h4,h5,h6,header,li,main,nav,ol,p,pre,section,summary,table,ul'
+
+/**
+ * Normalize the shapes `turndown` renders as stray Markdown punctuation, before anything reads
+ * the tree.
+ *
+ * Two page patterns produce those artifacts, and neither is the string's fault — so they are
+ * fixed on the DOM rather than by trimming the output:
+ *
+ * - **An anchor that wraps block content.** A news card is often one `<a>` around a whole
+ *   story: `<a href="…"><h1>Headline</h1><p>Teaser</p></a>`. The inlined-link rule renders that
+ *   as `[` + the converted block (`# Headline`) + `](href)` — an orphan `[` at the very start
+ *   and its `](url)` far below. {@link reflowBlockLinks} moves the link inside each block
+ *   instead, so it becomes `# [Headline](href)`, which is what the page meant.
+ * - **An anchor with nothing readable in it.** An icon button — Hacker News's upvote arrow, a
+ *   site-search magnifier — is an `<a>` wrapping an empty `<span>`; the link rule renders the
+ *   empty anchor as `[](href)`. {@link dropEmptyElements} drops such an anchor (and an image
+ *   with no `src`), so nothing empty reaches the converter.
+ */
+function normalizeMarkup(dom: Document): void {
+  dropEmptyElements(dom)
+  reflowBlockLinks(dom)
+}
+
+/**
+ * Remove the elements that would convert to nothing but punctuation: a link with no readable
+ * content, and an image that says nothing.
+ *
+ * An anchor is readable when it has text or wraps an image with a `src`; anything else (an empty
+ * `<a>`, one holding only a decorative `<span>`) is an icon rather than a link and is dropped, so
+ * no `[]()` is emitted. An `<img>` is readable when it has a source *and* an `alt`: with no
+ * `src`, or with no `alt`, it converts to `![]()`/`![](src)` — a URL fragment that shows a reader
+ * nothing — so a tracker pixel (Hacker News's spacer `s.gif`) and an undescribed decoration both
+ * go. An image with `alt` text is kept, which is the same rule the fallback's
+ * {@link isContentElement} uses.
+ */
+function dropEmptyElements(dom: Document): void {
+  for (const anchor of [...dom.querySelectorAll('a')]) {
+    if (!hasReadableContent(anchor)) {
+      anchor.remove()
+    }
+  }
+  for (const image of [...dom.querySelectorAll('img')]) {
+    const src = (image.getAttribute('src') ?? '').trim()
+    const alt = (image.getAttribute('alt') ?? '').trim()
+    if (src.length === 0 || alt.length === 0) {
+      image.remove()
+    }
+  }
+}
+
+/** Whether a link holds something a reader can read: text, or an image with a source. */
+function hasReadableContent(element: Element): boolean {
+  return textLength(element.textContent) > 0 || element.querySelector('img[src]') !== null
+}
+
+/**
+ * Push the link down into the blocks it wraps, so no anchor holds block-level content.
+ *
+ * For each anchor with a block-level descendant, every leaf block inside it has its children
+ * moved into a fresh `<a>` with the same `href` (and `title`), and the outer anchor is unwrapped:
+ * `<a href><h1>X</h1><p>Y</p></a>` becomes `<h1><a href>X</a></h1><p><a href>Y</a></p>`. The
+ * converter then renders `# [X](href)` and `[Y](href)`, which is exactly the link the page drew,
+ * with no orphan bracket. A link with no `href` (a placeholder) is unwrapped without a link, so
+ * its content survives rather than being dropped with the anchor.
+ */
+function reflowBlockLinks(dom: Document): void {
+  for (const anchor of [...dom.querySelectorAll('a')]) {
+    if (anchor.querySelector(BLOCK_SELECTOR) === null) {
+      continue
+    }
+    const href = anchor.getAttribute('href')
+    const title = anchor.getAttribute('title')
+    const blocks = Array.from(anchor.querySelectorAll(BLOCK_SELECTOR)).filter(
+      (block) => block.querySelector(BLOCK_SELECTOR) === null,
+    )
+    if (href !== null) {
+      for (const block of blocks) {
+        // A void/empty leaf block (`<hr>`, an empty `<div>`) has nothing to carry the link, so
+        // wrapping it would only produce the `[](href)` this pass exists to prevent.
+        if (block.firstChild === null) {
+          continue
+        }
+        const link = dom.createElement('a')
+        link.setAttribute('href', href)
+        if (title !== null) {
+          link.setAttribute('title', title)
+        }
+        while (block.firstChild !== null) {
+          link.appendChild(block.firstChild)
+        }
+        block.appendChild(link)
+      }
+    }
+    // Unwrap the outer anchor: its block children (now carrying the link) become its siblings.
+    const parent = anchor.parentNode
+    if (parent !== null) {
+      while (anchor.firstChild !== null) {
+        parent.insertBefore(anchor.firstChild, anchor)
+      }
+    }
+    anchor.remove()
   }
 }
 
