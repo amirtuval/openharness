@@ -708,9 +708,13 @@ capped (epic #303, X9) and the old ones it cleared:
 
 `seq` names the newest event whose text was cut, and the two counts bracket what it cost before
 and after — so a client can tell the user their message was shortened rather than let it
-silently disappear. `results` lists every tool result the request capped: a result is cut to the
-smaller of what its tool declares and a fifth of the chat model's budget, and the log keeps the
-whole of it. `cleared` says how many old tool results — those older than the recent quarter of
+silently disappear. The triple describes a **message**'s cut: it names a tool result only when
+no message had to be capped, which is what `results` says — a `seq` that list also carries is a
+result's cut and is reported by the results notice alone, never as the reader's own message
+(#314). `results` lists every tool result the request capped: a result is cut to the smaller of
+what its tool declares and a fifth of the chat model's budget, **keeping its beginning** — a
+tool's output means what it said first, so the tail is what it gives up, with the omission
+marker where the rest went — and the log keeps the whole of it. `cleared` says how many old tool results — those older than the recent quarter of
 the budget the summary engine keeps verbatim — had their bodies replaced by
 `result cleared, N tokens — call the tool again if you need it` (issue #331): clearing them is
 what the brain tries **before** summarizing, so a context that clearing alone brings back under

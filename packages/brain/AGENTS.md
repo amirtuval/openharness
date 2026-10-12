@@ -701,12 +701,17 @@ written it, so it is sized twice, and **both are the request's alone**: the stor
   declares (`ToolDefinition.maxResultTokens`, `DEFAULT_TOOL_RESULT_TOKENS` = 4096 when it
   declares none) and `TOOL_RESULT_BUDGET_RATIO` — a fifth of the chat model's history budget, so
   a generous declaration cannot overrun a small model's window, and a result at the cap still
-  leaves the quarter the engine keeps verbatim its room. The text becomes a head and a tail with
-  `OMISSION_MARKER` between them, and every result the request capped is recorded in
+  leaves the quarter the engine keeps verbatim its room. The text is cut **from the end**, with
+  `OMISSION_MARKER` where the rest went — a tool said what it had to say in the order it said it,
+  so a result keeps its beginning (a page's main content, a list's first hits) and gives up its
+  tail, where a capped _message_ keeps a head and a tail because both of its ends carry what the
+  other side needs (#314; `capResultText`). Every result the request capped is recorded in
   `span.model_request_start.truncated.results` — `{ seq, tool, tokens_before, tokens_after }` per
   result — so a client can show a notice. `truncated`'s `seq`/`tokens_before`/`tokens_after`
   still describe the newest item the request shortened: the newest message when it had to be
-  capped (K6), and otherwise the newest result that was (X9).
+  capped (K6), and otherwise the newest result that was (X9) — which is what a client reading
+  that triple has to tell apart, and `results` is what tells it: a `seq` the list also carries is
+  a result's cut and belongs to the results notice alone (#314, `@openharness/client`).
 - **A result older than the verbatim tail is cleared, before anything is summarized (X9)** —
   and, since #331, **only once the context is past the soft clearing threshold**. Its body is
   replaced by `CLEARED_TOOL_RESULT(n)` — "result cleared, N tokens — call the tool again if you
@@ -1563,7 +1568,8 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   #277's half: a log with no summary, one summary, several (the latest wins) and a summary a
   rewind has superseded (ignored, including a summary before the rewind but not after it); the
   summary kept through trimming; the newest item capped to a head and a tail with the marker and
-  the record of what was cut (a reply as well as a message, and nothing cut when it fits); and
+  the record of what was cut (a reply as well as a message, and nothing cut when it fits); a
+  **tool result** capped to its beginning instead (the marker last, the tail gone, #314); and
   the size accounting — `promptTokensOf`'s three counters, and
   `estimateNextRequestTokens` with a usable baseline, with none, and with each refusal (a
   summary request, another model, a superseded context), and `estimateContextSize` off a whole
@@ -1700,9 +1706,10 @@ lost`.
   a call and its answer counted as part of the context (K2), and a cleared result counted as the
   placeholder it became.
 - `tool-loop.test.ts`'s #306 case is the loop's own: an answer far over its tool's cap
-  (`maxResultTokens`) reaches the _second_ request as a head and a tail with the marker, the
-  stored `agent.tool_result` keeps every character, the call is still in front of it, and the
-  request's `span.model_request_start.truncated.results` names the result and what it cost.
+  (`maxResultTokens`) reaches the _second_ request shortened **from the end** with the marker
+  where the rest went, the stored `agent.tool_result` keeps every character, the call is still in
+  front of it, and the request's `span.model_request_start.truncated.results` names the result
+  and what it cost.
 - `opaque.test.ts` — the provider-opaque rules on their own (epic #303, X13; #334): which client
   family a request's model id and credential type make (every fixed provider the table has a row
   for, the compatible chat families, a Vertex `claude-*` model and a Vertex Gemini one, and the

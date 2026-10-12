@@ -873,7 +873,7 @@ function toolResultTextsOf(messages: readonly ModelMessage[]): string[] {
 }
 
 describe('sizing a tool result in a request (epic #303, X9; #306)', () => {
-  it('caps a result to its tool’s declaration, head and tail around the marker', () => {
+  it('caps a result to its tool’s declaration, keeping its beginning (#314)', () => {
     const strategy = createContextStrategy()
     const call = toolUse(2, 'fetch')
     const body = `HEAD${'a'.repeat(4_000 - 8)}TAIL`
@@ -885,11 +885,14 @@ describe('sizing a tool result in a request (epic #303, X9; #306)', () => {
       tools: registryWith('fetch', 100),
     })
 
-    // The result keeps its place — the call stays answered — and carries a head and a tail.
+    // The result keeps its place — the call stays answered — and keeps its **beginning**: a
+    // tool's output means what it said first (a page's main content, a list's first hits), so
+    // the tail is what a capped result gives up (#314).
     const carried = toolResultTextsOf(messages)[0] ?? ''
     expect(carried.startsWith('HEAD')).toBe(true)
-    expect(carried.endsWith('TAIL')).toBe(true)
-    expect(carried).toMatch(/\[… \d+ tokens omitted …\]/)
+    expect(carried.endsWith('TAIL')).toBe(false)
+    expect(carried).not.toContain('TAIL')
+    expect(carried).toMatch(/\[… \d+ tokens omitted …\]$/)
     // Inside the cap it was given, and not much inside it: the marker is what took the rest.
     expect(estimateTokens(carried)).toBeLessThanOrEqual(100)
     expect(estimateTokens(carried)).toBeGreaterThan(90)
