@@ -1081,6 +1081,46 @@ function conversationAfter(
         }
         break
       }
+      case EVENT_TYPES.agentToolUse: {
+        flushAnswers()
+        assistant ??= { seq: event.seq, text: '', calls: [] }
+        assistant.calls.push({
+          type: 'tool-call',
+          toolCallId: event.id,
+          toolName: event.name,
+          input: event.input,
+        })
+        break
+      }
+      case EVENT_TYPES.agentToolResult: {
+        closeAssistant()
+        answers ??= { index: messages.length, seq: event.seq, parts: [] }
+        const raw = textOf(event.content)
+        const tool = toolNames.get(event.tool_use_id) ?? ''
+        // What the request carries instead of the result exactly as it was stored (X9): an old
+        // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+        // either way — the call stays answered, with a shorter answer.
+        const planned = planToolResult(results, event.seq, tool, raw)
+        answers.parts.push({
+          type: 'tool-result',
+          toolCallId: event.tool_use_id,
+          toolName: tool,
+          output:
+            event.is_error === true
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+        })
+        if (planned.truncation !== undefined) {
+          truncatedResults.push(planned.truncation)
+        }
+        if (planned.cleared !== undefined) {
+          cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+        }
+        flushAnswers()
+        break
+      }
+      default:
+        break
     }
   }
   closeAssistant()
