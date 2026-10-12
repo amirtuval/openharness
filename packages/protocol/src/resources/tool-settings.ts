@@ -24,9 +24,9 @@ import { ToolPermissionSchema, ToolSourceSchema } from '../tools'
 /**
  * The longest tool name this API stores.
  *
- * Long enough for a built-in tool's own name (`web_search`) and for the namespaced name an MCP
- * tool will take (a server's id plus its tool's, #312), and short enough that the stored key of
- * a settings map cannot be a paragraph.
+ * Long enough for a built-in tool's own name (`web_search`) and for the model-facing name an
+ * MCP tool takes (`<server>__<tool>`, at most `MCP_TOOL_NAME_MAX_LENGTH` = 64, #312), and short
+ * enough that the stored key of a settings map cannot be a paragraph.
  */
 export const TOOL_NAME_MAX_LENGTH = 128
 
@@ -65,25 +65,36 @@ export const BuiltinToolSettingSchema = z.object({
 export type BuiltinToolSetting = z.infer<typeof BuiltinToolSettingSchema>
 
 /**
- * // extension: a user's stored tool settings (epic #303, X4; #307).
+ * // extension: a user's stored tool settings (epic #303, X4; #307; the MCP half is #312).
  *
- * One map today — `builtin`, keyed by tool name — and the place the MCP half will sit: a
- * user's MCP servers are on or off as a resource of their own (#311 carries the `enabled`
- * field that is the user's default), and a permission for one MCP tool is keyed by its server
- * and its tool (#312), which will be a sibling entry of this object rather than a change to
- * this one. What #311 did land is the **mode's** view of the servers: whether one is in play at
- * all is a mode's override (`{@link ModeToolOverrideSchema}`'s `mcp_servers`), not a per-tool
- * setting here — a mode never carries a permission, and a user's tool settings never carry a
- * server.
+ * Two maps, one per source of tool. `builtin` is keyed by a built-in tool's name and carries
+ * the two things a user chooses about one (on/off and a permission); `mcp` is keyed by a
+ * remote tool's model-facing offered name and carries a **permission only**, because whether a
+ * whole server is in play is a resource of its own (#311 carries `enabled`, and a mode overrides
+ * it through {@link ModeToolOverrideSchema}'s `mcp_servers`) — a mode never carries a
+ * permission, and a per-MCP-tool on/off does not exist (X6).
  *
  * A tool absent from the map follows **its own declared default** — the permission its
- * `ToolDefinition` carries, which is `allow` for every built-in tool and `ask` for every MCP
- * tool — so a user who has never opened the settings screen gets the build's defaults rather
- * than a frozen copy of them.
+ * `ToolDefinition` carries, which is `allow` for every built-in tool and
+ * `DEFAULT_MCP_TOOL_PERMISSION` (`ask`) for every MCP tool — so a user who has never opened the
+ * settings screen gets the build's defaults rather than a frozen copy of them.
+ *
+ * Both maps are records of **choices**, so a user who has saved none reads
+ * `DEFAULT_USER_TOOL_SETTINGS` and every tool follows its declaration.
  */
 export const UserToolSettingsSchema = z.object({
   /** The built-in tools a user has chosen for, keyed by tool name. */
   builtin: z.record(ToolNameSchema, BuiltinToolSettingSchema),
+  /**
+   * // extension: the remote MCP tools a user has chosen a policy for (epic #303, X10; #312),
+   * keyed by the model-facing offered name (`<server>__<tool>`, see `mcpToolOfferedName`).
+   *
+   * A **permission and nothing else**: a remote tool has no on/off of its own — whether a whole
+   * server is in play is the server resource's `enabled` and a mode's override (X6) — so the
+   * only thing a user chooses per tool is what a call to it means. A tool absent from the map
+   * follows `DEFAULT_MCP_TOOL_PERMISSION` (`ask`).
+   */
+  mcp: z.record(ToolNameSchema, ToolPermissionSchema),
 })
 
 export type UserToolSettings = z.infer<typeof UserToolSettingsSchema>
@@ -92,7 +103,7 @@ export type UserToolSettings = z.infer<typeof UserToolSettingsSchema>
  * What a user who has never saved any tool settings reads: no choices at all, so every tool
  * follows its own declaration. The absence of a choice, not a 404 and not a stored default.
  */
-export const DEFAULT_USER_TOOL_SETTINGS: UserToolSettings = { builtin: {} }
+export const DEFAULT_USER_TOOL_SETTINGS: UserToolSettings = { builtin: {}, mcp: {} }
 
 /**
  * // extension: one tool, as `GET /v1/me/tools` reports it (epic #303, X4; #307).
@@ -107,10 +118,18 @@ export const DEFAULT_USER_TOOL_SETTINGS: UserToolSettings = { builtin: {} }
  *   happens to equal it — and `null` for a tool this process does not register, which has no
  *   declaration to report.
  * - `available` is whether this server registers the tool. `false` is a stored setting for a
- *   tool that is not here (a built-in whose key this deployment lacks), listed rather than
- *   hidden so a user can see why it is not working; a tool that is not here is never offered,
- *   whatever `enabled` says.
- * - `source` is where the tool comes from (`builtin` today; `mcp` when #312 puts one there).
+ *   tool that is not here (a built-in whose key this deployment lacks, or a remote tool of a
+ *   server that is gone), listed rather than hidden so a user can see why it is not working; a
+ *   tool that is not here is never offered, whatever `enabled` says.
+ * - `source` is where the tool comes from: `builtin` for this build's own, `mcp` for a remote
+ *   server's (#312).
+ * - `mcp_server` is the MCP server a remote tool belongs to, by name — absent for a built-in
+ *   tool. It is what a settings screen groups remote tools by, and it is the same server name
+ *   the log records on a call.
+ *
+ * For a remote tool `enabled` is the **effective** on/off of the server it belongs to (the
+ * server's own `enabled`, with the mode's override applied), not a per-tool choice — there is
+ * none (X6) — and `default_policy` is `'ask'`.
  */
 export const ToolSettingEntrySchema = z.object({
   name: ToolNameSchema,
@@ -119,6 +138,11 @@ export const ToolSettingEntrySchema = z.object({
   policy: ToolPermissionSchema,
   default_policy: ToolPermissionSchema.nullable(),
   available: z.boolean(),
+  /**
+   * // extension: the remote MCP server this tool belongs to, by name (#312). Absent for a
+   * built-in tool, and for a stored setting that names no tool this or any server offers.
+   */
+  mcp_server: z.string().min(1).optional(),
 })
 
 export type ToolSettingEntry = z.infer<typeof ToolSettingEntrySchema>
@@ -129,7 +153,8 @@ export type ToolSettingEntry = z.infer<typeof ToolSettingEntrySchema>
  * No pagination envelope, the shape the mode and credential lists use: the list is bounded by
  * the tools a build registers plus the settings a user has stored, so a settings screen can
  * show all of it at once. Registered tools come in the registry's order — the order a request
- * offers them in — then any stored setting for a tool that is not registered, by name.
+ * offers them in — then the tools of the user's in-force remote MCP servers (#312), then any
+ * stored setting for a tool that is neither, by name.
  */
 export const ListToolSettingsResponseSchema = z.object({
   data: z.array(ToolSettingEntrySchema),
@@ -155,16 +180,18 @@ export type ListToolSettingsQuery = z.infer<typeof ListToolSettingsQuerySchema>
 /**
  * Body of `PUT /v1/me/tools`. Response: {@link ListToolSettingsResponseSchema}.
  *
- * Named `builtin` like the stored map, and every field optional: the write **merges** — a tool
- * the body names replaces that tool's whole setting, a tool it leaves out keeps what is
+ * Named `builtin` and `mcp` like the stored maps, and every field optional: the write **merges**
+ * — a tool the body names replaces that tool's whole setting, a tool it leaves out keeps what is
  * stored — so a settings screen can flip one switch without reading and rewriting the rest,
  * exactly as `PUT /v1/me/preferences` merges its fields. There is no way to delete an entry,
  * because there is nothing a deletion would say that a value does not: following a tool's own
- * declaration is `{ enabled: true, policy: <its default> }`, and a user may set that
- * deliberately.
+ * declaration is `{ enabled: true, policy: <its default> }` for a built-in and its default
+ * policy (`ask`) for a remote one, and a user may set that deliberately.
  */
 export const PutToolSettingsRequestSchema = z.object({
   builtin: z.record(ToolNameSchema, BuiltinToolSettingSchema).optional(),
+  /** The policy a remote MCP tool's calls are evaluated under, keyed by offered name (#312). */
+  mcp: z.record(ToolNameSchema, ToolPermissionSchema).optional(),
 })
 
 export type PutToolSettingsRequest = z.infer<typeof PutToolSettingsRequestSchema>

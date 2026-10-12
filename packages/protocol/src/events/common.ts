@@ -39,6 +39,28 @@ export const EVENT_TYPES = {
    */
   agentToolResult: 'agent.tool_result',
   /**
+   * The agent asked a remote MCP server's tool (epic #303, X1/X10; #312).
+   *
+   * Anthropic's event, with Anthropic's fields: `mcp_server_name` names the server the tool
+   * belongs to and `name` is the tool's own name **on that server** — not the model-facing name
+   * this build offers it under, which is a spelling the protocol owns and the log does not have
+   * to carry (see `mcpToolOfferedName`). The event's own `id` is the call's id, exactly as for
+   * `agent.tool_use`, and `agent.mcp_tool_result.mcp_tool_use_id` names it; a
+   * `user.tool_confirmation` answers it the same way (its `tool_use_id` is that id). See
+   * {@link AgentMcpToolUseEventSchema}.
+   */
+  agentMcpToolUse: 'agent.mcp_tool_use',
+  /**
+   * What a remote MCP tool call produced.
+   *
+   * Written by the brain, like `agent.tool_result` and for the same reason: the loop owns the
+   * log, and a client never writes a tool result. The content is text blocks like any other
+   * result — an MCP answer's text and structured content become text, and anything else it
+   * carried (an image, a resource) is replaced by a marker — so every reader of a tool result
+   * reads one shape. See {@link AgentMcpToolResultEventSchema}.
+   */
+  agentMcpToolResult: 'agent.mcp_tool_result',
+  /**
    * // extension: the user answered a call that was waiting on them (epic #303, X6; #309).
    *
    * One event answers every pause: an approval the settings demanded (`result`), or the
@@ -159,6 +181,8 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.agentMessage,
   EVENT_TYPES.agentToolUse,
   EVENT_TYPES.agentToolResult,
+  EVENT_TYPES.agentMcpToolUse,
+  EVENT_TYPES.agentMcpToolResult,
   EVENT_TYPES.sessionStatusRunning,
   EVENT_TYPES.sessionStatusIdle,
   EVENT_TYPES.sessionStatusRescheduled,

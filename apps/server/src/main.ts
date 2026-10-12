@@ -47,6 +47,8 @@ import { DeltaCompactor } from './compaction'
 import { ENV_VARS, type ServerConfig, describeConfig, readServerConfig } from './config'
 import { createSessionCredentialResolver, type ResolveSessionCredential } from './credentials'
 import { createConfigVault } from './key-provider'
+import { createMcpFetch } from './mcp/fetch'
+import { createMcpServerService } from './mcp/service'
 import { resolveMockCredential, resolveModelFactory } from './model'
 import { PostgresPartitionScheduler } from './partition-scheduler'
 import {
@@ -273,6 +275,19 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // the fixed endpoint and the operator's key are the only things it carries.
   const searchTransport = createProviderFetch()
   const turnRegistry = createTurnRegistry({ config, kind: resolvedModel.kind, searchTransport })
+  // The remote-MCP-server resource (epic #303, X10; the loop's half: #312). Built once here and
+  // handed to **both** readers — the turn options, whose provider lists a chat's in-force
+  // servers and calls their tools, and `createApp`, whose routes manage them — so a settings
+  // screen and a chat see one set of servers. Every outbound request goes through the guarded
+  // fetch, honouring the same self-host setting a custom endpoint does.
+  const mcpFetch = createMcpFetch({ allowPrivate: config.allowPrivateProviderUrls })
+  const mcpServers = createMcpServerService({
+    store: opened.mcpServers,
+    vault,
+    fetch: mcpFetch,
+    callbackUrl: new URL('/v1/me/mcp_servers/oauth/callback', config.betterAuthUrl).href,
+    logger,
+  })
   const turnTools = createTurnTools({
     config,
     kind: resolvedModel.kind,
@@ -284,6 +299,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
         ? undefined
         : createSearchAllowance({ store, dailyLimit: config.search.dailyLimit }),
     store,
+    mcp: { service: mcpServers, fetch: mcpFetch },
+    logger,
   })
 
   const scheduler = createScheduler(
@@ -338,14 +355,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       // The public URL is the one origin a cookie-authenticated write may come from (A2).
       trustedOrigins: [config.betterAuthUrl],
     },
-    // The remote-MCP-server resource (epic #303, X10): the durable store, and the OAuth
-    // callback this deployment's `BETTER_AUTH_URL` makes reachable. Its outbound requests go
-    // through the guarded fetch, honouring the same self-host setting a custom endpoint does.
-    mcpServers: {
-      store: opened.mcpServers,
-      callbackUrl: new URL('/v1/me/mcp_servers/oauth/callback', config.betterAuthUrl).href,
-      allowPrivateUrls: config.allowPrivateProviderUrls,
-    },
+    // The remote-MCP-server resource (epic #303, X10): the same instance the turn options were
+    // built with, so a server a route changes is the one a chat lists.
+    mcpServers: { service: mcpServers },
     credentialRoutes: {
       credentials,
       vault,

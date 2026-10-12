@@ -40,7 +40,11 @@ import { registerCompactRoutes } from './routes/compact'
 import type { AuthDeps, RouteDeps } from './routes/deps'
 import { registerEventRoutes } from './routes/events'
 import { createMcpFetch } from './mcp/fetch'
-import { createMcpServerService, type McpServerServiceOptions } from './mcp/service'
+import {
+  createMcpServerService,
+  type McpServerService,
+  type McpServerServiceOptions,
+} from './mcp/service'
 import { registerMcpOAuthCallbackRoute, registerMcpServerRoutes } from './routes/mcp-servers'
 import { registerMeRoutes } from './routes/me'
 import { registerToolSettingsRoutes } from './routes/tool-settings'
@@ -200,6 +204,15 @@ export interface AppOptions {
  * callback is, and whether a private address is reachable.
  */
 export interface McpServersAppOptions {
+  /**
+   * The service the routes use, when the caller already built one (epic #303, X10; #312).
+   *
+   * `main.ts` builds the service once and hands the same instance to the turn options — the
+   * tool loop lists a chat's servers through it — so the routes and a chat cannot disagree
+   * about what the deployment offers. Absent, the service is built here from the fields below,
+   * which is what a test that only cares about the routes wants.
+   */
+  readonly service?: McpServerService
   /** Where the servers and their sealed secrets live; an in-memory store when omitted. */
   readonly store?: McpServerStore
   /**
@@ -439,21 +452,23 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     scheduler: options.scheduler,
     auth: { enabledProviders: options.auth.enabledProviders, devLogin: options.auth.devLogin },
     credentialRoutes: options.credentialRoutes,
-    mcpServers: createMcpServerService({
-      store: options.mcpServers?.store ?? new InMemoryMcpServerStore(),
-      vault: options.credentialRoutes.vault,
-      fetch:
-        options.mcpServers?.fetch ??
-        createMcpFetch({ allowPrivate: options.mcpServers?.allowPrivateUrls === true }),
-      callbackUrl:
-        options.mcpServers?.callbackUrl ??
-        new URL(
-          '/v1/me/mcp_servers/oauth/callback',
-          options.auth.trustedOrigins[0] ?? 'http://localhost',
-        ).href,
-      ...(options.mcpServers?.now === undefined ? {} : { now: options.mcpServers.now }),
-      logger: options.mcpServers?.logger ?? logger,
-    }),
+    mcpServers:
+      options.mcpServers?.service ??
+      createMcpServerService({
+        store: options.mcpServers?.store ?? new InMemoryMcpServerStore(),
+        vault: options.credentialRoutes.vault,
+        fetch:
+          options.mcpServers?.fetch ??
+          createMcpFetch({ allowPrivate: options.mcpServers?.allowPrivateUrls === true }),
+        callbackUrl:
+          options.mcpServers?.callbackUrl ??
+          new URL(
+            '/v1/me/mcp_servers/oauth/callback',
+            options.auth.trustedOrigins[0] ?? 'http://localhost',
+          ).href,
+        ...(options.mcpServers?.now === undefined ? {} : { now: options.mcpServers.now }),
+        logger: options.mcpServers?.logger ?? logger,
+      }),
     catalog: options.catalog,
     // The automatic default model (epic #116, U4) is built here, per app: the record of who
     // the server has picked for lives as long as this app does (see `default-model.ts`).

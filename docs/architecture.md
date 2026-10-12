@@ -140,7 +140,8 @@ with a mode able to override the on/off part
 ([#307](https://github.com/amirtuval/openharness/issues/307)) — and the loop sizes what a request
 carries of a tool's result ([#306](https://github.com/amirtuval/openharness/issues/306)). It also
 holds the remote-MCP client (`openMcpClient`, Streamable HTTP over the official
-`@modelcontextprotocol/sdk`), shared with the tool loop
+`@modelcontextprotocol/sdk`) and the `ToolDefinition` that makes one of a remote server's tools
+an ordinary tool (`createMcpTool`), shared with the tool loop
 ([#312](https://github.com/amirtuval/openharness/issues/312)); the loop they run in is the
 brain's, and what they may reach is [`docs/threat-model.md`](./threat-model.md).
 

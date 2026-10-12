@@ -540,7 +540,7 @@ export class InMemorySessionStore implements SessionStore {
     const stored = this.#toolSettings.get(userId)
     // No row is "no choice stored": the protocol's one shape, and every tool then follows its
     // own declared default.
-    return resolved(deepFreeze({ builtin: stored?.builtin ?? {} }))
+    return resolved(deepFreeze({ builtin: stored?.builtin ?? {}, mcp: stored?.mcp ?? {} }))
   }
 
   putToolSettings(userId: UserId, settings: UserToolSettings): Promise<UserToolSettings> {
@@ -548,9 +548,10 @@ export class InMemorySessionStore implements SessionStore {
     // decides the same in Postgres.
     this.#toolSettings.set(userId, {
       builtin: settings.builtin,
+      mcp: settings.mcp,
       updatedAtMs: this.#clock(),
     })
-    return resolved(deepFreeze({ builtin: settings.builtin }))
+    return resolved(deepFreeze({ builtin: settings.builtin, mcp: settings.mcp }))
   }
 
   // ----------------------------------------------------------------- events
@@ -1347,11 +1348,14 @@ interface PreferencesRecord {
 
 /**
  * One user's stored tool settings, as the in-memory `user_tool_settings` row keeps them (epic
- * #303, X4; issue #307): the built-in tools they have chosen for, by name.
+ * #303, X4; issue #307): the built-in tools they have chosen for, by name, and the policies
+ * they have set for remote MCP tools (#312).
  */
 interface ToolSettingsRecord {
   /** The tool choices, keyed by tool name; a tool absent follows its own declaration. */
   readonly builtin: UserToolSettings['builtin']
+  /** The remote MCP tools' policies, keyed by offered name. */
+  readonly mcp: UserToolSettings['mcp']
   /** When `putToolSettings` last wrote it, as the injected clock read it. */
   readonly updatedAtMs: number
 }

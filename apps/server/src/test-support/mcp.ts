@@ -9,7 +9,12 @@ import type { AddressInfo } from 'node:net'
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js'
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  type CallToolResult,
+  type Tool,
+} from '@modelcontextprotocol/sdk/types.js'
 
 /**
  * The two stub servers the MCP tests drive the real stack against (epic #303, X10): a remote
@@ -42,6 +47,10 @@ export interface StubMcpServer {
   readonly url: string
   /** Every `authorization` header the server saw, in order. */
   readonly authorizations: string[]
+  /** Every `tools/call` the server served, in order — what the loop really sent. */
+  readonly calls: { readonly name: string; readonly args: Record<string, unknown> }[]
+  /** How many `tools/list` requests the server answered — what a listing cache saves. */
+  readonly listings: { count: number }
   /** Require this bearer token; every other request answers 401. `null` accepts any. */
   setRequiredToken(token: string | null): void
   close(): Promise<void>
@@ -59,7 +68,21 @@ export interface StubMcpServerOptions {
   readonly requiredToken?: string
   /** Make every initialize fail, to exercise the `status: 'error'` path. */
   readonly failing?: boolean
+  /**
+   * How the server answers a `tools/call` (epic #303, #312).
+   *
+   * The default echoes the arguments back as text, which is enough to prove a call reached the
+   * server and what it carried. A test of the loop's shaping passes its own: an error, an
+   * image, a resource, structured content.
+   */
+  readonly onCall?: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => CallToolResult | Promise<CallToolResult>
 }
+
+/** What a `tools/call` answers with, as the SDK types it. */
+export type StubCallToolResult = Awaited<ReturnType<NonNullable<StubMcpServerOptions['onCall']>>>
 
 /** Start a stub MCP server on loopback. */
 export async function startStubMcpServer(
@@ -67,6 +90,8 @@ export async function startStubMcpServer(
 ): Promise<StubMcpServer> {
   const tools = options.tools ?? STUB_MCP_TOOLS
   const authorizations: string[] = []
+  const calls: { name: string; args: Record<string, unknown> }[] = []
+  const listings = { count: 0 }
   let requiredToken = options.requiredToken ?? null
   const http = createServer((req, res) => {
     const authorization = req.headers['authorization']
@@ -113,7 +138,21 @@ export async function startStubMcpServer(
         { name: 'stub-mcp', version: '1.0.0' },
         { capabilities: { tools: {} } },
       )
-      server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [...tools] }))
+      server.setRequestHandler(ListToolsRequestSchema, () => {
+        listings.count += 1
+        return { tools: [...tools] }
+      })
+      server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        const name = request.params.name
+        const args = request.params.arguments ?? {}
+        calls.push({ name, args })
+        if (options.onCall !== undefined) {
+          return await options.onCall(name, args)
+        }
+        return {
+          content: [{ type: 'text', text: `${name} answered ${JSON.stringify(args)}` }],
+        }
+      })
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
       await server.connect(transport)
       response.on('close', () => {
@@ -131,6 +170,8 @@ export async function startStubMcpServer(
   return {
     url: `http://127.0.0.1:${port()}/mcp`,
     authorizations,
+    calls,
+    listings,
     setRequiredToken(token: string | null): void {
       requiredToken = token
     },

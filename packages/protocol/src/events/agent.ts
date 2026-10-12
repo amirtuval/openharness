@@ -110,11 +110,76 @@ export const AgentToolResultEventSchema = z.object({
 /** A stored `agent.tool_result`, deep-readonly like every event. */
 export type AgentToolResultEvent = DeepReadonly<z.infer<typeof AgentToolResultEventSchema>>
 
+/**
+ * The agent asked a remote MCP server's tool (epic #303, X1/X10; #312).
+ *
+ * The same shape as {@link AgentToolUseEventSchema} — the event's id **is** the call's id, and
+ * `evaluated_permission` is what the policy in force said about *this* call — plus the one
+ * field the built-in pair has no use for: `mcp_server_name`, the server the tool belongs to.
+ *
+ * `name` is the tool's own name **as the MCP server named it**, not the name the model was
+ * offered it under. The two differ: a chat offers a remote tool as `<server>__<tool>` so a
+ * model can tell two servers' `search` apart, and that spelling is openharness's invention —
+ * a reader recomputes it from this pair with `mcpToolOfferedName` whenever it needs the name a
+ * registry or a cap is keyed by. Recording the server's own names is what keeps the log true
+ * to what happened even if that spelling ever changes.
+ *
+ * A tool-level failure is not special here: as with a built-in, the call is stored and then
+ * answered with an `is_error` result, because the log records what the model asked for.
+ */
+export const AgentMcpToolUseEventSchema = z.object({
+  id: EventIdSchema,
+  type: z.literal(EVENT_TYPES.agentMcpToolUse),
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  /** The MCP server's name — the user-unique name it was configured under. */
+  mcp_server_name: z.string().min(1),
+  /** The tool's own name on that server, e.g. `search`. */
+  name: z.string().min(1),
+  /** The arguments the model produced: a JSON object; see `ToolInputSchema`. */
+  input: ToolInputSchema,
+  /** What the policy in force said about this call: `allow`, `ask` or `deny`. */
+  evaluated_permission: ToolPermissionSchema,
+})
+
+/** A stored `agent.mcp_tool_use`, deep-readonly like every event. */
+export type AgentMcpToolUseEvent = DeepReadonly<z.infer<typeof AgentMcpToolUseEventSchema>>
+
+/**
+ * What a remote MCP tool call produced (epic #303, X1/X10; #312).
+ *
+ * Always written, and always by the brain — the same rule as {@link AgentToolResultEventSchema},
+ * with the id field named for the MCP pair (`mcp_tool_use_id`).
+ *
+ * `content` is text blocks, whatever the server sent: the answer's text and its structured
+ * content become text, and content this protocol cannot carry as text — an image, an embedded
+ * resource — becomes a marker naming it, so a model is told something was there rather than
+ * shown a shape no reader accepts. `is_error: true` is the tool's own `isError`, or the loop's
+ * report of a call that failed to run.
+ */
+export const AgentMcpToolResultEventSchema = z.object({
+  id: EventIdSchema,
+  type: z.literal(EVENT_TYPES.agentMcpToolResult),
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  /** The `agent.mcp_tool_use` this answers — its event id, which is the call's id. */
+  mcp_tool_use_id: EventIdSchema,
+  /** What the call produced, as text blocks. */
+  content: ContentBlocksSchema,
+  /** Whether the call failed — the tool's own error, a timeout, an interrupt or a lost turn. */
+  is_error: z.boolean(),
+})
+
+/** A stored `agent.mcp_tool_result`, deep-readonly like every event. */
+export type AgentMcpToolResultEvent = DeepReadonly<z.infer<typeof AgentMcpToolResultEventSchema>>
+
 /** Any stored agent event. */
 export const AgentEventSchema = z.discriminatedUnion('type', [
   AgentMessageEventSchema,
   AgentToolUseEventSchema,
   AgentToolResultEventSchema,
+  AgentMcpToolUseEventSchema,
+  AgentMcpToolResultEventSchema,
 ])
 
 /** Any stored agent event, deep-readonly (D9, issue #46). */

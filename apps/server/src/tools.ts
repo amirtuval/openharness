@@ -1,4 +1,9 @@
-import type { ToolSecretResolver, ToolSettingsResolver, ToolSupportFor } from '@openharness/brain'
+import type {
+  McpToolProvider,
+  ToolSecretResolver,
+  ToolSettingsResolver,
+  ToolSupportFor,
+} from '@openharness/brain'
 import {
   WEB_SEARCH_API_KEY,
   createBraveSearchProvider,
@@ -8,17 +13,20 @@ import {
   textResult,
   todoWriteTool,
 } from '@openharness/hands'
-import type { SearchTransport, ToolDefinition, ToolRegistry } from '@openharness/hands'
+import type { McpFetch, SearchTransport, ToolDefinition, ToolRegistry } from '@openharness/hands'
 import type { SessionStore } from '@openharness/session'
 import { z } from 'zod'
 
 import type { ModelRegistry } from './catalog/registry'
 import { createToolSupportResolver } from './catalog/tool-support'
 import type { SearchConfig } from './config'
+import { createMcpToolProvider } from './mcp/tools'
+import type { McpServerService } from './mcp/service'
 import type { ResolvedModel } from './model'
 import { askUserTool } from './pausing'
 import type { SearchAllowance } from './searches'
 import { createToolSettingsResolver } from './tool-settings'
+import type { Logger } from './types'
 
 /**
  * The tools a turn may offer (epic #303, X4; the built-ins are #305; the per-user settings are
@@ -156,6 +164,12 @@ export interface TurnToolOptions {
   readonly resolveToolSecrets?: ToolSecretResolver
   /** The most model requests one turn may make; the brain's default when absent. */
   readonly maxToolSteps?: number
+  /**
+   * Where a request's remote MCP tools come from (epic #303, X10; #312), or absent for a
+   * deployment whose chats offer this build's tools alone. The loop asks it once per request
+   * with the session's owner and the mode's tool override.
+   */
+  readonly mcpTools?: McpToolProvider
 }
 
 /**
@@ -188,6 +202,22 @@ export interface TurnToolsOptions {
    * something small and known to read; production passes nothing and gets the built-ins.
    */
   readonly tools?: ToolRegistry
+  /**
+   * The MCP server resource a request's remote tools are listed from (epic #303, X10; #312), or
+   * `undefined` for a deployment that offers this build's tools alone.
+   *
+   * The service is what knows a user's servers, their sealed credentials and how to reach them;
+   * the fetch is the guarded one every listing and every call goes through. A test passes its
+   * own pair, which is how the remote half is exercised without a network.
+   */
+  readonly mcp?: {
+    readonly service: Pick<McpServerService, 'list' | 'resolve' | 'disconnect'>
+    readonly fetch: McpFetch
+  }
+  /** The clock the MCP listing cache runs on; injectable for tests. */
+  readonly now?: () => Date
+  /** Where a failed listing is logged. Silent by default. */
+  readonly logger?: Logger
 }
 
 /**
@@ -206,11 +236,18 @@ export function createTurnTools(options: TurnToolsOptions): TurnToolOptions {
   const { config, registry, allowance } = options
   const tools = options.tools ?? createTurnRegistry(options)
   const search = config.search
+  const mcp = options.mcp
   return {
     tools,
     // The per-user settings (#307): the session owner's stored choices, with a mode's override
     // applied, read per request over this very registry — so "available" and "offered" agree.
-    toolSettings: createToolSettingsResolver({ store: options.store, tools }),
+    // The remote half (#312) comes from the same read of the owner's servers and the same
+    // override, so the tools this calls offered and the servers the loop lists agree too.
+    toolSettings: createToolSettingsResolver({
+      store: options.store,
+      tools,
+      ...(mcp === undefined ? {} : { mcpServers: mcp.service }),
+    }),
     // Which models may be offered tools is models.dev's `tool_call`, the same gate the context
     // budget and the reasoning effort come from (#304, X2).
     toolSupportFor: createToolSupportResolver(registry),
@@ -221,6 +258,18 @@ export function createTurnTools(options: TurnToolsOptions): TurnToolOptions {
       ? {}
       : { resolveToolSecrets: searchSecretResolver(search, allowance) }),
     maxToolSteps: config.maxToolSteps,
+    // The remote tools a request offers (epic #303, X10; #312): listed per request from the
+    // chat's in-force servers, through the guarded fetch, and cached briefly.
+    ...(mcp === undefined
+      ? {}
+      : {
+          mcpTools: createMcpToolProvider({
+            service: mcp.service,
+            fetch: mcp.fetch,
+            ...(options.now === undefined ? {} : { now: options.now }),
+            ...(options.logger === undefined ? {} : { logger: options.logger }),
+          }),
+        }),
   }
 }
 
