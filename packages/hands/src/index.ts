@@ -64,6 +64,19 @@ export {
   type WebFetchOptions,
 } from './web-fetch'
 export { todoWriteTool } from './todo'
+export {
+  AGENT_TOOL_DESCRIPTION,
+  HARNESS_ANSWERED,
+  HARNESS_TOOL_HANDLERS,
+  SUBAGENT_TOOL_NAMES,
+  agentToolDescription,
+  agentWaitTool,
+  createSubagentTools,
+  isSubagentToolName,
+  type SubagentToolHandlers,
+  type SubagentToolsOptions,
+  type SubagentTypeSummaryLike,
+} from './subagent-tools'
 
 export {
   DEFAULT_MAX_BYTES,

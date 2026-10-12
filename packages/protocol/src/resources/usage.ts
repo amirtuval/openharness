@@ -9,7 +9,7 @@ import { ModelUsageSchema } from '../events/span'
  * (epic #245, A2; issue #247) — the shapes of what a session and a user spent.
  *
  * ```
- * GET /v1/sessions/{session_id}/usage  -> { session_id, totals, cost, by_model, searches }
+ * GET /v1/sessions/{session_id}/usage  -> { session_id, totals, cost, by_model, descendants, searches }
  * GET /v1/me/usage?from=&to=&tz=       -> { from, to, tz, totals, cost, by_model, by_day, searches }
  * ```
  *
@@ -36,6 +36,11 @@ import { ModelUsageSchema } from '../events/span'
  * - **Usage is broken down by model, never by mode.** A session may switch models
  *   mid-conversation (epic #116, U3), so `by_model` is what tells the cheap requests from the
  *   expensive ones; there is no second axis.
+ * - **A session's totals include its subtree** (epic #340, S8; #344). A subagent is a real
+ *   session with its own log, so its requests are billed to it; the session route sums the
+ *   whole tree anyway — a chat that delegates should not look cheap — and `descendants` is the
+ *   subtree's own share of the same numbers. The per-user route is unchanged: every session it
+ *   counts is already there on its own, ancestor or not.
  *
  * // extension: the shapes are openharness's own. Anthropic tracks usage per session and
  * reports it on the session object and in `session.usage` events; it has no per-user, per-range
@@ -126,11 +131,38 @@ export const UsageSearchesSchema = z.number().int().nonnegative()
 export type UsageSearches = z.infer<typeof UsageSearchesSchema>
 
 /**
+ * What a chat's **descendants** spent (epic #340, S8; #344): the same totals the session's own
+ * are, over the subtree under it and nothing else.
+ *
+ * A subagent is a real session with its own log, so its tokens are billed to it — but a chat
+ * that delegates work should not look cheap, which is why the session route's `totals`, `cost`
+ * and `by_model` cover the whole tree and this object says how much of that was the helpers'.
+ * The shape is the session's own without `session_id`: the four counters, the cost and its
+ * `unpriced_requests`, the per-model split and the search count.
+ */
+export const DescendantUsageSchema = z.object({
+  /** Every request the chat's descendants made, summed. */
+  totals: UsageTotalsSchema,
+  /** What `totals` cost, and how many of those requests had no price. */
+  ...TotalCostSchema.shape,
+  /** The descendants' totals per model, biggest first. */
+  by_model: z.array(ModelUsageBreakdownSchema),
+  /** How many `web_search` calls the descendants made; see {@link UsageSearchesSchema}. */
+  searches: UsageSearchesSchema,
+})
+
+export type DescendantUsage = z.infer<typeof DescendantUsageSchema>
+
+/**
  * Response of `GET /v1/sessions/{session_id}/usage`: everything one session spent.
  *
  * Owner-scoped: another user's session is the 404 an unknown id gets (A4). The route reads the
  * session's whole log — skipping what a rewind replaced, so a branch the reader took back is not
  * billed — and answers the totals over all of it, with the per-model split beside them.
+ *
+ * Since #344 the totals cover the session **and every session below it in the tree** (S8), so a
+ * chat's cost includes the work it delegated; `descendants` carries the subtree's own share of
+ * those numbers, and a session with no children answers zeroes in it.
  *
  * A session whose log holds no `span.model_request_end` at all (a chat with no reply yet)
  * answers zeroed totals, an empty `by_model` and a `null` cost: nothing was spent, and nothing
@@ -139,13 +171,15 @@ export type UsageSearches = z.infer<typeof UsageSearchesSchema>
 export const SessionUsageSchema = z.object({
   /** The session these totals are for. */
   session_id: SessionIdSchema,
-  /** Every request the session made, summed. */
+  /** Every request the session and its descendants made, summed. */
   totals: UsageTotalsSchema,
-  /** What `totals` cost, and how many of the session's requests had no price. */
+  /** What `totals` cost, and how many of the requests in it had no price. */
   ...TotalCostSchema.shape,
   /** The same totals per model, biggest first. */
   by_model: z.array(ModelUsageBreakdownSchema),
-  /** How many `web_search` calls this session made; see {@link UsageSearchesSchema}. */
+  /** What the sessions below this one spent (S8; #344) — zeroed when there are none. */
+  descendants: DescendantUsageSchema,
+  /** How many `web_search` calls this session and its descendants made. */
   searches: UsageSearchesSchema,
 })
 
