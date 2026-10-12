@@ -38,49 +38,49 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method   | path                                            | body / query                                | answers                                                                                                                                                                                                                         |
-| -------- | ----------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                       | —                                           | liveness: `{ status: 'ok' }`; never needs a session                                                                                                                                                                             |
-| `GET`    | `/ready`                                        | —                                           | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                                                                                            |
-| `GET`    | `/v1/auth-config`                               | —                                           | `{ providers, dev_login }`; never needs a session                                                                                                                                                                               |
-| `GET`    | `/v1/me`                                        | —                                           | the signed-in `User`                                                                                                                                                                                                            |
-| `GET`    | `/v1/me/preferences`                            | —                                           | the caller's `UserPreferences` plus the `defaults` its `null`s mean (#282), unwrapped                                                                                                                                           |
-| `PUT`    | `/v1/me/preferences`                            | `PutPreferencesRequestSchema`               | the stored preferences, merged; 400 for a malformed id or an out-of-range number                                                                                                                                                |
-| `GET`    | `/v1/me/tools`                                  | `ListToolSettingsQuerySchema` (`mode_id`)   | `{ data: ToolSettingEntry[] }` — the effective settings, as a chat on `mode_id` would see them: this process's tools, then the in-force MCP servers' (#307; #312)                                                               |
-| `PUT`    | `/v1/me/tools`                                  | `PutToolSettingsRequestSchema`              | the stored settings, merged per tool; 400 for a permission or shape the schema refuses                                                                                                                                          |
-| `POST`   | `/v1/me/modes`                                  | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                                                                                                  |
-| `GET`    | `/v1/me/modes`                                  | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                                                                                                   |
-| `GET`    | `/v1/me/modes/{mode_id}`                        | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                                                                                                          |
-| `POST`   | `/v1/me/modes/{mode_id}`                        | `UpdateModeRequestSchema`                   | the updated `Mode`, or 404; 409 for a rename onto a name the caller has                                                                                                                                                         |
-| `DELETE` | `/v1/me/modes/{mode_id}`                        | —                                           | 204; lands the chats that followed the mode on the model they last ran; 404 for another user's                                                                                                                                  |
-| `POST`   | `/v1/agents`                                    | `CreateAgentRequestSchema`                  | 201, the `Agent`                                                                                                                                                                                                                |
-| `GET`    | `/v1/agents`                                    | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                           |
-| `GET`    | `/v1/agents/{agent_id}`                         | —                                           | the `Agent`, or 404                                                                                                                                                                                                             |
-| `POST`   | `/v1/agents/{agent_id}`                         | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                                                                                                     |
-| `POST`   | `/v1/sessions`                                  | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used                                                                                    |
-| `GET`    | `/v1/sessions`                                  | `ListSessionsQuerySchema`                   | `{ data, next_page }`                                                                                                                                                                                                           |
-| `GET`    | `/v1/sessions/{session_id}`                     | —                                           | the `Session`, or 404                                                                                                                                                                                                           |
-| `DELETE` | `/v1/sessions/{session_id}`                     | —                                           | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                                                                                            |
-| `POST`   | `/v1/sessions/{session_id}/events`              | `SendEventsRequestSchema`                   | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) or for a `user.tool_confirmation` naming a call that is not waiting (#309) |
-| `GET`    | `/v1/sessions/{session_id}/events`              | `ListEventsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                           |
-| `GET`    | `/v1/sessions/{session_id}/events/stream`       | `StreamEventsQuerySchema`                   | the SSE stream; 404 for an unknown session                                                                                                                                                                                      |
-| `POST`   | `/v1/sessions/{session_id}/compact`             | `CompactSessionRequestSchema`               | `{ data: session.compact }` — stores a manual-compaction request, or returns the one already pending; 400 for over-long `instructions`, 404 for another owner's (#283)                                                          |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | the AI SDK `useChat` request (see below)    | an AI SDK UI message stream — an **extension**                                                                                                                                                                                  |
-| `GET`    | `/v1/models`                                    | `ListModelsQuerySchema` (`refresh`)         | `{ data, providers }`; 429 for a refresh inside the minute                                                                                                                                                                      |
-| `GET`    | `/v1/sessions/{session_id}/usage`               | —                                           | what one session spent: totals, cost and the per-model breakdown; 404 for another owner's                                                                                                                                       |
-| `GET`    | `/v1/me/usage`                                  | `UserUsageQuerySchema` (`from`, `to`, `tz`) | the caller's own usage: totals, cost, by model and by day; 400 for a zone or range it cannot read                                                                                                                               |
-| `PUT`    | `/v1/provider-credentials/{name}`               | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if it is refused, 400 for a name its type may not take                                                                                                                                           |
-| `GET`    | `/v1/provider-credentials`                      | —                                           | `{ data: ProviderCredential[] }`, metadata only                                                                                                                                                                                 |
-| `DELETE` | `/v1/provider-credentials/{name}`               | —                                           | 204; never an error for one that is not there                                                                                                                                                                                   |
-| `POST`   | `/v1/me/mcp_servers`                            | `CreateMcpServerRequestSchema`              | 201, the `McpServer`; 409 for a duplicate name or the twenty-first server (#303, X10); 400 for a URL the guard refuses; 422 never (a check that fails stores `status: error`)                                                   |
-| `GET`    | `/v1/me/mcp_servers`                            | —                                           | `{ data: McpServer[] }`, metadata only; no pagination (a user holds at most 20)                                                                                                                                                 |
-| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | the `McpServer`, or 404                                                                                                                                                                                                         |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | `UpdateMcpServerRequestSchema`              | the updated `McpServer`, or 404; `headers` replaces the sealed map, omitted keeps it                                                                                                                                            |
-| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | 204; deletes the server and its pending OAuth states                                                                                                                                                                            |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | —                                           | the refreshed `McpServer` after the connection check; 400 for a refused URL, 404 for another owner's                                                                                                                            |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | `ConnectMcpServerRequestSchema` (`client`)  | `{ authorization_url }`; 422 `mcp_connection_error` for a discovery/registration failure, 400 for a non-OAuth server                                                                                                            |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | —                                           | the `McpServer` with its tokens dropped, on `needs_reconnect`                                                                                                                                                                   |
-| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | `code`, `state`                             | the provider's redirect back — **no session**; 302 to the app (web) or an HTML page (CLI), 400 with a page for a bad, expired or misused state                                                                                  |
+| method   | path                                            | body / query                                | answers                                                                                                                                                                                                                          |
+| -------- | ----------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                       | —                                           | liveness: `{ status: 'ok' }`; never needs a session                                                                                                                                                                              |
+| `GET`    | `/ready`                                        | —                                           | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                                                                                             |
+| `GET`    | `/v1/auth-config`                               | —                                           | `{ providers, dev_login }`; never needs a session                                                                                                                                                                                |
+| `GET`    | `/v1/me`                                        | —                                           | the signed-in `User`                                                                                                                                                                                                             |
+| `GET`    | `/v1/me/preferences`                            | —                                           | the caller's `UserPreferences` plus the `defaults` its `null`s mean (#282), unwrapped                                                                                                                                            |
+| `PUT`    | `/v1/me/preferences`                            | `PutPreferencesRequestSchema`               | the stored preferences, merged; 400 for a malformed id or an out-of-range number                                                                                                                                                 |
+| `GET`    | `/v1/me/tools`                                  | `ListToolSettingsQuerySchema` (`mode_id`)   | `{ data: ToolSettingEntry[] }` — the effective settings, as a chat on `mode_id` would see them: this process's tools, then the in-force MCP servers' (#307; #312)                                                                |
+| `PUT`    | `/v1/me/tools`                                  | `PutToolSettingsRequestSchema`              | the stored settings, merged per tool; 400 for a permission or shape the schema refuses                                                                                                                                           |
+| `POST`   | `/v1/me/modes`                                  | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                                                                                                   |
+| `GET`    | `/v1/me/modes`                                  | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                                                                                                    |
+| `GET`    | `/v1/me/modes/{mode_id}`                        | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                                                                                                           |
+| `POST`   | `/v1/me/modes/{mode_id}`                        | `UpdateModeRequestSchema`                   | the updated `Mode`, or 404; 409 for a rename onto a name the caller has                                                                                                                                                          |
+| `DELETE` | `/v1/me/modes/{mode_id}`                        | —                                           | 204; lands the chats that followed the mode on the model they last ran; 404 for another user's                                                                                                                                   |
+| `POST`   | `/v1/agents`                                    | `CreateAgentRequestSchema`                  | 201, the `Agent`                                                                                                                                                                                                                 |
+| `GET`    | `/v1/agents`                                    | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                            |
+| `GET`    | `/v1/agents/{agent_id}`                         | —                                           | the `Agent`, or 404                                                                                                                                                                                                              |
+| `POST`   | `/v1/agents/{agent_id}`                         | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                                                                                                      |
+| `POST`   | `/v1/sessions`                                  | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used                                                                                     |
+| `GET`    | `/v1/sessions`                                  | `ListSessionsQuerySchema`                   | `{ data, next_page }`                                                                                                                                                                                                            |
+| `GET`    | `/v1/sessions/{session_id}`                     | —                                           | the `Session`, or 404                                                                                                                                                                                                            |
+| `DELETE` | `/v1/sessions/{session_id}`                     | —                                           | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                                                                                             |
+| `POST`   | `/v1/sessions/{session_id}/events`              | `SendEventsRequestSchema`                   | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) or for a `user.tool_confirmation` naming a call that is not waiting (#309)  |
+| `GET`    | `/v1/sessions/{session_id}/events`              | `ListEventsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                            |
+| `GET`    | `/v1/sessions/{session_id}/events/stream`       | `StreamEventsQuerySchema`                   | the SSE stream; 404 for an unknown session                                                                                                                                                                                       |
+| `POST`   | `/v1/sessions/{session_id}/compact`             | `CompactSessionRequestSchema`               | `{ data: session.compact }` — stores a manual-compaction request, or returns the one already pending; 400 for over-long `instructions`, 404 for another owner's (#283)                                                           |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | the AI SDK `useChat` request (see below)    | an AI SDK UI message stream — an **extension**                                                                                                                                                                                   |
+| `GET`    | `/v1/models`                                    | `ListModelsQuerySchema` (`refresh`)         | `{ data, providers }`; 429 for a refresh inside the minute                                                                                                                                                                       |
+| `GET`    | `/v1/sessions/{session_id}/usage`               | —                                           | what one session spent: totals, cost and the per-model breakdown; 404 for another owner's                                                                                                                                        |
+| `GET`    | `/v1/me/usage`                                  | `UserUsageQuerySchema` (`from`, `to`, `tz`) | the caller's own usage: totals, cost, by model and by day; 400 for a zone or range it cannot read                                                                                                                                |
+| `PUT`    | `/v1/provider-credentials/{name}`               | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if it is refused, 400 for a name its type may not take                                                                                                                                            |
+| `GET`    | `/v1/provider-credentials`                      | —                                           | `{ data: ProviderCredential[] }`, metadata only                                                                                                                                                                                  |
+| `DELETE` | `/v1/provider-credentials/{name}`               | —                                           | 204; never an error for one that is not there                                                                                                                                                                                    |
+| `POST`   | `/v1/me/mcp_servers`                            | `CreateMcpServerRequestSchema`              | 201, the `McpServer`; the auth type is **detected** from the URL (#314); 409 for a duplicate name or the twenty-first server (#303, X10); 400 for a URL the guard refuses; 422 never (a check that fails stores `status: error`) |
+| `GET`    | `/v1/me/mcp_servers`                            | —                                           | `{ data: McpServer[] }`, metadata only; no pagination (a user holds at most 20)                                                                                                                                                  |
+| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | the `McpServer`, or 404                                                                                                                                                                                                          |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | `UpdateMcpServerRequestSchema`              | the updated `McpServer`, or 404; `headers` replaces the sealed map, omitted keeps it                                                                                                                                             |
+| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | 204; deletes the server and its pending OAuth states                                                                                                                                                                             |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | —                                           | the refreshed `McpServer` after the connection check; 400 for a refused URL, 404 for another owner's                                                                                                                             |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | `ConnectMcpServerRequestSchema` (`client`)  | `{ authorization_url }`; 422 `mcp_connection_error` for a discovery/registration failure, 400 for a non-OAuth server                                                                                                             |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | —                                           | the `McpServer` with its tokens dropped, on `needs_reconnect`                                                                                                                                                                    |
+| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | `code`, `state`                             | the provider's redirect back — **no session**; 302 to the app (web) or an HTML page (CLI), 400 with a page for a bad, expired or misused state                                                                                   |
 
 Every `/v1` route except `auth-config` and the MCP OAuth callback requires a session (see
 "Authentication" and "Remote MCP servers"), and every resource is scoped to its owner. The two
@@ -817,6 +817,23 @@ and the guarded `fetch`.
   setting a custom OpenAI-compatible endpoint reads, #249). A refusal is a **400 and nothing is
   stored**; every other failure stores the server in `status: 'error'` with a bounded reason. A
   chat is never blocked by an MCP server that is down.
+- **The auth type is detected, not chosen** (#314). A create body is a **URL** — `name` is
+  optional and derived from the host (`mcpServerNameFromUrl`), and `auth` is optional and still
+  honoured. When the caller did not say, `McpServerService.#resolveAuth` probes: a `401`/`403`
+  from a resource whose RFC 9728 metadata advertises an authorization server is `oauth` (stored
+  `needs_reconnect`, ready for `connect`); a successful initialize is `none` (the probe's tool
+  list is kept); a `401` from a server advertising no such metadata is stored in `error` with a
+  reason telling the reader to add an API key under custom headers — never sent down a flow that
+  cannot exist; and anything else (unreachable, a 5xx) is stored in `error` with the transport's
+  own reason. A body carrying a `headers` map **implies** `auth: 'headers'`, on a create and on
+  an update alike, and a map sent beside a different explicit `auth` is the protocol's 400.
+- **What a failure says** (#314). Every check goes through `recordingMcpFetch` (`mcp/
+http-failure.ts`), which remembers the last non-2xx response's status, status text and a
+  bounded clone-read body excerpt; `describeMcpFailure` turns that — or the thrown error when
+  there was no response — into one bounded, secret-free sentence **naming the status** (`the MCP
+server answered 401 Unauthorized: {"error":"invalid_token"}`). It exists because the SDK's own
+  message ends at a colon for the empty-bodied `401` Linear answers, which told the reader
+  nothing. The same helper serves the tool loop's listing, and the full sentence is logged.
 - **Secrets are sealed and never returned.** `mcp/secrets.ts` seals the header map, the OAuth
   tokens and the registered client with `@openharness/vault` under AAD
   `mcp:{userId}|{serverId}|{purpose}` — the `mcp:` prefix keeps the family from decrypting under
@@ -825,12 +842,16 @@ and the guarded `fetch`.
   values never reach a response, a log line or an error. A failing MCP server that quotes the
   request is scrubbed of every header value and access token this server sent before its reason
   is stored (`describeCheckError`).
-- **The connection check** runs on save (for `none`/`headers`) and on demand
-  (`POST …/{id}/test`), in `McpServerService.#checkAddressAndTools`: it opens the client,
-  initializes, lists the tools (pagination included) and writes the summaries and the total
-  estimated token cost onto the server (epic #303, X6). The estimate is the protocol's
-  `estimateToolsTokens` — the cheap four-characters-per-token rule of thumb, named as an
-  estimate — because the real tokenizer belongs to the model that will read the definitions.
+- **The connection check** runs on save — for `none`/`headers`, and for the unauthenticated
+  probe that detects an `oauth` server (#314) — and on demand (`POST …/{id}/test`), in
+  `McpServerService.#checkAddressAndTools`: it opens the client, initializes, lists the tools
+  (pagination included) and writes the summaries and the total estimated token cost onto the
+  server (epic #303, X6). An `oauth` server that is not connected cannot be checked at all —
+  `resolve` finds no token and answers `null`, which leaves the server `needs_reconnect` with no
+  error — so the settings screens do not offer Test until the server is connected. The estimate
+  is the protocol's `estimateToolsTokens` — the cheap four-characters-per-token rule of thumb,
+  named as an estimate — because the real tokenizer belongs to the model that will read the
+  definitions.
 - **OAuth 2.1, with this server as the client** (`mcp/oauth.ts`), for the web app and `oh`
   alike. `POST …/{id}/connect` discovers the resource's authorization server (RFC 9728), then
   its metadata (RFC 8414, the OIDC discovery document as a fallback), registers this server
@@ -873,10 +894,14 @@ and the guarded `fetch`.
   [`docs/threat-model.md`](../../docs/threat-model.md).
 - **Tokens are refreshed before expiry and once on a 401** (`#requestHeaders`, `#refreshTokens`):
   a token within a minute of its `expires_at` is refreshed, and a check that gets a 401 from the
-  MCP server refreshes once and retries. A refresh that fails — no refresh token, a revoked one,
-  a token endpoint that refuses — marks the server `needs_reconnect` and is logged, never
-  thrown. All token timestamps come from the injected clock, not the wall clock, so a test that
-  moves time moves an expiry with it.
+  MCP server refreshes once and retries. **The refresh names the `resource`** (RFC 8707, #314):
+  the authorization URL and the code exchange always did, and the refresh did not — so an
+  authorization server serving several APIs could mint a refreshed token for the wrong audience,
+  which Linear's resource server refuses with the same opaque 401. A refresh that fails — no
+  refresh token, a revoked one, a token endpoint that refuses — marks the server
+  `needs_reconnect`, stores the bounded reason and logs it, never throws. All token timestamps
+  come from the injected clock, not the wall clock, so a test that moves time moves an expiry
+  with it.
 - **The seam #312 uses** is `McpServerService.resolve(userId, serverId, { forceRefresh? })`: it
   answers `{ server, url, headers }` — the URL and the ready-to-use auth headers (empty for
   `none`, the opened map for `headers`, a fresh bearer for `oauth`) — refreshing an OAuth token
@@ -2127,15 +2152,16 @@ parallel with each other.
   other root files, and `no-store` for `/v1`, `/api/auth/*` (with `Vary: Cookie`), the
   probes, the `/device` redirect and every error response — plus `Vary: Origin` where CORS
   makes a response vary by origin.
-- `mcp-servers.test.ts` (#303, X10) — the remote-MCP-server routes end to end against a stub MCP
-  server on loopback: create/list/get/update/delete, the 409s (a duplicate name, the
-  twenty-first server), another user's server 404ing on every verb, the header **names** a
-  listing shows and the value that never reaches a response or a log line, the URL rules (a
-  private address and a metadata host refused with 400 and nothing stored, a non-http URL and a
-  malformed path id refused), the connection check (a down server stored in `status: error` and
-  reported on demand, an authenticated one whose token is refused), and `resolve`/`listEnabled`
-  for the tool loop.
-- `mcp-oauth.test.ts` (#303, X10; #311) — the OAuth 2.1 client end to end against a stub
+- `mcp-servers.test.ts` (#303, X10; detection: #314) — the remote-MCP-server routes end to end
+  against a stub MCP server on loopback: create/list/get/update/delete, the 409s (a duplicate
+  name, the twenty-first server), another user's server 404ing on every verb, the header
+  **names** a listing shows and the value that never reaches a response or a log line, the URL
+  rules (a private address and a metadata host refused with 400 and nothing stored, a non-http
+  URL and a malformed path id refused), the connection check (a down server stored in
+  `status: error` and reported on demand, an authenticated one whose token is refused, and the
+  `auth` a create body resolves to with no detector at all), and `resolve`/`listEnabled` for
+  the tool loop.
+- `mcp-oauth.test.ts` (#303, X10; #311; #314) — the OAuth 2.1 client end to end against a stub
   authorization server and MCP server on loopback: RFC 9728 then RFC 8414 discovery, RFC 7591
   registration, the authorization URL's PKCE parameters, the callback completing the flow and
   sealing the tokens, a 422 when the server offers no dynamic registration, a refresh before
@@ -2145,7 +2171,15 @@ parallel with each other.
   page while a **web**-started one still redirects, a state presented with **another user's**
   session is refused (and left `needs_reconnect`), a used, unknown or expired state is a 400
   with a readable page, and the authorization server's own `error`/`error_description` is
-  rendered **escaped** (`<script>` cannot survive it). `test-support/mcp.ts` is the two stubs.
+  rendered **escaped** (`<script>` cannot survive it). Since #314 the stubs also model a
+  **resource-bound** server — one authorization server behind several resources, where a token
+  is refused unless it was minted for the resource that asked (Linear's shape) and a refresh
+  that omits the RFC 8707 `resource` is a `400` — plus an **empty-bodied 401** like
+  `mcp.linear.app`'s; the tests drive the whole flow against the first and pin the reported
+  status against the second, and the create-side tests cover the probe: OAuth from a 401 whose
+  metadata advertises an authorization server, `none` from a successful initialize, `headers`
+  implied by a map, a clear reason for a 401 with no metadata, and an unreachable host.
+  `test-support/mcp.ts` is the two stubs.
 - `mcp/in-force.test.ts` (#303, X10; #311) — the servers in force for a request, on its own: no
   mode follows the user's `enabled`; a mode turns an enabled server off and a disabled one on;
   a server the mode does not name follows the user; an entry naming no server — a deleted one —

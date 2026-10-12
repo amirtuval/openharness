@@ -644,6 +644,14 @@ so the page and `oh` cannot disagree.
   permission select. Every control is named for its server (`Test notes`, `Edit notes`), because
   a screen of rows with a dozen buttons all called "Edit" is not one a screen reader — or a test
   — can address.
+- **A Test draws its result on the row** (#314). The check is a network call, and it used to
+  leave no trace — the status either changed or did not — so a Test that could only fail
+  silently looked like a button that did nothing. Now the row holds the outcome: a spinner while
+  it runs, then `mcpTestOutcome` (`@openharness/client`, shared with `oh`): the tool count and
+  their estimate when it listed, and the server's own reason — status and body excerpt included —
+  when it did not. **Test is not offered for an `oauth` server that is not connected**: there is
+  no token for the check to use, so the action that exists is Connect, and the card shows that
+  instead.
 - **A permission is written where every other tool setting is.** A remote tool has no on/off of
   its own — a whole server is on or off, and a mode patches that by id — so the select writes
   `PUT /v1/me/tools`'s `mcp` map through `useTools.savePolicy`, keyed by the offered name, and
@@ -655,16 +663,24 @@ so the page and `oh` cannot disagree.
   `location.search` — the query is before the hash), shows **Connected <name>.** in a
   `role="status"` line, and takes the parameter off the URL so a reload does not repeat it. The
   list it reads was fetched after the redirect, so the status on screen is the one the callback
-  just wrote — no second read is needed and none is made.
-- **The dialog is the one form** for register and edit (`mcp-server-dialog.tsx`): name, URL, the
-  auth select with `mcpAuthHint` under it, and — for a `headers` server — a repeatable name/value
-  pair whose values are `type="password"`. The stored map is **sealed**, so an edit shows the
-  header **names** it holds and starts the map empty: leaving the fields alone omits `headers`
-  from the update and keeps what is there, which is the only way to say "keep the secret". The
-  two shape rules are the protocol's own (`isMcpServerName`, `isMcpServerUrl`), checked inline so
-  the reader sees what is wrong beside the field, and a `headers` server with no pair is held
-  back — the wire refuses one. What the server is the one to decide (a name already taken, the
-  twenty-first server) lands under the fields as its 409.
+  just wrote — no second read is needed and none is made. **The line reads that status** (#314):
+  the callback lists the server's tools straight away, so a sign-in that succeeded but could not
+  be listed arrives in `error`/`needs_reconnect` with a reason, and the card says _"Connected
+  <name>, but its tools could not be listed: …"_ rather than claiming a success the reader can
+  see is not there.
+- **The dialog is a URL, not a classification** (`mcp-server-dialog.tsx`, #313; #314). There is
+  **no auth-type select**: the reader types the **server URL first** — it is what decides
+  everything, and the server probes it on save — then an optional **name**, whose placeholder is
+  the name the server would derive from that URL (`mcpServerNameFromUrl`), then an optional
+  header behind an **"Advanced: custom headers"** disclosure. The disclosure says what sending
+  one means (this server authenticates with a header, so it is stored as `headers`), the values
+  are `type="password"`, and the stored map is **sealed** — an edit shows the header **names** it
+  holds and starts the map empty, so leaving the fields alone omits `headers` and keeps what is
+  there. Because saving runs a real probe, the dialog says so while it waits ("Checking the
+  server…") and disables its fields; the two shape rules are the protocol's own
+  (`isMcpServerName`/`isMcpServerUrl`), checked inline so the reader sees what is wrong beside the
+  field; and what the server is the one to decide (a name already taken, the twenty-first server,
+  a URL the guard refuses) lands under the fields as its status.
 - **A mode may turn a whole server on or off** (#311). The mode editor's **MCP servers** section
   is the same tri-state a built-in tool gets — _Follow my settings_, _Always on_, _Always off_ —
   at **server** granularity, translated by `modeMcpServerChoice` / `withModeMcpServerChoice`
