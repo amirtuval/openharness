@@ -32,6 +32,13 @@ turn can be resumed by a different process after the one that started it dies. S
 [`docs/architecture.md`](./docs/architecture.md) for the package map and the dependency rules,
 and [`docs/api.md`](./docs/api.md) for the HTTP API.
 
+This is meant as a **reference implementation**: the point is not only that it works, but that
+you can read it. [`docs/LEARNINGS.md`](./docs/LEARNINGS.md) is the record of what building it
+taught us that the code does not say out loud — the provider quirks, the configuration traps, the
+dead ends and the decisions whose reasons are invisible in the source. If you are building an
+agent harness, a chat-with-tools product, an MCP client or a multi-provider LLM app, that file is
+where the days we spent are written down so you do not have to spend them again.
+
 **Status: v1 is built.** The v1 epic
 ([#2](https://github.com/amirtuval/openharness/issues/2)) is closed: a chat server with a web
 UI and a terminal UI. Authentication
