@@ -1079,8 +1079,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       // What the session runs (issue #93): the request's model and system, or the agent's when
       // the request named none — the protocol's refinement guarantees one of the two exists.
       const timestamp = now().toISOString()
+      const id = newSessionId()
       const session = SessionSchema.parse({
-        id: newSessionId(),
+        id,
         type: 'session',
         // Required since #61 (A4); the same signed-in user the agent belongs to.
         owner_id: user.id,
@@ -1102,6 +1103,17 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
                 model: agent.model,
                 system: agent.system,
               },
+        // The flag and the tree (epic #340, S1/S3). The fake is a server: it answers sessions
+        // the real `SessionSchema` accepts. `interactive` is the request's, defaulting to an
+        // interactive chat; the tree fields are the fake's to write exactly as they are the
+        // real server's, and a fake session is always a top-level chat — no route creates a
+        // child yet (#344), so `parent_session_id` in a request is stripped like any unknown
+        // field, and this is the shape such a session is stored in.
+        interactive: request.data.interactive ?? true,
+        parent_session_id: null,
+        parent_task_id: null,
+        root_session_id: id,
+        depth: 0,
         created_at: timestamp,
         updated_at: timestamp,
       })
