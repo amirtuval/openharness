@@ -1,4 +1,4 @@
-import type { SessionId, TaskId } from '@openharness/protocol'
+import type { EventId, SessionId, TaskId } from '@openharness/protocol'
 import {
   EVENT_TYPES,
   TASK_WAIT_DEFAULT_TIMEOUT_MS,
@@ -127,8 +127,10 @@ export interface TestBackgroundTasksOptions {
  * Every append is forwarded unchanged, and the batch is scanned for the one thing this cares
  * about: an `agent.tool_use` naming {@link TEST_TASK_TOOL_NAME}. Seeing one, it starts the task
  * in that session's log — with the id the call carried, so the handle the model was given and
- * the events the log holds agree — and schedules what a real task's turn would write when it
- * ends: `session.task_status { idle }` and the notification that carries what it produced.
+ * the events the log holds agree, and with the call's own event id as the start's
+ * `tool_use_id`, exactly as a real starter names its call (#345) — and schedules what a real
+ * task's turn would write when it ends: `session.task_status { idle }` and the notification
+ * that carries what it produced.
  *
  * Delivery goes through {@link TaskNotifier.notify}, so it is the **same** idempotent path a
  * subagent will use, keyed by `<task_id>:1`: a test can call it twice and see one notification.
@@ -162,7 +164,8 @@ export function withTestBackgroundTasks(
           const input = event.input as TestTaskInput
           const taskId = (input.task_id ?? newTaskId()) as TaskId
           const delayMs = typeof input.delay_ms === 'number' ? input.delay_ms : defaultDelay
-          void startTestTask(options.tasks, sessionId, taskId, input, delayMs, schedule)
+          // The call's own id, so the start names the call a client draws the card at (#345).
+          void startTestTask(options.tasks, sessionId, taskId, input, delayMs, schedule, event.id)
         }
         return appended
       }
@@ -184,10 +187,12 @@ async function startTestTask(
   input: TestTaskInput,
   delayMs: number,
   schedule: (work: () => void, delayMs: number) => void,
+  toolUseId: EventId,
 ): Promise<void> {
   try {
     await tasks.startTask(sessionId, {
       taskId,
+      toolUseId,
       description: taskDescription(input.description ?? 'A test background task'),
     })
   } catch {

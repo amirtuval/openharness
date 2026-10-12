@@ -869,8 +869,9 @@ is the whole of it.
 | the child's live activity | the child's own stream, followed by `watchTaskActivity`                                           | the last watcher unsubscribing, or `close()`                             |
 
 - **The parent's log is the whole card.** Three events carry a task's life in the parent's log
-  (S4): `session.task_started` names it — its kind, its child session, its type and its
-  description — `session.task_status` says what it is doing (`running | idle | failed |
+  (S4): `session.task_started` names it — its kind, its child session, its type, its description
+  and the call that started it (`tool_use_id`, #345) — `session.task_status` says what it is
+  doing (`running | idle | failed |
 stopped`), and `session.task_notification` is the one way anything reaches the parent model
   from it (`result` / `message` / `failed`). `tasksFromEvents` folds them into `TaskCard`s and
   is the one reading of them, exactly as `readTodoList` is for the todo list: the transcript
@@ -896,12 +897,16 @@ stopped`), and `session.task_notification` is the one way anything reaches the p
   the only thing drawn there. An `agent_message`'s `text` becomes the parent's half of the
   conversation; the child's half is a `message` notification. A remote MCP tool cannot collide
   with them: it is offered as `<server>__<tool>`.
-- **The card sits at its `agent` call, and that join is a heuristic by necessity.** Nothing links
-  a `session.task_started` to the call that produced it — the call's result is text, and the
-  start carries no call id — so `tasksFromEvents` matches a start to the nearest unmatched
-  `agent` call **with its own description**, which is the one field the two share, and falls back
-  to the start's own `seq` when the call is not in the events it was handed. A call that started
-  nothing (the live-task limit refused it) therefore cannot steal a later task's place.
+- **The card sits at the call its start names, and the description is only the fallback.** A
+  `session.task_started` carries `tool_use_id` — the id of the `agent.tool_use` whose result was
+  the handle — so `tasksFromEvents` places the card at that exact call (#345). Two calls may
+  share a description, which is what the earlier join-by-description got wrong; the field is
+  optional (a task kind nothing of this log called, and a log stored before it existed), so a
+  start **without** one still falls back to the nearest unmatched `agent` call **with its own
+  description** — the one field the two share there — and a start whose call is not in the
+  events it was handed (a trimmed replay) falls back to its own `seq`. A call that started
+  nothing (the live-task limit refused it) therefore cannot steal a later task's place either
+  way.
 - **The child's activity is read from the child's own stream.** A task does not report progress
   (S4), so `watchTaskActivity(client.sessions.events, childSessionId, { prices })` reads the
   child's history and then follows it, folds it into a transcript of its own, and answers the one

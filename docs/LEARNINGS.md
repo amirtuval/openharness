@@ -1356,16 +1356,25 @@ rows an arrow key should not have to walk. Colour is never the selection: the ma
 is the one thing that survives `NO_COLOR`, and a test per screen asserts the frame carries it
 ([#335](https://github.com/amirtuval/openharness/issues/335)).
 
-**A tool call and the thing it started are not linked by an id, so the client's join is a
-heuristic — and it has to be documented as one.** `agent { type, description, prompt }` returns a
-handle as a **text** result and the `session.task_started` it writes carries a `task_id` but no
-call id, so nothing in the parent's log says which call opened which card except the
-`description` both sides were given. The client matches a start to the nearest unmatched `agent`
-call with its own description (and falls back to the start's own `seq` when a trimmed replay has
-no call), which is why a call the live-task limit refused cannot steal a later task's place —
-but it is a join the log does not actually make, and a card drawn one step off is the failure
-mode ([#345](https://github.com/amirtuval/openharness/issues/345);
-`packages/client/src/tasks.ts`).
+**A tool call and the thing it started were not linked by an id, so the client's join had to be a
+heuristic — and a heuristic keyed on the wrong field is a bug that waits for a second matching
+call.** `agent { type, description, prompt }` returns a handle as a **text** result, and the
+`session.task_started` it writes carried a `task_id` but no call id, so nothing in the parent's
+log said which call opened which card except the `description` both sides were given. The client
+matched a start to the nearest unmatched `agent` call with its own description — which is why a
+call the live-task limit refused could not steal a later task's place — but the join is wrong the
+moment a step makes two calls with the same words: the calls are both stored before either runs,
+the starts arrive after both, and the nearest-unmatched rule answers them in the **wrong order**.
+#345 makes the link explicit: `session.task_started` carries `tool_use_id` — the id of the
+`agent.tool_use` whose result was the handle, which **is** the call's id — and
+`tasksFromEvents` places the card at that call, keeping the description match only as the
+fallback for a log stored before the field existed (and falling back to the start's own `seq`
+for one whose call a trimmed replay no longer holds). The id reaches the tool because the loop
+stores a step's calls before it runs them: `runToolStep` hands each call its own event id as
+`ToolExecutionContext.toolUseId`, the one thing a tool is told about its own call rather than
+about the turn — the `agent` handler needs it and nothing else could supply it, since the input
+is the model's words and the result is only the answer ([#345](https://github.com/amirtuval/openharness/issues/345);
+`packages/client/src/tasks.ts`, `packages/brain/src/agents.ts`, `packages/brain/src/tools.ts`).
 
 **"Waiting" is a child-side fact, so a task's status cannot be derived from the parent's log
 alone.** The parent's `session.task_status` stays `running | idle | failed | stopped` while the

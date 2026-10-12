@@ -19,7 +19,7 @@ import type {
 } from '@openharness/protocol'
 
 import { errorResult } from './tool'
-import type { ToolDefinition, ToolResult } from './tool'
+import type { ToolDefinition, ToolExecutionContext, ToolResult } from './tool'
 
 /**
  * The subagent tools (epic #340, S5; issue #344): the five definitions the model is offered —
@@ -49,8 +49,15 @@ import type { ToolDefinition, ToolResult } from './tool'
  * one frame up and turned into that same sentence.
  */
 export interface SubagentToolHandlers {
-  /** Start a helper of the named type and answer its handle. */
-  start(input: AgentToolInput): Promise<ToolResult> | ToolResult
+  /**
+   * Start a helper of the named type and answer its handle.
+   *
+   * `context` is the call's own: it carries `toolUseId` — the `agent.tool_use` event the loop
+   * stored for this call — which the starter writes onto the `session.task_started` it
+   * appends, so a client places the task's card at that exact call rather than matching by
+   * description (#345).
+   */
+  start(input: AgentToolInput, context: ToolExecutionContext): Promise<ToolResult> | ToolResult
   /** Send a task a message. */
   message(input: AgentMessageToolInput): Promise<ToolResult> | ToolResult
   /** Interrupt a task and mark it stopped. */
@@ -161,7 +168,7 @@ export function createSubagentTools(options: SubagentToolsOptions): ToolDefiniti
       name: AGENT_TOOL_NAME,
       description: agentToolDescription(options.types),
       inputSchema: AgentToolInputSchema,
-      run: (input) => handlers.start(input),
+      run: (input, context) => handlers.start(input, context),
     }),
     subagentTool({
       name: AGENT_MESSAGE_TOOL_NAME,
