@@ -1,6 +1,8 @@
 import { transcriptEntries } from '@openharness/client'
 import type {
   ModelPriceLookup,
+  TaskActivityLog,
+  TaskCard,
   TranscriptEntry,
   TranscriptMessage,
   TranscriptSummary,
@@ -12,6 +14,7 @@ import { Fragment, useRef } from 'react'
 import { draws, MessageView } from './message-view'
 import { replyMetaLines } from './reply-meta'
 import { SummaryDivider } from './summary-divider'
+import { TaskCardView } from './task-card'
 import { ToolCallView } from './tool-call'
 
 /**
@@ -73,6 +76,8 @@ export function TranscriptView({
   messages,
   summaries = [],
   toolCalls = [],
+  tasks = [],
+  taskLog,
   decisionOf,
   detail = false,
   width,
@@ -86,6 +91,18 @@ export function TranscriptView({
   readonly summaries?: readonly TranscriptSummary[] | undefined
   /** The tool calls in the conversation, in order (epic #303, X5; #308). */
   readonly toolCalls?: readonly TranscriptToolCall[] | undefined
+  /**
+   * The background tasks this chat ran, in order (epic #340, S9; issue #347).
+   *
+   * Each card draws where the `agent` call that started it was — merged among the messages by
+   * {@link mergeTasks} — because that call is not a tool line at all.
+   */
+  readonly tasks?: readonly TaskCard[] | undefined
+  /**
+   * The log a task's live activity is followed on — `client.sessions.events` (#347). Omitted,
+   * each card draws what the parent's log alone says and no activity line.
+   */
+  readonly taskLog?: TaskActivityLog | undefined
   /**
    * What the reader decided about a call that waited on them, or `null` (epic #303, #310): the
    * words come from the client's `confirmationSummary`, and the screen is what holds the
@@ -125,7 +142,7 @@ export function TranscriptView({
   // state — what is committed is a pure function of the blocks and what has already been
   // written, so re-running a render (React strict mode, a reconciler pass) leaves it where it
   // was. See {@link committedSettled} for why the list has to be built this way.
-  const committed = useRef<readonly TranscriptEntry[]>([])
+  const committed = useRef<readonly Block[]>([])
 
   // Only the messages that draw something are laid out as blocks. A reply that has been
   // announced but has not produced a token yet draws nothing at all (`message-view.tsx`), so
@@ -137,19 +154,21 @@ export function TranscriptView({
   // the client's `transcriptEntries` — the same function the web app orders its transcript
   // with, so a divider lands in the same place in both. A divider is *not* filtered by `draws`:
   // it always has something to say, whether or not the history under it draws.
-  const blocks: readonly TranscriptEntry[] = transcriptEntries(
-    messages.filter(draws),
-    summaries,
-    toolCalls,
+  //
+  // A **task card** joins the same list at its own position (#347): the `agent` call it stands
+  // in for is not a tool line, so the card is the only thing drawn where the call was.
+  const blocks: readonly Block[] = mergeTasks(
+    transcriptEntries(messages.filter(draws), summaries, toolCalls),
+    tasks,
   )
-  const firstLive = holdAll === true ? 0 : blocks.findIndex((entry) => isLiveEntry(entry, holdLive))
+  const firstLive = holdAll === true ? 0 : blocks.findIndex((entry) => isLiveBlock(entry, holdLive))
   const settled = committedSettled(committed.current, blocks, firstLive)
   committed.current = settled
   const live = firstLive === -1 ? [] : blocks.slice(firstLive)
   const metaLines = replyMetaLines(messages, currentModel, costOf)
 
   /** The block, framed by the blank line the transcript owes it after `previous`, if any. */
-  const draw = (entry: TranscriptEntry, previous: TranscriptEntry | undefined) =>
+  const draw = (entry: Block, previous: Block | undefined) =>
     entry.kind === 'summary' ? (
       <Fragment key={entry.summary.id}>
         {setsOffBlock(previous) && <Text> </Text>}
@@ -166,6 +185,13 @@ export function TranscriptView({
           detail={detail}
           width={width}
         />
+      </Fragment>
+    ) : entry.kind === 'task' ? (
+      // A card is structure too (epic #340, S9; #347): it stands where its `agent` call was
+      // drawn, and the model's call is not a line of its own.
+      <Fragment key={entry.card.id}>
+        {setsOffBlock(previous) && <Text> </Text>}
+        <TaskCardView card={entry.card} log={taskLog} prices={costOf} width={width} />
       </Fragment>
     ) : (
       <Fragment key={entry.message.id}>
@@ -185,6 +211,58 @@ export function TranscriptView({
       {live.map((entry, index) => draw(entry, index === 0 ? settled.at(-1) : live[index - 1]))}
     </>
   )
+}
+
+/**
+ * One block of the transcript: what the client's `transcriptEntries` already merged, plus the
+ * task cards this frontend draws among them (epic #340, S9; issue #347).
+ *
+ * A `TaskCard` is deliberately **not** a member of the client's `TranscriptEntry` union — a
+ * fourth member there is a compile error in both frontends, and the web app is drawn in a
+ * parallel issue — so a card is state with a **position**, and each frontend merges it in. This
+ * is the TUI's merge, and it is the whole of the difference between the two lists.
+ */
+export type Block = TranscriptEntry | { readonly kind: 'task'; readonly card: TaskCard }
+
+/**
+ * The cards placed among the entries, by the position each one carries.
+ *
+ * A card's position is the `seq` of the `agent` call that started the task, which no entry
+ * holds: the call is suppressed from the tool lines (it is task machinery, not work worth a
+ * line), so a card drawn *after* everything up to its own seq reads exactly where the call was.
+ * `entries` is already ordered by position, so the walk is one pass.
+ */
+export function mergeTasks(
+  entries: readonly TranscriptEntry[],
+  tasks: readonly TaskCard[],
+): readonly Block[] {
+  if (tasks.length === 0) {
+    return entries
+  }
+  const ordered = [...tasks].sort((left, right) => left.position - right.position)
+  const merged: Block[] = []
+  let next = 0
+  for (const entry of entries) {
+    while (next < ordered.length && (ordered[next]?.position ?? 0) <= entryPosition(entry)) {
+      const card = ordered[next]
+      if (card !== undefined) merged.push({ kind: 'task', card })
+      next += 1
+    }
+    merged.push(entry)
+  }
+  for (; next < ordered.length; next += 1) {
+    const card = ordered[next]
+    if (card !== undefined) merged.push({ kind: 'task', card })
+  }
+  return merged
+}
+
+/** Where a transcript entry sits in the log: its message's, its call's or its summary's seq. */
+function entryPosition(entry: TranscriptEntry): number {
+  if (entry.kind === 'summary') {
+    return entry.summary.position
+  }
+  return entry.kind === 'tool' ? entry.call.position : entry.message.position
 }
 
 /**
@@ -208,10 +286,10 @@ export function TranscriptView({
  * never moves again.
  */
 function committedSettled(
-  previous: readonly TranscriptEntry[],
-  blocks: readonly TranscriptEntry[],
+  previous: readonly Block[],
+  blocks: readonly Block[],
   firstLive: number,
-): readonly TranscriptEntry[] {
+): readonly Block[] {
   const candidates = firstLive === -1 ? blocks : blocks.slice(0, firstLive)
   const settledIds = new Set(candidates.map(entryId))
   const kept = previous.filter((entry) => settledIds.has(entryId(entry)))
@@ -225,12 +303,15 @@ function committedSettled(
 }
 
 /**
- * The id a block is written under: its message's, its call's, or its summary's (its `<Static>`
- * key).
+ * The id a block is written under: its message's, its call's, its summary's or its task's (its
+ * `<Static>` key).
  */
-function entryId(entry: TranscriptEntry): string {
+function entryId(entry: Block): string {
   if (entry.kind === 'summary') {
     return entry.summary.id
+  }
+  if (entry.kind === 'task') {
+    return entry.card.id
   }
   return entry.kind === 'tool' ? entry.call.id : entry.message.id
 }
@@ -244,12 +325,22 @@ function entryId(entry: TranscriptEntry): string {
  * written once and never redrawn, so a running call committed to the scrollback would stay
  * "running" for the life of the screen. A divider never changes and settles where it lands.
  */
-function isLiveEntry(entry: TranscriptEntry, holdLive: string | undefined): boolean {
+function isLiveBlock(entry: Block, holdLive: string | undefined): boolean {
   if (entry.kind === 'message') {
     return isLive(entry.message, holdLive)
   }
   if (entry.kind === 'tool') {
     return entry.call.status === 'running' || entry.call.status === 'waiting'
+  }
+  if (entry.kind === 'task') {
+    // **A task card is always live** (issue #347), and the reason is the one #208 gives for
+    // holding a reply: what a card draws under its head — the child's activity line, and what
+    // the child has spent — arrives on the *child's* stream, continues to arrive after the
+    // parent's log has gone quiet, and would be frozen the instant `<Static>` wrote it. The
+    // alternative (settle the card and keep a watcher open behind a scrollback nobody can
+    // rewrite) only pays for a stream nothing draws. Cards are few, and a running tool call
+    // already takes the same trade.
+    return true
   }
   return false
 }
@@ -283,9 +374,9 @@ function isLive(message: TranscriptMessage, holdLive: string | undefined): boole
  * in a blank one. That is the case `previous.kind === 'summary'` covers, and a user's message
  * there is excluded because it draws the line itself (see {@link blankAbove}).
  */
-function separates(previous: TranscriptEntry | undefined, entry: TranscriptEntry): boolean {
-  // A divider and a tool call bring their own line above themselves (they are structure, not a
-  // banded message), so nothing is drawn for them here.
+function separates(previous: Block | undefined, entry: Block): boolean {
+  // A divider, a tool call and a task card bring their own line above themselves (they are
+  // structure, not a banded message), so nothing is drawn for them here.
   if (previous === undefined || entry.kind !== 'message') {
     return false
   }
@@ -299,7 +390,7 @@ function separates(previous: TranscriptEntry | undefined, entry: TranscriptEntry
  * below ask the same question about whatever sits above them, which is why it is one helper
  * rather than a `kind` check written three times.
  */
-function isUserMessage(entry: TranscriptEntry | undefined): boolean {
+function isUserMessage(entry: Block | undefined): boolean {
   return entry !== undefined && entry.kind === 'message' && entry.message.role === 'user'
 }
 
@@ -311,7 +402,7 @@ function isUserMessage(entry: TranscriptEntry | undefined): boolean {
  * reply above it, a divider above it, or the transcript's own separator — is a case the message
  * has to cover itself, and only a user's message ever does.
  */
-function blankAbove(previous: TranscriptEntry | undefined): boolean {
+function blankAbove(previous: Block | undefined): boolean {
   if (previous === undefined) {
     return false
   }
@@ -321,10 +412,11 @@ function blankAbove(previous: TranscriptEntry | undefined): boolean {
 /**
  * Whether a block that draws its own leading blank line is the one that draws it.
  *
- * A divider and a tool call are drawn as structure rather than as banded messages, so nothing
- * above them brings a line of their own — the exception is a user's message, whose band already
- * ends in a blank line. And nothing is drawn above the first block of a transcript.
+ * A divider, a tool call and a task card are drawn as structure rather than as banded messages,
+ * so nothing above them brings a line of their own — the exception is a user's message, whose
+ * band already ends in a blank line. And nothing is drawn above the first block of a
+ * transcript.
  */
-function setsOffBlock(previous: TranscriptEntry | undefined): boolean {
+function setsOffBlock(previous: Block | undefined): boolean {
   return previous !== undefined && !isUserMessage(previous)
 }
