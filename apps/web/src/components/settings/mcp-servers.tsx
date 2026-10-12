@@ -8,9 +8,10 @@ import {
   mcpStatusDetail,
   mcpStatusLabel,
   mcpStatusTone,
+  mcpTestOutcome,
   toolPolicyLabel,
 } from '@openharness/client'
-import type { McpServerTool } from '@openharness/client'
+import type { McpServerTool, McpTestOutcome } from '@openharness/client'
 import type { McpServer, ToolPermission } from '@openharness/protocol'
 import { ChevronRight, PlugZap, RefreshCw } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -61,6 +62,9 @@ export function McpServersCard() {
   const [confirming, setConfirming] = useState<string | null>(null)
   const [connected, setConnected] = useState<string | null>(null)
   const [confirmation, setConfirmation] = useState<string | null>(null)
+  // A Test's own result, per server, shown on the row (issue #314): the check is a network call
+  // that used to leave no trace, so "nothing happened" was indistinguishable from "it worked".
+  const [tests, setTests] = useState<Record<string, McpTestOutcome | 'pending'>>({})
 
   // The OAuth callback's landing (epic #303, X10; #311): read once, and take the parameter off
   // the URL so a reload does not confirm it a second time.
@@ -74,13 +78,26 @@ export function McpServersCard() {
   }, [])
 
   // The list this card reads was fetched after the redirect, so it already carries the status
-  // the callback wrote; the confirmation just has to name the server.
+  // the callback wrote — **including a check that failed** (issue #314): the callback lists the
+  // tools straight away, so a server that signed in but could not be listed arrives here in
+  // `error`/`needs_reconnect` with a reason, and claiming "Connected" over it was the report the
+  // maintainer saw. The confirmation now says what the check actually came to.
   useEffect(() => {
     if (connected === null || servers.loading) {
       return
     }
     const server = mcpServerById(servers.servers, connected)
-    setConfirmation(server === null ? 'A server finished connecting.' : `Connected ${server.name}.`)
+    if (server === null) {
+      setConfirmation('A server finished connecting.')
+    } else if (server.status === 'connected') {
+      setConfirmation(`Connected ${server.name}.`)
+    } else {
+      setConfirmation(
+        `Connected ${server.name}, but its tools could not be listed: ${
+          server.last_error ?? 'the server did not answer.'
+        }`,
+      )
+    }
     setConnected(null)
   }, [connected, servers.loading, servers.servers])
 
@@ -101,6 +118,24 @@ export function McpServersCard() {
       setFailure(result.message ?? 'The request failed.')
     }
     setConfirming(null)
+  }
+
+  /**
+   * Run one server's connection check and keep its result on the row (issue #314).
+   *
+   * The row is where the answer belongs — it is the row that was tested — so the outcome is held
+   * per server and drawn under it: a spinner while the check is in flight, then what it found
+   * (the tool count) or why it found nothing. A `test` that answered `ok: false` is the row's
+   * error too, because a request that never reached the server is just as much a result.
+   */
+  const runTest = async (server: McpServer): Promise<void> => {
+    setFailure(null)
+    setTests((current) => ({ ...current, [server.id]: 'pending' }))
+    const result = await servers.test(server.id)
+    const outcome: McpTestOutcome = result.ok
+      ? mcpTestOutcome(result.server)
+      : { ok: false, message: result.message }
+    setTests((current) => ({ ...current, [server.id]: outcome }))
   }
 
   const connect = async (server: McpServer): Promise<void> => {
@@ -175,11 +210,12 @@ export function McpServersCard() {
                 tools={mcpServerTools(server, tools.tools?.data ?? [])}
                 busy={servers.busy || tools.saving}
                 confirming={confirming === server.id}
+                test={tests[server.id] ?? null}
                 onConfirming={(next) => {
                   setFailure(null)
                   setConfirming(next ? server.id : null)
                 }}
-                onTest={() => void run(servers.test(server.id))}
+                onTest={() => void runTest(server)}
                 onConnect={() => void connect(server)}
                 onDisconnect={() => void run(servers.disconnect(server.id))}
                 onEdit={() => openEdit(server)}
@@ -222,6 +258,7 @@ function McpServerRow({
   tools,
   busy,
   confirming,
+  test,
   onConfirming,
   onTest,
   onConnect,
@@ -235,6 +272,8 @@ function McpServerRow({
   tools: readonly McpServerTool[]
   busy: boolean
   confirming: boolean
+  /** This row's own Test result, `pending` while the check runs, or `null` before one has. */
+  test: McpTestOutcome | 'pending' | null
   onConfirming: (next: boolean) => void
   onTest: () => void
   onConnect: () => void
@@ -249,6 +288,10 @@ function McpServerRow({
   // A server that needs a sign-in offers the flow; one that has tokens offers the way to drop
   // them. A `none`/`headers` server has neither — there is nothing to connect or disconnect.
   const showsDisconnect = oauth && server.status === 'connected'
+  // **Test is not offered until an `oauth` server is connected** (issue #314): the check has no
+  // token to use, so it can only report the same "needs a sign-in" the row already says — and
+  // pressing it looked like a button that did nothing. Connect is the action that exists.
+  const showsTest = !oauth || server.status === 'connected'
 
   return (
     <li
@@ -290,6 +333,25 @@ function McpServerRow({
         {server.url}
       </p>
 
+      {test === null ? null : test === 'pending' ? (
+        <p role="status" className="text-xs text-muted-foreground" data-slot="mcp-test-result">
+          Testing {server.name}…
+        </p>
+      ) : (
+        <p
+          role="status"
+          data-slot="mcp-test-result"
+          data-ok={test.ok}
+          className={
+            test.ok
+              ? 'break-words rounded-md border border-primary/30 bg-primary/5 px-2 py-1 text-xs text-foreground'
+              : 'break-words rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1 text-xs text-destructive'
+          }
+        >
+          {test.message}
+        </p>
+      )}
+
       {confirming ? (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">
@@ -317,16 +379,18 @@ function McpServerRow({
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-1">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            aria-label={`Test ${server.name}`}
-            onClick={onTest}
-            disabled={busy}
-          >
-            Test
-          </Button>
+          {showsTest ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-label={`Test ${server.name}`}
+              onClick={onTest}
+              disabled={busy || test === 'pending'}
+            >
+              {test === 'pending' ? 'Testing…' : 'Test'}
+            </Button>
+          ) : null}
           {oauth ? (
             <Button
               type="button"

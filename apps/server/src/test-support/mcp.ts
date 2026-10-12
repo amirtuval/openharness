@@ -160,8 +160,7 @@ export async function startStubMcpServer(
         if (options.emptyRefusalBody === true) {
           target.writeHead(401, {
             'content-length': '0',
-            'www-authenticate':
-              'Bearer realm="OAuth", scope="read write"',
+            'www-authenticate': 'Bearer realm="OAuth", scope="read write"',
           })
           target.end()
           return

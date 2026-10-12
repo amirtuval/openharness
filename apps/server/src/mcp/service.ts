@@ -416,7 +416,7 @@ class McpServerServiceImpl implements McpServerService {
     // must not disagree.
     if (body.headers !== undefined && body.auth !== undefined && body.auth !== 'headers') {
       throw invalidRequest(
-        'a `headers` map implies `auth: \'headers\'`; send one or the other, not both',
+        "a `headers` map implies `auth: 'headers'`; send one or the other, not both",
       )
     }
     const auth = body.headers !== undefined ? 'headers' : (body.auth ?? current.auth)
@@ -789,7 +789,13 @@ class McpServerServiceImpl implements McpServerService {
       return { ok: true, tools }
     } catch (error) {
       if (isMcpFetchRefusal(error)) {
-        return { ok: false, refused: true, error: refusalMessage(error), status: undefined, raw: error }
+        return {
+          ok: false,
+          refused: true,
+          error: refusalMessage(error),
+          status: undefined,
+          raw: error,
+        }
       }
       const observed: McpHttpObservation | null = recorder.lastFailure()
       return {

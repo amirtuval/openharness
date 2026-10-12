@@ -188,6 +188,7 @@ export {
   mcpStatusDetail,
   mcpStatusLabel,
   mcpStatusTone,
+  mcpTestOutcome,
   mcpToolEntriesByServer,
   mcpToolPolicyBody,
   toolPolicyLabel,
@@ -198,6 +199,7 @@ export type {
   McpFailureNotice,
   McpServerTone,
   McpServerTool,
+  McpTestOutcome,
   WaitForMcpConnectionOptions,
 } from './mcp'
 

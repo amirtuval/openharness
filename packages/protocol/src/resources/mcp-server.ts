@@ -411,17 +411,23 @@ export const CreateMcpServerRequestSchema = z
     auth: McpAuthTypeSchema.optional(),
     headers: McpHeadersSchema.optional(),
   })
-  .refine((body) => body.auth === undefined || body.auth !== 'headers' || body.headers !== undefined, {
-    error:
-      "a server saved with `auth: 'headers'` needs a `headers` map; omit `auth` to let the " +
-      'server detect the authentication from the URL',
-    path: ['headers'],
-  })
-  .refine((body) => body.headers === undefined || body.auth === undefined || body.auth === 'headers', {
-    error:
-      'a `headers` map implies `auth: \'headers\'`; it may not be sent beside another auth type',
-    path: ['auth'],
-  })
+  .refine(
+    (body) => body.auth === undefined || body.auth !== 'headers' || body.headers !== undefined,
+    {
+      error:
+        "a server saved with `auth: 'headers'` needs a `headers` map; omit `auth` to let the " +
+        'server detect the authentication from the URL',
+      path: ['headers'],
+    },
+  )
+  .refine(
+    (body) => body.headers === undefined || body.auth === undefined || body.auth === 'headers',
+    {
+      error:
+        "a `headers` map implies `auth: 'headers'`; it may not be sent beside another auth type",
+      path: ['auth'],
+    },
+  )
 
 export type CreateMcpServerRequest = z.infer<typeof CreateMcpServerRequestSchema>
 
