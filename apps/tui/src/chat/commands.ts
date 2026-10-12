@@ -46,6 +46,12 @@ export interface CommandContext {
    * empty string when the line named none.
    */
   readonly compact: (instructions: string) => void
+  /**
+   * Open the remote MCP servers in the prompt slot — `/mcp` (epic #303, X10; #313). The screen
+   * is the one `oh mcp` mounts: add, edit, connect, reconnect, test and delete a server, and
+   * set the permission each of its tools runs under.
+   */
+  readonly openMcpServers: () => void
   /** Wipe the screen, the session untouched — the Ctrl+L wipe, by another name. */
   readonly clearScreen: () => void
   /** Leave the chat, the way the second idle Ctrl+C does. */
@@ -112,6 +118,13 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     },
   },
   {
+    name: 'mcp',
+    description: 'your remote MCP servers: add, edit, connect, test them',
+    run: (context) => {
+      context.openMcpServers()
+    },
+  },
+  {
     name: 'clear',
     description: 'clear the screen; the session stays',
     run: (context) => {
@@ -156,6 +169,10 @@ export const CHAT_KEYS: readonly { readonly keys: string; readonly description: 
   { keys: 'Tab', description: 'complete the command the menu has selected' },
   { keys: 'Esc', description: 'close the command menu, keeping what is typed' },
   { keys: 'Ctrl+L', description: 'clear the screen; the session stays' },
+  {
+    keys: 'Ctrl+R',
+    description: 'reconnect the MCP server a failed turn named — a notice says when to',
+  },
   { keys: 'Ctrl+C', description: 'interrupt the reply; press twice when idle to exit' },
 ]
 

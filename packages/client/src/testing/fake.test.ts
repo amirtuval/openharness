@@ -1,6 +1,7 @@
 import {
   CreateAgentRequestSchema,
   EVENT_TYPES,
+  MAX_MCP_SERVERS_PER_USER,
   SESSION_TITLE_MAX_LENGTH,
   SendEventsRequestSchema,
   StoredEventSchema,
@@ -21,6 +22,7 @@ import type {
 } from '@openharness/protocol'
 import {
   fixtureTimestamp,
+  makeMcpServer,
   makeMode,
   makeModelEntry,
   makeProviderCredential,
@@ -1768,6 +1770,240 @@ describe('the fake’s remote MCP tools (#303, #312)', () => {
       available: false,
     })
     expect(stray?.mcp_server).toBeUndefined()
+  })
+
+  it('reads the remote tools off a seeded server when no explicit list is given', async () => {
+    const fake = createFakeClient({
+      mcpServers: [
+        makeMcpServer({
+          name: 'notes',
+          tools: [
+            { name: 'search', description: 'Search notes', definition_tokens: 41 },
+            { name: 'read', description: null, definition_tokens: 12 },
+          ],
+          definition_tokens: 53,
+        }),
+      ],
+    })
+
+    const { data } = await fake.tools.list()
+    const remote = data.filter((entry) => entry.source === 'mcp')
+
+    // A test that registers a server does not have to name its tools a second time; an explicit
+    // `mcpTools` still wins when one is given.
+    expect(remote.map((entry) => entry.name)).toEqual(['notes__search', 'notes__read'])
+    expect(remote.every((entry) => entry.mcp_server === 'notes')).toBe(true)
+    expect(remote.every((entry) => entry.enabled)).toBe(true)
+  })
+
+  it('drops a server that is off from the remote list, and honours a mode’s patch', async () => {
+    const tools = [{ name: 'search', description: null, definition_tokens: 24 }]
+    const off = makeMcpServer({ name: 'notes', enabled: false, tools, definition_tokens: 24 })
+    const on = makeMcpServer({ name: 'wiki', enabled: true, tools, definition_tokens: 24 })
+    const enable = makeMode({ tools: { builtin: {}, mcp_servers: { [off.id]: true } } })
+    const disable = makeMode({ tools: { builtin: {}, mcp_servers: { [on.id]: false } } })
+    const fake = createFakeClient({ mcpServers: [off, on], modes: [enable, disable] })
+
+    // Neither server is in force as stored: `notes` is off and `wiki` is on, and only an
+    // in-force server's tools are listed at all.
+    const plain = await fake.tools.list()
+    expect(plain.data.filter((entry) => entry.source === 'mcp').map((entry) => entry.name)).toEqual(
+      ['wiki__search'],
+    )
+
+    // A mode patches the server's own `enabled` (#311), both ways.
+    const enabledByIdMode = await fake.tools.list({ mode_id: enable.id })
+    expect(
+      enabledByIdMode.data.filter((entry) => entry.source === 'mcp').map((entry) => entry.name),
+    ).toEqual(['notes__search', 'wiki__search'])
+    expect(enabledByIdMode.data.find((entry) => entry.name === 'notes__search')?.enabled).toBe(true)
+
+    const disabledByMode = await fake.tools.list({ mode_id: disable.id })
+    expect(disabledByMode.data.filter((entry) => entry.source === 'mcp')).toEqual([])
+  })
+})
+
+describe('the fake’s MCP servers (#303, X10; #313)', () => {
+  it('stores a none-authenticated server connected, with the tools its check listed', async () => {
+    const fake = createFakeClient({
+      mcpServers: [
+        makeMcpServer({
+          name: 'notes',
+          tools: [{ name: 'search', description: 'Search notes', definition_tokens: 41 }],
+          definition_tokens: 41,
+        }),
+      ],
+    })
+
+    const seeded = (await fake.mcpServers.list()).data[0]
+    expect(seeded?.name).toBe('notes')
+
+    const created = await fake.mcpServers.create({
+      auth: 'none',
+      name: 'wiki',
+      url: 'https://wiki.example.com/mcp',
+    })
+
+    expect(created).toMatchObject({
+      type: 'mcp_server',
+      name: 'wiki',
+      auth: 'none',
+      enabled: true,
+      owner_id: fake.user.id,
+      // A `none` server needs no sign-in, so the save-time check reaches it.
+      status: 'connected',
+      last_error: null,
+      tools: [],
+      definition_tokens: 0,
+    })
+    expect(created.last_tested_at).not.toBeNull()
+    expect((await fake.mcpServers.list()).data.map((server) => server.name)).toEqual([
+      'notes',
+      'wiki',
+    ])
+  })
+
+  it('keeps the header names a headers server carries and never a value', async () => {
+    const fake = createFakeClient()
+
+    const created = await fake.mcpServers.create({
+      auth: 'headers',
+      name: 'notes',
+      url: 'https://mcp.example.com/mcp',
+      headers: { Authorization: 'Bearer sk-secret' },
+    })
+
+    expect(created.header_names).toEqual(['Authorization'])
+    expect(created.status).toBe('connected')
+    expect(JSON.stringify(created)).not.toContain('sk-secret')
+    expect(JSON.stringify((await fake.mcpServers.list()).data)).not.toContain('sk-secret')
+  })
+
+  it('stores an oauth server needing a sign-in, and only a flow changes that', async () => {
+    const fake = createFakeClient()
+    const created = await fake.mcpServers.create({
+      auth: 'oauth',
+      name: 'notes',
+      url: 'https://mcp.example.com/mcp',
+    })
+
+    expect(created).toMatchObject({ status: 'needs_reconnect', last_tested_at: null, tools: [] })
+    // A test cannot connect what has no tokens, whatever it is asked.
+    expect(await fake.mcpServers.test(created.id)).toMatchObject({ status: 'needs_reconnect' })
+
+    const started = await fake.mcpServers.connect(created.id, { client: 'cli' })
+    expect(started.authorization_url).toContain('https://auth.example.com/authorize')
+    expect(fake.mcpConnects).toEqual([{ serverId: created.id, client: 'cli' }])
+
+    expect(await fake.mcpServers.get(created.id)).toMatchObject({ status: 'needs_reconnect' })
+
+    // The browser comes back, the callback exchanges the code: the server lands connected.
+    fake.completeMcpOAuth(created.id)
+    const connected = await fake.mcpServers.get(created.id)
+    expect(connected).toMatchObject({ status: 'connected', last_error: null })
+    expect(connected.last_tested_at).not.toBeNull()
+
+    const dropped = await fake.mcpServers.disconnect(created.id)
+    expect(dropped).toMatchObject({ status: 'needs_reconnect', tools: [], definition_tokens: 0 })
+  })
+
+  it('refuses a non-oauth connect, a duplicate name and the twenty-first server', async () => {
+    const fake = createFakeClient()
+    const plain = await fake.mcpServers.create({
+      auth: 'none',
+      name: 'notes',
+      url: 'https://mcp.example.com/mcp',
+    })
+
+    await expect(fake.mcpServers.connect(plain.id)).rejects.toMatchObject({
+      status: 400,
+      type: 'invalid_request_error',
+    })
+    await expect(
+      fake.mcpServers.create({ auth: 'none', name: 'notes', url: 'https://other.example.com/mcp' }),
+    ).rejects.toMatchObject({ status: 409, type: 'conflict_error' })
+
+    for (let index = 1; index < MAX_MCP_SERVERS_PER_USER; index += 1) {
+      await fake.mcpServers.create({
+        auth: 'none',
+        name: `server-${index}`,
+        url: 'https://mcp.example.com/mcp',
+      })
+    }
+    await expect(
+      fake.mcpServers.create({
+        auth: 'none',
+        name: 'one-too-many',
+        url: 'https://x.example.com/mcp',
+      }),
+    ).rejects.toMatchObject({ status: 409, type: 'conflict_error' })
+  })
+
+  it('updates, checks again on an address change, and deletes', async () => {
+    const fake = createFakeClient({
+      mcpServers: [
+        makeMcpServer({
+          name: 'notes',
+          tools: [{ name: 'search', description: null, definition_tokens: 24 }],
+          definition_tokens: 24,
+        }),
+      ],
+      mcpUnreachable: ['notes'],
+    })
+    const seeded = (await fake.mcpServers.list()).data[0]
+
+    // A server the check cannot reach is stored in `error` with a reason, as the route's
+    // save-time check does.
+    const checked = await fake.mcpServers.test(seeded!.id)
+    expect(checked).toMatchObject({
+      status: 'error',
+      last_error: 'The server could not be reached.',
+      tools: [],
+    })
+
+    const renamed = await fake.mcpServers.update(seeded!.id, { name: 'notes-2', enabled: false })
+    expect(renamed).toMatchObject({ name: 'notes-2', enabled: false })
+    // A rename is not a new address, so nothing is checked again: whatever the last check left
+    // — here the failure — is what the update answers with.
+    expect(renamed.status).toBe('error')
+    expect(renamed.tools).toEqual([])
+
+    // A new address is checked, and `notes-2` is not one the fake was told is unreachable, so
+    // the server comes back with its tools listed.
+    const moved = await fake.mcpServers.update(seeded!.id, { url: 'https://other.example.com/mcp' })
+    expect(moved.status).toBe('connected')
+    expect(moved.tools).toEqual([{ name: 'search', description: null, definition_tokens: 24 }])
+    expect(moved.definition_tokens).toBe(24)
+
+    // Changing the auth type drops whatever the old one carried. Away from `oauth`, the tokens
+    // go — and a server that needs none is connected by its check.
+    const open = await fake.mcpServers.update(seeded!.id, { auth: 'none' })
+    expect(open).toMatchObject({ auth: 'none', status: 'connected', header_names: [] })
+    // To `oauth`, whatever it was before, there is nothing to authenticate with until a flow
+    // completes.
+    const oauth = await fake.mcpServers.update(seeded!.id, { auth: 'oauth' })
+    expect(oauth).toMatchObject({ auth: 'oauth', status: 'needs_reconnect', header_names: [] })
+
+    await fake.mcpServers.delete(seeded!.id)
+    await expect(fake.mcpServers.get(seeded!.id)).rejects.toMatchObject({ status: 404 })
+    await expect(fake.mcpServers.delete(seeded!.id)).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('refuses a headers map for a server that is not headers-authenticated', async () => {
+    const fake = createFakeClient({
+      mcpServers: [makeMcpServer({ name: 'notes', auth: 'none' })],
+    })
+    const server = (await fake.mcpServers.list()).data[0]
+
+    await expect(
+      fake.mcpServers.update(server!.id, { headers: { Authorization: 'Bearer x' } }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+  })
+
+  it('answers 401 while signed out, like every other /v1 method', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    await expect(fake.mcpServers.list()).rejects.toBeInstanceOf(AuthenticationError)
+    await expect(fake.mcpServers.get('mcps_1')).rejects.toBeInstanceOf(AuthenticationError)
   })
 })
 

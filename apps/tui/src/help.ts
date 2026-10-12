@@ -28,6 +28,7 @@ Usage:
   oh default-model [id]        print or set the default model for new chats
   oh settings [flags]          show or set the context (compaction) settings
   oh tools [name] [flags]      show which tools your chats may use, or change one
+  oh mcp                       your remote MCP servers: add, edit, connect, test them
   oh login                     sign in through the browser (the device flow)
   oh logout                    end the session and forget the token
   oh whoami                    print the signed-in user

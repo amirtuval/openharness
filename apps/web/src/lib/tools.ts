@@ -62,11 +62,11 @@ export function modeToolChoice(override: ModeToolOverride | null, name: string):
  * the same thing to the server, and `null` is the reading a reader sees ("follow my settings").
  *
  * **The MCP half is carried through untouched** (#311, #312). `Mode.tools.mcp_servers` is a
- * per-server on/off patch this editor does not offer yet (its own screen is #313), so a mode a
- * reader edits here must keep whatever it already says about servers: the form writes back the
- * whole `tools` value, and rebuilding it from `builtin` alone would silently drop those choices
- * on the next save. A patch holding only `mcp_servers` is not empty — it is a mode that says
- * something — so it is returned as it stands rather than folded to `null`.
+ * per-server on/off patch, edited by {@link withModeMcpServerChoice}, so a mode a reader edits
+ * here must keep whatever it already says about servers: the form writes back the whole `tools`
+ * value, and rebuilding it from `builtin` alone would silently drop those choices on the next
+ * save. A patch holding only `mcp_servers` is not empty — it is a mode that says something — so
+ * it is returned as it stands rather than folded to `null`.
  *
  * @param override the mode's current `tools`
  * @param name the tool to set
@@ -83,11 +83,72 @@ export function withModeToolChoice(
   } else {
     builtin[name] = choice === 'on'
   }
-  const mcpServers = override?.mcp_servers
-  if (Object.keys(builtin).length === 0 && (mcpServers === undefined || isEmpty(mcpServers))) {
+  return rebuild(override, builtin)
+}
+
+/**
+ * What a mode says about one remote MCP server (epic #303, X10; #311; #313).
+ *
+ * The same tri-state a built-in tool gets, at **server** granularity: a mode turns a whole
+ * server on or off for the chats that follow it, and there is no per-MCP-tool switch anywhere
+ * (a remote tool has no on/off of its own). `follow` is the absence of the server's id in the
+ * patch.
+ *
+ * @param override the mode's `tools`, or `null` for a mode that says nothing
+ * @param serverId the `mcps_` id
+ */
+export function modeMcpServerChoice(
+  override: ModeToolOverride | null,
+  serverId: string,
+): ModeToolChoice {
+  const patch: Record<string, boolean> | undefined = override?.mcp_servers
+  const chosen = patch?.[serverId]
+  if (chosen === undefined) {
+    return 'follow'
+  }
+  return chosen ? 'on' : 'off'
+}
+
+/**
+ * The override a server's choice makes, keeping every other choice exactly as it was (#311).
+ *
+ * @param override the mode's current `tools`
+ * @param serverId the server to set
+ * @param choice what to set it to
+ */
+export function withModeMcpServerChoice(
+  override: ModeToolOverride | null,
+  serverId: string,
+  choice: ModeToolChoice,
+): ModeToolOverride | null {
+  const mcpServers: Record<string, boolean> = { ...(override?.mcp_servers ?? {}) }
+  if (choice === 'follow') {
+    delete mcpServers[serverId]
+  } else {
+    mcpServers[serverId] = choice === 'on'
+  }
+  return rebuild(override, { ...(override?.builtin ?? {}) }, mcpServers)
+}
+
+/**
+ * Fold the two halves back into one override, or `null` when neither says anything.
+ *
+ * A patch that ends up empty is `null` — the reading a reader sees ("follow my settings") and
+ * the value the server treats as no override. Otherwise the `builtin` map is always written,
+ * empty included, because it is the one required field of the wire's override: a mode that says
+ * something about servers and nothing about tools is `{ builtin: {}, mcp_servers: { … } }`. An
+ * empty `mcp_servers` is left out altogether — it means the same thing as none, and the patch a
+ * reader's choice produces should be the smallest one that says it.
+ */
+function rebuild(
+  override: ModeToolOverride | null,
+  builtin: Record<string, boolean>,
+  mcpServers: Record<string, boolean> = override?.mcp_servers ?? {},
+): ModeToolOverride | null {
+  if (Object.keys(builtin).length === 0 && isEmpty(mcpServers)) {
     return null
   }
-  return mcpServers === undefined ? { builtin } : { builtin, mcp_servers: mcpServers }
+  return isEmpty(mcpServers) ? { builtin } : { builtin, mcp_servers: mcpServers }
 }
 
 /** Whether a record holds no entries at all. */

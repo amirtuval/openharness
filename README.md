@@ -223,6 +223,16 @@ tool this deployment does not register (a `web_search` with no key) is listed as
 rather than hidden. A model that cannot call tools says so. `oh settings` prints the context
 settings and `oh tools` the tool settings; both are the same stored values the web app shows.
 
+**A chat can also reach your own remote MCP servers** (epic #303, X10). You register the ones
+you operate — a name, its Streamable HTTP URL, and how it authenticates (nothing, a header, or
+OAuth) — from the web app's **Settings → MCP servers** or `oh mcp`, and while a server is on its
+tools are offered to your chats as `<server>__<tool>`. Every call asks you first until you set
+that tool's permission (`allow`, `ask` or `deny`), each server shows the state it is in and why
+it last failed, and both frontends can test one, turn it off, or run the OAuth flow again — a
+server that is down is a tool source that is missing, never a failed turn. An error that stops a
+turn is a notice with a **Reconnect** in the page and `Ctrl+R` in `oh`. `oh mcp` is the same
+screen in the terminal, or a listing when there is no terminal to read.
+
 The web app and `oh` speak to the server through the same client
 ([`packages/client`](./packages/client/AGENTS.md)), so a behaviour one of them has, the other
 has too.

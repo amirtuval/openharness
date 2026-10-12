@@ -3,6 +3,7 @@ import {
   clearedResultsNotice,
   compactionThreshold,
   contextMeter,
+  mcpFailureNotice,
   modelSupportsTools,
   pendingCalls,
   pendingCallsNotice,
@@ -32,6 +33,7 @@ import { Button } from '../ui/button'
 import { Composer, focusComposer } from './composer'
 import { ContextMeter } from './context-meter'
 import { ErrorBanner } from './error-banner'
+import { McpNotice } from './mcp-notice'
 import { MessageList } from './message-list'
 import { StatusIndicator } from './status-indicator'
 import { TodoPanel } from './todo-panel'
@@ -120,6 +122,7 @@ export function ChatView({
     usage,
     status,
     lastError,
+    mcpFailure: storedMcpFailure,
     loadingHistory,
     requestError,
     deleted,
@@ -174,6 +177,18 @@ export function ChatView({
   // step-limit sentence replaces the generic error banner — it is a notice, not a failure to
   // retry — so the reader is told once.
   const stepLimit = stepLimitNotice(lastError)
+  // An MCP server that could not be used is a notice, not a failure (epic #303, X10; #313): the
+  // chat goes on without that server's tools, and the one thing a reader can do about it is
+  // reconnect it — so it is drawn with that action rather than as the generic red banner. The
+  // words and the server the message names come from the client's `mcpFailureNotice`.
+  // The MCP failure is the transcript's own record rather than `lastError` (#313): the turn
+  // carries on without the server, so the reply that clears `lastError` must not take the notice
+  // with it. See `selectMcpFailure`.
+  const mcpFailure = mcpFailureNotice(storedMcpFailure)
+  // Dismissing it hides that one message: a later turn's failure is a different sentence and is
+  // shown again, because a reader who dismissed one notice did not ask to never hear of MCP.
+  const [dismissedMcp, setDismissedMcp] = useState<string | null>(null)
+  const mcpNotice = mcpFailure === null || mcpFailure.message === dismissedMcp ? null : mcpFailure
   const toolsUnsupported =
     modelSupportsTools(catalog.models.find((entry) => entry.id === sessionModel)) === false
   const truncatedResultsNoticeText = truncatedResultsNotice(truncatedToolResults)
@@ -518,8 +533,12 @@ export function ChatView({
           )}
           {/* A step-limit error is drawn by the tool notices below the transcript — it is a
               notice ("send a message to carry on"), not a failure — so the red banner is skipped
-              for exactly that error type rather than saying it twice. */}
-          {lastError === null || stepLimit !== null ? null : (
+              for exactly that error type rather than saying it twice. An MCP failure gets the
+              same treatment, with a Reconnect action (epic #303, X10; #313). */}
+          {mcpNotice === null ? null : (
+            <McpNotice failure={mcpNotice} onDismiss={() => setDismissedMcp(mcpNotice.message)} />
+          )}
+          {lastError === null || stepLimit !== null || mcpFailure !== null ? null : (
             <ErrorBanner
               title={
                 lastError.retryStatus === 'retrying'

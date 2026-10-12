@@ -107,6 +107,13 @@ src/
                                searches it counted (#247; #303 X5, #308)
       tools.tsx                Settings -> Tools (#303 X4; #307; #308): per-tool on/off and
                                allow/ask/deny, an unavailable tool listed as such
+      mcp-servers.tsx          Settings -> MCP servers (#303, X10; #313): the remote servers —
+                               status and last error, on/off, Test, Connect/Reconnect,
+                               Disconnect, Edit, Delete, and under each one its tools with
+                               the permission each runs under and what they cost, plus the
+                               `?mcp_connected=` confirmation a web OAuth callback lands on
+      mcp-server-dialog.tsx    the add/edit form: name, URL, auth, the header pair a `headers`
+                               server authenticates with (values masked and write-only)
     providers/
       provider-tiles.tsx       the provider grid: one tile per PROVIDER, free-tier hint (X5/X8)
       provider-key-form.tsx    THE key form, built from the credential type (X6); the same
@@ -160,6 +167,8 @@ src/
       todo-panel.tsx           the chat's task list, pinned above the composer (X5; #305; #308)
       tool-notices.tsx         the step limit, "this model can't use tools", what a request
                                shortened and what it cleared (X2/X5/X9; #308)
+      mcp-notice.tsx           a turn's `mcp_*` failure, as a notice with a Reconnect action
+                               (#303, X10; #313)
       error-banner.tsx         inline errors (from the log, or from a failed request)
     models/
       model-picker.tsx         THE model control: grouped, searchable, free text, refresh,
@@ -195,8 +204,12 @@ src/
                                list plus create/update/remove, updating it in place
     use-preferences.ts         GET/PUT /v1/me/preferences: every stored setting, saved as a patch
     use-usage.ts               GET /v1/me/usage: this month, in the reader's own zone (#247)
-    use-tools.ts               GET/PUT /v1/me/tools: the effective tool list, and one
-                               tool's merge-write (#303 X4; #307; #308)
+    use-tools.ts               GET/PUT /v1/me/tools: the effective tool list, one tool's
+                               merge-write, and a remote tool's permission (#303 X4; #307;
+                               #308; #312)
+    use-mcp-servers.ts         GET/POST/DELETE /v1/me/mcp_servers: the reader's remote MCP
+                               servers, and create/update/delete/test/connect/disconnect
+                               (#303, X10; #313)
     use-theme.ts               the theme store's React binding (#203)
     use-auth.ts                the auth store's React binding
     use-auth-config.ts         GET /v1/auth-config for the sign-in page
@@ -250,14 +263,14 @@ the build, which is why its rasterizer is a devDependency rather than a dependen
 
 ### Routes
 
-| route                       | screen                                                                       |
-| --------------------------- | ---------------------------------------------------------------------------- |
-| `#/`                        | New chat — or the first-run flow with no key (#209)                          |
-| `#/s/<sessionId>`           | the chat                                                                     |
-| `#/new`                     | new chat: an empty composer on the default model                             |
-| `#/settings`                | Providers, Default model, Modes, Context, Tools, Appearance, Usage, Advanced |
-| `#/signin`                  | sign in (`?next=<hash>` to return there)                                     |
-| `#/device?user_code=<code>` | the device-approval page `oh login` opens                                    |
+| route                       | screen                                                                                                                                                             |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `#/`                        | New chat — or the first-run flow with no key (#209)                                                                                                                |
+| `#/s/<sessionId>`           | the chat                                                                                                                                                           |
+| `#/new`                     | new chat: an empty composer on the default model                                                                                                                   |
+| `#/settings`                | Providers, Default model, Modes, Context, Tools, MCP servers, Appearance, Usage, Advanced — an OAuth callback lands here as `?mcp_connected=<id>#/settings` (#313) |
+| `#/signin`                  | sign in (`?next=<hash>` to return there)                                                                                                                           |
+| `#/device?user_code=<code>` | the device-approval page `oh login` opens                                                                                                                          |
 
 There is no `#/agents` route since #91: chatting is model-first, agents are hidden from the
 UI, and an old bookmark to that screen lands on the root route. There is no **Home** screen
@@ -609,6 +622,61 @@ everywhere (the shadcn primitives' rings, plus the composer's own), and
 caret — with one global rule, since an `animate-pulse` three levels down cannot be reached by a
 variant. Colours are the #203 palettes unchanged; the new surfaces were built out of token
 pairs that were already measured.
+
+### The MCP servers, on screen (epic #303, X10; issue #313)
+
+A chat can reach the reader's own remote MCP servers, and Settings → MCP servers is where they
+are managed. Every word comes from `@openharness/client`'s `src/mcp.ts` (`mcpStatusLabel`,
+`mcpStatusDetail`, `mcpAuthLabel`, `estimatedTokensLabel`, `mcpServerTools`, `toolPolicyLabel`),
+so the page and `oh` cannot disagree.
+
+- **`mcp-servers.tsx` is the card**: one row per server with its name, its auth and its status
+  (badged by `mcpStatusTone`), the `mcpStatusDetail` line under it — the last error, what its
+  tools cost, or that no check has run — its address, an on/off switch, and the verbs: **Test**
+  (the connection check now), **Connect**/**Reconnect** (an `oauth` server's flow), **Disconnect**
+  (drop its tokens), **Edit**, **Delete** (in-page confirm). Under each row a Radix `Collapsible`
+  holds its tools: the model-facing `<server>__<tool>` name, what that definition costs, and a
+  permission select. Every control is named for its server (`Test notes`, `Edit notes`), because
+  a screen of rows with a dozen buttons all called "Edit" is not one a screen reader — or a test
+  — can address.
+- **A permission is written where every other tool setting is.** A remote tool has no on/off of
+  its own — a whole server is on or off, and a mode patches that by id — so the select writes
+  `PUT /v1/me/tools`'s `mcp` map through `useTools.savePolicy`, keyed by the offered name, and
+  never touches the `builtin` half. `mcpServerTools` joins the two reads (the server's checked
+  tool summaries and the stored permissions), and a stored permission for a tool the server no
+  longer lists is shown beside them, marked, rather than dropped.
+- **An OAuth callback is confirmed where it lands.** The callback redirects the browser to
+  `?mcp_connected=<id>#/settings`; the card reads that once (`mcpConnectedServerId`, out of
+  `location.search` — the query is before the hash), shows **Connected <name>.** in a
+  `role="status"` line, and takes the parameter off the URL so a reload does not repeat it. The
+  list it reads was fetched after the redirect, so the status on screen is the one the callback
+  just wrote — no second read is needed and none is made.
+- **The dialog is the one form** for register and edit (`mcp-server-dialog.tsx`): name, URL, the
+  auth select with `mcpAuthHint` under it, and — for a `headers` server — a repeatable name/value
+  pair whose values are `type="password"`. The stored map is **sealed**, so an edit shows the
+  header **names** it holds and starts the map empty: leaving the fields alone omits `headers`
+  from the update and keeps what is there, which is the only way to say "keep the secret". The
+  two shape rules are the protocol's own (`isMcpServerName`, `isMcpServerUrl`), checked inline so
+  the reader sees what is wrong beside the field, and a `headers` server with no pair is held
+  back — the wire refuses one. What the server is the one to decide (a name already taken, the
+  twenty-first server) lands under the fields as its 409.
+- **A mode may turn a whole server on or off** (#311). The mode editor's **MCP servers** section
+  is the same tri-state a built-in tool gets — _Follow my settings_, _Always on_, _Always off_ —
+  at **server** granularity, translated by `modeMcpServerChoice` / `withModeMcpServerChoice`
+  (`lib/tools.ts`) against the `mcps_` id. The Modes list names the servers a mode overrides
+  (`notes off`), and a server the mode names that the reader has since deleted reads as `a
+removed server` rather than disappearing: the patch still names it, and the server ignores it.
+- **Settings → Tools still lists the remote entries**, grouped by server, but the permission is
+  edited here: the row says so rather than offering a control that would write the wrong map
+  (#312's reasoning, kept).
+- **A failed turn is a notice, not the red banner** (`mcp-notice.tsx`). A server the turn could
+  not use is one `session.error` per server with the chat carrying on, so the notice shows the
+  brain's own sentence and offers **Reconnect** — plus a link to Settings and a Dismiss that
+  hides that one message. Reconnect reads the caller's servers **lazily**, only when the reader
+  asks, finds the one the message names (the log carries a name, not an id), and for an `oauth`
+  server starts the flow and opens it in a new tab — a blocked pop-up is the one reason a click
+  opens nothing, and the notice says so rather than leaving a reader waiting. A `none` or
+  `headers` server has no flow to run, so the reader is taken to Settings → MCP servers instead.
 
 ## Model-first chat (#91, #113)
 
@@ -1150,6 +1218,8 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/components/chat/approval-prompt.test.tsx`                                                 | the approval prompt (#303, X6; #310): the four choices named as the log records them, an allow-once with no memory, the two `remember` extensions, a denial's message and an empty one's plain denial, Cancel sending nothing, every control off while a confirmation is in flight, and a waiting MCP call prompted with its server named and its own id in the event (#312)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `src/components/chat/ask-user-form.test.tsx`                                                   | the `ask_user` form (#303, X6; #310): a control per question type with its header and an option's description, checkboxes for a `multi_select`, Submit held until the protocol's own check passes (with the missing part named), every answer sent at once in the order asked, several options where the question allows them, the write-in beside the options, Decline's denial, and the controls off while in flight                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `src/screens/pausing.test.tsx`                                                                 | the pause end to end in the browser (#303, X6; #310): the question a **reloaded** session is waiting on, the answers sent as one confirmation with the result the brain writes from them, Decline, and a message that says it declines what waits — then does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/components/settings/mcp-servers.test.tsx`                                                 | Settings → MCP servers (#303, X10; #313): the empty state and a registration through the dialog (the save-time check listing the server's tools and pricing them), the inline name/URL refusals and the 409 a duplicate name gets, the header pair a `headers` server needs, a server's tools with their policies and cost (a permission written to the `mcp` map), Test reporting a failure and the on/off switch, Connect opening the authorization URL in a new tab and Disconnect, an edit that keeps the sealed header map (the body it sends, asserted), the in-page delete with its cancel, and the `?mcp_connected=` confirmation with the parameter taken off the URL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `src/components/chat/mcp-notice.test.tsx`                                                      | the MCP failure notice (#313): the brain's sentence with the server named and **no** red banner, Reconnect starting the flow in a new tab, a server with no OAuth flow sending the reader to Settings instead, and Dismiss hiding one message while the next failure is shown again                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `src/components/settings/tools.test.tsx`                                                       | Settings → Tools (#303, X4; #307; #308): the registered tools with their state and default, a toggle writing only that tool, a permission change, and an unregistered tool listed as unavailable and not switchable — and, for #312, the remote entries grouped by server under their offered names, a remote row showing its policy with no control that would write the wrong map, and the built-in list unchanged by a deployment offering remote tools                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `src/lib/tools.test.ts`                                                                        | the mode editor's tri-state (#307): a missing tool read as "follow my settings", an explicit boolean as on/off, one tool set without disturbing the others, and an empty patch folded back to `null` — and, for #311/#312, a mode's `mcp_servers` patch carried through a built-in write and keeping the patch from folding to `null`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `src/components/theme-menu.test.tsx`                                                           | the theme quick switch (#203), now the account menu's submenu (#211): a pick paints and saves, it reads back with `aria-checked`, Escape closes without choosing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |

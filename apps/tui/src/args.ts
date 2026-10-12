@@ -118,6 +118,11 @@ export type CliCommand =
       readonly patch: ToolsPatch
       readonly options: GlobalOptions
     }
+  | {
+      readonly kind: 'mcp'
+      /** The reader's remote MCP servers, as a screen in a terminal and a listing without one. */
+      readonly options: GlobalOptions
+    }
   | { readonly kind: 'login'; readonly options: LoginOptions }
   | { readonly kind: 'logout'; readonly options: GlobalOptions }
   | { readonly kind: 'whoami'; readonly options: GlobalOptions }
@@ -144,6 +149,7 @@ const SUBCOMMANDS = [
   'default-model',
   'settings',
   'tools',
+  'mcp',
   'login',
   'logout',
   'whoami',
@@ -161,6 +167,7 @@ const SUBCOMMAND_BLURBS: Record<Subcommand, string> = {
   'default-model': 'it gets or sets the default model',
   settings: 'it prints the context settings, and sets them with its flags',
   tools: 'it prints which tools your chats may use, and sets one with --on/--off/--policy',
+  mcp: 'it opens your remote MCP servers: add, edit, connect, test and delete them',
   login: 'it signs you in through the browser',
   logout: 'it ends the session and forgets the token',
   whoami: 'it prints the signed-in user',

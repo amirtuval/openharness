@@ -356,6 +356,19 @@ describe('parseArgs', () => {
     )
   })
 
+  it('reads `oh mcp`, which takes no arguments at all (#303, X10; #313)', () => {
+    expect(commandOf(['mcp'])).toEqual({
+      kind: 'mcp',
+      options: { debug: false, server: undefined },
+    })
+    expect(commandOf(['mcp', '--server', 'http://localhost:9000'])).toMatchObject({
+      kind: 'mcp',
+      options: { server: 'http://localhost:9000' },
+    })
+    expect(errorOf(['mcp', 'notes'])).toContain('takes no arguments')
+    expect(errorOf(['mcp', '--model', 'openai/gpt-5-mini'])).toContain('--model <provider/model>')
+  })
+
   it('rejects the tools flags everywhere but `oh tools` (#308)', () => {
     expect(errorOf(['--off'])).toContain('only makes sense with `oh tools`')
     expect(errorOf(['settings', '--policy', 'ask'])).toContain('--policy <allow|ask|deny>')

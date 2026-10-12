@@ -14,12 +14,18 @@ import { App } from '../App'
  * The hash is set before the render, because that is the app's route: `#/s/<id>` opens a
  * chat, `#/new` and `#/settings` open the others. Changing it later and letting the
  * `hashchange` event do the rest is how a test navigates.
+ *
+ * `search` is the URL's query string, which the app reads for one thing: an MCP OAuth callback
+ * lands on `?mcp_connected=<id>#/settings` (epic #303, X10; #313). It is written through
+ * `replaceState` — with the hash — so nothing navigates, and it is cleared for every render so
+ * one test's callback cannot leak into the next.
  */
 export function renderApp(
   fake: FakeClient,
-  options: { hash?: string; fakeClient?: boolean } = {},
+  options: { hash?: string; search?: string; fakeClient?: boolean } = {},
 ): RenderResult {
-  window.location.hash = options.hash ?? `#/s/${fake.session.id}`
+  const hash = options.hash ?? `#/s/${fake.session.id}`
+  window.history.replaceState(null, '', `${options.search ?? ''}${hash}`)
   return render(<App client={fake} fakeClient={options.fakeClient} />)
 }
 

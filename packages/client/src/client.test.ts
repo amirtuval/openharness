@@ -11,6 +11,7 @@ import {
   makeListModelsResponse,
   makeListToolSettingsResponse,
   makeMcpToolSettingEntry,
+  makeMcpServer,
   makeMode,
   makeProviderCredential,
   makeSession,
@@ -795,6 +796,122 @@ describe('tool settings (#303, #307, #308)', () => {
     const body = { mcp: { notes__search: 'allow' as const } }
     expect(await client.tools.put(body)).toEqual(response)
     expect(bodyOf(mock.requests[0]?.init)).toEqual(body)
+  })
+})
+
+describe('remote MCP servers (#303, X10; #313)', () => {
+  it('creates, reads and lists at /v1/me/mcp_servers', async () => {
+    const server = makeMcpServer({ auth: 'none', status: 'connected' })
+    const { client, mock } = clientWith(() => jsonResponse(server, 201))
+
+    expect(
+      await client.mcpServers.create({
+        auth: 'none',
+        name: 'notes',
+        url: 'https://mcp.example.com/mcp',
+      }),
+    ).toEqual(server)
+    expect(mock.requests[0]?.init?.method).toBe('POST')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/mcp_servers`)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      auth: 'none',
+      name: 'notes',
+      url: 'https://mcp.example.com/mcp',
+    })
+
+    const listed = clientWith(() => jsonResponse({ data: [server] }))
+    expect(await listed.client.mcpServers.list()).toEqual({ data: [server] })
+    expect(listed.mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/mcp_servers`)
+
+    const one = clientWith(() => jsonResponse(server))
+    expect(await one.client.mcpServers.get(server.id)).toEqual(server)
+    expect(one.mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/mcp_servers/${server.id}`)
+  })
+
+  it('sends a headers map on create and never sees it back', async () => {
+    const server = makeMcpServer({ auth: 'headers', header_names: ['Authorization'] })
+    const { client, mock } = clientWith(() => jsonResponse(server, 201))
+
+    const created = await client.mcpServers.create({
+      auth: 'headers',
+      name: 'notes',
+      url: 'https://mcp.example.com/mcp',
+      headers: { Authorization: 'Bearer sk-secret' },
+    })
+
+    expect(bodyOf(mock.requests[0]?.init)).toMatchObject({
+      headers: { Authorization: 'Bearer sk-secret' },
+    })
+    expect(created.header_names).toEqual(['Authorization'])
+    // The value is write-only: it is in the request and in no part of the answer.
+    expect(JSON.stringify(created)).not.toContain('sk-secret')
+  })
+
+  it('updates with POST and deletes for a 204', async () => {
+    const server = makeMcpServer()
+    const { client, mock } = clientWith((_request, call) =>
+      call === 0 ? jsonResponse(server) : new Response(null, { status: 204 }),
+    )
+
+    expect(await client.mcpServers.update(server.id, { enabled: false })).toEqual(server)
+    expect(mock.requests[0]?.init?.method).toBe('POST')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/mcp_servers/${server.id}`)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({ enabled: false })
+
+    expect(await client.mcpServers.delete(server.id)).toBeUndefined()
+    expect(mock.requests[1]?.init?.method).toBe('DELETE')
+  })
+
+  it('tests a server, and connects with the client the flow was started from', async () => {
+    const server = makeMcpServer()
+    const { client, mock } = clientWith((_request, call) =>
+      call === 0 ? jsonResponse(server) : jsonResponse({ authorization_url: 'https://auth/x' }),
+    )
+
+    expect(await client.mcpServers.test(server.id)).toEqual(server)
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/mcp_servers/${server.id}/test`)
+    expect(mock.requests[0]?.init?.method).toBe('POST')
+
+    const started = await client.mcpServers.connect(server.id, { client: 'cli' })
+    expect(started).toEqual({ authorization_url: 'https://auth/x' })
+    expect(mock.urlOf(1)).toBe(`${BASE_URL}/v1/me/mcp_servers/${server.id}/connect`)
+    expect(bodyOf(mock.requests[1]?.init)).toEqual({ client: 'cli' })
+
+    // A web flow is the default a bodyless call means, and the body says so.
+    await client.mcpServers.connect(server.id)
+    expect(bodyOf(mock.requests[2]?.init)).toEqual({})
+  })
+
+  it('disconnects and reads the server back on needs_reconnect', async () => {
+    const dropped = makeMcpServer({ status: 'needs_reconnect', tools: [], definition_tokens: 0 })
+    const { client, mock } = clientWith(() => jsonResponse(dropped))
+
+    expect(await client.mcpServers.disconnect(dropped.id)).toEqual(dropped)
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/mcp_servers/${dropped.id}/disconnect`)
+    expect(mock.requests[0]?.init?.method).toBe('POST')
+  })
+
+  it('rejects an answer that is not the protocol’s server, or a connect without a URL', async () => {
+    const bad = clientWith(() => jsonResponse({ id: 'mcps_1', name: 'notes' }))
+    await expect(bad.client.mcpServers.list()).rejects.toBeInstanceOf(ResponseValidationError)
+
+    const noUrl = clientWith(() => jsonResponse({}))
+    await expect(noUrl.client.mcpServers.connect('mcps_1')).rejects.toBeInstanceOf(
+      ResponseValidationError,
+    )
+  })
+
+  it('maps a 409 for a duplicate name to the protocol’s conflict', async () => {
+    const { client } = clientWith(() =>
+      errorResponse(409, 'conflict_error', 'an MCP server named notes already exists'),
+    )
+
+    const failure = await client.mcpServers
+      .create({ auth: 'none', name: 'notes', url: 'https://mcp.example.com/mcp' })
+      .catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).type).toBe('conflict_error')
   })
 })
 

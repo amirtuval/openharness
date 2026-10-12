@@ -1,7 +1,8 @@
-import type { Mode } from '@openharness/protocol'
+import type { McpServer, Mode } from '@openharness/protocol'
 import { useState } from 'react'
 
 import type { ModesView } from '../../hooks/use-modes'
+import { useMcpServers } from '../../hooks/use-mcp-servers'
 import type { ModelsView } from '../../hooks/use-models'
 import { useTools } from '../../hooks/use-tools'
 import { modeLabel } from '../../lib/modes'
@@ -26,6 +27,9 @@ import { ModeFormDialog } from './mode-form-dialog'
 export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: ModelsView }) {
   const client = useClient()
   const { tools } = useTools(client)
+  // A mode may also turn a whole remote MCP server on or off (#311; #313), so the editor needs
+  // the reader's servers to offer them — the same list the MCP servers card reads.
+  const { servers } = useMcpServers(client)
   const [editing, setEditing] = useState<Mode | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [confirming, setConfirming] = useState<string | null>(null)
@@ -106,7 +110,7 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
                 <p className="truncate text-xs text-muted-foreground">{modeLabel(mode)}</p>
                 {mode.tools === null ? null : (
                   <p className="truncate text-xs text-muted-foreground" data-slot="mode-tools">
-                    tools: {describeModeTools(mode)}
+                    tools: {describeModeTools(mode, servers)}
                   </p>
                 )}
               </div>
@@ -162,6 +166,7 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
         modes={modes}
         catalog={catalog}
         tools={tools?.data ?? []}
+        mcpServers={servers}
         onSaved={() => setDialogOpen(false)}
         onClose={() => setDialogOpen(false)}
       />
@@ -171,19 +176,25 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
 
 /**
  * What a mode's tool override says, as the row's one-line summary: "web_search on · todo_write
- * off", plus a count of the remote MCP servers it names (#312).
+ * off · notes on".
  *
- * A mode may also carry `mcp_servers` — a per-**server** on/off patch, keyed by an opaque
- * `mcps_` id — which this editor does not offer yet (#313). Counting them rather than printing
- * their ids is what keeps the line honest: a mode that says something about servers must not
- * read as one that "follows your settings".
+ * Both halves are named: a built-in tool by its own name, and a remote MCP server by the name
+ * the reader gave it (#311; #313) — a patch keyed by an opaque `mcps_` id is not something a row
+ * can show, and a mode that says something about servers must not read as one that "follows your
+ * settings". A server the mode names and the reader has since deleted is called what it is
+ * rather than dropped: the patch still names it, and the server ignores it.
+ *
+ * @param mode the mode whose override is described
+ * @param servers the reader's servers, for the names
  */
-function describeModeTools(mode: Mode): string {
+function describeModeTools(mode: Mode, servers: readonly McpServer[]): string {
   const builtin = mode.tools?.builtin ?? {}
   const parts = Object.entries(builtin).map(([name, on]) => `${name} ${on ? 'on' : 'off'}`)
-  const servers = Object.keys(mode.tools?.mcp_servers ?? {}).length
-  if (servers > 0) {
-    parts.push(servers === 1 ? '1 MCP server' : `${servers} MCP servers`)
+  for (const [id, on] of Object.entries(
+    (mode.tools?.mcp_servers ?? {}) as Record<string, boolean>,
+  )) {
+    const name = servers.find((server) => server.id === id)?.name ?? 'a removed server'
+    parts.push(`${name} ${on ? 'on' : 'off'}`)
   }
   return parts.length === 0 ? 'follow your settings' : parts.join(' · ')
 }

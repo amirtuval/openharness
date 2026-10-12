@@ -1,4 +1,4 @@
-import { makeMode } from '@openharness/protocol/fixtures'
+import { makeMcpServer, makeMode } from '@openharness/protocol/fixtures'
 import { newMcpServerId, newModeId } from '@openharness/protocol'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -155,9 +155,10 @@ describe('Settings → Modes', () => {
     expect(await screen.findByText('tools: web_search off')).toBeInTheDocument()
   })
 
-  it('keeps a mode’s MCP server patch when a built-in tool is edited (#311, #312)', async () => {
+  it('keeps a mode’s MCP server patch when a built-in tool is edited (#311, #312, #313)', async () => {
     const server = newMcpServerId()
     const fake = makeFake({
+      mcpServers: [makeMcpServer({ id: server, name: 'notes' })],
       modes: [
         makeMode({
           name: 'research',
@@ -170,8 +171,6 @@ describe('Settings → Modes', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Edit' }))
     const dialog = await screen.findByRole('dialog')
-    // The editor offers the built-in tools and nothing about servers — that half is #313 — but
-    // the patch it does not draw is carried through the save rather than dropped.
     await user.selectOptions(within(dialog).getByLabelText('todo_write in this mode'), 'off')
     await user.click(within(dialog).getByRole('button', { name: 'Save changes' }))
 
@@ -182,11 +181,35 @@ describe('Settings → Modes', () => {
         mcp_servers: { [server]: false },
       })
     })
-    // The row counts them, so a mode that says something about servers does not read as one
-    // that follows the reader's settings.
+    // The row names the server it overrides, so a mode that says something about one does not
+    // read as a mode that follows the reader's settings.
     expect(
-      await screen.findByText('tools: web_search on · todo_write off · 1 MCP server'),
+      await screen.findByText('tools: web_search on · todo_write off · notes off'),
     ).toBeInTheDocument()
+  })
+
+  it('offers a server per mode, and stores the choice at server granularity (#311, #313)', async () => {
+    const server = makeMcpServer({ name: 'notes' })
+    const fake = makeFake({ ...TWO_PROVIDERS, mcpServers: [server] })
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: 'Create mode' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // A whole server is turned on or off; there is no per-tool switch for a remote tool, whose
+    // on/off is its server's.
+    const choice = within(dialog).getByLabelText('notes in this mode')
+    expect(choice).toHaveValue('follow')
+
+    await user.type(within(dialog).getByLabelText('Name'), 'research')
+    await user.click(within(dialog).getByLabelText(/My default model/))
+    await user.selectOptions(choice, 'off')
+    await user.click(within(dialog).getByRole('button', { name: 'Create mode' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.tools).toEqual({ builtin: {}, mcp_servers: { [server.id]: false } })
+    })
   })
 
   it('offers no per-tool switch for a remote MCP tool (#312)', async () => {

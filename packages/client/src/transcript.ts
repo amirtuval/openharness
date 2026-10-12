@@ -279,6 +279,33 @@ export interface TranscriptError {
 }
 
 /**
+ * Whether a `session.error` type is one an MCP server's failure is reported with (epic #303,
+ * X10; #313).
+ */
+function isMcpFailure(type: SessionErrorType): boolean {
+  return type === 'mcp_connection_failed_error' || type === 'mcp_authentication_failed_error'
+}
+
+/**
+ * An MCP server a turn could not use, as the log recorded it (epic #303, X10; #313).
+ *
+ * **Not** `lastError`: a server that is down is a tool source that is missing, not a failed
+ * turn — the brain writes the `session.error` and the turn carries on — so the notice it is owed
+ * has to outlive the reply that follows it. `lastError` is cleared by the next `agent.message`
+ * (the turn recovered), which would take a notice about a *tool source* with it and leave a
+ * reader who looked away with nothing to act on. This is kept until a later MCP failure replaces
+ * it or a `session.rewind` takes it back with the branch it was on, which is what the web app's
+ * Dismiss and `oh`'s Ctrl+R hang off.
+ *
+ * `seq` is the reporting event's own position, so the rewind test is the same one every other
+ * position-based record makes.
+ */
+export interface TranscriptMcpFailure extends TranscriptError {
+  /** The `seq` of the `session.error` that reported it. */
+  readonly seq: number
+}
+
+/**
  * One model request the transcript is still accounting for (epic #201, U1).
  *
  * Bookkeeping for {@link TranscriptMessage.meta}, not something a UI renders. A
@@ -492,6 +519,13 @@ export interface TranscriptState {
   /** The most recent `session.error`, until a reply supersedes it. */
   readonly lastError: TranscriptError | null
   /**
+   * The most recent MCP server a turn could not use, or `null` (epic #303, X10; #313).
+   *
+   * Kept rather than cleared by the reply that follows — see {@link TranscriptMcpFailure} — so
+   * a screen can show the notice with the reconnect it offers until the reader acts on it.
+   */
+  readonly mcpFailure: TranscriptMcpFailure | null
+  /**
    * The `seq` of the last stored event the transcript has seen.
    *
    * Feed it back as `afterSeq` when reconnecting: it is exactly where the transcript got to.
@@ -653,6 +687,7 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
     messages: [],
     status: 'idle',
     lastError: null,
+    mcpFailure: null,
     lastSeq: 0,
     deleted: false,
     model: seed.model ?? null,
@@ -906,18 +941,24 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
     case EVENT_TYPES.sessionRewind:
       return dropRewound(state, event)
 
-    case EVENT_TYPES.sessionError:
+    case EVENT_TYPES.sessionError: {
+      const error: TranscriptError = {
+        type: event.error.type,
+        message: event.error.message,
+        retryStatus: event.error.retry_status.type,
+      }
       return {
         ...state,
-        lastError: {
-          type: event.error.type,
-          message: event.error.message,
-          retryStatus: event.error.retry_status.type,
-        },
+        lastError: error,
+        // An MCP failure is kept beside `lastError` rather than only in it (#313): the turn
+        // carries on without that server, so the reply that follows would clear the one copy a
+        // screen has of a tool source that is missing.
+        mcpFailure: isMcpFailure(error.type) ? { ...error, seq: event.seq } : state.mcpFailure,
         // An error ends whatever the turn was doing — including a compaction whose passes were
         // still going (epic #277, K10).
         summarizing: null,
       }
+    }
 
     case EVENT_TYPES.sessionCompact:
       // The reader asked for a compaction (`/compact`, epic #277 K8; #283) and the brain has not
@@ -1102,6 +1143,7 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     state.truncatedToolResults.length === 0 &&
     state.clearedToolResults === null &&
     state.lastError === null &&
+    state.mcpFailure === null &&
     state.pendingRequests.length === 0 &&
     state.usage === null &&
     state.context === null
@@ -1128,6 +1170,10 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     confirmations,
     todos: readTodoList(todoEvents),
     lastError: null,
+    // The notice a rewind covers goes with the branch, like every other position-based record:
+    // the turn it was about is not one the conversation is on any more.
+    mcpFailure:
+      state.mcpFailure !== null && inRange(state.mcpFailure.seq) ? null : state.mcpFailure,
     pendingRequests: [],
     usage: null,
     context: null,
@@ -2004,6 +2050,20 @@ export function selectConfirmation(
     }
   }
   return found
+}
+
+/**
+ * The newest MCP server a turn could not use, or `null` (epic #303, X10; #313).
+ *
+ * It is **not** `lastError`: the notice a missing tool source is owed outlives the reply that
+ * follows it (see {@link TranscriptMcpFailure}), so a screen reads this rather than the
+ * transcript's newest error. It is `null` — not a guess — when nothing has failed, and it is
+ * dropped only by a rewind over the event that reported it.
+ *
+ * @param state the transcript
+ */
+export function selectMcpFailure(state: TranscriptState): TranscriptMcpFailure | null {
+  return state.mcpFailure
 }
 
 /**

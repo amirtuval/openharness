@@ -115,7 +115,8 @@ describe('Settings → Tools, the remote MCP half (#312)', () => {
     expect(within(row).getByText('MCP')).toBeInTheDocument()
     expect(within(row).getByText('When called: ask (default)')).toBeInTheDocument()
     // A remote tool has no on/off of its own and `PUT /v1/me/tools` keys its policy under `mcp`:
-    // the editing half of this screen is #313, so nothing here writes a `builtin` entry for it.
+    // this card reads it, and the permission is edited under the server it belongs to
+    // (Settings → MCP servers), so nothing here writes a `builtin` entry for it.
     expect(within(row).queryByRole('checkbox')).toBeNull()
     expect(within(row).queryByRole('combobox')).toBeNull()
   })

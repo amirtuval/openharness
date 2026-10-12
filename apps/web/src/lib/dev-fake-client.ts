@@ -1,5 +1,7 @@
 import type { Client } from '@openharness/client'
 import type { FakeClient } from '@openharness/client/testing'
+import type { McpServer } from '@openharness/protocol'
+import { newMcpServerId } from '@openharness/protocol'
 
 /**
  * The dev-only fake client.
@@ -151,6 +153,13 @@ export async function createDevFakeClient(): Promise<Client | null> {
         message: 'The provider timed out.',
       },
     ],
+    // Three remote MCP servers (#303, X10; #313), one per auth type and one of them down, so
+    // Settings → MCP servers shows a connected row with tools and their cost, a headers row with
+    // the names it holds and never a value, and an error with its last reason. Their tools are
+    // what the deployment offers too: the fake derives `GET /v1/me/tools`' remote half from the
+    // servers it holds, so the Tools card's groups render from the same seed.
+    mcpServers: DEV_MCP_SERVERS,
+    mcpUnreachable: ['git'],
   })
   await seedFakeScenario(fake)
 
@@ -159,6 +168,78 @@ export async function createDevFakeClient(): Promise<Client | null> {
 
   return fake
 }
+
+/**
+ * The remote MCP servers fake mode starts with (epic #303, X10; #313).
+ *
+ * Three, one per auth type, so the screen has something real to show in each state:
+ *
+ * - **notes** — an `oauth` server that is connected and lists two tools, which is where a
+ *   permission is changed and a definition's cost is read;
+ * - **wiki** — a `headers` server: a listing reports the header **names** and never a value;
+ * - **git** — a `none` server that is down, so the status, the last error and a failing Test are
+ *   all reachable (`mcpUnreachable` keeps it down however often it is tested).
+ *
+ * The ids come from the protocol's own generator, because the fake parses this seed with the
+ * resource's schema and an `mcps_` id is a ULID — a hand-written one would have to be a real one
+ * too, and a generator says where the shape comes from.
+ */
+const DEV_MCP_SERVERS: readonly McpServer[] = [
+  {
+    id: newMcpServerId(),
+    type: 'mcp_server',
+    owner_id: 'fake_user',
+    name: 'notes',
+    url: 'https://mcp.example.com/mcp',
+    auth: 'oauth',
+    enabled: true,
+    status: 'connected',
+    last_error: null,
+    header_names: [],
+    tools: [
+      { name: 'search', description: 'Search your notes', definition_tokens: 41 },
+      { name: 'read', description: 'Read one note', definition_tokens: 12 },
+    ],
+    definition_tokens: 53,
+    last_tested_at: '2026-10-10T09:00:00.000Z',
+    created_at: '2026-10-08T09:00:00.000Z',
+    updated_at: '2026-10-10T09:00:00.000Z',
+  },
+  {
+    id: newMcpServerId(),
+    type: 'mcp_server',
+    owner_id: 'fake_user',
+    name: 'wiki',
+    url: 'https://wiki.internal.example/mcp',
+    auth: 'headers',
+    enabled: true,
+    status: 'connected',
+    last_error: null,
+    header_names: ['Authorization'],
+    tools: [{ name: 'page', description: 'Fetch a wiki page', definition_tokens: 28 }],
+    definition_tokens: 28,
+    last_tested_at: '2026-10-10T09:05:00.000Z',
+    created_at: '2026-10-08T09:10:00.000Z',
+    updated_at: '2026-10-10T09:05:00.000Z',
+  },
+  {
+    id: newMcpServerId(),
+    type: 'mcp_server',
+    owner_id: 'fake_user',
+    name: 'git',
+    url: 'https://git.internal.example/mcp',
+    auth: 'none',
+    enabled: false,
+    status: 'error',
+    last_error: 'The server could not be reached.',
+    header_names: [],
+    tools: [],
+    definition_tokens: 0,
+    last_tested_at: '2026-10-10T09:06:00.000Z',
+    created_at: '2026-10-08T09:20:00.000Z',
+    updated_at: '2026-10-10T09:06:00.000Z',
+  },
+]
 
 /**
  * The markdown the seeded session's reply is made of.

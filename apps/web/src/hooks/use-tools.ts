@@ -4,6 +4,7 @@ import type {
   ListToolSettingsResponse,
   ModeId,
   ToolName,
+  ToolPermission,
 } from '@openharness/protocol'
 import { useCallback, useEffect, useState } from 'react'
 
@@ -33,6 +34,14 @@ export interface ToolsView {
    * show the effective state — a mode's override included, when one was named.
    */
   readonly save: (name: ToolName, setting: BuiltinToolSetting) => Promise<SaveToolsResult>
+  /**
+   * Store one **remote** tool's permission, and nothing else (epic #303, #312).
+   *
+   * A remote tool has no on/off of its own — a whole server is on or off — so the write goes to
+   * the `mcp` map alone, keyed by the tool's model-facing `<server>__<tool>` name. The merge is
+   * the server's, so a built-in write here never disturbs a remote one and the other way round.
+   */
+  readonly savePolicy: (name: ToolName, policy: ToolPermission) => Promise<SaveToolsResult>
   /** Read the entries again, after a write another tab made. */
   readonly reload: () => Promise<void>
   /** Clear the error. */
@@ -110,9 +119,27 @@ export function useTools(client: Client, modeId?: ModeId): ToolsView {
     [client, serverUrl],
   )
 
+  const savePolicy = useCallback(
+    async (name: ToolName, policy: ToolPermission): Promise<SaveToolsResult> => {
+      setSaving(true)
+      try {
+        const saved = await client.tools.put({ mcp: { [name]: policy } })
+        setTools(saved)
+        setError(null)
+        return { ok: true }
+      } catch (caught) {
+        noteAuthenticationError(client, caught)
+        return { ok: false, message: describeError(caught, { serverUrl }) }
+      } finally {
+        setSaving(false)
+      }
+    },
+    [client, serverUrl],
+  )
+
   const dismissError = useCallback(() => {
     setError(null)
   }, [])
 
-  return { tools, loading, error, saving, save, reload, dismissError }
+  return { tools, loading, error, saving, save, savePolicy, reload, dismissError }
 }
