@@ -1,0 +1,245 @@
+import type { APIRequestContext } from '@playwright/test'
+
+import { ensureDefaultModel, expect, test } from './support'
+import { ensureCliSignedIn, expectNoErrorNotice, ohCommand, Terminal } from './tmux'
+
+/**
+ * Subagents in `oh`, hands-on (epic #340, S9; issue #347).
+ *
+ * The terminal half of the epic's UX, driven through the **built** `oh` in a real pseudo-terminal
+ * against a mock-model stack:
+
+ * - a task is a **card** in the transcript — its type and description, its status, the messages
+ *   between the parent and the child, and the result folded in;
+ * - **`/agents`** lists the chat's tasks, switches into one and back, and stops one;
+ * - a task's own chat is a full chat: a breadcrumb line, the normal composer, **Esc** to stop the
+ *   turn and typing to steer or continue;
+ * - **`oh modes`** marks a subagent type and shows the description read-only.
+ *
+ * Everything a task does is the mock model's markers (`apps/server/AGENTS.md`), which is why the
+ * stack has to run with `OPENHARNESS_TEST_MODEL=mock` — the same stack `cli.spec.ts` uses:
+ *
+ * ```bash
+ * OPENHARNESS_DEV_LOGIN=1 OPENHARNESS_TEST_MODEL=mock docker compose up --build -d
+ * yarn turbo run build --filter=@openh/cli...
+ * QA_WITH_CLI=1 yarn qa:web qa/cli-subagents.spec.ts
+ * ```
+ *
+ * Opt-in with `QA_WITH_CLI=1`, and skipped on a real provider: every scenario here leans on the
+ * mock's markers and its echo, which no provider has.
+ */
+
+const isRealModel = process.env.QA_MODEL !== undefined
+
+/** The peer the mock answers with, and the type the helper is started as. */
+const TYPE = 'general-purpose'
+
+/** What a chat's first message and the parent's own turn are: the marker plus a prompt. */
+const PROMPT = 'Report the tail of the log'
+
+test.describe('cli subagents (#340, S9; #347)', () => {
+  test.skip(process.env.QA_WITH_CLI !== '1', 'set QA_WITH_CLI=1 to drive the oh CLI in tmux')
+  test.skip(isRealModel, 'the mock markers and the mock echo are what these scenarios drive')
+  test.setTimeout(300_000)
+
+  test('a task is a card, /agents switches into it, Esc stops it, and it goes back', async ({
+    context,
+    request,
+  }) => {
+    const terminal = new Terminal('oh-qa-a7', 100, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+
+    try {
+      const parentHandle = (await startChat(terminal, request)).slice(-6)
+
+      // 1. Start a helper. The card appears where the `agent` call was.
+      send(terminal, `__agent__ ${TYPE} | ${PROMPT}`)
+      await terminal.waitFor(new RegExp(`· ${TYPE} · ${PROMPT}`), 60_000)
+      await terminal.screenshot(shot, 'a7-01-card-running')
+
+      // 2. The child runs its own turn and its result folds into the card. (A helper the mock
+      // answers finishes in a blink, which is why the *running* state is the other scenario's —
+      // its child streams for ten seconds.)
+      await terminal.waitFor(new RegExp(`● done · ${TYPE}`), 90_000)
+      const finished = terminal.capture(400)
+      expect(finished).toContain(`⎿ ${PROMPT}`)
+      await terminal.screenshot(shot, 'a7-02-card-done')
+
+      // 3. /agents lists it, with the row marked and the panel's own keys named.
+      send(terminal, '/agents')
+      await terminal.waitFor(/Agents/, 15_000)
+      await terminal.waitFor(new RegExp(`❯ ● done · ${TYPE}: ${PROMPT}`), 15_000)
+      expect(terminal.capture()).toContain('Enter open · s stop')
+      await terminal.screenshot(shot, 'a7-03-agents-list')
+
+      // 4. Enter switches into the task's own chat: a breadcrumb, and its own conversation.
+      terminal.send('Enter')
+      // The breadcrumb is the chain from the root chat down to this one; the parent's title is
+      // its first message, so the line reads `<the marker…> › …`. Nothing else draws a `›`
+      // between two chat titles, which is what makes this the breadcrumb rather than the prompt.
+      await terminal.waitFor(/__agent__[^\n]* › /, 30_000)
+      await terminal.waitFor(new RegExp(PROMPT), 15_000)
+      await terminal.screenshot(shot, 'a7-04-child-chat')
+
+      // 5. Steer it, and read its answer — the child's own composer works like any chat's.
+      send(terminal, 'one more pass over the tail')
+      await terminal.waitUntil(
+        (screen) => countOf(screen, 'one more pass over the tail') >= 2,
+        60_000,
+      )
+
+      // 6. Esc stops the child's turn: the one key a reader has over a helper (S1).
+      send(terminal, '__slow__ keep going')
+      await terminal.waitFor(/part 1\/40/, 60_000)
+      terminal.send('Escape')
+      await terminal.waitFor(/Interrupted/, 30_000)
+      await terminal.screenshot(shot, 'a7-05-child-interrupted')
+
+      // 7. Continue it after the stop: the child is a chat like any other.
+      send(terminal, 'carry on then')
+      await terminal.waitUntil((screen) => countOf(screen, 'carry on then') >= 2, 60_000)
+
+      // 8. Back to the parent: /agents again, and its first row goes up.
+      send(terminal, '/agents')
+      await terminal.waitFor(/‹ back to /, 15_000)
+      await terminal.screenshot(shot, 'a7-06-back-row')
+      terminal.send('Enter')
+      await terminal.waitFor(new RegExp(`${parentHandle}`), 30_000)
+      // The breadcrumb is gone: this is a top-level chat again.
+      await terminal.waitUntil((screen) => !/__agent__[^\n]* › /.test(screen), 15_000)
+
+      expectNoErrorNotice(terminal.capture(400))
+      await quit(terminal)
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
+  test('a task is stopped from the list', async ({ context, request }) => {
+    const terminal = new Terminal('oh-qa-a7b', 100, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+
+    try {
+      await startChat(terminal, request)
+      // A helper that does not finish on its own: `__slow__` streams for about ten seconds.
+      send(terminal, `__agent__ ${TYPE} | __slow__ think about it`)
+      await terminal.waitFor(new RegExp(`◐ running · ${TYPE} · __slow__`), 60_000)
+
+      send(terminal, '/agents')
+      await terminal.waitFor(/Agents/, 15_000)
+      await terminal.waitFor(new RegExp(`running · ${TYPE}: __slow__`), 15_000)
+      await terminal.screenshot(shot, 'a7-07-stop-before')
+
+      // `s` stops the highlighted task: one `user.interrupt` to the child session.
+      terminal.send('s')
+      await terminal.waitFor(/Stopped general-purpose — its turn ended where it got to\./, 30_000)
+      await terminal.screenshot(shot, 'a7-08-stop-after')
+
+      expectNoErrorNotice(terminal.capture(400))
+      await quit(terminal)
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
+  test('oh modes marks a subagent type and shows its description', async ({ context, request }) => {
+    // Wide enough that the description is one line: a terminal wraps a long line at column 0,
+    // which would split the sentence the assertion is about.
+    const terminal = new Terminal('oh-qa-a7c', 200, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+
+    // A type is a mode with a description (#342), and `oh` does not create one: the web app's
+    // Settings → Modes does. This is the same write it makes.
+    const description = 'Researches a question on the web and reports sources.'
+    await createSubagentType(request, 'researcher-a7', description)
+
+    try {
+      terminal.start()
+      terminal.run(ohCommand('modes'))
+      await terminal.waitFor(/researcher-a7/, 60_000)
+      const screen = terminal.capture(400)
+      expect(screen).toContain('subagent type')
+      expect(screen).toContain(description)
+      expect(screen).toContain('read-only')
+      await terminal.screenshot(shot, 'a7-09-oh-modes')
+      expectNoErrorNotice(terminal.capture())
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+})
+
+/**
+ * Start `oh` in the terminal and wait for the chat it opens.
+ *
+ * The same step `cli.spec.ts` takes: a bare `oh` starts on the account's default model, so the
+ * account is given one first (`PUT /v1/me/preferences`, the write Settings → Default model
+ * makes), and the wait is for the status line — which names the session it created.
+ */
+async function startChat(terminal: Terminal, request: APIRequestContext): Promise<string> {
+  const model = await ensureDefaultModel(request)
+  terminal.run(ohCommand())
+  // The status line draws the session as a shortened handle — `sesn_…S76VM6` — which is what a
+  // reader recognises it by (that is what the status line is for); the toast below the regex is
+  // that handle as it is on screen.
+  const handle = (await terminal.waitFor(/sesn_[^\s]+/, 30_000))[0] ?? ''
+  await terminal.waitForIdle()
+  expect(terminal.capture()).toContain(model)
+  return handle
+}
+
+/** Type a line into the prompt and send it. */
+function send(terminal: Terminal, text: string): void {
+  terminal.type(text)
+  terminal.send('Enter')
+}
+
+/** How many times `text` has been written at the start of a line since the pane's first row. */
+function countOf(screen: string, text: string): number {
+  const first = (text.split('\n')[0] ?? '').trim()
+  return `\n${screen}`.split(`\n${first}`).length - 1
+}
+
+/**
+ * Leave the chat the way the second idle Ctrl+C does, and wait for the shell back.
+ *
+ * The first Esc is for a flow that may still own the input area — the `/agents` list is up until
+ * it is left, and the Ctrl+C after it is the chat's again.
+ */
+async function quit(terminal: Terminal): Promise<void> {
+  if (terminal.capture().includes('Esc done')) {
+    terminal.send('Escape')
+    await terminal.waitUntil((screen) => !screen.includes('Esc done'), 10_000)
+  }
+  // A deliberate beat between keys: a terminal sends a lone `ESC` and the byte after it in one
+  // read, and Ink reads that pair as one meta sequence — so an `Escape` and the Ctrl+C behind it
+  // sent together are a keystroke neither of them. (The same reason `cli.spec.ts` pauses after a
+  // resize.)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  terminal.send('C-c')
+  await terminal.waitFor(/Press Ctrl\+C again to exit\./, 15_000)
+  terminal.send('C-c')
+  await terminal.waitFor(/Resume this session with: oh -s sesn_[A-Z0-9]+/, 15_000)
+  await terminal.waitForShellPrompt()
+}
+
+/** Create a mode that carries a description — a **subagent type** (epic #340, S2; #342). */
+async function createSubagentType(
+  request: APIRequestContext,
+  name: string,
+  description: string,
+): Promise<void> {
+  const response = await request.post('/v1/me/modes', {
+    data: { name, model: 'my-default-model', subagent_description: description },
+  })
+  // A name is unique per user, so a second run of the pass reuses what the first one made.
+  expect([201, 409]).toContain(response.status())
+}

@@ -348,7 +348,9 @@ no other file knows its name.
 `/model` picks a model (pending until the next message, as above), `/new` starts a new chat on
 the current model (the app opens the session the way a first chat does, and the old screen's
 stream is disposed with it), `/providers [provider]` connects a provider without leaving the
-chat (#210), `/mcp` opens the remote MCP servers in the prompt slot (#303, X10; #313),
+chat (#210), `/agents` opens the chat's background tasks in the prompt slot — switching into a
+task's own chat, or back up, and stopping one (#340, S9; #347),
+`/mcp` opens the remote MCP servers in the prompt slot (#303, X10; #313),
 `/tools` opens this build's own tools there too — on/off and the permission each call runs
 under, the counterpart of the web app's Settings → Tools (#303, X4; #335) —
 `/compact [instructions]` asks the brain to summarize the older history now
@@ -503,24 +505,24 @@ install, because there is nothing here for npm to replace.
 
 ## In the chat
 
-| key                     | what it does                                                                                                                        |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `/` + Enter             | the command menu: `/model`, `/providers`, `/new`, `/compact`, `/mcp`, `/tools`, `/clear`, `/help`, `/exit` (#207, #210, #283; #335) |
-| Enter                   | send — also while a reply streams, which is what steering is                                                                        |
-| Ctrl+J, Alt+Enter       | insert a newline                                                                                                                    |
-| ←/→, Home/End, Ctrl+A/E | move the cursor; Home/End and Ctrl+A/Ctrl+E take the line's ends                                                                    |
-| Backspace / Delete      | delete behind the cursor, and at it                                                                                                 |
-| Ctrl+U / Ctrl+K         | delete to the start of the line, and to its end                                                                                     |
-| Ctrl+W, Alt+Backspace   | delete the word before the cursor                                                                                                   |
-| Alt+B / Alt+F, Ctrl+←/→ | jump a word back and forward                                                                                                        |
-| ↑/↓                     | the menu's rows while it is open (#207), otherwise the buffer's own lines and then the history (#206)                               |
-| Tab                     | complete the highlighted command into the buffer (#207)                                                                             |
-| Esc                     | close the menu, keeping the text (#207)                                                                                             |
-| Ctrl+L                  | clear the screen; the session stays (#206)                                                                                          |
-| Ctrl+T                  | fold or unfold the task list above the prompt; a list past five items starts folded (#308)                                          |
-| Ctrl+O                  | show every tool call's full input and a capped result, or the compact line again (#308)                                             |
-| Ctrl+R                  | reconnect the MCP server a failed turn named (#303, X10; #313)                                                                      |
-| Ctrl+C                  | interrupt the running turn; pressed again when idle, leave                                                                          |
+| key                     | what it does                                                                                                                                         |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/` + Enter             | the command menu: `/model`, `/providers`, `/new`, `/compact`, `/mcp`, `/tools`, `/agents`, `/clear`, `/help`, `/exit` (#207, #210, #283; #335; #347) |
+| Enter                   | send — also while a reply streams, which is what steering is                                                                                         |
+| Ctrl+J, Alt+Enter       | insert a newline                                                                                                                                     |
+| ←/→, Home/End, Ctrl+A/E | move the cursor; Home/End and Ctrl+A/Ctrl+E take the line's ends                                                                                     |
+| Backspace / Delete      | delete behind the cursor, and at it                                                                                                                  |
+| Ctrl+U / Ctrl+K         | delete to the start of the line, and to its end                                                                                                      |
+| Ctrl+W, Alt+Backspace   | delete the word before the cursor                                                                                                                    |
+| Alt+B / Alt+F, Ctrl+←/→ | jump a word back and forward                                                                                                                         |
+| ↑/↓                     | the menu's rows while it is open (#207), otherwise the buffer's own lines and then the history (#206)                                                |
+| Tab                     | complete the highlighted command into the buffer (#207)                                                                                              |
+| Esc                     | close the menu, keeping the text (#207) — and, in a **task's own chat**, stop its turn (#347)                                                        |
+| Ctrl+L                  | clear the screen; the session stays (#206)                                                                                                           |
+| Ctrl+T                  | fold or unfold the task list above the prompt; a list past five items starts folded (#308)                                                           |
+| Ctrl+O                  | show every tool call's full input and a capped result, or the compact line again (#308)                                                              |
+| Ctrl+R                  | reconnect the MCP server a failed turn named (#303, X10; #313)                                                                                       |
+| Ctrl+C                  | interrupt the running turn; pressed again when idle, leave                                                                                           |
 
 "Shift+Enter" is not a key a terminal can send — most send the same `\r` for both — so the
 newline is bound to **Ctrl+J** (line feed, `0x0A`, against Enter's `0x0D`), which every
@@ -815,6 +817,65 @@ because whether a remote tool is in play is its server's `enabled`, not a per-to
 (a remote tool has no on/off of its own). Writing `builtin` for one would store a choice the
 server lists as an unavailable tool and never applies to the call.
 
+### Subagents, in the terminal (epic #340, S9; issue #347)
+
+A chat can hand work to a **background task** — a subagent today — and `oh` draws the same card
+the web app does, in the transcript, where the `agent` call that started it was.
+
+- **`components/task-card.tsx` is one task, in a few lines.** The head is the status mark, the
+  status' own word, the type, the description and what the child has spent
+  (`● done · researcher · Check the flaky test · 2.1k tokens · $0.04`), and under it come the
+  child's **activity** (`web_fetch: https://…`, `2 of 5`, `writing…`), the **conversation**
+  between the two (`→ researcher: …`, `researcher →: …`) and the task's latest **result** — each
+  drawn only when there is one. The status leads the line because it is what a reader scans for:
+  a narrow terminal loses the cost before it loses the state. The mark and the word are both
+  there, so a card still says what it is under `NO_COLOR`.
+- **The card stands where its `agent` call was.** That call is not a tool line at all (S9) — the
+  client keeps the four `agent*` tools as task machinery — so `TranscriptView` merges the cards
+  into the transcript **by position** (`mergeTasks`), which is the same join the web app makes.
+  A card is **always in the live area** and never settles into `<Static>`: its activity line and
+  its cost arrive on the _child's_ stream and keep arriving after the parent's log has gone
+  quiet, and the scrollback is write-once (#208, X2). Cards are few, and a running tool call
+  already makes the same trade.
+- **The child's stream is what says what it is doing right now** (S4: a task does not report
+  progress). `components/task-card.tsx`'s `useTaskActivity` subscribes to the client's
+  `watchTaskActivity` — a reference-counted follower, so a card that is not on screen holds no
+  connection — and closes it on unmount. The **fifth status word** comes from there too: a child
+  parked in its own `agent_wait` is **waiting** (cyan, not the alarm a _call_ waiting on the
+  reader is drawn in — a task waiting on its own subtasks is not asking this reader for
+  anything).
+- **`/agents` is the way in and out** (`components/agents-screen.tsx`, in the prompt slot like
+  `/mcp` and `/tools`): the current chat's tasks as one flat list, with the row that goes **back
+  up** first when this chat is itself a task's own. `Enter` opens the highlighted row (the
+  parent's `/agents` switches into a child's chat, the child's switches back) and `s` **stops**
+  the highlighted task. A task whose child has children of its own says so (`› 2 subtasks`), one
+  `listChildren` read per row when the list opens — best effort, since a row that cannot count
+  its subtasks is still a row. The list draws the **parent's** status (four words): the fifth is
+  the child's, and reading one child per row for it would be a request per row for a word the
+  reader is about to see on the card anyway.
+- **Stop is one `user.interrupt` to the child session**, which is the only stop a person has —
+  `agent_stop` is the parent _model's_ tool and a reader cannot call one. It ends the child's
+  turn where it got to and leaves its chat to be continued from, and the card then says what the
+  log says that turn ended as. **This is a gap in the epic's UX, not a choice** (#347): the
+  child's turn-end delivery is a `result` with status `idle` (the brain writes `stopped` only
+  for its own `agent_stop`), so a task the reader stopped reads **done**, and the parent model is
+  told the helper finished. The card is the log's, and the frontend does not invent a state.
+- **A child is a full chat.** `oh` opens one as any other session (an `oh -s` away, and reached
+  from `/agents`), with the normal composer — typing steers it, as `agent_message` does — and a
+  **breadcrumb** line above the input section (`components/breadcrumb.tsx`) naming the chain from
+  the root chat down to it, read once through the client's `sessionBreadcrumb`. A child's title
+  is usually null (the server names a session from its first _message_, and a helper's is the
+  prompt the parent wrote), so the line falls back to the short session handle. **Esc stops the
+  child's turn** — the one thing a reader does to a helper (S1), and the reason the child's chat
+  binds Esc as well as Ctrl+C; Ctrl+C still interrupts, and still leaves `oh` on the second idle
+  press, which is why `/agents` is the way back up.
+- **`oh modes` marks a subagent type and shows its description read-only** (epic #340, S2; #342;
+  the refinement for #347). A type is a mode with a `subagent_description`, so `oh` prints
+  `researcher  claude-sonnet-5 · high  subagent type` and the sentence under it, indented to the
+  second column, plus one line saying a type is a helper's mode and that this CLI only shows it.
+  `oh` does not create or edit modes, and a description is what the parent model chooses a type
+  by — so it is read here and written in the web app's Settings → Modes.
+
 ### Remote MCP servers in the terminal (#303, X10; #313)
 
 A chat can reach the reader's own remote MCP servers, and `oh mcp` is where they live: the same
@@ -1035,7 +1096,14 @@ src/
                          X2/X5/X9; #308), pending-prompt (the approvals and questions
                          waiting on the reader, as one keyboard-driven list, X6; #310)
                          and text-entry (the one-line field a pending row's free text
-                         goes through, #310), mcp-servers (the remote MCP servers: the
+                         goes through, #310), task-card (a background task in the transcript:
+                         the status, the type and the description, the child's live activity
+                         and cost, the messages between the two and the result folded in —
+                         plus the hook that follows the child, X5/S9; #347), agents-screen
+                         (/agents: the chat's tasks as a list, the row that goes back up, and
+                         the two verbs an Enter or an `s` performs, S9; #347), breadcrumb (where
+                         a task's own chat sits, read-only and drawn above the input section,
+                         S9; #347), mcp-servers (the remote MCP servers: the
                          list with a key per verb, the form, and the tools face — one
                          permission per tool, and the all-tools row that sets every one of
                          them at once, X10; #313), tool-settings (this build's own tools:
@@ -1206,6 +1274,10 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/todo-panel.test.tsx`              | the task list, pinned (#303, X5; #305; #308): `todoLines`' header, marks and states, a cleared list drawn as cleared, the folded one-line form (with and without an item in progress), the window a long list gets with its `+K more` counts, the item lines a terminal height allows, the hint line, the truncation, and the two frames the component draws (`TodoPanel` folded and not)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/tool-notices.test.tsx`            | the four tool notices (#303, X2/X5/X9; #308): nothing when there is nothing to say, the step limit in the amber, the two result lines in chrome, and the words keeping without colour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `src/components/transcript-view-tools.test.tsx`   | a call in the transcript (#303, X5; #308): drawn between the messages with one blank line around it, kept live while it runs and settled once it does not, and a failed call's reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/components/task-card.test.tsx`               | a background task's card (#340, S9; #347): the head line — the status word, its mark, the type, the description and what the child has spent — every one of the five statuses and the colour each is drawn in, the child's activity line (`web_fetch: …`, `2 of 5`, `writing…`), the conversation in both directions with the ones it leaves out counted, the result folded in one line, tokens with and without a catalog to price them, the truncation a narrow terminal gets, and the same card with no colour at all — then the component over a log double: the child picked up and drawn as it works                                                                                                                                                                                                                                                                                                                                                                                 |
+| `src/chat/subagents.test.tsx`                     | subagents through the whole app (#340, S9; #347): a resumed chat's task a card in the transcript with its note and its result, `/agents` opened from the prompt, a task's own chat named by its breadcrumb, and **Esc stopping a child's turn** with a top-level chat's turn left alone (the control)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/components/agents-screen.test.tsx`           | `/agents` (#340, S9; #347): `agentsRows` and the words of a row — the status, the notes, the result and the subtasks counted — the back row for a task's own chat and none for a top-level one, then the screen at the keyboard: the rows with the cursor marked, Enter opening a task's own session, Enter on the back row going up, `s` stopping the highlighted task (one interrupt to its child), and the empty state                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/components/transcript-view-tasks.test.tsx`   | a card among the messages (#347): `mergeTasks` placing one at its `agent` call's position — before the first entry, between two, appended past the end, several in order, and the entries handed back untouched when there are no cards — and the frame a card draws in, with one blank line around it and its result line under it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/chat/live-area.test.tsx`                     | the live area under the transcript, through the whole app (#308): a resumed chat's task list drawn while idle and while a turn runs, the panel above the rule rather than in the scrollback, Ctrl+T folding and unfolding and the choice kept for the chat, the auto-fold past five items, the window of a twelve-item list with its `+4 more`, a settled call's `⎿` line in the committed output, and Ctrl+O opening a live call's full input and closing it again                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/components/pending-prompt.test.tsx`          | the pending list (#303, X6; #310): `pendingRows` and the lines it draws — an approval's four choices and its deny-with-a-message row, a question's options with the mark that says what is chosen, the write-in and the text row, the Submit hint naming what is still missing, the bulk rows, and the truncation a narrow terminal gets — then the component at the keyboard: Enter sends an approval (and ↓ moves to the next one), Esc declines the row's call, space and Enter choose and toggle, Tab crosses to the next question, a text row opens the slot's entry, the message row hands the keyboard back, nothing is read when it is not the list's, and a remote call's heading naming its server (#312)                                                                                                                                                                                                                                                                        |
 | `src/components/text-entry.test.tsx`              | the one-line entry (#303, #310): what is typed is echoed and settled on Enter, it starts from what was said before so an answer can be corrected, Esc and Ctrl+C settle nothing, an empty line is a real answer, and a pasted several-line string stays on one line                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |

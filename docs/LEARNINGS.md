@@ -1387,6 +1387,24 @@ that call suppressed from the tool lines), so a frontend merges it with
 ([#345](https://github.com/amirtuval/openharness/issues/345);
 `packages/client/src/transcript.ts`).
 
+**The stop a person can make is not the status the log records, so a task a reader stopped
+reads as a finished one.** `oh`'s Stop on a card is one `user.interrupt` to the **child** session
+— the only stop a reader has, since `agent_stop` is the parent _model's_ tool (#344) — and the
+parent's log answers it with the child's ordinary turn-end delivery: a `result` notification and
+`session.task_status { idle }` (only the model's own `agent_stop` writes `stopped`). So the card
+the reader just stopped says **done**, folds in whatever the child had produced, and the parent
+model is told the helper finished — the one place in the epic where the log and the reader
+disagree, and it cannot be fixed in the frontend: a card is the log's, and inventing a `stopped`
+the parent's log does not hold would be a lie the next reader (and the model) inherits
+([#347](https://github.com/amirtuval/openharness/issues/347);
+`apps/tui/src/components/agents-screen.tsx`). The `oh` half of the same issue found a second,
+smaller thing: a task card is never settled into Ink's `<Static>`, unlike every other block in
+the transcript — its activity line and its cost come from the **child's** stream and keep
+arriving after the parent's log has gone quiet, and the scrollback is write-once (#208), so a
+card that settled early would keep a stale line and a missing cost for the life of the screen.
+That is the trade a running tool call already makes, and it is affordable here only because a
+chat holds a handful of cards (`apps/tui/src/components/transcript-view.tsx`).
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take
@@ -1549,6 +1567,17 @@ squashing.
 merging an unrelated docs PR while someone was hand-testing a feature branch on staging silently
 replaced that build (the tester saw `404 no route for GET /v1/me/tools`). Redeploy the branch after
 any merge to `main` during a branch test, and say so.
+
+**A terminal sends a lone `ESC` and the byte behind it in one read, and Ink reads the pair as
+one meta sequence — so a tmux spec that presses Escape and then Ctrl+C has pressed neither.**
+The `/agents` scenario ends by leaving the list and the chat, and its first version sent `Escape`
+and `C-c` back to back: `oh` never armed its exit and the spec failed on a hint that was never
+drawn, with the frame looking exactly like a chat nobody had touched. The fix is a beat between
+the two keys (or only sending the Escape when a flow is actually up, which is what the spec does
+now) — the same kind of deliberate pause `cli.spec.ts` takes after a resize, and the reason
+`tmux.ts`'s `type()` sends a character at a time
+([#347](https://github.com/amirtuval/openharness/issues/347);
+`e2e/qa/cli-subagents.spec.ts`).
 
 ## Working with coding agents
 
