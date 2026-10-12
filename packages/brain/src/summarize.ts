@@ -1,19 +1,24 @@
-import { EVENT_TYPES } from '@openharness/protocol'
 import type {
   ContextSummaryReason,
   SessionModelUsage,
   StoredEvent,
   UserId,
 } from '@openharness/protocol'
+import type { ToolRegistry } from '@openharness/hands'
 import type { AppendableEvent } from '@openharness/session'
 import type { LanguageModel, ModelMessage } from 'ai'
 
 import {
   capItemText,
+  conversationItems,
+  cutAtUserBoundary,
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   estimateTokens,
   latestContextSummary,
+  RECENT_TAIL_RATIO,
+  toolResultCap,
 } from './context'
+import type { ContextCutItem, ContextCutRule } from './context'
 import { contextSummary, contextSummaryProgress, sessionUsage, spanEnd, spanStart } from './events'
 import { usageByModel, withRequestUsage } from './log'
 import type { ModelFactory, ResolveCredential } from './model'
@@ -49,17 +54,20 @@ import { redactSecrets } from './redact'
  *    asked, so the engine tries at any size (and `'skipped'` means only that there was nowhere
  *    to cut), and its `guidance` is folded into the summarizer's instructions as the user's own
  *    instruction.
- * 2. **Where to cut** (K4, K12). One replaceable function answers "where may history be cut?"
- *    ({@link ContextCutRule}); the default keeps about a quarter of the chat model's budget
- *    verbatim and cuts at a `user.message` boundary, so no model turn is split. Everything
- *    before the cut is what this summary covers.
+ * 2. **Where to cut** (K4, K12; #306). One replaceable function answers "where may history be
+ *    cut?" ({@link ContextCutRule}); the default keeps about a quarter of the chat model's budget
+ *    verbatim and cuts at a `user.message` boundary, so no model turn is split — and never
+ *    between a tool call and the result that answers it, whatever the log put in between (X9).
+ *    Everything before the cut is what this summary covers.
  * 3. **Which model** (K3). The summary model (`same as the chat` by default); a chosen one with
  *    no usable credential, or one that would need more passes than the limit, hands the work to
  *    the chat model and the event records why in `fallback_reason`.
  * 4. **Chunked passes** (K5). The covered history is folded in slices, each pass
  *    "instructions + the running summary + the next slice" sized to the summary model's budget
- *    with room for its answer. The running summary is capped (12% of the chat budget, the
- *    summary model's output ceiling, and "leaves room for a slice"), and a running summary that
+ *    with room for its answer — a slice made of whole units, so a call and its result are never
+ *    folded in different passes (#306). The running summary is capped (12% of the chat budget,
+ *    the summary model's output ceiling, and "leaves room for a slice"), and a running summary
+ *    that
  *    has grown until no slice fits is summarized alone first.
  * 5. **One model call per pass, recorded** (K3, #247). Each pass opens a
  *    `span.model_request_start` with `purpose: 'summary'` and closes it with the usage and a
@@ -114,14 +122,6 @@ export const DEFAULT_MAX_SUMMARY_PASSES = 3
 export const SUMMARY_SIZE_RATIO = 0.12
 
 /**
- * How much of the chat model's budget the recent history keeps verbatim (K4): a quarter.
- *
- * The tail is the conversation the model needs to answer the next message in full; everything
- * older is what the summary stands in for.
- */
-export const RECENT_TAIL_RATIO = 0.25
-
-/**
  * The tail the **overflow** path keeps (K2): half of the normal one.
  *
  * When a provider has already refused the request as too long, "tighter caps" has to mean
@@ -173,16 +173,21 @@ export const MIN_SUMMARY_TOKENS = 256
  * A constant rather than a hash of the text: the point is that a change to how summaries are
  * written is visible in the log, and a reader comparing two sessions wants a name for the
  * difference, not a fingerprint. Bumped by hand when {@link SUMMARY_PROMPT} changes meaningfully.
+ *
+ * `context-summary-v2` adds the tool-work section (#306, X9): a history that called tools has
+ * pages fetched, searches made, actions taken and errors to account for, and a summary that
+ * dropped them would leave the model unable to say what the tools already did.
  */
-export const SUMMARY_PROMPT_VERSION = 'context-summary-v1'
+export const SUMMARY_PROMPT_VERSION = 'context-summary-v2'
 
 /**
  * The prompt a summary is written with (K7).
  *
- * Written for this project, in the six sections the epic fixes — goal, constraints and
+ * Written for this project, in the six sections epic #277 fixes — goal, constraints and
  * preferences, progress, key decisions, next steps, critical context — for **general chat**
  * rather than only coding, in update mode (the model is given what is there and asked to fold the
- * new history into it).
+ * new history into it). #306 adds the seventh, tool work (X9): since the history a summary stands
+ * in for holds what the tools were asked and what they answered, the summary has to carry it.
  *
  * **Licence:** this text is original. The epic allows adapting an open-source prompt (it names
  * Codex's, Apache-2.0) once its licence is checked; nothing was adapted here, so no third-party
@@ -192,7 +197,7 @@ export const SUMMARY_PROMPT_VERSION = 'context-summary-v1'
  */
 const SUMMARY_PROMPT = `You compress the earlier part of a conversation so the chat can continue with less context. You are given the history to fold in and, when there is one, the summary so far. Answer with the updated summary and nothing else: no preamble, no commentary.
 
-Write these six sections, in this order, with exactly these headings:
+Write these seven sections, in this order, with exactly these headings:
 
 ## Goal
 What the user is trying to do, in their own terms.
@@ -206,6 +211,9 @@ What has happened: what was asked, what was answered, what was decided, what fai
 ## Key decisions
 Each decision and the reason for it, so it is not revisited. Name the alternatives that were rejected.
 
+## Tool work
+What the tools did, in the order it mattered: the pages fetched and searches made (with the URLs and queries that identify them), the actions taken and their outcome, and every tool error with how it was handled — retried, worked around, or reported to the user. Keep what a result established — a value, a file, a fact — and leave out the bulk of what a tool returned: the output itself is gone from the context, and only what you write here survives. A tool error that was resolved is still worth a line, so it is not tried again.
+
 ## Next steps
 What is still to do, and what was about to happen when the history ends.
 
@@ -216,6 +224,7 @@ Rules:
 - Keep every user instruction and constraint, including ones that now seem irrelevant.
 - Quote exact identifiers and values verbatim; never paraphrase one.
 - Prefer the specific to the general: a fact the next turn needs beats a tidy sentence.
+- Report what a tool call and its result mean for the task, not the raw output.
 - Write in the language the conversation is in.
 - This may be any kind of chat, not only coding, so do not assume the work is software.`
 
@@ -257,8 +266,8 @@ export interface ContextCompactionConfig {
    */
   readonly maxOutputFor?: (modelId: string) => number | undefined
   /**
-   * Where history may be cut (K4, K12). One function, replaceable: #276 replaces it with one that
-   * keeps tool call/result pairs together, without this module changing.
+   * Where history may be cut (K4, K12). One function, replaceable: the slices this engine folds
+   * and the results the strategy clears (#306, X9) are both decided from what it answers.
    */
   readonly cutRule?: ContextCutRule
 }
@@ -310,63 +319,6 @@ export function resolveContextCompaction(
   }
 }
 
-/** One conversation message, as the cut rule sees it. */
-export interface ContextCutItem {
-  /** The `seq` of the event the text came from. */
-  readonly seq: number
-  /** The role the model reads it under. */
-  readonly role: 'user' | 'assistant'
-  /** The message's text. */
-  readonly text: string
-  /** Its size, at {@link estimateTokens}. */
-  readonly tokens: number
-}
-
-/**
- * Where may history be cut? Returns the index of the first item to keep verbatim; everything
- * before it is what a summary covers. An index of `0` (or `items.length`) means "nowhere".
- *
- * This is K12's one replaceable function, and the whole of the answer to "what may the model be
- * told in summary instead of in full?". Two rules are the default's, not the engine's: keep a
- * recent tail of about `tailTokens`, and never split a model turn. #276 replaces the default with
- * one that also keeps a tool call with its result — same signature, same call site.
- */
-export type ContextCutRule = (items: readonly ContextCutItem[], tailTokens: number) => number
-
-/**
- * The default cut rule: the smallest recent tail that reaches `tailTokens`, widened to start at a
- * `user.message` (K4).
- *
- * A turn is a user message and the reply to it, so a cut that landed between the two would hand
- * the model an answer to a question it cannot see. Walking back from the newest item to the first
- * `user.message` is therefore not a refinement but the rule: the kept tail always begins with
- * what the user asked.
- *
- * A tail that reaches the start of the history returns `0` — there is nothing to summarize — and
- * so does a history with no user message in it, which is not a conversation the engine can
- * compress.
- *
- * @param items the visible conversation, oldest first
- * @param tailTokens how many tokens the kept tail should reach
- */
-export function cutAtUserBoundary(items: readonly ContextCutItem[], tailTokens: number): number {
-  if (items.length === 0) {
-    return 0
-  }
-  const target = Math.max(1, tailTokens)
-  let index = items.length
-  let tokens = 0
-  while (index > 0 && tokens < target) {
-    index -= 1
-    tokens += items[index]?.tokens ?? 0
-  }
-  // Ascend to the user message that opens the turn the tail would otherwise start inside.
-  while (index > 0 && items[index]?.role !== 'user') {
-    index -= 1
-  }
-  return index
-}
-
 /** How {@link summarizeContext} is called. Everything it cannot read off the log is here. */
 export interface SummarizeContextOptions {
   /** The `provider/model` the next chat request will run — the model the trigger is sized by. */
@@ -378,13 +330,20 @@ export interface SummarizeContextOptions {
    * `reason: 'manual'` carries it; a threshold or overflow pass makes none. The engine folds it
    * into the summarizer's instructions as the user's own instruction, after the base prompt and
    * before the size line, and never into the recorded `prompt_version` — the base prompt's
-   * meaning is unchanged, so the version stays `context-summary-v1`.
+   * meaning is unchanged, so guidance alone never bumps the version (K7).
    */
   readonly guidance?: string | null
   /** The log as the request boundary sees it, as `readLog` handed it over. */
   readonly events: readonly StoredEvent[]
   /** The session's system prompt, or `null`. */
   readonly system: string | null
+  /**
+   * The tools a turn may call, when the host wired any (epic #303, X4). The cut measures a tool
+   * result as a request would carry it — capped by the tool's declaration (X9) — so one enormous
+   * stored result cannot make the tail reach the whole history and leave nothing to summarize.
+   * The text the summarizer is handed is still the stored one.
+   */
+  readonly tools?: ToolRegistry
   /** The measured context size at this boundary, in tokens — the trigger's number, and K10's. */
   readonly estimatedTokens: number
   /** The trigger, the model and the limits. */
@@ -453,7 +412,11 @@ export async function summarizeContext(options: SummarizeContextOptions): Promis
   }
 
   const previous = latestContextSummary(events)
-  const items = conversationItems(events, previous === null ? 0 : previous.covers.to_seq)
+  const items = conversationItems(
+    events,
+    previous === null ? 0 : previous.covers.to_seq,
+    toolResultCap(options.tools, chatBudget),
+  )
   const tailTokens = Math.floor(
     chatBudget * (options.reason === 'overflow' ? OVERFLOW_RECENT_TAIL_RATIO : RECENT_TAIL_RATIO),
   )
@@ -488,19 +451,19 @@ export async function summarizeContext(options: SummarizeContextOptions): Promis
     const instructions = instructionsFor(previous !== null, cap, guidance)
     const sliceBudget = sliceBudgetOf(budget, estimateTokens(instructions), cap)
     const needsFold = runningSummary !== null && estimateTokens(runningSummary) > cap
-    const capped = capItems(covered, budget)
+    const units = coveredUnits(covered, budget)
     return {
       instructions,
       sliceBudget,
       sizeCap: cap,
-      capped,
-      planned: planPasses(sliceBudget, capped) + (needsFold ? 1 : 0),
+      units,
+      planned: planPasses(sliceBudget, units) + (needsFold ? 1 : 0),
     }
   }
 
   let fallbackReason = writer.fallbackReason
   let writer_ = writer
-  let { instructions, sliceBudget, sizeCap, capped, planned } = plan(writer.modelId)
+  let { instructions, sliceBudget, sizeCap, units, planned } = plan(writer.modelId)
   if (planned > config.maxPasses && writer.modelId !== options.chatModel) {
     // K5: the chosen summary model would need more passes than the limit allows, so the chat
     // model does it — usually in one — and the event says why.
@@ -512,7 +475,7 @@ export async function summarizeContext(options: SummarizeContextOptions): Promis
     }
     writer_ = fallback
     fallbackReason = fallback.fallbackReason
-    ;({ instructions, sliceBudget, sizeCap, capped, planned } = plan(writer_.modelId))
+    ;({ instructions, sliceBudget, sizeCap, units, planned } = plan(writer_.modelId))
   }
 
   const written = await runPasses({
@@ -522,7 +485,7 @@ export async function summarizeContext(options: SummarizeContextOptions): Promis
     sliceBudget,
     sizeCap,
     planned,
-    capped,
+    units,
     running: runningSummary,
   })
   if (written === null) {
@@ -654,9 +617,8 @@ function summarySizeCap(
  * `min(½ × 936,000, …)` ≈ 468,000, and folds the same history in **one** pass. (The exact count
  * moves with the two models' ceilings; the rule is that the *plan*, not the run, decides.)
  */
-function planPasses(sliceBudget: number, items: readonly CappedItem[]): number {
-  const total = items.reduce((sum, item) => sum + item.tokens, 0)
-  return Math.max(1, Math.ceil(total / Math.max(1, sliceBudget)))
+function planPasses(sliceBudget: number, units: readonly CoveredUnit[]): number {
+  return Math.max(1, Math.ceil(unitTokens(units) / Math.max(1, sliceBudget)))
 }
 
 /**
@@ -692,13 +654,34 @@ function instructionsFor(incremental: boolean, sizeCap: number, guidance: string
   return `${tailored}\n\nKeep the summary under ${sizeCap} tokens.`
 }
 
-/** The covered items, each capped to a quarter of the summary model's budget (K6). */
-function capItems(items: readonly ContextCutItem[], summaryBudget: number): CappedItem[] {
+/**
+ * The covered items, each capped to a quarter of the summary model's budget (K6), grouped so a
+ * slice can never be cut between a tool call and the result that answers it (epic #303, X9).
+ *
+ * A unit is one item or a call with the results it was answered with, kept together whatever else
+ * the log put between them — a steering message that arrived while the call ran is a unit of its
+ * own, after the pair. Both halves of a pair reach the summarizer in one pass, which is what makes
+ * the tool-work section of the prompt (K7) able to say what a call was for and what came of it.
+ */
+function coveredUnits(items: readonly ContextCutItem[], summaryBudget: number): CoveredUnit[] {
   const itemCap = Math.max(1, Math.floor(summaryBudget * SUMMARY_ITEM_CAP_RATIO))
-  return items.map((item) => ({
-    text: item.tokens > itemCap ? capItemText(item.text, itemCap) : item.text,
-    tokens: Math.min(item.tokens, itemCap),
-  }))
+  const units: CappedItem[][] = []
+  const unitOfCall = new Map<number, CappedItem[]>()
+  for (const item of items) {
+    const capped: CappedItem = {
+      text: item.tokens > itemCap ? capItemText(item.text, itemCap) : item.text,
+      tokens: Math.min(item.tokens, itemCap),
+    }
+    const owner = item.pairSeq === undefined ? undefined : unitOfCall.get(item.pairSeq)
+    if (owner !== undefined) {
+      owner.push(capped)
+      continue
+    }
+    const unit = [capped]
+    units.push(unit)
+    unitOfCall.set(item.seq, unit)
+  }
+  return units
 }
 
 /** One covered item, already capped for the summarizer's input (K6). */
@@ -707,6 +690,14 @@ interface CappedItem {
   readonly text: string
   /** What it costs, cap included. */
   readonly tokens: number
+}
+
+/** A slice's smallest unit: one item, or a tool call with the results that answer it (X9). */
+type CoveredUnit = readonly CappedItem[]
+
+/** What a slice's units cost together. */
+function unitTokens(units: readonly CoveredUnit[]): number {
+  return units.reduce((total, unit) => total + unit.reduce((sum, item) => sum + item.tokens, 0), 0)
 }
 
 /** What one run of the passes produced: the summary text, and how many calls it took. */
@@ -723,7 +714,7 @@ interface RunPassesOptions {
   readonly sliceBudget: number
   readonly sizeCap: number
   readonly planned: number
-  readonly capped: readonly CappedItem[]
+  readonly units: readonly CoveredUnit[]
   readonly running: string | null
 }
 
@@ -748,7 +739,7 @@ async function runPasses(state: RunPassesOptions): Promise<WrittenSummary | null
   let passes = 0
   let index = 0
 
-  while (index < state.capped.length) {
+  while (index < state.units.length) {
     if (options.signal?.aborted === true) {
       return null
     }
@@ -767,18 +758,20 @@ async function runPasses(state: RunPassesOptions): Promise<WrittenSummary | null
       totals = result.totals
       continue
     }
-    const slice: CappedItem[] = []
+    // The slice grows by whole units, so its end never falls inside a tool call's pair (X9).
+    const slice: CoveredUnit[] = []
     let sliceTokens = 0
-    while (index < state.capped.length) {
-      const item = state.capped[index]
-      if (item === undefined) {
+    while (index < state.units.length) {
+      const unit = state.units[index]
+      if (unit === undefined) {
         break
       }
-      if (slice.length > 0 && sliceTokens + item.tokens > state.sliceBudget) {
+      const tokens = unitTokens([unit])
+      if (slice.length > 0 && sliceTokens + tokens > state.sliceBudget) {
         break
       }
-      slice.push(item)
-      sliceTokens += item.tokens
+      slice.push(unit)
+      sliceTokens += tokens
       index += 1
       if (sliceTokens >= state.sliceBudget) {
         break
@@ -790,7 +783,7 @@ async function runPasses(state: RunPassesOptions): Promise<WrittenSummary | null
       options,
       writer,
       instructions,
-      slice.map((item) => item.text).join('\n\n'),
+      slice.flatMap((unit) => unit.map((item) => item.text)).join('\n\n'),
       totals,
       running,
     )
@@ -873,42 +866,4 @@ function messageOf(error: unknown): string {
       ? (error as { message?: unknown }).message
       : undefined
   return typeof message === 'string' && message.length > 0 ? message : String(error)
-}
-
-/**
- * The visible conversation after `afterSeq`, as cut items: user and agent messages with text,
- * oldest first.
- *
- * Only the two message types are history the model was told or said — the same reading the
- * strategy's `conversationAfter` makes — so a span, a status transition, a progress event or
- * another summary is not something the summarizer is handed.
- */
-function conversationItems(events: readonly StoredEvent[], afterSeq: number): ContextCutItem[] {
-  const items: ContextCutItem[] = []
-  for (const event of events) {
-    if (event.seq <= afterSeq) {
-      continue
-    }
-    let role: 'user' | 'assistant'
-    let text: string
-    if (event.type === EVENT_TYPES.userMessage) {
-      role = 'user'
-      text = textOfBlocks(event.content)
-    } else if (event.type === EVENT_TYPES.agentMessage) {
-      role = 'assistant'
-      text = textOfBlocks(event.content)
-    } else {
-      continue
-    }
-    if (text.length === 0) {
-      continue
-    }
-    items.push({ seq: event.seq, role, text, tokens: estimateTokens(text) })
-  }
-  return items
-}
-
-/** A message's text blocks joined into the string the model reads. */
-function textOfBlocks(content: readonly { readonly text: string }[]): string {
-  return content.map((block) => block.text).join('')
 }

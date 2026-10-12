@@ -69,7 +69,7 @@ describe('context compaction over HTTP', () => {
     expect(summary).toMatchObject({
       reason: 'threshold',
       summary_model: 'tiny/model',
-      prompt_version: 'context-summary-v1',
+      prompt_version: 'context-summary-v2',
       passes: 1,
     })
     // The summary covers the oldest messages and leaves the newest verbatim (K4).

@@ -29,6 +29,7 @@ export {
   type ToolRunContext,
 } from './registry'
 export {
+  DEFAULT_TOOL_RESULT_TOKENS,
   DEFAULT_TOOL_TIMEOUT_MS,
   errorResult,
   textResult,

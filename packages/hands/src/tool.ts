@@ -21,6 +21,18 @@ import type { z } from 'zod'
 export const DEFAULT_TOOL_TIMEOUT_MS = 30_000
 
 /**
+ * How much of one call's result the context keeps, when its definition names no cap.
+ *
+ * A result is stored whole — the log is the record — but a request may not carry an unbounded
+ * one: the brain caps a result to a head and a tail around an omission marker, to this many
+ * tokens or the share of the model's budget named in the brain, whichever is smaller
+ * (epic #303, X9; #306). Four thousand tokens is roughly a page of text: enough that a fetch
+ * or a search is still readable, small enough that several of them fit a chat model's history.
+ * A tool whose output is naturally longer — or shorter — says so in its own definition.
+ */
+export const DEFAULT_TOOL_RESULT_TOKENS = 4_096
+
+/**
  * What one tool call produced.
  *
  * `content` is the same text blocks a message carries, because that is the shape the result
@@ -103,6 +115,17 @@ export interface ToolDefinition<Input = unknown> {
   readonly permission: ToolPermission
   /** The most a call may take; {@link DEFAULT_TOOL_TIMEOUT_MS} when omitted. */
   readonly timeoutMs?: number
+  /**
+   * The most of one call's result a model request keeps, in tokens — the tool's half of the cap
+   * the brain applies before a result enters a context (epic #303, X9; #306).
+   *
+   * It is a declaration, not enforcement: the tool still sees the whole result stored in the
+   * log, and a request over the cap carries a head and a tail with an omission marker. The brain
+   * takes the smaller of this and the share of the chat model's budget no single result may take,
+   * so a generous cap cannot overrun a small model's window. Omitted means
+   * {@link DEFAULT_TOOL_RESULT_TOKENS}.
+   */
+  readonly maxResultTokens?: number
   /** Run one call, with the arguments the definition's own schema parsed. */
   run(input: Input, context: ToolExecutionContext): Promise<ToolResult> | ToolResult
 }
