@@ -1,10 +1,16 @@
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider'
 import type { AskUserInput, ModelUsage } from '@openharness/protocol'
-import { ASK_USER_TOOL_NAME, TODO_WRITE_TOOL_NAME } from '@openharness/protocol'
+import {
+  ASK_USER_TOOL_NAME,
+  TASK_WAIT_TOOL_NAME,
+  TODO_WRITE_TOOL_NAME,
+  newTaskId,
+} from '@openharness/protocol'
 import { MockLanguageModelV4 } from 'ai/test'
 
 import type { ModelFactory } from '@openharness/brain'
 
+import { TEST_TASK_TOOL_NAME } from './test-tasks'
 import { TEST_TOOL_NAME } from './tools'
 
 /**
@@ -122,6 +128,51 @@ export const MOCK_MCP_MARKER = '__mcp__'
  * long enough to fold, or a short one that stays open.
  */
 export const MOCK_TODO_MARKER = '__todos__'
+
+/**
+ * The marker that makes the model start a **background task** (epic #340, S4; #343).
+ *
+ * The model calls the test background tool, which returns a handle at once, and the process's
+ * store proxy starts the task and delivers its notification after the delay the marker names —
+ * so a whole background task, end to end (the call, the handle, the `session.task_started` and
+ * its status, the news the parent reacts to) is driven through the real server, scheduler,
+ * brain, store and log. The text after the marker is the delay in milliseconds, defaulting to
+ * {@link TEST_TASK_DELAY_MS}.
+ */
+export const MOCK_TASK_MARKER = '__task__'
+
+/**
+ * The marker that makes the model **wait for background tasks** (epic #340, S5; #343).
+ *
+ * The model calls `agent_wait` and the turn ends `waiting_on_tasks`, holding nothing — which is
+ * what lets an e2e test watch a wait being resolved by a notification, or by its own deadline
+ * (the text after the marker is the timeout in seconds, and a short one is what a test that
+ * wants the deadline rather than the news writes).
+ */
+export const MOCK_WAIT_MARKER = '__wait__'
+
+/**
+ * What a `__task__` prompt's call carries: a task id of its own (so the handle the model reads
+ * and the events the log holds name one task) and the delay the marker names, if any.
+ */
+export function testTaskInputOf(message: string): {
+  task_id: string
+  description: string
+  delay_ms?: number
+} {
+  const asked = Number.parseInt(message.slice(MOCK_TASK_MARKER.length).trim(), 10)
+  return {
+    task_id: newTaskId(),
+    description: 'A test background task',
+    ...(Number.isFinite(asked) && asked >= 0 ? { delay_ms: asked } : {}),
+  }
+}
+
+/** What a `__wait__` prompt's call carries: the timeout the marker names, if any. */
+export function testWaitInputOf(message: string): { timeout_s?: number } {
+  const asked = Number.parseFloat(message.slice(MOCK_WAIT_MARKER.length).trim())
+  return Number.isFinite(asked) && asked > 0 ? { timeout_s: asked } : {}
+}
 
 /** How many items a `__todos__` prompt writes when it does not say. */
 export const MOCK_TODO_DEFAULT_COUNT = 3
@@ -299,6 +350,20 @@ export function planFor(message: string, attempt: number): ModelPlan {
       chunks: [],
       delayMs: 0,
       toolCalls: [{ name: TODO_WRITE_TOOL_NAME, input: todoInputOf(message) }],
+    }
+  }
+  if (message.startsWith(MOCK_TASK_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: TEST_TASK_TOOL_NAME, input: testTaskInputOf(message) }],
+    }
+  }
+  if (message.startsWith(MOCK_WAIT_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: TASK_WAIT_TOOL_NAME, input: testWaitInputOf(message) }],
     }
   }
   if (message.startsWith(MOCK_TOOL_MARKER)) {

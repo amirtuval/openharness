@@ -87,6 +87,20 @@ with `last-event-id: 7` gets `8` next, never `7` twice and never a gap. Resource
 under an offset pager and a millisecond timestamp is not a position; the ULID `id` breaks the tie
 ([`apps/server/AGENTS.md`](../apps/server/AGENTS.md)).
 
+**A queued event is not always the user's, and the event that ends work can be the one that
+consumed it.** `processed_at` is derived from a claim, and until #343 the claim sites were a
+turn's own bookkeeping — a request start claiming the messages it folds in, a span end or an
+idle claiming the interrupts that stopped something. Background tasks added a fourth kind of
+queued event (`session.task_notification`: a task's news, addressed to the parent **model**
+exactly as a message is) and, with it, the first claim site that is not turn bookkeeping at all:
+an `agent.tool_result`. A **wait** for background tasks is resolved *by* the notifications that
+answer it, so the result **is** what they said — and if it did not claim them, the parent's next
+request would be handed the same news a second time as steering, once as a result and once as a
+message. The lesson generalises: a claim belongs on the event that ends the work the consumed
+event was for, and when a result *is* the answer, the result is that event
+([#343](https://github.com/amirtuval/openharness/issues/343),
+[`packages/protocol/src/events/agent.ts`](../packages/protocol/src/events/agent.ts)).
+
 **Usage counters have to be disjoint, cost has to be computed on read, and "a day" is a local
 question.** Providers report cache reads, cache writes, reasoning tokens and audio tokens in
 overlapping fields, so the brain normalises each family into disjoint counters at one seam and
@@ -284,7 +298,19 @@ read at all: a session whose owner has no key for the model's provider ends the 
 
 ## Postgres, migrations and the store
 
-**A migration must never be edited once it has been applied anywhere, and because every file
+**A JSON timestamp compared against a bound parameter is a string comparison, and node-postgres'
+serialization hides it.** A task wait's deadline lives in the payload as ISO text
+(`stop_reason.deadline`) and the recovery scan asks `(payload -> 'stop_reason' ->> 'deadline')
+<= $1`. Kysely binds a JavaScript `Date` with no type OID, so Postgres resolved
+`text <= unknown` as `text <= text` — and node-postgres serializes a `Date` with a **space**
+(`2026-03-15 10:00:05+00`) where `toISOString()` uses a `T`. `'T'` sorts after `' '`, so every
+deadline read as *greater* than now and no wait ever looked expired: "a wait past its deadline is
+resumed" failed against Postgres while the same rule passed in the in-memory store, which is
+what pointed at the SQL rather than at the rule. The fix is an explicit cast on both sides
+(`…::timestamptz <= $1::timestamptz`); the lesson is that a comparison against a `jsonb` field
+needs its type spelled out, because there is no column type to infer it from
+([#343](https://github.com/amirtuval/openharness/issues/343)).
+, and because every file
 re-runs, a data-changing one needs a guard on the state it changes.** The migrator re-runs every
 file on every `migrate()` call and there is no ledger table, so editing an applied file is silently
 ignored on existing databases and applied on new ones — the two drift apart with no error.
@@ -790,6 +816,31 @@ must not hand out a remembered permission
 ([#309](https://github.com/amirtuval/openharness/issues/309),
 [PR #321](https://github.com/amirtuval/openharness/pull/321)).
 
+**A pause can be about something other than the user, and then nothing in the process wakes
+it.** The durable wait of epic #340 S5 (#343) is the #309 pause read across: a call to
+`agent_wait` is stored `ask`, nothing runs it, the turn ends `session.status_idle
+{ stop_reason: { type: waiting_on_tasks, task_ids, deadline } }` — and it holds no lease, no
+slot and no timer, which is the whole point. Two things follow that a user pause does not have.
+A **timer** has to be somewhere: `PassQueue.#afterPass` arms one `unref`'d timeout per session
+from the deadline the turn handed out in its outcome, because nothing in the log wakes a session
+at an instant; and recovery has to be able to answer the same question without it, so
+`findSessionsNeedingWork` reports a `waiting_on_tasks` session whose deadline has passed. The
+second is what makes a wait that outlives the process recoverable rather than stranded, and the
+first is what makes it timely.
+
+**News for one task can resolve a wait for another, and that is deliberate.** S5 says a wait is
+resolved by "the first notification for those tasks", and #343 says other tasks' notifications
+are "folded in as above" — but taken literally, a session waiting for task A whose session also
+ran task B has a real hazard: B's news is a **pending queued event**, which makes the session
+"needing work", and a woken turn that cannot use it for the wait would end waiting again — a
+spin, not a pause. There is also no way out of it: a turn never makes a request while one of its
+own calls has no answer (a provider refuses an assistant turn whose calls are not the next
+message). So a wait is resolved by **any** notification of its session, its own tasks' first;
+the news is the call's result, framed with the task it actually came from, and the model can
+wait again. The alternative — news sitting in the log until the deadline — is the failure the
+whole mechanism exists to prevent ([#343](https://github.com/amirtuval/openharness/issues/343),
+[`packages/brain/src/tasks.ts`](../packages/brain/src/tasks.ts)).
+
 ## Provider-opaque content and reasoning
 
 **Opaque provider content needs its own event, one per model request.** `agent.opaque_content`
@@ -1208,7 +1259,12 @@ suites, while the same suite alone passed 318/318 in 98 seconds against 500 unde
 conclusion was "raise the timeout or stop running the whole graph on four cores", not "the tests are
 flaky". And a wait can pass vacuously when what it waits for is already true of an empty state — a
 wait for "settled" returns immediately on a fresh, idle, _empty_ transcript — so waits have to be
-anchored on a `seq`.
+anchored on a `seq`. #343 added a
+third shape of it: a polling helper that resolves on anything that is **not `undefined`**
+resolves instantly on a `boolean` check that is `false`, which is exactly what a check written
+with `Array.prototype.some` returns — `expect(...).some(...)` inside a helper whose signature is
+`() => T | undefined` has to be written as `find`, or the wait is over before it begins
+([`e2e/src/tasks.test.ts`](../e2e/src/tasks.test.ts)).
 
 **A fake that reimplements a rewrite is telling you the fake is wrong, and a conformance suite run
 against both stores is what makes a fake trustworthy.** The web app carried a local

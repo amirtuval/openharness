@@ -1,6 +1,11 @@
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
-import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
-import { ASK_USER_TOOL_NAME, EVENT_TYPES, WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
+import { MOCK_TOOL_MARKER, TEST_TASK_TOOL_NAME, TEST_TOOL_NAME } from '@openharness/server'
+import {
+  ASK_USER_TOOL_NAME,
+  EVENT_TYPES,
+  TASK_WAIT_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+} from '@openharness/protocol'
 import type { ModelRequestStartEvent, StoredEvent, ToolSettingEntry } from '@openharness/protocol'
 import type { Client } from '@openharness/client'
 import { describe, expect, it } from 'vitest'
@@ -102,6 +107,10 @@ describe('the tool settings over the wire', () => {
     expect(await listTools(server, me)).toEqual([
       listed(ASK_USER_TOOL_NAME),
       listed(TEST_TOOL_NAME),
+      // The background-task hooks ride with the mock model (#343): a task to start, and the
+      // wait a model can end a turn on.
+      listed(TEST_TASK_TOOL_NAME),
+      listed(TASK_WAIT_TOOL_NAME),
       listed(WEB_FETCH_TOOL_NAME),
       listed('todo_write'),
       listed(WEB_SEARCH_TOOL_NAME),
@@ -114,6 +123,8 @@ describe('the tool settings over the wire', () => {
     expect(spans(await readLog(me.client, session.id))[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: TEST_TOOL_NAME, source: 'builtin' },
+      { name: TEST_TASK_TOOL_NAME, source: 'builtin' },
+      { name: TASK_WAIT_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
       // And the provider's own tool, because this chat runs a Claude (#335).
@@ -148,6 +159,8 @@ describe('the tool settings over the wire', () => {
     // which the user left on, and the built-ins.
     expect(spans(log)[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: TEST_TASK_TOOL_NAME, source: 'builtin' },
+      { name: TASK_WAIT_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
       { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
@@ -171,6 +184,8 @@ describe('the tool settings over the wire', () => {
         builtin: {
           [ASK_USER_TOOL_NAME]: { enabled: false, policy: 'allow' },
           [TEST_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [TEST_TASK_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [TASK_WAIT_TOOL_NAME]: { enabled: false, policy: 'allow' },
           [WEB_FETCH_TOOL_NAME]: { enabled: false, policy: 'allow' },
           [WEB_SEARCH_TOOL_NAME]: { enabled: false, policy: 'allow' },
           todo_write: { enabled: false, policy: 'allow' },

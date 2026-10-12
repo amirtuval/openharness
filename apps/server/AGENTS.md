@@ -755,6 +755,49 @@ answer is the **effective** state of each tool:
   the map as written (`routes/modes.ts`) and nothing re-writes a mode when a server is deleted.
   See [Remote MCP servers](#remote-mcp-servers-epic-303-x10).
 
+### Background tasks (epic #340, S4/S5; #343)
+
+A session can start work it does not wait for, and `tasks.ts` is the server's half: the inbox
+anything that runs a task writes through. The store owns the durable parts — the queued
+notification and the idempotent append on `source_key`
+(`SessionStore.appendTaskNotification`, `@openharness/session`, migration `0034`) — and this
+owns the two a store cannot: the events that are _not_ notifications, written through the same
+append path, and the **wake**, so a chat reacts on its own instead of waiting for a sweep.
+
+- **`createTaskNotifier({ store, signal })`** is built once in `main.ts` and handed to whatever
+  starts a task: `startTask` writes `session.task_started` and its `running` status in one
+  append, `setStatus` writes a status, and `notify` writes the news and signals the scheduler
+  `work`. The signal is sent whether or not the append stored something new — a redundant wake
+  costs a turn that finds nothing to do, while a missing one is exactly the failure the signal
+  exists to prevent, and the store's work scan is the net under both.
+- **Nothing about it is fenced.** A task's side appends without a `fence`, exactly as the API
+  appends a user's message: the notification is a _queued_ event, so its durability is the
+  store's and the owner's brain is what claims it.
+- **The wait has its own timer, in the queue.** A turn that ends `waiting_on_tasks` holds no
+  lease, no slot and no open request, so nothing in the process would resume it —
+  `PassQueue.#afterPass` arms a single `unref`'d timer per session at the deadline the turn
+  handed out (`TurnOutcome.waiting`), and that timer asks the queue for one more pass. A wait
+  that outlives the process is recovered by `findSessionsNeedingWork`, which reports a
+  `waiting_on_tasks` session whose deadline has passed (#343) — the two paths are the same turn
+  as far as the brain is concerned.
+- **The tools are the mock model's, until #344.** `createTurnRegistry` adds
+  `testTaskTool` (`task_start`) and `testTaskWaitTool` (`agent_wait`) under
+  `OPENHARNESS_TEST_MODEL=mock`, and `main.ts` wraps the store with
+  `withTestBackgroundTasks` in the same mode. A real deployment gets neither yet: the tool a
+  chat waits with belongs to [#344](https://github.com/amirtuval/openharness/issues/344), which
+  registers it (and the one that starts a subagent) beside these.
+- **The test hook is a store proxy, and that is the only shape that works.** A tool cannot
+  append: `ToolRunContext` is a signal and a secret map, and a tool has no idea which session it
+  was called in. The process that owns the store does, so `withTestBackgroundTasks` watches for
+  a call to the test tool and plays the task's own side — the start, then the status and the
+  notification after the delay the call asked for, through the _same_ `notify` a subagent will
+  use. It is the `withSessionTraces` pattern (#158): one seam, forwarding everything.
+- **The mock model makes it drivable.** `__task__ [delay_ms]` calls `task_start` with a
+  `task_id` it minted itself (so the handle the model reads and the events the log holds name
+  one task) and `__wait__ [timeout_s]` calls `agent_wait`, which is what lets
+  `e2e/src/tasks.test.ts` drive a whole task — and a whole wait, deadline included — through the
+  real server.
+
 ### Pausing for the user (epic #303, X6; #309)
 
 A turn can end because it is waiting for the user, and this server is the half that decides
@@ -1580,15 +1623,17 @@ and no network. It is an AI SDK `MockLanguageModelV4`, streamed through the same
 path a real provider goes through, and it lives in `mock-model.ts`; `resolveModelFactory` is
 the only thing that constructs it, and it only does so when the variable says `mock`:
 
-| last user message    | what happens                                                                                                                                                         |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| anything else        | echoed back in 4 chunks, 25 ms apart                                                                                                                                 |
-| `__slow__`           | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests                                                                                          |
-| `__hold__`           | one chunk, then nothing: the request stays open until it is aborted                                                                                                  |
-| `__fail_retryable__` | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo                                                                                          |
-| `__fail_terminal__`  | HTTP 400 (`model_request_failed_error`) on every attempt                                                                                                             |
-| `__ask__`            | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309)                                                                                       |
-| `__todos__ [n]`      | calls `todo_write` with `n` items (three when it is not said), so a chat's task list can be driven through the whole server (#305; the terminal's pinned list, #308) |
+| last user message      | what happens                                                                                                                                                                                                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| anything else          | echoed back in 4 chunks, 25 ms apart                                                                                                                                                                                         |
+| `__slow__`             | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests                                                                                                                                                  |
+| `__hold__`             | one chunk, then nothing: the request stays open until it is aborted                                                                                                                                                          |
+| `__fail_retryable__`   | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo                                                                                                                                                  |
+| `__fail_terminal__`    | HTTP 400 (`model_request_failed_error`) on every attempt                                                                                                                                                                     |
+| `__ask__`              | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309)                                                                                                                                               |
+| `__todos__ [n]`        | calls `todo_write` with `n` items (three when it is not said), so a chat's task list can be driven through the whole server (#305; the terminal's pinned list, #308)                                                         |
+| `__task__ [delay_ms]`  | calls `task_start`, the test background tool (#343): the handle comes back at once, and the process's store proxy starts the task and reports back after the delay — the whole background-task path, through the real server |
+| `__wait__ [timeout_s]` | calls `agent_wait` (#343), so the turn ends `waiting_on_tasks` — resolved by a task's news, by its deadline (the queue's timer), or by a message                                                                             |
 
 A marker matches the _start_ of the message, so `__slow__ tell me something` still streams
 slowly. The message a marker is matched against is the newest one that is not the brain's own
@@ -1819,6 +1864,8 @@ before the instance stops serving it (#151).
 | `createContextCompactionResolver`, `ContextCompactionDeps`                                                                                                                                                                                                                                                                                                                          | the per-owner compaction resolver (epic #277 C3; #282): the session owner's stored threshold, summary model and pass limit, resolved per request over `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's budgets                                                                                                                                                                                        |
 | `createReasoningSupportResolver`                                                                                                                                                                                                                                                                                                                                                    | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                                                                                                                                                                                                                                                                                |
 | `createTurnRegistry`, `createTurnTools`, `TurnRegistryOptions`, `TurnToolsOptions`, `TurnToolOptions`                                                                                                                                                                                                                                                                               | the registry a process runs with — `ask_user` and the built-ins of #305 for every process, and the test `echo` tool under `OPENHARNESS_TEST_MODEL=mock` (the provider-native `web_search` is no tool of ours, so nothing is registered for it, #335) — and the tools a turn is handed: that registry, the settings resolver (#307), the support gate and the step budget                                   |
+| `createTaskNotifier`, `TaskNotifier`, `TaskNotifierDeps`, `StartTaskInput`, `NotifyTaskInput`, `taskDescription`                                                                                                                                                                                                                                                                    | the inbox (epic #340, S4; #343): `startTask` (the task and its `running` status in the parent's log), `setStatus`, and `notify` — a task's news written through the store's idempotent append and the parent woken (`work`)                                                                                                                                                                                |
+| `testTaskTool`, `testTaskWaitTool`, `withTestBackgroundTasks`, `TestBackgroundTasksOptions`, `TestTaskInputSchema`, `TestTaskInput`, `TEST_TASK_TOOL_NAME`, `TEST_TASK_TOOL_DESCRIPTION`, `TEST_TASK_DELAY_MS`, `TEST_TASK_RESULT`                                                                                                                                                  | the test hooks (#343), wired only under `OPENHARNESS_TEST_MODEL=mock`: a tool that returns a handle at once, the `agent_wait` a test model pauses on, and the store proxy that starts a task on a call to it and delivers its notification after the delay the call asked for                                                                                                                              |
 | `askUserTool`, `assertConfirmations`, `rememberAlwaysApprovals`, `withAlwaysApprovals`, `isConfirmation`, `PausingDeps`, `RememberDeps`, `AlwaysApproval`                                                                                                                                                                                                                           | the pause's server half (epic #303, X6; #309; the remote pair: #312): the `ask_user` tool every deployment registers, the checks a `user.tool_confirmation` passes (a call of this session is waiting — built-in or remote — the answers fit its questions, the extensions make sense for it), and the stored policy an `always` approval writes (a built-in's `enabled`+`policy`, a remote tool's policy) |
 | `effectiveTools`, `toolSettingEntries`, `toolDecisions`, `createToolSettingsResolver`, `listToolSettings`, `ToolSettingsDeps`                                                                                                                                                                                                                                                       | the per-user tool settings (epic #303, X4; #307; the remote half: #312): the effective answer, as the wire's entries, as the brain's decisions, the resolver `runTurn` is handed, and the listing a route makes (a mode's override and the owner's in-force MCP servers included)                                                                                                                          |
 | `createMcpToolProvider`, `McpToolProviderOptions`, `DEFAULT_MCP_TOOL_CACHE_TTL_MS`, `DEFAULT_MCP_LISTING_TIMEOUT_MS`                                                                                                                                                                                                                                                                | the remote tools a request may offer (#312): the listing — the in-force servers, their tools as `createMcpTool` definitions, a short cache keyed per user and server, and a failure per server that could not be listed — as the brain's `McpToolProvider`                                                                                                                                                 |
@@ -1919,6 +1966,12 @@ src/
   pausing.ts            the pause (epic #303, X6; #309): the `ask_user` tool every deployment
                         registers, and the checks a `user.tool_confirmation` passes before it is
                         stored
+  tasks.ts              the inbox (epic #340, S4; #343): the one function anything that runs a
+                        background task writes through — start, status, and the notification the
+                        store makes idempotent — and the wake that follows it
+  test-tasks.ts         the test hooks for background tasks (#343): the tool the mock model
+                        starts one with, the `agent_wait` a test model waits with, and the store
+                        proxy that plays a task's own side (mock model only)
   tool-settings.ts      the per-user tool settings (epic #303, X4; #307): the effective answer
                         a settings screen and the brain both read, and the resolver the loop
                         is handed
@@ -2085,6 +2138,16 @@ parallel with each other.
   keep the short TTL. `DATABASE_URL` when it is set, otherwise a container, otherwise the
   suite is skipped with a note.
 - `ai-sdk.test.ts` — the adapter through `DefaultChatTransport` and `readUIMessageStream`.
+- `tasks.test.ts` (#343) — the server's half of background tasks, in three parts. The inbox:
+  a task's start and its `running` status, the description bounded rather than refused, and
+  `notify` delivering once per `source_key` while waking the session every time. The wait,
+  over HTTP: a turn that called `agent_wait` ends idle naming its tasks and deadline; the
+  news a task reports becomes the call's result — claimed by it, and not also folded in as a
+  message — the wait named no task for takes the first news of any, a valid-timeout deadline
+  fires the queue's own timer (`The wait timed out`, naming what is still running), and a
+  `user.message` resolves it with the sentence a moved-on reader gets. The tools: the handle
+  the test tool returns, the `run` a hand-called `agent_wait` gets, and that the two are
+  registered for the mock model and never for a provider-backed deployment.
 - `mock-model.test.ts` — the echo, `__slow__`, `__hold__` (a held turn ending on the
   interrupt that aborts it), both failure markers, fixed usage, and that the hook cannot
   activate without the variable.

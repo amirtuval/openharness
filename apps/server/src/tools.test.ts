@@ -1,10 +1,15 @@
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
 import type { ToolRegistry } from '@openharness/hands'
-import { ASK_USER_TOOL_NAME, WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
+import {
+  ASK_USER_TOOL_NAME,
+  TASK_WAIT_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+} from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 import { describe, expect, it } from 'vitest'
 
 import { emptyRegistry } from './catalog/registry'
+import { TEST_TASK_TOOL_NAME } from './test-tasks'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
 import {
   createTestToolRegistry,
@@ -64,10 +69,15 @@ describe('createTurnRegistry and createTurnTools', () => {
     expect(turn.resolveToolSecrets).toBeUndefined()
   })
 
-  it('adds the test tool for the mock model, after ask_user and ahead of the built-ins', () => {
+  it('adds the test tools for the mock model, after ask_user and ahead of the built-ins', () => {
+    // The `echo` tool, and — since #343 — the two background-task hooks: a task the mock model
+    // can start, and the wait a model can end a turn on. They ride with the mock model rather
+    // than with a deployment, because the tool a real chat waits with is #344's.
     expect(turnTools({ kind: 'mock' }).names).toEqual([
       ASK_USER_TOOL_NAME,
       TEST_TOOL_NAME,
+      TEST_TASK_TOOL_NAME,
+      TASK_WAIT_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
     ])
@@ -89,12 +99,16 @@ describe('createTurnRegistry and createTurnTools', () => {
     expect(await turn.toolSettings?.('user_a', null)).toEqual({
       [ASK_USER_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TOOL_NAME]: { enabled: false, permission: 'deny' },
+      [TEST_TASK_TOOL_NAME]: { enabled: true, permission: 'allow' },
+      [TASK_WAIT_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [WEB_SEARCH_TOOL_NAME]: { enabled: true, permission: 'allow' },
     })
     // A user who has saved nothing gets each tool's own declaration: offered, and allowed.
     expect(await turn.toolSettings?.('user_b', null)).toEqual({
       [ASK_USER_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TOOL_NAME]: { enabled: true, permission: 'allow' },
+      [TEST_TASK_TOOL_NAME]: { enabled: true, permission: 'allow' },
+      [TASK_WAIT_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [WEB_SEARCH_TOOL_NAME]: { enabled: true, permission: 'allow' },
     })
   })
@@ -128,6 +142,8 @@ describe('createTurnRegistry and createTurnTools', () => {
     expect(createTestToolRegistry().tools.map((tool) => tool.name)).toEqual([
       ASK_USER_TOOL_NAME,
       TEST_TOOL_NAME,
+      TEST_TASK_TOOL_NAME,
+      TASK_WAIT_TOOL_NAME,
     ])
   })
 

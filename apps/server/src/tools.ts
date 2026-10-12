@@ -20,6 +20,7 @@ import { createMcpToolProvider } from './mcp/tools'
 import type { McpServerService } from './mcp/service'
 import type { ResolvedModel } from './model'
 import { askUserTool } from './pausing'
+import { testTaskTool, testTaskWaitTool } from './test-tasks'
 import { createToolSettingsResolver } from './tool-settings'
 import type { Logger } from './types'
 
@@ -75,7 +76,7 @@ export const testEchoTool: ToolDefinition<{ text: string }> = {
 
 /** The registry the test hook runs with: {@link testEchoTool} beside the real {@link askUserTool}. */
 export function createTestToolRegistry(): ToolRegistry {
-  return createToolRegistry([askUserTool, testEchoTool])
+  return createToolRegistry([askUserTool, testEchoTool, testTaskTool, testTaskWaitTool])
 }
 
 /**
@@ -106,7 +107,9 @@ export interface TurnRegistryOptions {
 export function createTurnRegistry(options: TurnRegistryOptions): ToolRegistry {
   const tools: ToolDefinition[] = [askUserTool]
   if (options.kind === 'mock') {
-    tools.push(testEchoTool)
+    // The background-task hooks (epic #340, S4/S5; #343): a task the mock model can start, and
+    // the wait a model can end a turn on. A deployment's own `agent_wait` is #344's.
+    tools.push(testEchoTool, testTaskTool, testTaskWaitTool)
   }
   tools.push(createWebFetchTool(), todoWriteTool)
   return createToolRegistry(tools)

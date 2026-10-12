@@ -248,9 +248,13 @@ export {
   MOCK_SLOW_CHUNKS,
   MOCK_SLOW_MARKER,
   MOCK_SLOW_TOTAL_MS,
+  MOCK_TASK_MARKER,
   MOCK_TERMINAL_MARKER,
   MOCK_TOOL_MARKER,
+  MOCK_WAIT_MARKER,
   planFor,
+  testTaskInputOf,
+  testWaitInputOf,
 } from './mock-model'
 export {
   MOCK_CREDENTIAL,
@@ -289,6 +293,26 @@ export {
   type TurnToolsOptions,
 } from './tools'
 export { askUserTool, withAlwaysApprovals } from './pausing'
+export {
+  createTaskNotifier,
+  taskDescription,
+  type NotifyTaskInput,
+  type StartTaskInput,
+  type TaskNotifier,
+  type TaskNotifierDeps,
+} from './tasks'
+export {
+  TEST_TASK_DELAY_MS,
+  TEST_TASK_RESULT,
+  TEST_TASK_TOOL_DESCRIPTION,
+  TEST_TASK_TOOL_NAME,
+  TestTaskInputSchema,
+  testTaskTool,
+  testTaskWaitTool,
+  withTestBackgroundTasks,
+  type TestBackgroundTasksOptions,
+  type TestTaskInput,
+} from './test-tasks'
 export {
   createToolSettingsResolver,
   effectiveTools,

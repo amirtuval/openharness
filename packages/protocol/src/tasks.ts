@@ -143,7 +143,9 @@ export type TaskWaitInput = z.infer<typeof TaskWaitInputSchema>
  */
 export function taskWaitInputProblems(value: unknown): string[] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return ['the arguments must be an object: an optional `task_ids` list and an optional `timeout_s`']
+    return [
+      'the arguments must be an object: an optional `task_ids` list and an optional `timeout_s`',
+    ]
   }
   const problems: string[] = []
   const { task_ids: taskIds, timeout_s: timeout } = value as {

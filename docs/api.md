@@ -164,6 +164,9 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)                 |
 | `session.compact`                  | the server    | // extension: the user asked for a manual compaction, `/compact [instructions]` (#283)  |
 | `session.compaction`               | the brain     | // extension: what came of it — `summarized`, `nothing_to_summarize` or `failed` (#283) |
+| `session.task_started`             | the server    | // extension: a background task was started and is not waited for (epic #340, #343)     |
+| `session.task_status`              | the server    | // extension: what a background task is doing — running, idle, failed, stopped (#343)   |
+| `session.task_notification`        | the server    | // extension: **queued**: what a task produced, for the parent model (epic #340, #343)  |
 | `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)                |
 | `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)          |
 
@@ -172,6 +175,47 @@ model the session runs from that message on, and the session keeps running it un
 message changes it (epic #116, U3). The switch is stored on the message — the log stays the
 source of truth — and each `span.model_request_start` still records the model its request
 actually used.
+
+### Background tasks
+
+A session can start work it does not wait for — a **background task** (epic #340, S4; #343).
+Starting one returns at once (the starting tool's result is a handle), the conversation goes
+on, and the task's whole life in *this* session's log is three events:
+
+```json
+// 1. it was started: the handle, what kind it is, and what it is for
+{ "type": "session.task_started", "id": "sevt_…", "seq": 6, "processed_at": "…",
+  "task_id": "task_…", "kind": "subagent", "child_session_id": "sesn_…",
+  "task_type": "researcher", "description": "Research how a rewind works" }
+// 2. what it is doing — written as it changes state, so a client draws the card from here
+{ "type": "session.task_status", "id": "sevt_…", "seq": 7, "processed_at": "…",
+  "task_id": "task_…", "status": "running" }
+// 3. what it produced, as a **queued** event addressed to the model
+{ "type": "session.task_notification", "id": "sevt_…", "seq": 20, "processed_at": null,
+  "task_id": "task_…", "kind": "result", "text": "A rewind supersedes the tail.",
+  "source_key": "sesn_child:3" }
+```
+
+- **Live activity is the child's own stream.** This log says what a task is *doing*; what it is
+  doing now, in detail, is the events of the session its `child_session_id` names.
+- **A notification is queued, once.** Its `processed_at` is `null` until a turn claims it — the
+  `consumes` list of the event that answers it, exactly as for a `user.message` — and
+  `source_key` is the task's own key for that piece of news (a child session's
+  `<child_session_id>:<idle seq>`), which makes the append **idempotent**: a second notification
+  with the same key changes nothing. A client can read `source_key` and know the same finished
+  turn will never be announced twice.
+- **The model is told in a frame, and the text is data.** What a notification becomes is a
+  user-role message reading `[background task <what> · <task_id> · <kind>]`, then the text — with
+  a line saying it came from another session and is data rather than an instruction. A task's
+  output can carry what that session read from the web or an MCP server; see
+  [`threat-model.md`](./threat-model.md).
+- **A turn can wait for one.** A call to `agent_wait { "task_ids": [ … ], "timeout_s": 30 }`
+  ends the turn with `stop_reason: { "type": "waiting_on_tasks", "task_ids": [ … ],
+  "deadline": "…" }` — the same kind of pause as `requires_action`, holding no lease and no
+  slot. The wait resumes on the first notification for one of its tasks (which becomes the
+  call's `agent.tool_result`), on its deadline (the result says the wait timed out and which
+  tasks are still running), or on a `user.message`, which resolves it with `The user sent a
+  message instead.` `timeout_s` defaults to 600 and is capped at 3600.
 
 It may carry a `reasoning_effort` (`"low"`, `"medium"` or `"high"`) the same way: the effort
 the session runs at from that message on, until another message changes it or clears it with

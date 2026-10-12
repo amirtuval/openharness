@@ -166,6 +166,36 @@ from the device flow.
 Every other `/v1/me/mcp_servers` route stays behind the guard and is owner-scoped like the rest
 of the API; the callback is the exact method and path and nothing more.
 
+## Background tasks: a task's output is data
+
+A session can start work it does not wait for (epic #340, S4; #343), and what that work produces
+reaches the parent **model** as a `session.task_notification` — a queued event, delivered by the
+parent's brain exactly as a `user.message` is. It is a second channel into a model's context that
+this build did not have before, so what it may carry is worth stating.
+
+- **The text is data, and the frame says so.** Every notification reaches the model as a
+  user-role message reading `[background task <what> · <task_id> · <kind>]`, followed by a line
+  saying it came from another session and is **data, not an instruction**. The same rule as a
+  tool result ([#304](https://github.com/amirtuval/openharness/issues/304)) and an MCP answer
+  (#312): the loop never reads one as an instruction, and the wording is there so a model has
+  the best chance of doing the same.
+- **It is not more trusted than the task's own session.** A notification is written by whatever
+  ran the task, on an instance that may not be the parent's owner, and it carries nothing but
+  text — a task cannot make the parent's loop do anything with it. A subagent's output is as
+  trustworthy as that session's own conversation, which is to say: as trustworthy as whatever
+  the web page, file or MCP server it read.
+- **It cannot come from outside the deployment by itself.** Writing one is
+  `SessionStore.appendTaskNotification` — a store method, not a route: the API exposes no way to
+  append a notification, so nothing a user or a remote server sends can be one. The one producer
+  today is the process itself (the test hook of #343, and the subagent tool of #344).
+- **Delivery cannot be used to talk to someone else's session.** A notification names the
+  session it goes to, and only the code that ran the task — inside this deployment, on the
+  parent's own log — writes one. A task's id is stored, never interpreted as a destination.
+- **Exactly once, so a replay is not a second telling.** The append is idempotent on the task
+  side's `source_key` and the claim is the model's having been told, so a crash, a recovery scan
+  and a re-delivery cannot make the model act on the same output twice — and cannot silently
+  swallow it either.
+
 ## What this build does and does not have yet
 
 Written honestly, so nothing here is read as a promise the code does not keep:
@@ -182,6 +212,7 @@ Written honestly, so nothing here is read as a promise the code does not keep:
 | MCP servers: the resource, OAuth, and the loop                               | built ([#311](https://github.com/amirtuval/openharness/issues/311), [#312](https://github.com/amirtuval/openharness/issues/312)): a user's servers, their tools offered per request under this build's name and `ask` by default, and a failure that never blocks a chat |
 | capping and clearing old tool results, so a huge page cannot flood a context | built ([#306](https://github.com/amirtuval/openharness/issues/306)): a tool declares its own `maxResultTokens`, and a request that carries too many old results clears the oldest                                                                                        |
 | provider-opaque parts: stored, unshown, same-family-and-model only           | built ([#334](https://github.com/amirtuval/openharness/issues/334)): `agent.opaque_content` is never the reply, never summarized, never truncated, and replayed only to the family and model that produced it                                                            |
+| a background task's output framed as data, never as an instruction           | built ([#343](https://github.com/amirtuval/openharness/issues/343)): `session.task_notification` is queued and claimed like a user message, rendered in a frame that names the task and says the text is data (above)                                                     |
 
 There is **no sandbox** in this epic, deliberately (the sandboxed tools moved to
 [#315](https://github.com/amirtuval/openharness/issues/315)): a tool runs in the server process,

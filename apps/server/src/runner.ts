@@ -116,6 +116,12 @@ export interface RunSessionOptions {
 /** The outcome of a pass that found nothing to do. */
 const NOOP: TurnOutcome = { outcome: 'noop' }
 
+/**
+ * Re-exported for the queue beside this one: what a pass resolved to, and — since #343 — the
+ * task wait it ended in, which is what arms the deadline timer.
+ */
+export type { TurnOutcome }
+
 /** What a pass in flight keeps: its abort controller, its promise, and what it has been told. */
 interface TurnHandle {
   /** Aborting this ends the turn in flight at its next safe point. */
@@ -457,16 +463,20 @@ export class SessionRunner {
   }
 
   /**
-   * Whether the log has more for this session: user events nobody has claimed, or a turn that
-   * is still open.
+   * Whether the log has more for this session: queued events nobody has claimed — the user's
+   * own, or a background task's news (epic #340, S4; #343) — or a turn that is still open.
    *
-   * Both are the store's answers, and both are what `findSessionsNeedingWork` looks at — a
-   * pass that ends here would leave exactly the work recovery would later pick up.
+   * All three are the store's answers, and all three are what `findSessionsNeedingWork` looks
+   * at — a pass that ends here would leave exactly the work recovery would later pick up.
    */
   async #hasMoreWork(sessionId: SessionId): Promise<boolean> {
     try {
       const pending = await this.#store.getPendingUserEvents(sessionId)
       if (pending.length > 0) {
+        return true
+      }
+      const notifications = await this.#store.getPendingTaskNotifications(sessionId)
+      if (notifications.length > 0) {
         return true
       }
       const turn = await this.#store.getTurnState(sessionId)
