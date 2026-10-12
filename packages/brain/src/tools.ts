@@ -365,7 +365,7 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
         : agentMcpToolUse(remote.serverName, remote.toolName, input, permission)
     }),
   )
-  const context: ToolRunContext = {
+  const baseContext: ToolRunContext = {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
   }
@@ -395,6 +395,14 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
         return problem === null ? null : errorResult(problem)
       }
       if (runs(registry, call.name, decision.permission)) {
+        // The call's own id — the event just stored for it, which *is* its id (X1) — so a tool
+        // that writes an event naming the call that caused it (the `agent` tool's
+        // `session.task_started`, #345) has it without having to guess.
+        const storedCall = stored[index]
+        const context: ToolRunContext = {
+          ...baseContext,
+          ...(storedCall === undefined ? {} : { toolUseId: storedCall.id }),
+        }
         return await registry.execute(call.name, input, context)
       }
       return errorResult(refusal(call.name))

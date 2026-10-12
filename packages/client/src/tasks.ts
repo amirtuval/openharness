@@ -9,6 +9,7 @@ import {
 } from '@openharness/protocol'
 import type {
   DeepReadonly,
+  EventId,
   SessionId,
   StoredEvent,
   TaskKind,
@@ -121,11 +122,12 @@ export interface TaskCard {
    * Where the card draws: the `seq` of the `agent` call that started the task.
    *
    * The task's own `session.task_started` arrives a step later — the tool writes it while it
-   * runs — so the call's position is found by matching the start back to the nearest
-   * unmatched `agent` call with the same description (see {@link tasksFromEvents}). A log that
-   * no longer holds the call — a trimmed replay — falls back to the start event's own `seq`,
-   * which is where the call's two suppressed lines would have been anyway. Either way it is
-   * the position the transcript's `agent*` call was **not** drawn at
+   * runs — and it names that call in `tool_use_id`, so the card sits exactly where the call is
+   * (see {@link tasksFromEvents}). A start **without** the field (a log stored before it
+   * existed) is matched to the nearest unmatched `agent` call with its own description
+   * instead, and one whose call the log no longer holds — a trimmed replay — falls back to the
+   * start event's own `seq`, which is where the call's two suppressed lines would have been
+   * anyway. Either way it is the position the transcript's `agent*` call was **not** drawn at
    * ({@link TranscriptState.taskEvents}): the card takes its place.
    */
   readonly position: number
@@ -185,7 +187,9 @@ export function taskCardStatus(status: TaskCardStatus, waiting: boolean): TaskCa
  *
  * One pass over the events, and the whole card comes out of it:
  *
- * - `session.task_started` opens a card and places it at the `agent` call that started it;
+ * - `session.task_started` opens a card and places it at the `agent` call that started it —
+ *   the call whose id its `tool_use_id` names, or, for a start without one, the nearest
+ *   unmatched `agent` call carrying its description;
  * - `session.task_status` moves the status, the newest one winning;
  * - `session.task_notification` adds a line (`message`) or the latest outcome (`result` /
  *   `failed`);
@@ -205,10 +209,11 @@ export function taskCardStatus(status: TaskCardStatus, waiting: boolean): TaskCa
  */
 export function tasksFromEvents(events: Iterable<StoredEvent>): readonly TaskCard[] {
   const builders = new Map<string, Builder>()
-  // The `agent` calls the log has offered and no start has claimed yet, oldest first: a call
-  // completes before the model can make the next one, so the match for a start is the nearest
-  // unmatched call, and matching on the description keeps a call that started nothing — one
-  // the live-task limit refused — from stealing a later task's place.
+  // The `agent` calls the log has offered and no start has claimed yet, oldest first. A start
+  // names its call in `tool_use_id`, which is the exact join; the order and the description
+  // matter only for a start that carries none (a log stored before the field existed), where
+  // the match is the nearest unmatched call with the same description — which keeps a call that
+  // started nothing (one the live-task limit refused) from stealing a later task's place.
   const calls: AgentCall[] = []
 
   for (const event of events) {
@@ -216,7 +221,7 @@ export function tasksFromEvents(events: Iterable<StoredEvent>): readonly TaskCar
       const name = toolCallOfferedName(event)
       const input = toolCallInput(event)
       if (name === AGENT_TOOL_NAME) {
-        calls.push({ seq: event.seq, description: stringField(input, 'description') })
+        calls.push({ id: event.id, seq: event.seq, description: stringField(input, 'description') })
       } else if (name === AGENT_MESSAGE_TOOL_NAME) {
         const taskId = stringField(input, 'task_id')
         const text = stringField(input, 'text')
@@ -238,7 +243,7 @@ export function tasksFromEvents(events: Iterable<StoredEvent>): readonly TaskCar
         parentStatus: 'running',
         messages: [],
         result: null,
-        position: claimCall(calls, event.description) ?? event.seq,
+        position: claimCall(calls, event.tool_use_id, event.description) ?? event.seq,
       }
       builders.set(event.task_id, builder)
       continue
@@ -282,6 +287,8 @@ export function tasksFromEvents(events: Iterable<StoredEvent>): readonly TaskCar
 
 /** The `agent` call a `session.task_started` has not claimed yet. */
 interface AgentCall {
+  /** The call's own id — the event's id, which is the call's id (X1) — a start names it by. */
+  readonly id: EventId
   readonly seq: number
   readonly description: string | null
 }
@@ -310,16 +317,34 @@ function cardStatus(status: TaskStatus, hasResult: boolean): TaskCardStatus {
 /**
  * The `agent` call that started a task, or `null` when the log no longer holds it.
  *
- * The nearest **unmatched** call whose description is the task's own is the one: the
- * description is what the starter wrote for a reader, and it is the only field the call and
- * the start share. The matched call is removed so that two tasks cannot claim one call, and a
- * call that matches nothing — a start reported without its call in the window — leaves the
- * others alone.
+ * A start that names its call (`tool_use_id`) is answered by that call alone — the exact join,
+ * and why the field was added (#345): two calls may share a description, and the older
+ * heuristic then put a card at the wrong one. The id is matched against the calls this fold has
+ * seen, and anything it cannot find (a trimmed replay) is `null`, so the card falls back to the
+ * start's own `seq` rather than being placed at some other call.
+ *
+ * A start **without** the field — every log stored before it existed — keeps the old heuristic:
+ * the nearest unmatched call whose description is the task's own, which is what the call and
+ * the start share there. A matched call is removed so two tasks cannot claim one call, and a
+ * call that matches nothing leaves the others alone.
  *
  * @param calls the unmatched `agent` calls, oldest first
- * @param description the task's own description
+ * @param toolUseId the id of the call that started the task, when the start names one
+ * @param description the task's own description — the fallback's only join
  */
-function claimCall(calls: AgentCall[], description: string): number | null {
+function claimCall(
+  calls: AgentCall[],
+  toolUseId: EventId | undefined,
+  description: string,
+): number | null {
+  if (toolUseId !== undefined) {
+    const index = calls.findIndex((call) => call.id === toolUseId)
+    if (index === -1) {
+      return null
+    }
+    const [call] = calls.splice(index, 1)
+    return call?.seq ?? null
+  }
   for (let index = calls.length - 1; index >= 0; index -= 1) {
     if (calls[index]?.description === description) {
       const [call] = calls.splice(index, 1)

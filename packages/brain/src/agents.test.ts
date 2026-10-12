@@ -263,6 +263,11 @@ describe('starting a helper (S3/S4/S5; #344)', () => {
       task_type: RESEARCHER.name,
       description: 'Check the rewind path',
     })
+    // The start names the call that caused it (#345): the `agent.tool_use` event's own id, which
+    // is the call's id — the exact join a client draws the card at.
+    const call = of(log, EVENT_TYPES.agentToolUse)[0]
+    expect(call).toBeDefined()
+    expect(started?.tool_use_id).toBe(call?.id)
     expect(of(log, EVENT_TYPES.sessionTaskStatus)[0]?.status).toBe('running')
 
     // A child is a real session: owned by the parent's owner, parented, one level deeper, not a

@@ -1,4 +1,10 @@
-import type { SessionId, TaskId, TaskNotificationKind, TaskStatus } from '@openharness/protocol'
+import type {
+  EventId,
+  SessionId,
+  TaskId,
+  TaskNotificationKind,
+  TaskStatus,
+} from '@openharness/protocol'
 import { EVENT_TYPES, TASK_DESCRIPTION_MAX_LENGTH, TASK_KINDS } from '@openharness/protocol'
 import type { SessionStore, TaskNotificationAppend } from '@openharness/session'
 
@@ -36,6 +42,12 @@ export interface StartTaskInput {
   readonly taskId: TaskId
   /** The session the task runs in, when it has one. */
   readonly childSessionId?: SessionId
+  /**
+   * The tool call that started it, when a tool call did — the id of the `agent.tool_use` whose
+   * result was the handle (the event's id *is* the call's id). A card is drawn at that call
+   * rather than matched to it by description, so a starter that has the id passes it on.
+   */
+  readonly toolUseId?: EventId
   /** The kind's own sub-kind (a subagent's type, #342), when the starter named one. */
   readonly taskType?: string
   /** What the task is for — a card's line, bounded by the protocol. */
@@ -95,6 +107,7 @@ export function createTaskNotifier(deps: TaskNotifierDeps): TaskNotifier {
           type: EVENT_TYPES.sessionTaskStarted,
           task_id: input.taskId,
           kind: TASK_KINDS[0],
+          ...(input.toolUseId === undefined ? {} : { tool_use_id: input.toolUseId }),
           ...(input.childSessionId === undefined ? {} : { child_session_id: input.childSessionId }),
           ...(input.taskType === undefined ? {} : { task_type: input.taskType }),
           description: taskDescription(input.description),

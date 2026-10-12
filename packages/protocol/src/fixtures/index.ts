@@ -970,6 +970,9 @@ export function makeSessionCompaction(
  * The default is a subagent — the first kind of task, and the one the first user of this
  * mechanism starts — with a child session and a type. Override `kind`/`task_type` as the epic
  * grows more kinds, or drop `child_session_id` for a task that is not a session of its own.
+ * The call that started it rides in the overrides too (`tool_use_id`, the id of the
+ * `agent.tool_use` whose result was the handle): it is optional on the wire, so the default
+ * leaves it out and a log stored before it existed parses exactly as it did.
  *
  * @param overrides fields to replace on the event
  */
