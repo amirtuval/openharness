@@ -338,6 +338,32 @@ export const ModelRequestEndEventSchema = z.object({
    * P4 keeps validating.
    */
   consumes: z.array(EventIdSchema).optional(),
+  /**
+   * // extension: how many web searches the provider ran inside this request (epic #303, X14;
+   * issue #335).
+   *
+   * A provider-executed search is not one of our calls, so there is no `agent.tool_use` to
+   * count: the provider reports the number itself (Anthropic counts them under its usage's
+   * `server_tool_use.web_search_requests`, and the others are read from the steps' own
+   * reports), and it is written here — per request, on the span that spent it, the same place
+   * the tokens are.
+   *
+   * Absent when the request ran no provider search, which is every request of a log stored
+   * before #335 and every request of a chat that cannot search. A `0` is never written: a count
+   * of nothing is the absence of the field, the rule the rest of the protocol follows.
+   */
+  searches: z.number().int().positive().optional(),
+  /**
+   * // extension: the request had to be made again without its native search tool (epic #303,
+   * X14; issue #335).
+   *
+   * A provider that does not know the tool it was handed refuses the whole request, and the
+   * model's support for it varies by version. The loop drops the tool and retries once — the
+   * same request, minus the thing that was refused — and records that here, on the span of the
+   * request that was **kept**, so the log says a search was offered and then withdrawn rather
+   * than staying silent about it. Absent for every request that was not retried this way.
+   */
+  search_rejected: z.literal(true).optional(),
 })
 
 /** A stored `span.model_request_end`, deep-readonly (D9, issue #46). */

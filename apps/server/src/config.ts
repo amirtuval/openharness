@@ -7,8 +7,6 @@ import {
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_MAX_TOOL_STEPS,
 } from '@openharness/brain'
-import { BRAVE_SEARCH_PROVIDER, SUPPORTED_SEARCH_PROVIDERS } from '@openharness/hands'
-import type { SearchProviderName } from '@openharness/hands'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS, envKeyProvider, gcpKmsKeyProvider } from '@openharness/vault'
 
@@ -121,9 +119,6 @@ export const ENV_VARS = {
   clearThreshold: 'OPENHARNESS_CLEAR_THRESHOLD',
   todoNudge: 'OPENHARNESS_TODO_NUDGE',
   maxToolSteps: 'OPENHARNESS_MAX_TOOL_STEPS',
-  searchProvider: 'OPENHARNESS_SEARCH_PROVIDER',
-  searchApiKey: 'OPENHARNESS_SEARCH_API_KEY',
-  searchDailyLimit: 'OPENHARNESS_SEARCH_DAILY_LIMIT',
   logFormat: 'OPENHARNESS_LOG_FORMAT',
   tracing: 'OPENHARNESS_TRACING',
   traceSampleRate: 'OPENHARNESS_TRACE_SAMPLE_RATE',
@@ -255,18 +250,6 @@ export interface ServerConfig {
    * short of a runaway — and a value below 1 fails the boot.
    */
   readonly maxToolSteps: number
-  /**
-   * `OPENHARNESS_SEARCH_PROVIDER` / `OPENHARNESS_SEARCH_API_KEY` /
-   * `OPENHARNESS_SEARCH_DAILY_LIMIT`: the search API `web_search` is served by (epic #303,
-   * #305), or `null` when the deployment offers the tool nowhere.
-   *
-   * The key is the **operator's**, not a user's: the deployment pays for the searches, which
-   * is why each user has a daily allowance and why the key never leaves the server — the tool
-   * is handed it per step through the turn's per-user values, and the registry scrubs it out of
-   * anything a tool returns. `null` means no `web_search` is registered at all, which is a
-   * deployment without a search API rather than a degraded one.
-   */
-  readonly search: SearchConfig | null
   /** `OPENHARNESS_LOG_FORMAT`: the readable one-line format, or Cloud Logging JSON (#158). */
   readonly logFormat: LogFormat
   /** `OPENHARNESS_TRACING`: where spans go — nowhere, or Cloud Trace (#158). */
@@ -489,7 +472,6 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     // The tool loop's budget (epic #303, X2): how many model requests one turn may make. At
     // least one — a turn that may make no request could not answer a message at all.
     maxToolSteps: readInteger(env, ENV_VARS.maxToolSteps, DEFAULT_MAX_TOOL_STEPS, { min: 1 }),
-    search: readSearch(env),
     // Observability (#158). The log format and the trace mode are a choice each, so an
     // unknown value is a boot failure naming the variable rather than a silent default; the
     // sample rate is a fraction, and 0 is meaningful (trace nothing while keeping the
@@ -535,14 +517,9 @@ export function describeConfig(config: ServerConfig): string[] {
   )
   lines.push(`public URL: ${config.betterAuthUrl}`)
   // Which built-in tools a deployment's chats can call (epic #303, #305): `web_fetch` and
-  // `todo_write` always, `web_search` only where an operator key was configured. The key's
-  // value is never printed — only that there is one.
-  lines.push(
-    config.search === null
-      ? 'tools: web_fetch, todo_write (no search provider configured)'
-      : `tools: web_fetch, todo_write, web_search (${config.search.provider}, ` +
-          `${config.search.dailyLimit} searches/user/day, key not printed)`,
-  )
+  // `todo_write` always, and `web_search` where a chat's own model provider has a native
+  // search tool (#335) — there is no operator key any more, so there is nothing to print.
+  lines.push('tools: web_fetch, todo_write, web_search (provider-native, #335)')
   const providers = [
     ...(config.google === undefined ? [] : ['google']),
     ...(config.github === undefined ? [] : ['github']),

@@ -69,6 +69,24 @@ export interface StubMcpServerOptions {
   /** Make every initialize fail, to exercise the `status: 'error'` path. */
   readonly failing?: boolean
   /**
+   * Which protected resource a bearer token was issued for, when this server is one of several
+   * behind one authorization server (issue #314 — Linear's shape).
+   *
+   * With this set the server is **resource-bound**: a request is served only when the token it
+   * carries was issued for *this* server's own URL (RFC 8707). A token minted for another
+   * resource — what an authorization server hands back when a refresh forgets the `resource`
+   * parameter — is refused exactly as a Linear 401 is.
+   */
+  readonly issuedResourceOf?: (token: string) => string | undefined
+  /**
+   * Refuse with **no body** rather than a JSON error (issue #314).
+   *
+   * `mcp.linear.app` answers an unauthenticated request `401` with `content-length: 0` and a
+   * `WWW-Authenticate` header, which is what made the SDK's own message stop at
+   * "Error POSTing to endpoint:". A test that pins the improved message needs the same shape.
+   */
+  readonly emptyRefusalBody?: boolean
+  /**
    * How the server answers a `tools/call` (epic #303, #312).
    *
    * The default echoes the arguments back as text, which is enough to prove a call reached the
@@ -79,6 +97,16 @@ export interface StubMcpServerOptions {
     name: string,
     args: Record<string, unknown>,
   ) => CallToolResult | Promise<CallToolResult>
+  /**
+   * The `resource` this server's RFC 9728 metadata names (issue #316).
+   *
+   * The server's own URL by default, which is what a real deployment does; `null` omits the
+   * field entirely, a string overrides it, and a function is handed the server's own URL so a
+   * test can name another **path on the same origin** (`(url) => new URL('/api/v1', url).href`)
+   * without knowing the ephemeral port first — which is the case the `resource` parameter's
+   * same-origin rule is about.
+   */
+  readonly protectedResource?: string | ((serverUrl: string) => string) | null
 }
 
 /** What a `tools/call` answers with, as the SDK types it. */
@@ -111,19 +139,61 @@ export async function startStubMcpServer(
         url.pathname.startsWith('/.well-known/oauth-protected-resource')
       ) {
         response.writeHead(200, { 'content-type': 'application/json' })
+        const own = `http://127.0.0.1:${port()}/mcp`
+        const advertised =
+          options.protectedResource === null
+            ? null
+            : typeof options.protectedResource === 'function'
+              ? options.protectedResource(own)
+              : (options.protectedResource ?? own)
         response.end(
           JSON.stringify({
-            resource: `http://127.0.0.1:${port()}/mcp`,
+            ...(advertised === null ? {} : { resource: advertised }),
             authorization_servers: [options.authorizationServer],
             ...(options.scopes === undefined ? {} : { scopes_supported: options.scopes }),
           }),
         )
         return
       }
-      if (requiredToken !== null && authorization !== `Bearer ${requiredToken}`) {
-        response.writeHead(401, { 'content-type': 'application/json' })
-        response.end(JSON.stringify({ error: 'invalid_token' }))
+      // The scheme is pinned to exactly `Bearer `, case-sensitively and with the space, the way
+      // a real resource server reads it (the MCP spec and the official SDK always send that):
+      // a request carrying `bearer <token>` — a token response's `token_type` echoed back as the
+      // scheme, which is the bug #316 is about — `Basic …`, or an empty token is refused
+      // whatever it is authenticated with. A request carrying no `Authorization` at all is
+      // neither refused nor authenticated here; that is what `requiredToken` is for.
+      if (typeof authorization === 'string' && !authorization.startsWith('Bearer ')) {
+        respondUnauthorized(response)
         return
+      }
+      if (requiredToken !== null && authorization !== `Bearer ${requiredToken}`) {
+        respondUnauthorized(response)
+        return
+      }
+      // Resource-bound: the token must have been issued for *this* server (RFC 8707). This is
+      // the check a refresh that forgets the `resource` parameter fails (issue #314).
+      if (options.issuedResourceOf !== undefined) {
+        const bearer =
+          typeof authorization === 'string' && authorization.startsWith('Bearer ')
+            ? authorization.slice('Bearer '.length)
+            : null
+        const issued = bearer === null ? undefined : options.issuedResourceOf(bearer)
+        if (issued !== `http://127.0.0.1:${port()}${url.pathname}`) {
+          respondUnauthorized(response)
+          return
+        }
+      }
+
+      function respondUnauthorized(target: ServerResponse): void {
+        if (options.emptyRefusalBody === true) {
+          target.writeHead(401, {
+            'content-length': '0',
+            'www-authenticate': 'Bearer realm="OAuth", scope="read write"',
+          })
+          target.end()
+          return
+        }
+        target.writeHead(401, { 'content-type': 'application/json' })
+        target.end(JSON.stringify({ error: 'invalid_token' }))
       }
       if (options.failing === true) {
         response.writeHead(500, { 'content-type': 'application/json' })
@@ -206,6 +276,8 @@ export interface StubAuthorizationServer {
   setRefreshWorking(working: boolean): void
   /** Every access token the token endpoint has issued, in order. */
   readonly issuedTokens: string[]
+  /** Which protected resource a token was issued for (RFC 8707), or `undefined` for an unknown one. */
+  resourceOf(token: string): string | undefined
   close(): Promise<void>
 }
 
@@ -217,6 +289,25 @@ export interface StubAuthorizationServerOptions {
   readonly expiresIn?: number
   /** The scopes the metadata advertises. */
   readonly scopes?: readonly string[]
+  /**
+   * Refuse a token request that carries no `resource` parameter (issue #314, RFC 8707).
+   *
+   * An authorization server serving several APIs binds the token it mints to the resource that
+   * asked for it, and this is the strict form: no `resource`, no token. With it, a refresh that
+   * forgets the parameter is a 400 rather than a token for the wrong audience — which is how a
+   * resource-bound MCP server (Linear's shape) ends up refusing the refreshed token.
+   */
+  readonly requireResource?: boolean
+  /**
+   * The `token_type` the token endpoint reports — `'Bearer'` by default, and `null` to leave
+   * the field out entirely (issue #316).
+   *
+   * A live value, whatever RFC 6749 says: `bearer` (lower case) is what several providers send,
+   * and a deployment has been seen reporting `access_token` or `JWT`. It is **not** the scheme
+   * this server authenticates with — the resource server takes `Bearer ` and nothing else — so
+   * a test that sets it here and still expects the flow to work is a test of that rule.
+   */
+  readonly tokenType?: string | null
 }
 
 /** Start a stub authorization server on loopback. */
@@ -227,6 +318,7 @@ export async function startStubAuthorizationServer(
   let refreshWorking = true
   let nextToken = 0
   const issuedTokens: string[] = []
+  const issuedResources = new Map<string, string | undefined>()
   let authorization: ReturnType<StubAuthorizationServer['lastAuthorization']> = null
   let code: string | null = null
   const http = createServer((req, res) => {
@@ -278,6 +370,14 @@ export async function startStubAuthorizationServer(
       if (request.method === 'POST' && url.pathname === '/token') {
         const body = new URLSearchParams(Buffer.from(await readRawBody(request)).toString('utf8'))
         const grant = body.get('grant_type')
+        const resource = body.get('resource') ?? undefined
+        if (options.requireResource === true && resource === undefined) {
+          sendJson(response, 400, {
+            error: 'invalid_request',
+            error_description: 'the `resource` parameter is required',
+          })
+          return
+        }
         if (grant === 'authorization_code') {
           if (body.get('code') !== code || code === null) {
             sendJson(response, 400, { error: 'invalid_grant', error_description: 'unknown code' })
@@ -292,7 +392,7 @@ export async function startStubAuthorizationServer(
             return
           }
           code = null
-          sendJson(response, 200, tokenBody())
+          sendJson(response, 200, tokenBody(resource))
           return
         }
         if (grant === 'refresh_token') {
@@ -303,7 +403,7 @@ export async function startStubAuthorizationServer(
             })
             return
           }
-          sendJson(response, 200, tokenBody())
+          sendJson(response, 200, tokenBody(resource))
           return
         }
         sendJson(response, 400, { error: 'unsupported_grant_type' })
@@ -312,13 +412,14 @@ export async function startStubAuthorizationServer(
       response.writeHead(404).end()
     }
 
-    function tokenBody(): Record<string, unknown> {
+    function tokenBody(resource: string | undefined): Record<string, unknown> {
       nextToken += 1
       const access = `access-${nextToken}`
       issuedTokens.push(access)
+      issuedResources.set(access, resource)
       return {
         access_token: access,
-        token_type: 'Bearer',
+        ...(options.tokenType === null ? {} : { token_type: options.tokenType ?? 'Bearer' }),
         refresh_token: `refresh-${nextToken}`,
         ...(options.expiresIn === undefined ? {} : { expires_in: options.expiresIn }),
         scope: 'mcp',
@@ -346,6 +447,7 @@ export async function startStubAuthorizationServer(
       refreshWorking = working
     },
     issuedTokens,
+    resourceOf: (token: string) => issuedResources.get(token),
     close: () => closeServer(http),
   }
 }

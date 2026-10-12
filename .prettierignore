@@ -12,3 +12,8 @@ e2e/qa-output
 # check them. `helm lint` and the chart's CI job are what check them; the chart's values files,
 # `Chart.yaml` and `README.md` are still formatted.
 charts/*/templates
+# Saved web pages the hands extraction tests read verbatim: real markup, and one of them is
+# encoded windows-1255, which prettier would read as UTF-8 and mangle. The package ignores the
+# same directory for the same reason (`packages/hands/.prettierignore`); this one is what
+# `format:check:repo` reads.
+packages/hands/src/fixtures

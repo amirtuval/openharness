@@ -105,12 +105,14 @@ src/
       appearance.tsx           Settings -> Appearance: the four-way theme picker (#203)
       usage.tsx                Settings -> Usage: this month by model and by day, and the
                                searches it counted (#247; #303 X5, #308)
-      tools.tsx                Settings -> Tools (#303 X4; #307; #308): per-tool on/off and
-                               allow/ask/deny, an unavailable tool listed as such
+      tools.tsx                Settings -> Tools (#303 X4; #307; #308; #313): per-tool on/off
+                               and allow/ask/deny for this build's own tools, an unavailable
+                               tool listed as such, and a line saying where MCP tools are set
       mcp-servers.tsx          Settings -> MCP servers (#303, X10; #313): the remote servers —
                                status and last error, on/off, Test, Connect/Reconnect,
-                               Disconnect, Edit, Delete, and under each one its tools with
-                               the permission each runs under and what they cost, plus the
+                               Disconnect, Edit, Delete, under each one its tools with the
+                               permission each runs under and what they cost, and the one
+                               control that sets every tool of a server at once, plus the
                                `?mcp_connected=` confirmation a web OAuth callback lands on
       mcp-server-dialog.tsx    the add/edit form: name, URL, auth, the header pair a `headers`
                                server authenticates with (values masked and write-only)
@@ -126,7 +128,8 @@ src/
     chat/
       chat-view.tsx            the chat screen: header (+ delete), messages, errors,
                                composer with the model selector, the model-change marker,
-                               and Edit and resend, which rewinds the session (#238)
+                               Edit and resend, which rewinds the session (#238), and the
+                               one column the transcript and the composer share (#316)
       message-list.tsx         the scrolling conversation + stick-to-bottom
       message-item.tsx         one message (user right / agent left, markdown), the
                                "Switched to …" marker when it changed the model,
@@ -164,7 +167,10 @@ src/
       ask-user-form.tsx        an ask_user call's questions: radios or checkboxes with their
                                descriptions plus "Other", a text input, a yes/no pair, Submit
                                and Decline (X6; #310)
-      todo-panel.tsx           the chat's task list, pinned above the composer (X5; #305; #308)
+      todo-panel.tsx           the chat's task list: a full-height side column beside the
+                               transcript *and its composer* from `xl` up, the row above the
+                               composer below it, foldable and remembered per chat
+                               (X5; #305; #308; #314; #316)
       tool-notices.tsx         the step limit, "this model can't use tools", what a request
                                shortened and what it cleared (X2/X5/X9; #308)
       mcp-notice.tsx           a turn's `mcp_*` failure, as a notice with a Reconnect action
@@ -299,8 +305,29 @@ lives. It owns a `createTranscript()` store and, in one effect:
    — exactly where the history stopped, so nothing is replayed and nothing is missed;
 3. aborts the stream on unmount (`signal.abort()` ends the iteration quietly, no throw).
 
-Rendering reads the store with `useSyncExternalStore(transcript.subscribe, transcript.getState)`,
-so the transcript stays plain data, and a reload is just the same code path as opening the
+Rendering reads the store through a subscription of its own, and **the updates it schedules
+are transitions** (React #185, the crash this replaced):
+
+- the listener below runs once per fold — the store notifies on every event — and each call
+  asks React for a re-render;
+- `startTransition` is what makes a burst of them safe. The stream delivers a whole network
+  read's worth of events in one turn of the event loop (a resumed connection's backlog, a big
+  tool result and the turn it ends, a fast provider's deltas), and `useSyncExternalStore` —
+  which this used to be — answers each notification with a **synchronous** update
+  (`forceStoreRerender`, React's own sync lane). A long enough burst was a run of synchronous
+  commits with more already pending, which React counts as nested updates and gives up past
+  fifty with "Maximum update depth exceeded" (React #185). The throw came out of the store's
+  notify call, _inside_ `transcript.apply` in the stream loop below, whose `catch` reports it as
+  a failed **request** — so a chat showed a "Request failed" banner whose message was React's
+  own minified #185, and the turn's events were half-folded. A transition is the right lane for
+  streamed text: only the newest state matters, React coalesces the updates that arrive before
+  it renders, and the reader's own input — a keystroke, a click — stays urgent.
+- the subscribe is in a **layout effect** and the render's snapshot is compared with the
+  store's newest after subscribing, which are the two things `useSyncExternalStore` does
+  internally that a hand-rolled subscription must not forget: an event folded between the
+  render and the subscription would otherwise leave the screen a state behind.
+
+The transcript itself stays plain data, and a reload is just the same code path as opening the
 session for the first time — which is why it restores the history _and_ resumes the stream.
 
 `send(text)` calls `client.sendMessage` and folds the returned stored event in immediately:
@@ -393,6 +420,37 @@ The full picture — routes, the exact Better Auth calls, and the device-approva
 The one thing to remember while reading the shell: **`#/device?user_code=<code>` is the URL
 `oh login` opens**, and signed out it signs the reader in first, because verifying a device
 code claims it for the session.
+
+## The shell is the viewport; the document never scrolls
+
+The app owns the viewport, and the page itself is never a scroller: exactly one box per screen
+scrolls — the transcript, the settings pane, the chat list, the task list — and everything else
+is chrome around it. The shell (`[data-slot="app-shell"]` in `App.tsx`) is `h-dvh` (the
+_dynamic_ viewport height: `100vh` on a phone is the tall viewport, and a shell taller than the
+screen is a scrollbar the reader cannot get rid of), `overflow-clip`, and `relative`; the
+stylesheet clips `#root` as well, for the corner a mobile browser leaves open when it resolves
+`100%` a shade shorter than `dvh`. `overflow-clip` rather than `overflow-hidden`: a `hidden` box
+can still be scrolled by the browser to reveal a focused descendant, which would shift the whole
+app under the reader.
+
+**Every scroll pane is `relative`, and that is not cosmetic.** A pane clips its own content —
+but only for descendants whose containing block is inside it. An absolutely positioned element
+with no positioned ancestor between it and the shell is laid out against the initial containing
+block instead: it escapes the pane's clip and stretches the _document_. Every `sr-only` span is
+such an element, and this app is full of them (the theme radios and the usage table's caption in
+Settings; the transcript's streaming caret), so the page grew a second, useless scrollbar over
+empty space — 2 400px of it on Settings at any width, and 17 000px while a reply streamed with
+the reader scrolled up. Positioning the pane (`message-list.tsx`'s scroller, the settings pane,
+`sidebar.tsx`'s nav, `todo-panel.tsx`'s column) makes the pane the containing block, so the pane
+clips its own absolute content and nothing reaches the document; the shell is the backstop that
+makes the rule hold for anything nobody has thought of yet.
+
+jsdom has no layout, so what `scroll-containers.test.tsx` asserts is the **class contract** —
+the shell's `h-dvh`/`overflow-clip`/`relative`, and a scroll pane's `relative` — and the
+visual verification is Playwright: with the transcript scrolled to the bottom (and on
+`#/settings`, `#/new`, at 1440, 1280 and 390 wide) `document.scrollingElement.scrollHeight ===
+document.scrollingElement.clientHeight`, `window.scrollY` stays 0, and the panes still scroll
+(`log.scrollHeight > log.clientHeight`, `log.scrollTop` settable).
 
 ## The responsive shell
 
@@ -512,8 +570,134 @@ markup.
   `manualCompactionNotice` in `@openharness/client`, shared with `oh`.
 - **`truncation-notice.tsx`** is the one line about the reader's own message: "Your message was
   too long for this model and was shortened", at the foot above the working row, with how much
-  was left out in the `title`. The list's stick-to-bottom key includes it, so a reader already
-  at the bottom is shown it rather than left with it below the fold.
+  was left out in the `title`. The sentence and the count are `@openharness/client`'s
+  `truncationNotice`, so `oh` can say the same thing — and it is only ever drawn for a **message**'s
+  cut (#314): the transcript leaves `truncation` null when the request's record names a tool
+  result, because that cut is `tool-notices.tsx`'s line, and reading one record as both is what
+  made a shortened `web_fetch` answer report the reader's short question as too long. The list's
+  stick-to-bottom key includes it, so a reader already at the bottom is shown it rather than left
+  with it below the fold.
+
+### The tools, on screen (epic #303, X1/X2/X4/X5/X9; issue #308)
+
+The tools work is visible in six places, and every piece of state comes from the transcript
+(`packages/client`'s `toolCalls`, `todos`, the newest request's `truncatedToolResults` /
+`clearedToolResults`) with every word from its `src/tools.ts` — so the page and `oh` cannot
+disagree.
+
+- **`tool-call.tsx` is one call's compact line**: the status mark, the tool's name, the shared
+  `toolCallSummary` (a URL, a query, a task count, a question) and the status words, behind a
+  Radix `Collapsible` that opens to the pretty-printed input, whatever the call answered, and —
+  for a provider-executed search — the pages the search found (`call.sources`) as a `ToolSources`
+  block: the title as the link, the URL under it, and the passage it was cited for, under
+  `data-slot="tool-sources"` (#335). The pages are drawn in the disclosure rather than on the
+  compact line — a search finds five, and five lines of chrome per call is what the disclosure
+  exists to avoid. It takes an `action` slot for #310's approval prompt — drawn **outside** the
+  trigger, so its buttons are not nested in a button — and badges `source: 'mcp'` (#312), with the
+  server in the badge's `title` and on the row as `data-server`; the name is already the
+  model-facing `<server>__<tool>` spelling, so no second word of chrome is spent on it. The whole
+  line is the extension point: a new caller passes props rather than reaching for a store.
+- **`MessageList` groups consecutive calls into one `role="group"` block** — a run of one stays
+  the bare line it already is — and renders them from `transcriptEntries(messages, summaries,
+toolCalls)`, the client's one merge, so a call draws where its event sits. **It is memoized**
+  (#314): the draft lives in `ChatView`, so every keystroke re-renders the screen, and the
+  conversation — markdown, highlighted code, one node per part — must not be re-rendered with
+  it. Every prop is the transcript store's own data or a string, which is what makes the memo
+  hold; the one that had to be made stable for it was `working` (`ChatView` memoizes
+  `workingState`'s object), because a fresh object compares unequal and reopens the subtree.
+  Measured on the built server: ~23 ms of scripting per keystroke on a 27-message chat before,
+  ~5 ms after, and the transcript's share of it flat with the length of the chat.
+- **`todo-panel.tsx` is the chat's task list**, in one of two places while the chat has one
+  (never in the scroller: it is chrome about the work), with the three states drawn differently
+  and "Tasks · 2 of 5 done" in its header (#314). **It changes place with the width**: from `xl`
+  up it is a 280px **full-height column** beside the chat column — the transcript _and_ the
+  composer block, which share one container so both are centred on the same `max-w-3xl` axis
+  (#316: with the panel a sibling of the transcript alone, the composer spanned the whole view and
+  the two read as misaligned) — scrolling on its own so a long run does not shorten the
+  conversation; below that it is the row **above the composer** it always was. Both
+  instances are rendered and one is `display: none` — a CSS rule rather than a JavaScript
+  breakpoint, the shell's sidebar switch again — and they share one piece of state, so they
+  cannot disagree. **The header is the control**: a button reading "Tasks · 2 of 5 done" with a
+  chevron, `aria-expanded`, and `aria-controls` only while the list it names is really rendered.
+  **It folds**, and a folded panel is one line — the header and the item in progress. The choice
+  is remembered **per chat** in `localStorage` (`lib/todo-panel.ts`, every read and write wrapped:
+  a browser that refuses storage loses the memory and nothing else), and a reader who has said
+  nothing gets the placement's own default — the row above the composer starts folded once the
+  list is longer than five items, because it takes the conversation's height, while the side
+  panel starts open, because it does not.
+- **`tool-notices.tsx`** draws the step-limit notice (which _replaces_ the red error banner for
+  that one error type — it is a notice, not a failure), "this model can't use tools" (the
+  catalog entry's `tool_call === false`), and what the newest request shortened or cleared. All
+  four are the client's sentences.
+- **the chat header** carries `N searches` beside the cost, the same count the usage routes
+  report, read off the calls the transcript already holds — a provider-executed search is a
+  `web_search` call in the transcript like any other, so it is counted here too (#335).
+- **Settings → Tools** is one row per tool: on/off, the permission (with the tool's own
+  declaration named as the default), and an unavailable tool listed rather than hidden.
+  `hooks/use-tools.ts` reads it and merges one write; the fake backs the route. **It lists this
+  build's own tools and nothing else** (#313): a remote MCP tool belongs to a server — no on/off
+  of its own, a server that is on or off as a whole, and a permission that lives in `PUT
+/v1/me/tools`'s `mcp` map — so its rows are Settings → MCP servers', where the server and all of
+  its tools are one screen. A `data-slot="tools-mcp-hint"` line says where they are and how many,
+  rather than dropping them silently: a tool that vanished from a list reads as one that does not
+  exist. Listing them here as well is what made the card as long as the servers' tool lists put
+  together.
+
+**A mode may turn a tool on or off** (#307). `mode-form-dialog.tsx` grew a Tools section whose
+choice per tool is tri-state — _Follow my settings_ (the absence of a name in the patch), _Always
+on_, _Always off_ — which `lib/tools.ts`'s `modeToolChoice` / `withModeToolChoice` translate to
+and from the wire's `{ builtin: { name: boolean } }`. A patch that ends up empty is sent as
+`null`, the one value that reads as "follow my settings" on both sides; a mode never changes a
+permission, and the Modes list shows what a mode overrides under its name. Only this build's own
+tools get a switch (#312): a remote MCP tool's presence is its server's, which a mode patches by
+id — a half of the editor that is #313 — while `withModeToolChoice` carries a mode's existing
+`mcp_servers` patch through a save untouched, and the row counts the servers a mode names rather
+than reading them as "follow your settings".
+
+### The pause, on screen (epic #303, X6; issues #309, #310)
+
+A turn can end waiting on the reader, and the page answers it where the call is drawn — the tool,
+its input (behind the disclosure #308 already had) and the choices are one block. Every word and
+every event comes from `@openharness/client`'s `src/approvals.ts`, so the page and `oh` cannot
+disagree about what a reader is being asked.
+
+- **`approval-prompt.tsx`** is a call waiting on `ask`: **Allow once**, **Allow for this chat**,
+  **Always allow**, and **Deny** — which opens a message box rather than sending at once, because
+  a denial is often worth explaining (an empty message sends a plain denial; the protocol wants a
+  non-empty `deny_message`). Each button sends one `user.tool_confirmation` through the chat's
+  `respond`, which is where the request and its failure live. **A remote MCP call gets the same
+  prompt** (#312) — a pause is a fact about the log, not about a tool — with the heading naming
+  the server (`notes__search (mcp: notes)`, `pendingCallHeading`) and `data-server` on the
+  prompt, so a reader allowing a remote tool knows whose it is; the confirmation names the
+  `agent.mcp_tool_use` event's own id, which is what the server checks and the brain answers with
+  an `agent.mcp_tool_result`.
+- **`ask-user-form.tsx`** is an `ask_user` call: one to four questions, each with its header as a
+  chip, drawn as radios — or checkboxes when the call asks for several — with the options'
+  descriptions beside them and the **Other** write-in row the type always allows, as an input
+  (`text`), or as a yes/no pair (`confirm`). **Submit** sends every answer as one confirmation
+  carrying `answers`; **Decline** denies the call. Submit stays off until the protocol's own
+  `askUserAnswerProblems` is satisfied — the same check the server refuses a 400 with — and what
+  is still missing is named beside the questions, so a malformed answer is never something the
+  reader learns from a failed request.
+- **`MessageList` draws a prompt under its own call**, out of `pendingCalls(toolCalls)` — the
+  client's one reading of which calls wait — with a prompt only for a call whose decision is not
+  yet in the log. A call whose confirmation **is** there has been answered and the turn is on its
+  way, which is what makes a reload land where a live tab left off; while this tab's own answer
+  is in flight the buttons are off and the row says "Answering…".
+- **Several approvals are answered together.** A run of two or more gets a bar at the foot of the
+  transcript with **Allow all** and **Deny all** — one event per call, in one batch, and "Allow
+  all" is the **once** approval for each: answering several at once must not hand out a remembered
+  permission nobody chose. A lone approval gets no bar: a second copy of its own buttons is noise.
+  A question never joins it — `ask_user` cannot be allowed without its answers, and the server
+  refuses an approval carrying none.
+- **An answered call shows what was decided.** The confirmation is the log's record, so the row's
+  trailing slot carries `confirmationSummary` — "Allowed for this chat", "Always allowed" — which
+  the tool's own result cannot say. A denial and an answered question draw nothing there: the
+  result the brain wrote already says them.
+- **The composer says a message declines what waits.** A `user.message` resolves every waiting
+  call ("The user sent a message instead"), so `pendingCallsNotice` is drawn as a dashed row above
+  the box — the reader is told before pressing Enter, not after. The row's status then reads
+  `dismissed`: the reader moving on is not a failure.
 
 ### The tools, on screen (epic #303, X1/X2/X4/X5/X9; issue #308)
 
@@ -639,36 +823,64 @@ so the page and `oh` cannot disagree.
   permission select. Every control is named for its server (`Test notes`, `Edit notes`), because
   a screen of rows with a dozen buttons all called "Edit" is not one a screen reader — or a test
   — can address.
+- **A Test draws its result on the row** (#314). The check is a network call, and it used to
+  leave no trace — the status either changed or did not — so a Test that could only fail
+  silently looked like a button that did nothing. Now the row holds the outcome: a spinner while
+  it runs, then `mcpTestOutcome` (`@openharness/client`, shared with `oh`): the tool count and
+  their estimate when it listed, and the server's own reason — status and body excerpt included —
+  when it did not. **Test is not offered for an `oauth` server that is not connected**: there is
+  no token for the check to use, so the action that exists is Connect, and the card shows that
+  instead.
 - **A permission is written where every other tool setting is.** A remote tool has no on/off of
   its own — a whole server is on or off, and a mode patches that by id — so the select writes
   `PUT /v1/me/tools`'s `mcp` map through `useTools.savePolicy`, keyed by the offered name, and
   never touches the `builtin` half. `mcpServerTools` joins the two reads (the server's checked
   tool summaries and the stored permissions), and a stored permission for a tool the server no
   longer lists is shown beside them, marked, rather than dropped.
+- **One control sets every tool of a server at once** (#313), drawn **outside** the tools
+  disclosure so it is there before a reader opens anything: the state it is in
+  (`mcpToolPolicyStateLabel`: `Ask (all)` for a permission every tool shares, `Mixed` when they
+  differ) and three buttons — **Allow all**, **Ask for all**, **Deny all** — named for their
+  server (`Set every tool on notes to Allow`) so a screen reader, and a test, can address one on a
+  page of servers. It sends **one** `PUT /v1/me/tools` — `useTools.saveServerPolicy` over the
+  client's `mcpServerPolicyBody`, which names every tool of that server in the `mcp` map — never a
+  write per row. The pending state is the per-tool control's (`saving` disables both, and the
+  server's answer replaces the entries it and the rows read), and a failure lands in the card's
+  inline banner.
 - **An OAuth callback is confirmed where it lands.** The callback redirects the browser to
   `?mcp_connected=<id>#/settings`; the card reads that once (`mcpConnectedServerId`, out of
   `location.search` — the query is before the hash), shows **Connected <name>.** in a
   `role="status"` line, and takes the parameter off the URL so a reload does not repeat it. The
   list it reads was fetched after the redirect, so the status on screen is the one the callback
-  just wrote — no second read is needed and none is made.
-- **The dialog is the one form** for register and edit (`mcp-server-dialog.tsx`): name, URL, the
-  auth select with `mcpAuthHint` under it, and — for a `headers` server — a repeatable name/value
-  pair whose values are `type="password"`. The stored map is **sealed**, so an edit shows the
-  header **names** it holds and starts the map empty: leaving the fields alone omits `headers`
-  from the update and keeps what is there, which is the only way to say "keep the secret". The
-  two shape rules are the protocol's own (`isMcpServerName`, `isMcpServerUrl`), checked inline so
-  the reader sees what is wrong beside the field, and a `headers` server with no pair is held
-  back — the wire refuses one. What the server is the one to decide (a name already taken, the
-  twenty-first server) lands under the fields as its 409.
+  just wrote — no second read is needed and none is made. **The line reads that status** (#314):
+  the callback lists the server's tools straight away, so a sign-in that succeeded but could not
+  be listed arrives in `error`/`needs_reconnect` with a reason, and the card says _"Connected
+  <name>, but its tools could not be listed: …"_ rather than claiming a success the reader can
+  see is not there.
+- **The dialog is a URL, not a classification** (`mcp-server-dialog.tsx`, #313; #314). There is
+  **no auth-type select**: the reader types the **server URL first** — it is what decides
+  everything, and the server probes it on save — then an optional **name**, whose placeholder is
+  the name the server would derive from that URL (`mcpServerNameFromUrl`), then an optional
+  header behind an **"Advanced: custom headers"** disclosure. The disclosure says what sending
+  one means (this server authenticates with a header, so it is stored as `headers`), the values
+  are `type="password"`, and the stored map is **sealed** — an edit shows the header **names** it
+  holds and starts the map empty, so leaving the fields alone omits `headers` and keeps what is
+  there. Because saving runs a real probe, the dialog says so while it waits ("Checking the
+  server…") and disables its fields; the two shape rules are the protocol's own
+  (`isMcpServerName`/`isMcpServerUrl`), checked inline so the reader sees what is wrong beside the
+  field; and what the server is the one to decide (a name already taken, the twenty-first server,
+  a URL the guard refuses) lands under the fields as its status.
 - **A mode may turn a whole server on or off** (#311). The mode editor's **MCP servers** section
   is the same tri-state a built-in tool gets — _Follow my settings_, _Always on_, _Always off_ —
   at **server** granularity, translated by `modeMcpServerChoice` / `withModeMcpServerChoice`
   (`lib/tools.ts`) against the `mcps_` id. The Modes list names the servers a mode overrides
   (`notes off`), and a server the mode names that the reader has since deleted reads as `a
 removed server` rather than disappearing: the patch still names it, and the server ignores it.
-- **Settings → Tools still lists the remote entries**, grouped by server, but the permission is
-  edited here: the row says so rather than offering a control that would write the wrong map
-  (#312's reasoning, kept).
+- **Settings → Tools lists no remote entry at all** (#313): its rows are this build's own tools,
+  and a hint line says that the tools from MCP servers are set here, per server, and how many
+  there are. A remote tool has no on/off of its own and its permission lives in the `mcp` map, so
+  a row of the Tools card's shape could only write the wrong thing — and a card that listed every
+  server's tools was as long as all of them put together.
 - **A failed turn is a notice, not the red banner** (`mcp-notice.tsx`). A server the turn could
   not use is one `session.error` per server with the chat carrying on, so the notice shows the
   brain's own sentence and offers **Reconnect** — plus a link to Settings and a Dismiss that
@@ -1204,6 +1416,8 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/components/chat/markdown.test.tsx`                                                        | the agent's markdown (#204): GFM headings/lists/tables/inline code, a fenced block highlighted with a variable per theme (against the real Shiki), an unshipped language falling back to plain text, Copy putting the code on a mocked clipboard and saying so, raw HTML staying text, links opening in a new tab, and an unfinished fence — and an unfinished `**bold`/link — mid-stream, both rendered directly and through the app's gated stream                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `src/components/models/model-picker.test.tsx`                                                  | the picker itself: grouping, search, the keyboard rule, free text, the fallback note, refresh (429 and failure), the compact trigger                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `src/hooks/use-session.test.tsx`                                                               | the hook's own contract: a failed load, and no duplicated message                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/hooks/use-session-burst.test.tsx`                                                         | a reply that arrives in one burst (#316): a stored `event_start`, 400 deltas and the `agent.message` that supersedes them are replayed through the real hook, and the screen shows the reply rather than a “Request failed” banner carrying React’s own `Maximum update depth exceeded` — the failure a burst of streamed events used to cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `src/scroll-containers.test.tsx`                                                               | the shell's layout contract (#316): the shell is the viewport — `h-dvh`, `overflow-clip`, `relative` — every pane that scrolls is `relative` (so its own `sr-only`/absolute content is clipped by the pane), the transcript, settings pane and chat list are all scroll panes, and the stylesheet clips `#root`; the visual half is Playwright (`scrollHeight === clientHeight`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/hooks/use-stick-to-bottom.test.tsx`                                                       | the auto-scroll rule, with a scroll geometry jsdom does not have                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/components/logo-mark.test.tsx`                                                            | the mark (#240): one `aria-hidden` svg, the ring in `currentColor` and the dot in coral, no hex anywhere in the markup, the canonical geometry on both circles, and a caller's own size and ink winning over the defaults                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `src/components/sidebar.test.tsx`                                                              | the session list: first page then the rest, the cap note, and the row's delete action (in-page confirm, cancel, Escape, failure); then, for #211, the date headings (and only the buckets that hold something), the marked open chat, the account menu, the loading skeleton and the collapse control                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -1212,15 +1426,18 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/components/chat/working-row.test.tsx`                                                     | the working row (#211): `workingState` as a rule (running/no-text, gone once text arrives, idle, retrying with the server's reason and without one, the reader's own stop first), and the component's clock under fake timers — counting up, the minute rollover, and no clock at all for "Interrupted"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `src/components/chat/compaction-notice.test.tsx`                                               | what a manual `/compact` came to (#283): the brain's sentence for `nothing_to_summarize` and `failed` with its tone, the shared fallback, and nothing drawn for a summary or a pending ask                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `src/components/chat/tool-call.test.tsx`                                                       | one call's line (#303, X5; #308): the tool, the summary and the status on one row, "waiting for you" with the `action` slot outside the disclosure trigger, the MCP badge and the server it names (#312), and the disclosure opening to the full input and the result (an error result drawn as one; none drawn for a call with no result)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `src/components/chat/todo-panel.test.tsx`                                                      | the task list (#303, X5; #305; #308): every item and its state, "1 of 3 done", the current item called out, an empty list drawn as cleared, and the labelled region                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `src/components/chat/todo-panel.test.tsx`                                                      | the task list (#303, X5; #305; #308; #314): every item and its state, the header's sentence and `aria-expanded`, the fold (the item in progress and nothing else) and the choice reported back to the screen, `aria-controls` only while the list is rendered, an empty list drawn as cleared, the labelled region, the placement's own default (a long list starts folded above the composer and open beside the transcript), and the two variants' classes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `src/lib/todo-panel.test.ts`                                                                   | the fold's memory (#314): a choice per chat read back, an unknown value and a thrown `localStorage` both read as "no choice", a refused write swallowed, and the length rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `src/components/chat/chat-view.test.tsx`                                                       | the chat screen's column layout (#316): with the task list in its side panel the transcript, the composer block and the box are all children of one `[data-slot="chat-column"]`, the panel is a sibling of that column (the row has exactly the two children) and never inside it, and with no task list the column is the row's only child with the transcript and the composer still sharing it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/components/chat/draft-render.test.tsx`                                                    | a keystroke in the composer does not re-render the conversation (#314): the messages are counted through a stubbed `MessageItem` while typing, and the same count moves when the transcript really changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `src/components/chat/tool-notices.test.tsx`                                                    | the four tool notices (#303, X2/X5/X9; #308): nothing when there is nothing to say, the step limit as a warning with the brain's sentence, the model-cannot-use-tools line, and the shortened/cleared lines                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/components/chat/message-list-tools.test.tsx`                                              | the calls among the messages (#303, X5; #308): a call drawn where its event sits, a run grouped into one block (and a lone call left bare), a new group when a message separates two runs, the tool notices at the foot, and a waiting MCP call's approval prompt drawn under its line with its server named (#312)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `src/components/chat/approval-prompt.test.tsx`                                                 | the approval prompt (#303, X6; #310): the four choices named as the log records them, an allow-once with no memory, the two `remember` extensions, a denial's message and an empty one's plain denial, Cancel sending nothing, every control off while a confirmation is in flight, and a waiting MCP call prompted with its server named and its own id in the event (#312)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `src/components/chat/ask-user-form.test.tsx`                                                   | the `ask_user` form (#303, X6; #310): a control per question type with its header and an option's description, checkboxes for a `multi_select`, Submit held until the protocol's own check passes (with the missing part named), every answer sent at once in the order asked, several options where the question allows them, the write-in beside the options, Decline's denial, and the controls off while in flight                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `src/screens/pausing.test.tsx`                                                                 | the pause end to end in the browser (#303, X6; #310): the question a **reloaded** session is waiting on, the answers sent as one confirmation with the result the brain writes from them, Decline, and a message that says it declines what waits — then does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `src/components/settings/mcp-servers.test.tsx`                                                 | Settings → MCP servers (#303, X10; #313): the empty state and a registration through the dialog (the save-time check listing the server's tools and pricing them), the inline name/URL refusals and the 409 a duplicate name gets, the header pair a `headers` server needs, a server's tools with their policies and cost (a permission written to the `mcp` map), Test reporting a failure and the on/off switch, Connect opening the authorization URL in a new tab and Disconnect, an edit that keeps the sealed header map (the body it sends, asserted), the in-page delete with its cancel, and the `?mcp_connected=` confirmation with the parameter taken off the URL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `src/components/settings/mcp-servers.test.tsx`                                                 | Settings → MCP servers (#303, X10; #313): the empty state and a registration through the dialog (the save-time check listing the server's tools and pricing them), the inline name/URL refusals and the 409 a duplicate name gets, the header pair a `headers` server needs, a server's tools with their policies and cost (a permission written to the `mcp` map), the batch control — its `Ask (all)` and `Mixed` states, **one** `PUT` carrying every tool of that server, the per-tool rows following it, and a refused write reported inline — Test reporting a failure and the on/off switch, Connect opening the authorization URL in a new tab and Disconnect, an edit that keeps the sealed header map (the body it sends, asserted), the in-page delete with its cancel, and the `?mcp_connected=` confirmation with the parameter taken off the URL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `src/components/chat/mcp-notice.test.tsx`                                                      | the MCP failure notice (#313): the brain's sentence with the server named and **no** red banner, Reconnect starting the flow in a new tab, a server with no OAuth flow sending the reader to Settings instead, and Dismiss hiding one message while the next failure is shown again                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `src/components/settings/tools.test.tsx`                                                       | Settings → Tools (#303, X4; #307; #308): the registered tools with their state and default, a toggle writing only that tool, a permission change, and an unregistered tool listed as unavailable and not switchable — and, for #312, the remote entries grouped by server under their offered names, a remote row showing its policy with no control that would write the wrong map, and the built-in list unchanged by a deployment offering remote tools                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `src/components/settings/tools.test.tsx`                                                       | Settings → Tools (#303, X4; #307; #308; #313): the registered tools with their state and default, a toggle writing only that tool, a permission change, and an unregistered tool listed as unavailable and not switchable — and, for #313, that a listing which offers remote MCP tools renders **none** of them (and no server group), that the hint names how many come from MCP servers and where they are set, and that it is absent when the deployment offers none                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `src/lib/tools.test.ts`                                                                        | the mode editor's tri-state (#307): a missing tool read as "follow my settings", an explicit boolean as on/off, one tool set without disturbing the others, and an empty patch folded back to `null` — and, for #311/#312, a mode's `mcp_servers` patch carried through a built-in write and keeping the patch from folding to `null`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `src/components/theme-menu.test.tsx`                                                           | the theme quick switch (#203), now the account menu's submenu (#211): a pick paints and saves, it reads back with `aria-checked`, Escape closes without choosing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/components/settings/appearance.test.tsx`                                                  | the Appearance picker (#203): a pick is saved to the account and painted at once, the cached theme paints first and the account's stored one takes over once it answers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |

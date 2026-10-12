@@ -700,46 +700,50 @@ it is a variable this infrastructure sets.
   the same `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1` documented above. Staging and production
   leave it off, so an MCP server there must be on the public internet.
 
-### Web search, and the daily allowance that pays for it
+### Web search, and whose key pays for it
 
-`web_fetch` and `todo_write` are offered by every deployment (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305)).
-`web_search` is different: it is served by **one search API the operator configures and pays
-for**, so a deployment turns it on deliberately, with three variables:
+`web_fetch` and `todo_write` are offered by every deployment (epic #303,
+[#305](https://github.com/amirtuval/openharness/issues/305)). `web_search` is different in kind:
+it is the **chat model's own provider's** native search tool, attached to the request when the
+model has one ([#335](https://github.com/amirtuval/openharness/issues/335)). The search runs
+inside that one model request, on the user's own model key, with the provider's own index — so
+there is **no operator key, no daily allowance, and no variable here at all**:
 
-```
-OPENHARNESS_SEARCH_PROVIDER=brave
-OPENHARNESS_SEARCH_API_KEY=<the operator's key>
-OPENHARNESS_SEARCH_DAILY_LIMIT=50
-```
-
-- **With no `OPENHARNESS_SEARCH_API_KEY` there is no search tool at all.** The model is offered
-  none — which is a smaller offer, not a broken one — rather than a tool that would always
-  fail. Naming a provider without a key stops the boot: that configuration asked for search and
-  gave no way to authenticate. `brave` is the provider this build has an adapter for and the
-  default when a key is set on its own; a name it has no adapter for is refused at boot.
-- **The key is the deployment's, never a user's.** It lives in the server process and reaches a
-  tool only through the turn's per-user values, for the length of one step; nothing writes it to
-  the log, and the result a tool returns is scrubbed of it like every other resolved secret.
-  Users do not bring their own search keys, and the settings screens do not offer one.
-- **`OPENHARNESS_SEARCH_DAILY_LIMIT` is per user, per day** and defaults to 50. A
-  research-shaped day of chat is a handful of searches, so fifty covers heavy honest use while
-  bounding what one account can spend of the plan; the whole deployment's worst case is
-  `users × limit` rather than "as many as a model asks for". The day is **UTC** — a cap is
-  enforced inside a turn, where no request named a time zone, and a user's zone is not stored
-  anywhere; the usage route's `tz` parameter is the reader's own. `0` keeps the tool registered
-  and answers every call with the limit notice, which is how a deployment turns search off
-  without dropping its configuration.
-- **Searches are counted, and never priced.** `GET /v1/sessions/{id}/usage` and
-  `GET /v1/me/usage` report `searches` beside the token totals: the number of `web_search`
-  calls the log holds. The operator's plan's rates are not in this repository, so no money is
-  invented for them.
-- **Nothing here sets any of the three.** Every environment takes the default, which is a
-  deployment with no search tool. Turning one on is a deliberate act: one key, one provider,
-  and the allowance above it.
-
-The outbound request goes through the server's egress like every provider call (`HTTP_PROXY` /
-`HTTPS_PROXY` / `NO_PROXY`, #270), to the provider's fixed endpoint — a URL this server wrote,
-not one a user typed, so there is no address to guard.
+- **Nothing to configure.** The three variables #305 introduced
+  (`OPENHARNESS_SEARCH_PROVIDER`, `OPENHARNESS_SEARCH_API_KEY`,
+  `OPENHARNESS_SEARCH_DAILY_LIMIT`) are gone. A deployment that still sets one is not asked
+  about it: nothing reads them.
+- **No operator bill.** The searches are part of the request the user already pays for with
+  their own key, and the provider prices them its own way (Anthropic charges $10 per 1,000
+  searches on top of tokens; OpenAI and xAI include theirs in the model's own pricing). The
+  model request's span records how many the provider reported (`searches`), and the usage routes
+  report the count beside the tokens. Anthropic's own $10 per 1,000 searches is a published
+  rate, so it is charged into `cost` with the tokens
+  (`@openharness/protocol`'s `SEARCH_PRICE_PER_CALL`, the one table — models.dev prices tokens
+  and records nothing about a tool); OpenAI's and xAI's search is priced through the model's own
+  rates and adds nothing.
+- **Which models have one is the model's business.** Anthropic's Claude models from 3.5 on
+  (and a Claude on Vertex, through the basic tool version), OpenAI's `gpt-4o`/`gpt-4.1`/`gpt-5`
+  and `o`-series, and xAI's `grok-3`/`grok-4`. **Everything else has no `web_search` at all**:
+  DeepSeek, Groq, Mistral, Cerebras, Together, Fireworks, Bedrock, OpenRouter, Azure OpenAI and
+  every custom OpenAI-compatible endpoint. That is a smaller offer, not a broken one, and the
+  settings screen says so on the model it cannot serve.
+- **Google's Gemini is deliberately excluded**, even though the AI SDK has a grounding tool for
+  it: Google's terms require the "search suggestions" element to be shown to the end user
+  wherever a grounded answer is, and `oh` is a terminal that cannot render the HTML widget those
+  elements are. Rather than offer a search one of the two frontends cannot present honestly, a
+  Gemini chat has no `web_search`.
+- **A provider that refuses the tool is handled quietly.** A provider that does not know the
+  tool it was handed fails the request; the loop drops it and asks once more, records that on
+  the span (`search_rejected`) and shows nothing broken. That is the safety net behind the
+  model table, not the expected path.
+- **The setting carries over.** `web_search` keeps its name and its `/v1/me/tools` entry, so a
+  user's own choice and the modes they wrote apply to the native tool unchanged. Its policy is
+  `allow` or `deny` only: an `ask` cannot be honoured, because a provider runs the search while
+  the request is in flight — the `PUT` refuses one, and a stored one is read as `allow`.
+- **The search's content is untrusted data.** It arrives inside a model request rather than
+  through `web_fetch`, so it never passes the SSRF guard — see
+  [`threat-model.md`](./threat-model.md#web-search).
 
 ### Context compaction, and the one knob it has
 

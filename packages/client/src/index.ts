@@ -137,12 +137,14 @@ export {
   modelContextBudget,
   summaryDescription,
   summaryModelFallback,
+  truncationNotice,
 } from './compaction'
 export type {
   ContextMeter,
   ManualCompactionNotice,
   ManualCompactionTone,
   SummaryModelFallback,
+  TruncationNotice,
 } from './compaction'
 
 export {
@@ -184,12 +186,16 @@ export {
   mcpServerById,
   mcpServerByName,
   mcpServerFromError,
+  mcpServerPolicyBody,
   mcpServerTools,
   mcpStatusDetail,
   mcpStatusLabel,
   mcpStatusTone,
+  mcpTestOutcome,
   mcpToolEntriesByServer,
   mcpToolPolicyBody,
+  mcpToolPolicyState,
+  mcpToolPolicyStateLabel,
   toolPolicyLabel,
   waitForMcpConnection,
 } from './mcp'
@@ -198,8 +204,18 @@ export type {
   McpFailureNotice,
   McpServerTone,
   McpServerTool,
+  McpTestOutcome,
+  McpToolPolicyState,
   WaitForMcpConnectionOptions,
 } from './mcp'
+
+export {
+  NOT_REGISTERED_NOTE,
+  cycleToolPolicy,
+  toolAvailabilityNote,
+  toolPolicyChoices,
+  toolPolicyNote,
+} from './tool-settings'
 
 export {
   APPROVAL_CHOICES,

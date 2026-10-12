@@ -237,6 +237,10 @@ describe('streamModelRequest', () => {
       text: '',
       toolCalls: [],
       opaque: [],
+      sources: [],
+      searchCalls: [],
+      searches: 0,
+      paused: false,
       usage: ZERO_MODEL_USAGE,
       error: failure,
       aborted: false,
@@ -292,14 +296,43 @@ describe('streamModelRequest', () => {
 
     // A block's metadata rides a fragment of its own, with no text of it: the fragments are one
     // part, and the order the blocks were streamed in is the order they are reported in
-    // (epic #303, X13; #334).
+    // (epic #303, X13; #334). Each part carries the place it had in the step — `0` here, since
+    // both blocks led it and the text follows (epic #303, X14; #335).
     expect(result.opaque).toEqual([
       {
         type: 'reasoning',
         text: 'weighing the options',
         providerMetadata: { anthropic: { signature: 'sig-1' } },
+        textBefore: 0,
       },
-      { type: 'reasoning', text: '', providerMetadata: { anthropic: { redactedData: 'blob' } } },
+      {
+        type: 'reasoning',
+        text: '',
+        providerMetadata: { anthropic: { redactedData: 'blob' } },
+        textBefore: 0,
+      },
+    ])
+  })
+
+  it('records how much of the step’s text came before each part (epic #303, X14; #335)', async () => {
+    // The shape a Claude search step really streams: a sentence, the provider's own call and its
+    // answer, then the reply that reads the results — so the offsets are 0 nowhere but the call
+    // and its answer sit after the sentence.
+    const { factory } = mockModel({
+      textBeforeProviders: ['Let me look that up.'],
+      providerTools: [{ id: 'srvtoolu_1', name: 'web_search', input: { query: 'x' } }],
+      text: ['Found it.'],
+    })
+
+    const result = await streamModelRequest({
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
+      messages,
+    })
+
+    expect(result.text).toBe('Let me look that up.Found it.')
+    expect(result.opaque.map((part) => [part.type, part.textBefore])).toEqual([
+      ['tool-call', 'Let me look that up.'.length],
+      ['tool-result', 'Let me look that up.'.length],
     ])
   })
 

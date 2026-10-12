@@ -675,6 +675,8 @@ export interface ModelRequestRow {
   readonly model_usage: unknown
   /** The end event's `processed_at`: when the request finished. */
   readonly processed_at: Date
+  /** How many provider-executed web searches the request's end reported, when it reported any. */
+  readonly searches: number | null
 }
 
 /**
@@ -686,6 +688,8 @@ export function modelRequestFromRow(row: ModelRequestRow): ModelRequestUsage {
     model: row.model,
     usage: row.model_usage as ModelUsage,
     processed_at: timestampOf(row.processed_at),
+    // A span end stored before #335 carries none, which is a count of nothing.
+    searches: row.searches ?? 0,
   })
 }
 

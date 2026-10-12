@@ -3,17 +3,28 @@ import { Box, Text, useInput } from 'ink'
 import { useRef, useState, type ReactElement } from 'react'
 
 import { modeLabel } from '../modes'
+import {
+  listJump,
+  listWindow,
+  moreMarker,
+  useTerminalRows,
+  viewportRows,
+  type ListWindow,
+} from './list-viewport'
 
 /**
  * How many models the picker draws at once.
  *
  * The catalog can hold hundreds of models — every chat model of every provider the user has
  * a key for — and a frame that tall does not fit a terminal and is slow to redraw for every
- * keystroke. So the list is windowed: at most this many rows, following the cursor, with a
- * count of what is out of sight above and below. Ten rows plus the headings, the counts and
- * the hint fits a 24-row terminal with room to spare.
+ * keystroke. So the list is windowed: at most this many rows, and never more than the terminal
+ * has room for (a short terminal gets fewer — `viewportRows` — because ten rows of models plus
+ * the headings, the counts and the hint is what a 24-row terminal can hold).
  */
 export const MODEL_PICKER_VISIBLE_ROWS = 10
+
+/** The lines the picker draws around its window: the question, the search line, the counts… */
+const MODEL_PICKER_CHROME = 6
 
 /** The free-text entry's label: a model the catalog does not know can still be typed (C5). */
 export const OTHER_MODEL_LABEL = 'Other model id…'
@@ -125,6 +136,7 @@ export function ModelPicker({
   onSelect,
   onCancel,
 }: ModelPickerProps) {
+  const terminalRows = useTerminalRows()
   const [query, setQuery] = useState('')
   const [index, setIndex] = useState(0)
   // `null` while the list is shown; the buffer while the free-text entry is being typed.
@@ -143,6 +155,16 @@ export function ModelPicker({
   const typedRef = useRef<string | null>(null)
 
   const rows = pickerRows(models, query, modes)
+
+  // The window the rows are drawn through, from the shared viewport: ten rows at most, and
+  // fewer on a terminal that has no room for ten. Derived from the cursor rather than kept
+  // beside it, so the two cannot get out of step — the cursor stays in frame wherever it is.
+  const capacity = Math.min(
+    MODEL_PICKER_VISIBLE_ROWS,
+    viewportRows(terminalRows, MODEL_PICKER_CHROME),
+  )
+  const window = listWindow(index, rows.length, capacity)
+  const visible = rows.slice(window.first, window.first + window.count)
 
   const moveTo = (next: number): void => {
     indexRef.current = next
@@ -234,6 +256,14 @@ export function ModelPicker({
       return
     }
 
+    // PgUp/PgDn/Home/End walk the whole list, not the ten rows on screen (a catalog of
+    // hundreds is not reached an arrow at a time).
+    const jumped = listJump(indexRef.current, current.length, key, capacity)
+    if (jumped !== null) {
+      moveTo(jumped)
+      return
+    }
+
     if (key.return) {
       choose(current[indexRef.current])
       return
@@ -255,14 +285,6 @@ export function ModelPicker({
     }
   })
 
-  // The window is derived from the cursor rather than kept beside it, so the two cannot get
-  // out of step: the cursor sits in the middle of the window wherever it can.
-  const windowRows = Math.min(rows.length, MODEL_PICKER_VISIBLE_ROWS)
-  const first = clamp(index - Math.floor(windowRows / 2), 0, Math.max(rows.length - windowRows, 0))
-  const visible = rows.slice(first, first + windowRows)
-  const above = first
-  const below = rows.length - first - visible.length
-
   const filtering = query.trim() !== ''
   // Everything was filtered away and only the free-text row is left.
   const noMatches = filtering && rows.length === 1
@@ -277,7 +299,7 @@ export function ModelPicker({
             {query === '' ? <Text dimColor>type to filter</Text> : query}
           </Text>
           {noMatches ? <Text dimColor>No models match</Text> : null}
-          {renderRows(visible, first, index, above, below)}
+          {renderRows(visible, window)}
         </>
       ) : (
         <Text>{`❯ ${typed}`}</Text>
@@ -302,21 +324,16 @@ function hint(typing: boolean, query: string, rowCount: number): string {
 }
 
 /** The list's rows, with a provider heading wherever the provider changes between them. */
-function renderRows(
-  visible: readonly PickerRow[],
-  first: number,
-  index: number,
-  above: number,
-  below: number,
-): ReactElement[] {
+function renderRows(visible: readonly PickerRow[], window: ListWindow): ReactElement[] {
   const items: ReactElement[] = []
-  if (above > 0) {
-    items.push(<Text key="above" dimColor>{`  ↑ ${above} more`}</Text>)
+  const above = moreMarker('above', window.above)
+  if (above !== null) {
+    items.push(<Text key="above" dimColor>{`  ${above}`}</Text>)
   }
 
   let heading: string | undefined
   visible.forEach((row, position) => {
-    const number = first + position + 1
+    const number = window.first + position + 1
     if (row.provider !== '' && row.provider !== heading) {
       heading = row.provider
       items.push(
@@ -325,7 +342,7 @@ function renderRows(
         </Text>,
       )
     }
-    const selected = first + position === index
+    const selected = window.first + position === window.index
     items.push(
       <Text key={`row-${String(number)}`} color={selected ? 'cyan' : undefined}>
         {`${selected ? '❯' : ' '} ${String(number)}. ${row.text}`}
@@ -333,8 +350,9 @@ function renderRows(
     )
   })
 
-  if (below > 0) {
-    items.push(<Text key="below" dimColor>{`  ↓ ${below} more`}</Text>)
+  const below = moreMarker('below', window.below)
+  if (below !== null) {
+    items.push(<Text key="below" dimColor>{`  ${below}`}</Text>)
   }
 
   return items
@@ -344,11 +362,6 @@ function renderRows(
 function modelText(model: ModelEntry): string {
   const context = formatContextWindow(model.context_window)
   return context === null ? model.name : `${model.name} · ${context} context`
-}
-
-/** Keep a number inside `[low, high]`. */
-function clamp(value: number, low: number, high: number): number {
-  return Math.min(Math.max(value, low), high)
 }
 
 /**

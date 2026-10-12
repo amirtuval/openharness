@@ -34,8 +34,14 @@ export type ToolPermission = z.infer<typeof ToolPermissionSchema>
  * server the user added (epic #303, X10; #312). The two are the epic's decision X6: an MCP
  * tool is the server's, not this build's, and the only thing a user chooses about one is the
  * permission a call to it is evaluated under.
+ *
+ * `provider` is the third (epic #303, X14; issue #335): a tool the **model provider** runs
+ * inside the request it was attached to, so nothing of ours executes it — `web_search` today.
+ * It is recorded on a call and on the request's offer for the same reason the other two are:
+ * a reader has to be able to tell which of the build's own tools ran, which a remote server's
+ * did, and which a provider answered by itself.
  */
-export const ToolSourceSchema = z.enum(['builtin', 'mcp'])
+export const ToolSourceSchema = z.enum(['builtin', 'mcp', 'provider'])
 
 export type ToolSource = z.infer<typeof ToolSourceSchema>
 

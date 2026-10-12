@@ -1,9 +1,9 @@
 import { z } from 'zod'
 
-import { ContentBlocksSchema } from '../content'
+import { ContentBlocksSchema, SourcesSchema } from '../content'
 import { EventIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
-import { JsonValueSchema, ToolInputSchema, ToolPermissionSchema } from '../tools'
+import { JsonValueSchema, ToolInputSchema, ToolPermissionSchema, ToolSourceSchema } from '../tools'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 
 /**
@@ -77,6 +77,16 @@ export const AgentToolUseEventSchema = z.object({
   input: ToolInputSchema,
   /** What the policy in force said about this call: `allow`, `ask` or `deny`. */
   evaluated_permission: ToolPermissionSchema,
+  /**
+   * // extension: where this call's tool comes from (epic #303, X14; issue #335).
+   *
+   * Absent is `builtin` — every call this event carried before #335 — so a log stored then
+   * replays exactly as it did. `provider` is a call the model's own provider ran inside the
+   * request, which this build neither offered through `@openharness/hands` nor could have run:
+   * it is stored for the reader, and the request is rebuilt from `agent.opaque_content`
+   * instead (§ `@openharness/brain`'s `./context`, `./opaque`).
+   */
+  source: ToolSourceSchema.optional(),
 })
 
 /** A stored `agent.tool_use`, deep-readonly like every event. */
@@ -105,6 +115,20 @@ export const AgentToolResultEventSchema = z.object({
   content: ContentBlocksSchema,
   /** Whether the call failed — a refusal, a timeout, an interrupt or the tool's own error. */
   is_error: z.boolean(),
+  /**
+   * // extension: the web sources a provider-executed search answered with (epic #303, X14;
+   * issue #335).
+   *
+   * Present only on the result of a `source: 'provider'` call, and only for a search: the
+   * provider's citations normalized to one list (`SourceSchema`), so a client renders where a
+   * reply got its facts without knowing which provider produced them. Absent everywhere else —
+   * every result stored before #335, every result of a tool this build ran, every remote tool's
+   * — so a reader that does not know the field sees the shape it always did.
+   *
+   * It is a **reading**, not the request's material: what goes back to the provider is the
+   * provider's own opaque content, never this.
+   */
+  sources: SourcesSchema.optional(),
 })
 
 /** A stored `agent.tool_result`, deep-readonly like every event. */
@@ -185,22 +209,61 @@ export type AgentMcpToolResultEvent = DeepReadonly<z.infer<typeof AgentMcpToolRe
  */
 export const OpaquePartSchema = z.object({
   /**
-   * The AI SDK assistant-part type. `reasoning` is the only one this build captures today
-   * (#334); a provider-executed tool call or result (#335) is a new value, not a new field.
+   * The AI SDK assistant-part type: `reasoning` (#334), or `tool-call` / `tool-result` for a
+   * call the provider ran itself inside the request (#335). See
+   * `@openharness/brain`'s `./opaque` for which types a family captures and how each goes back
+   * out.
    */
   type: z.string().min(1),
-  /** The part's text: a reasoning part's thinking, or `''` when the provider withheld it. */
+  /**
+   * The part's text: a reasoning part's thinking, or `''` when the provider withheld it.
+   *
+   * Empty for the tool parts #335 captures — what a tool call says is its id, its name and its
+   * arguments ({@link OpaquePartSchema.shape.payload}), not prose.
+   */
   text: z.string(),
+  /**
+   * // extension: how much of the step's own text was streamed **before** this part — in
+   * characters — which is where the part goes in the assistant turn it is replayed on
+   * (epic #303, X14; issue #335).
+   *
+   * A provider's assistant content has an order, and one this build must rebuild exactly: a
+   * Claude step that wrote "Let me look that up." then called `server_tool_use` then answered
+   * from the results is text → call → result → text, and a request that sent the parts first
+   * would be asking Anthropic to read a turn it never wrote. A part's place is therefore its
+   * own offset into that step's text, and the strategy splits the step's `agent.message` text
+   * at those offsets and lays the parts between the pieces.
+   *
+   * Absent reads as `0`: every part of a step streamed before any of its text, which is the
+   * order this event was written with before the offsets existed (#334 — parts ahead of the
+   * text), so a log stored then replays exactly as it did.
+   */
+  text_before: z.number().int().nonnegative().optional(),
   /**
    * // extension: the provider's own metadata for the part, exactly as it sent it — the AI
    * SDK's `providerOptions` key for that provider (`signature` for Anthropic, `itemId` and
-   * `reasoningEncryptedContent` for OpenAI and xAI, `redactedData` for a redacted block).
+   * `reasoningEncryptedContent` for OpenAI and xAI, `thoughtSignature` for Gemini, the
+   * `encryptedIndex` of a citation or the `encryptedContent` of a search result).
    *
    * Absent for a family whose reasoning is replayed as plain text and carries no payload
    * (DeepSeek thinking mode through an OpenAI-compatible endpoint). See
    * `@openharness/brain`'s `./opaque` for which key each family files it under.
    */
   provider_options: JsonValueSchema.optional(),
+  /**
+   * // extension: the part's own data, for a part that is more than text (#335).
+   *
+   * A provider-executed tool call and its result are the AI SDK's own part shapes — a call's
+   * `toolCallId`, `toolName` and arguments, a result's `toolCallId`, `toolName` and output —
+   * and there is no place in `text` or in the provider's metadata for any of it: the metadata
+   * is the provider's key namespace, and cramming a call's arguments into it would put them
+   * under a name the provider's client reads for something else.
+   *
+   * Stored exactly as the AI SDK delivered it, because that is the only form the provider will
+   * accept back (a search result's `encryptedContent` is opaque to this build). Absent for a
+   * `reasoning` part, which is its text and its metadata and nothing else.
+   */
+  payload: JsonValueSchema.optional(),
 })
 
 /** One part of a step, deep-readonly like every event. */
@@ -222,6 +285,15 @@ export type OpaquePart = DeepReadonly<z.infer<typeof OpaquePartSchema>>
  * re-attaches a step's parts only when the next request goes to the same family **and** the
  * same model, and drops them on any switch (the AI SDK's provider clients then write the
  * assistant message without them, which is what a provider that cannot read them wants).
+ *
+ * A step's assistant turn has an **order**, and this event is where the parts' place in it is
+ * recorded: each part carries {@link OpaquePartSchema.shape.text_before}, the characters of the
+ * step's own `agent.message` text that came before it, and the strategy rebuilds the turn by
+ * splitting that text at those offsets and laying the parts between the pieces. Text → a
+ * provider's call → its answer → the text that answers from it is a step's real shape, and a
+ * request that sent the parts ahead of the text would be a turn the provider never wrote.
+ * Absent reads as `0`, so a log written before the offsets existed (#334's parts-ahead-of-text
+ * order) replays exactly as it did.
  *
  * Nothing here is summarized, and a rewind takes it back with the step it belongs to —
  * `session.rewind` covers every event in the tail it restarts, this one included. It is never

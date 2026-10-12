@@ -8,11 +8,16 @@ holds the **tool registry**: a tool declares its name, the description a model r
 schema (zod), a default permission and a timeout, and `ToolRegistry.execute` runs one call of
 one and turns every outcome into a `ToolResult` the brain stores. There is **no sandbox**: a
 tool runs in this process. The built-in tools arrive with
-[#305](https://github.com/amirtuval/openharness/issues/305) — `web_fetch`, `web_search` and
-`todo_write`, below — the loop's first client was a test tool behind the server's
+[#305](https://github.com/amirtuval/openharness/issues/305) — `web_fetch` and `todo_write`,
+below — the loop's first client was a test tool behind the server's
 `OPENHARNESS_TEST_MODEL=mock` hook, and the MCP client lives here too: **`openMcpClient`**
 (#303, X10) is what the server's connection check and the tool loop
-([#312](https://github.com/amirtuval/openharness/issues/312)) share.
+([#312](https://github.com/amirtuval/openharness/issues/312)) share. The one built-in of #305
+that is **not** here is `web_search`, which is no longer a tool this package runs at all: since
+[#335](https://github.com/amirtuval/openharness/issues/335) it is offered by attaching the chat
+model's own provider's native search tool to the request, so the provider runs the search inside
+that one model request and nothing of ours executes it (the loop's half is
+`@openharness/brain`).
 
 **`safeFetch`** (epic #245, A3a) is the SSRF guard for a URL a **user** supplied, and is what
 `web_fetch` uses. Everything else the server fetches is a constant URL it wrote itself, so
@@ -42,44 +47,43 @@ repo.
 
 ## Public API
 
-| export                                                                                                                                                                                                  | what it is                                                                                                                                                                                                                                                            |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `safeFetch(url, init?, options?)`                                                                                                                                                                       | fetch a user-supplied URL, refusing everything below                                                                                                                                                                                                                  |
-| `safeFetchResult(url, init?, options?)`, `SafeFetchResult`                                                                                                                                              | the same call, answering `{ response, url }` — the address the response finally came from, after redirects                                                                                                                                                            |
-| `SafeFetchError`, `isSafeFetchError()`, `SafeFetchErrorCode`                                                                                                                                            | the refusal, with a stable `code`                                                                                                                                                                                                                                     |
-| `AddressResolver`, `SafeFetchTransport`, `SafeFetchRequest`                                                                                                                                             | the two seams: how a host resolves, and how the request is made                                                                                                                                                                                                       |
-| `SafeFetchOptions`                                                                                                                                                                                      | `allowPrivate`, `maxBytes`, `timeoutMs`, `idleTimeoutMs`, `maxRedirects`, the seams                                                                                                                                                                                   |
-| `SAVE_TIME_LIMITS`, `STREAMING_LIMITS`, `STREAMING_IDLE_TIMEOUT_MS`                                                                                                                                     | the two presets: a tight check, and a streaming-safe model call                                                                                                                                                                                                       |
-| `DEFAULT_MAX_BYTES`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_REDIRECTS`                                                                                                                                      | `1 MiB`, `30 s`, `5` — what a call with no options gets                                                                                                                                                                                                               |
-| `isBlockedAddress()`, `isPublicAddress()`, `isMetadataHostname()`, `parseIpAddress()`, `parseIPv4()`, `parseIPv6()`, `ParsedAddress`                                                                    | the address rules, exported so a caller can reason about one on its own                                                                                                                                                                                               |
-| `openMcpClient(options)`                                                                                                                                                                                | open and initialize a Streamable HTTP connection to a remote MCP server                                                                                                                                                                                               |
-| `McpClientSession`, `McpClientOptions`, `McpFetch`                                                                                                                                                      | the session (`listTools()`, `client`, `close()`), its options and the injected fetch                                                                                                                                                                                  |
-| `mcpToolDefinition(tool)`, `MCP_CLIENT_NAME`, `MCP_CLIENT_VERSION`                                                                                                                                      | one SDK tool as this protocol's definition, and the identity this client announces                                                                                                                                                                                    |
-| `createMcpTool(options)`, `McpToolOptions`                                                                                                                                                              | one remote tool as an ordinary `ToolDefinition` (#312): the offered name, the server's own JSON Schema, the `ask` default, and a `run` that opens a connection, calls, shapes and closes                                                                              |
-| `mcpResult(answer, options)`, `McpResultOptions`, `DEFAULT_MCP_TOOL_TIMEOUT_MS`                                                                                                                         | an MCP answer as this protocol's result — text, structured content as JSON, a marker for anything else, the provenance line — and the ceiling a remote call runs under (60 s)                                                                                         |
-| `PACKAGE_NAME`                                                                                                                                                                                          | `'@openharness/hands'`                                                                                                                                                                                                                                                |
-| `PROTOCOL_DEPENDENCY`                                                                                                                                                                                   | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge                                                                                                                                                                                                |
-| `createToolRegistry(tools)`                                                                                                                                                                             | a registry over a host's tools: look one up by name, or run one call                                                                                                                                                                                                  |
-| `ToolRegistry`, `ToolRunContext`                                                                                                                                                                        | `{ tools, get(name), execute(name, input, ctx) }`, and what a caller tells `execute` about the turn (`signal`, `secrets`, a `timeoutMs` ceiling)                                                                                                                      |
-| `ToolDefinition`, `ToolExecutionContext`, `ToolResult`                                                                                                                                                  | one tool — name, description, zod input schema, default permission, timeout, the result cap a request carries of its output (`maxResultTokens`, epic #303 X9; #306), `run` — and what `run` is handed (the turn's signal, its resolved limit, the per-user `secrets`) |
-| `textResult(text)`, `errorResult(text)`                                                                                                                                                                 | the two results a tool normally answers with: one text block, the second with `isError: true`                                                                                                                                                                         |
-| `DEFAULT_TOOL_TIMEOUT_MS`                                                                                                                                                                               | `30000` — a call's limit when its definition names none                                                                                                                                                                                                               |
-| `DEFAULT_TOOL_RESULT_TOKENS`                                                                                                                                                                            | `4096` — the most of one call's result a model request keeps, when its definition names no `maxResultTokens` (epic #303, X9)                                                                                                                                          |
-| `scrubText(text, values)`, `REDACTED_PLACEHOLDER`                                                                                                                                                       | the redaction every result passes through: `[REDACTED]` where a resolved secret was                                                                                                                                                                                   |
-| `createWebFetchTool(options?)`, `WebFetchOptions`, `PageFetch`, `safePageFetch`, `WEB_FETCH_TOOL_NAME`                                                                                                  | `web_fetch`: a GET of a model-chosen URL through `safeFetch`, as Markdown                                                                                                                                                                                             |
-| `WebFetchInputSchema`, `WebFetchInput`, `DEFAULT_MAX_FETCH_CHARS`, `WEB_FETCH_MAX_BYTES`, `WEB_FETCH_MAX_REDIRECTS`, `WEB_FETCH_TIMEOUT_MS`, `WEB_FETCH_USER_AGENT`                                     | its input, and the caps it enforces: 50,000 characters of output, 2 MiB of response, 5 redirect hops, a 20 s call                                                                                                                                                     |
-| `htmlToMarkdown(html, url)`                                                                                                                                                                             | the conversion `web_fetch` runs: main content, script and style dropped, relative links resolved against `url`                                                                                                                                                        |
-| `createWebSearchTool(options)`, `WebSearchToolOptions`, `WEB_SEARCH_TOOL_NAME`, `WEB_SEARCH_API_KEY`                                                                                                    | `web_search`: one search through the deployment's provider, bounded by a per-user daily allowance                                                                                                                                                                     |
-| `WebSearchInputSchema`, `WebSearchInput`, `DEFAULT_SEARCH_COUNT`, `MAX_SEARCH_COUNT`, `WEB_SEARCH_TIMEOUT_MS`                                                                                           | its input, and its bounds: 5 results by default, at most 20, a 15 s call                                                                                                                                                                                              |
-| `createBraveSearchProvider(options)`, `BraveSearchOptions`, `BRAVE_SEARCH_PROVIDER`, `BRAVE_SEARCH_ENDPOINT`, `BRAVE_TIMEOUT_MS`, `BRAVE_MAX_COUNT`, `SUPPORTED_SEARCH_PROVIDERS`, `SearchProviderName` | the Brave adapter, its fixed endpoint, and the provider names this build serves                                                                                                                                                                                       |
-| `SearchProvider`, `SearchRequest`, `SearchResult`, `SearchResultSchema`, `SearchTransport`, `SearchRequestInit`, `SearchResponse`                                                                       | the adapter seam: what a provider is, what one query is, and how a request reaches the internet                                                                                                                                                                       |
-| `todoWriteTool`                                                                                                                                                                                         | `todo_write`: the whole list, replacing the previous one                                                                                                                                                                                                              |
+| export                                                                                                                                                                                             | what it is                                                                                                                                                                                                                                                            |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `safeFetch(url, init?, options?)`                                                                                                                                                                  | fetch a user-supplied URL, refusing everything below                                                                                                                                                                                                                  |
+| `safeFetchResult(url, init?, options?)`, `SafeFetchResult`                                                                                                                                         | the same call, answering `{ response, url }` — the address the response finally came from, after redirects                                                                                                                                                            |
+| `SafeFetchError`, `isSafeFetchError()`, `SafeFetchErrorCode`                                                                                                                                       | the refusal, with a stable `code`                                                                                                                                                                                                                                     |
+| `AddressResolver`, `SafeFetchTransport`, `SafeFetchRequest`                                                                                                                                        | the two seams: how a host resolves, and how the request is made                                                                                                                                                                                                       |
+| `SafeFetchOptions`                                                                                                                                                                                 | `allowPrivate`, `maxBytes`, `timeoutMs`, `idleTimeoutMs`, `maxRedirects`, the seams                                                                                                                                                                                   |
+| `SAVE_TIME_LIMITS`, `STREAMING_LIMITS`, `STREAMING_IDLE_TIMEOUT_MS`                                                                                                                                | the two presets: a tight check, and a streaming-safe model call                                                                                                                                                                                                       |
+| `DEFAULT_MAX_BYTES`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_REDIRECTS`                                                                                                                                 | `1 MiB`, `30 s`, `5` — what a call with no options gets                                                                                                                                                                                                               |
+| `isBlockedAddress()`, `isPublicAddress()`, `isMetadataHostname()`, `parseIpAddress()`, `parseIPv4()`, `parseIPv6()`, `ParsedAddress`                                                               | the address rules, exported so a caller can reason about one on its own                                                                                                                                                                                               |
+| `openMcpClient(options)`                                                                                                                                                                           | open and initialize a Streamable HTTP connection to a remote MCP server                                                                                                                                                                                               |
+| `McpClientSession`, `McpClientOptions`, `McpFetch`                                                                                                                                                 | the session (`listTools()`, `client`, `close()`), its options and the injected fetch                                                                                                                                                                                  |
+| `mcpToolDefinition(tool)`, `MCP_CLIENT_NAME`, `MCP_CLIENT_VERSION`                                                                                                                                 | one SDK tool as this protocol's definition, and the identity this client announces                                                                                                                                                                                    |
+| `createMcpTool(options)`, `McpToolOptions`                                                                                                                                                         | one remote tool as an ordinary `ToolDefinition` (#312): the offered name, the server's own JSON Schema, the `ask` default, and a `run` that opens a connection, calls, shapes and closes                                                                              |
+| `mcpResult(answer, options)`, `McpResultOptions`, `DEFAULT_MCP_TOOL_TIMEOUT_MS`                                                                                                                    | an MCP answer as this protocol's result — text, structured content as JSON, a marker for anything else, the provenance line — and the ceiling a remote call runs under (60 s)                                                                                         |
+| `PACKAGE_NAME`                                                                                                                                                                                     | `'@openharness/hands'`                                                                                                                                                                                                                                                |
+| `PROTOCOL_DEPENDENCY`                                                                                                                                                                              | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge                                                                                                                                                                                                |
+| `createToolRegistry(tools)`                                                                                                                                                                        | a registry over a host's tools: look one up by name, or run one call                                                                                                                                                                                                  |
+| `ToolRegistry`, `ToolRunContext`                                                                                                                                                                   | `{ tools, get(name), execute(name, input, ctx) }`, and what a caller tells `execute` about the turn (`signal`, `secrets`, a `timeoutMs` ceiling)                                                                                                                      |
+| `ToolDefinition`, `ToolExecutionContext`, `ToolResult`                                                                                                                                             | one tool — name, description, zod input schema, default permission, timeout, the result cap a request carries of its output (`maxResultTokens`, epic #303 X9; #306), `run` — and what `run` is handed (the turn's signal, its resolved limit, the per-user `secrets`) |
+| `textResult(text)`, `errorResult(text)`                                                                                                                                                            | the two results a tool normally answers with: one text block, the second with `isError: true`                                                                                                                                                                         |
+| `DEFAULT_TOOL_TIMEOUT_MS`                                                                                                                                                                          | `30000` — a call's limit when its definition names none                                                                                                                                                                                                               |
+| `DEFAULT_TOOL_RESULT_TOKENS`                                                                                                                                                                       | `4096` — the most of one call's result a model request keeps, when its definition names no `maxResultTokens` (epic #303, X9)                                                                                                                                          |
+| `scrubText(text, values)`, `REDACTED_PLACEHOLDER`                                                                                                                                                  | the redaction every result passes through: `[REDACTED]` where a resolved secret was                                                                                                                                                                                   |
+| `createWebFetchTool(options?)`, `WebFetchOptions`, `PageFetch`, `safePageFetch`, `WEB_FETCH_TOOL_NAME`                                                                                             | `web_fetch`: a GET of a model-chosen URL through `safeFetch`, as Markdown                                                                                                                                                                                             |
+| `WebFetchInputSchema`, `WebFetchInput`, `DEFAULT_MAX_FETCH_CHARS`, `WEB_FETCH_MAX_BYTES`, `WEB_FETCH_MAX_REDIRECTS`, `WEB_FETCH_MAX_RESULT_TOKENS`, `WEB_FETCH_TIMEOUT_MS`, `WEB_FETCH_USER_AGENT` | its input, and the caps it declares: 50,000 characters of output, 2 MiB of response, 5 redirect hops, 16,384 tokens of a result a request keeps (its `maxResultTokens`), a 20 s call                                                                                  |
+| `htmlToMarkdown(html, url)`                                                                                                                                                                        | the conversion `web_fetch` runs: main content first, chrome/consent and script and style dropped, a headline fallback for a page with no article, `charset` sniffed when the response names none, relative links resolved against `url`                               |
+| `todoWriteTool`                                                                                                                                                                                    | `todo_write`: the whole list, replacing the previous one                                                                                                                                                                                                              |
 
 ### The built-in tools (epic #303; #305)
 
-Three tools ship with this package. They are ordinary `ToolDefinition`s — nothing in the
+Two tools ship with this package. They are ordinary `ToolDefinition`s — nothing in the
 registry knows they are special — and each one's _default permission_ is `allow` (the epic's
-default policies), so an unfiltered registry offers them to the model.
+default policies), so an unfiltered registry offers them to the model. `web_search` is the
+third built-in of #305 and it is deliberately **not** one of these (#335): it is offered by
+attaching the chat model's own provider's native search tool to the request, so the provider
+runs the search and no `ToolDefinition` of ours exists for it.
 
 **`web_fetch`** (`src/web-fetch.ts`) is the one tool that reaches an address the **model**
 chose, so every hop of it goes through `safeFetch`: the scheme, the metadata hostnames, every
@@ -95,16 +99,37 @@ should _see_:
   inlined links). Both are maintained libraries rather than hand-written rules, which is the
   point: HTML→Markdown is a solved problem with a well-known failure mode for every special
   case, and a tool is not where it should be re-solved. What is done here is what is specific
-  to _this_ use: `script`, `style`, `noscript`, `template`, `iframe` and `svg` are dropped
-  before anything reads the page (turndown would otherwise emit a `<style>`'s rules as text),
-  and every link is resolved against the address the page was fetched from so a model can
-  follow it. A page `Readability` finds no content in falls back to the stripped document, and
-  the page's own `<title>` is put back as a heading.
+  to _this_ use:
+  - **Chrome is dropped before anything reads the page**: `script`, `style`, `noscript`,
+    `template`, `iframe`, `svg` and `canvas` (so an inline `<script type="application/ld+json">`
+    goes with the rest), and the page's own structural chrome — `nav`, `header`, `footer`,
+    `aside`, `dialog`, `form` and the ARIA landmark roles that name the same regions — by the
+    page's markup rather than by guessing class names. A consent/cookie banner is dropped by a
+    whole-word rule on its class or id (`cookie`/`consent`/`gdpr`), so a page that merely mentions
+    cookies is left alone.
+  - **A page whose "content" is a list of headlines still gets its content.** `Readability` is
+    tuned for one article, so a news homepage can make it answer `null` or a small wrong node
+    (a byline list). When its answer is missing, or is a small fraction (under a quarter) of the
+    page's own text, a second pass keeps the headline shape — headings, the links that carry
+    them, teasers, lists and captioned images, in document order — without the menus, and it
+    drops the masthead above the first real content so the headline leads. It is a documented
+    heuristic, not a per-site rule.
+  - **Every link is resolved** against the address the page was fetched from, so a model can
+    follow it, and the page's own `<title>` is put back as a heading when `Readability` read one.
+  - **The shapes a converter renders as stray punctuation are fixed on the DOM, not the string.**
+    A news card is often one `<a>` wrapping a whole headline and teaser; the inlined-link rule
+    would render that as an orphan `[` at the start with its `](href)` hundreds of characters
+    below, so the link is pushed down into each block instead (`# [Headline](href)`). An icon
+    link (an empty `<a>`) or an undescribed image (no `alt`, Hacker News's spacer `s.gif`) would
+    render as `[](...)`/`![](...)`, so both are dropped: an element with no readable content
+    never reaches the converter.
 - **Text and JSON pass through** as they are; **anything else** (an image, a PDF) is refused
   with an `is_error` result naming the content type, because bytes that are not text are not
   something to store as if they were. A response that names no content type is read as text.
-- **The charset the response names is honoured** (a `windows-1252` page would otherwise come
-  back with every accented character replaced), with UTF-8 when it names none.
+- **The charset is decoded in the order a browser uses**: the `charset` the `content-type`
+  header named, then the page's **own** statement — a `<meta charset>`/`<meta http-equiv>` in
+  its first bytes, or a byte-order mark — then UTF-8. A `windows-1255` Hebrew page served as
+  plain `text/html` would otherwise come back with every character replaced.
 - **The result leads with the address — the _final_ one, after redirects — and says the
   content is untrusted data from the web, not instructions.** That sentence is the threat
   model's rule made visible to the model on the one path where a page's text could be mistaken
@@ -112,31 +137,28 @@ should _see_:
 - **The output is capped** at `DEFAULT_MAX_FETCH_CHARS` (50,000 characters — a long article,
   about twelve thousand tokens), on top of `safeFetch`'s byte cap (2 MiB here, twice the
   guard's default, because HTML is mostly markup the Markdown conversion drops). A page over
-  the cap is cut with a marker saying so, never silently. What a _result_ may cost the whole
+  the cap is cut with a last-line marker saying how many of how many characters were shown,
+  never silently. Above that sits the tool's `maxResultTokens`
+  (`WEB_FETCH_MAX_RESULT_TOKENS`, 16,384 — epic #303, X9), the tool's own declaration of what a
+  result may cost a **model request**: it is deliberately above what the character cap can
+  produce, so for an ordinary page the character cap is the binding one, and the brain's own
+  share of the model's budget can only lower it further. What a _result_ may cost the whole
   context is [#306](https://github.com/amirtuval/openharness/issues/306)'s.
 - A non-2xx answer is refused rather than converted: a 404 page is not the page.
 
-**`web_search`** (`src/web-search.ts`) is served by **one operator key**, so the deployment
-pays for what a user asks and the tool is bounded twice:
-
-- **The provider is behind an adapter** (`src/search.ts`): `SearchProvider` is one method
-  (`search({ query, count, apiKey, signal })`), `createBraveSearchProvider` is the first
-  implementation — a plain JSON `GET` of Brave's endpoint with the key in
-  `X-Subscription-Token`, no SDK, a free tier an operator can start on — and
-  `SUPPORTED_SEARCH_PROVIDERS` is the list a deployment's configuration is validated against.
-  Only `title`, `url` and `description` are read out of a result, and a payload that is not a
-  page of results is an error rather than an empty list: "Brave refused this key" and "nothing
-  on the web matched" are different answers.
-- **The key travels per call, in the turn's per-user values** (`WEB_SEARCH_API_KEY`), not in
-  the adapter: `@openharness/hands` reads no environment variable, and the host is what holds
-  the operator's secret — which also means the registry's scrubbing applies to it, so a result
-  that somehow quoted the key stores `[REDACTED]`.
-- **The daily allowance is the host's, not the tool's**: the tool names the limit in the
-  notice it answers with, and the server decides by handing the key over or withholding it
-  (see `apps/server/AGENTS.md`). A tool that is handed no key answers
-  `Search limit reached: this account has used all N of its web searches for today.`
-- **A deployment with no provider configured does not register the tool at all** — the model
-  is offered no search rather than a tool that always fails.
+**`web_search` is not here** (#305; #335). It was the third tool of
+[#305](https://github.com/amirtuval/openharness/issues/305), one search through a single
+operator-paid search API with a per-user daily cap — the removed design. Since
+[#335](https://github.com/amirtuval/openharness/issues/335) the search runs on the **user's own
+model key**, with the chat model's own provider's index, inside the model request itself: the
+provider attaches its native search tool to the request it is already running and executes the
+search there, so there is no operator bill, no key to hand over and no call of ours to run. The
+consequence for this package is that there is nothing to build — no `createWebSearchTool`, no
+adapter, no transport, no per-call secret, no allowance — and `web_search` is a name this
+package no longer exports. The loop's half (which model families have a native tool, how the
+tool is attached and how a provider's refusal is answered) is `@openharness/brain`'s
+`native-search.ts`, and the settings list it as a tool no registry holds
+(`@openharness/protocol`'s `WEB_SEARCH_TOOL_NAME`).
 
 **`todo_write`** (`src/todo.ts`) replaces the **whole list** every time, which is what makes
 the list one value and the storage the log itself: the newest call's own input is the list, and
@@ -184,7 +206,7 @@ const result = await registry.execute('echo', call.input, { signal, secrets })
   result that merely resembles one is left alone.
 - **How much of a result a request keeps is the tool's declaration, not the registry's doing.**
   `maxResultTokens` (epic #303, X9; #306) is the tool's own judgement about its output — a
-  search's answer against a fetched page — and the brain caps a result to the smaller of it and
+  fetched page against a todo list — and the brain caps a result to the smaller of it and
   the share of the chat model's budget no single result may take, head and tail around an
   omission marker. Nothing here enforces it: the whole result is stored in the log and the tool
   still sees it, and the cap is what the _model request_ carries. `DEFAULT_TOOL_RESULT_TOKENS`
@@ -346,23 +368,27 @@ dependency table.
   another scheme kept as written and a `javascript:` one dropped by the extractor, headings,
   fenced code, lists and emphasis, the fallback for a page with no article in it, and an empty
   document.
+- `markdown-extraction.test.ts` is the conversion on **saved pages** under `src/fixtures/`,
+  each trimmed under 120 KB and read relative to the test file: the ynet homepage keeps its
+  main headline and leads with it (no top bar, navigation or ticker before it), the Hacker News
+  front page yields its story titles as links with their addresses resolved, the Wikipedia
+  article keeps its first paragraph, none of them keeps a `<script>`'s text or a `window.`
+  string, and a consent banner's words are dropped while a page that merely mentions cookies is
+  kept. Every one of the five fixtures — the four above and the `windows-1255` Hebrew page —
+  is also checked for the **stray punctuation** a converter emits on the wrong shapes: the
+  Markdown never begins with an unmatched `[`/`]`, and carries no empty link or image (`[](`,
+  `[ ](`).
 - `web-fetch.test.ts` runs the tool against **local HTTP servers**, reached through the real
   guard with a resolver the test supplies — so the address checks and every redirect's re-check
   are the real ones and no test needs the internet. It covers the conversion a model reads (and
   that the result leads with the final URL after a redirect and the untrusted-data notice), text
   and JSON passed through, a content type that is not text refused, a non-2xx refused, the
-  charset honoured, the byte cap, the output cap and its truncation marker, a call cut short by
-  its deadline, a redirect that lands on a private address refused, the metadata host, another
-  scheme and a loopback-resolving name refused, the redirect cap, and the input schema.
-- `search.test.ts` is the Brave adapter against a stub transport: the endpoint, the query and
-  count it asks for, the operator's key in its header, the results it reads out (title, URL and
-  a snippet with the provider's markup stripped, an entry with no URL skipped), the count capped
-  at what Brave accepts, a refusal thrown with what the provider said, a payload that is not a
-  page of results, and an endpoint a deployment names instead.
-- `web-search.test.ts` is the tool on its own: the results it renders, the count it asks for,
-  the key it hands the adapter, the allowance notice a call with no key gets (and that the
-  adapter is never reached), a failing provider answered as an `is_error` result, no results,
-  and the input schema.
+  charset honoured (including a `windows-1255` fixture decoded through an injected `PageFetch`
+  when the response names no charset, and a header charset winning over the page's own), the byte
+  cap, the output cap and its truncation marker (which states how many of how many characters were
+  shown), the declared `maxResultTokens`, a call cut short by its deadline, a redirect that lands
+  on a private address refused, the metadata host, another scheme and a loopback-resolving name
+  refused, the redirect cap, and the input schema.
 - `todo.test.ts` is `todo_write`: the markers and the counts, a cleared list, the states it
   refuses, and the offer the model reads.
 - `mcp-client.test.ts` runs `openMcpClient` against a real MCP server built from the same SDK

@@ -1,4 +1,4 @@
-import type { OpaquePart, ProviderCredentialType } from '@openharness/protocol'
+import type { JsonValue, OpaquePart, ProviderCredentialType } from '@openharness/protocol'
 import type { ModelMessage } from 'ai'
 
 import type { ModelOpaquePart } from './model'
@@ -36,6 +36,16 @@ import { isVertexAnthropicModel } from './vertex'
  * next request goes to the same client family and the same model (`./context`). Nothing is
  * shown as the reply, nothing is summarized, and nothing is ever sent to another provider.
  *
+ * A fifth family needs the same treatment for a different reason (#335). A **provider-executed
+ * tool call** — the web search a provider runs inside the request it was attached to — comes
+ * back as the AI SDK's own `tool-call` / `tool-result` pair, and the provider needs that pair
+ * handed back to continue the turn: Anthropic refuses a `server_tool_use` block replayed
+ * without the `web_search_tool_result` that answers it, and both carry payload this build
+ * cannot read (a search result's `encryptedContent`). So the pair is captured, stored and
+ * replayed through the same table as a reasoning block, under the same family key — and it is
+ * the same four families' clients that read it back, because the tool is attached through the
+ * client the request already runs on.
+ *
  * ## The rules, and why they are this narrow
  *
  * A family's client is what can read its parts back, so the gate is the family **and** the
@@ -64,10 +74,10 @@ import { isVertexAnthropicModel } from './vertex'
  * part is replayed as its text alone.
  *
  * Google's Gemini is deliberately **not** a family here. Its thought signatures ride on the
- * *tool call* part as well as on the reasoning part, so a reasoning-only row would be half an
- * answer that a later change (the provider-executed tool parts of #335, which capture a
- * tool-call part's own options) completes; until then a Gemini request builds exactly what it
- * built before, and the table says so by having no row.
+ * *tool call* part as well as on the reasoning part, and its grounding is left out of #335
+ * altogether (`./native-search` has why), so a row for it would half-answer a question nothing
+ * is asking. A Gemini request builds exactly what it built before, and the table says so by
+ * having no row.
  */
 
 /** The client families whose assistant turns carry parts only they can read back. */
@@ -259,10 +269,18 @@ export function captureOpaque(
 /** One stream part as the log stores it: the AI SDK's part, with the family's payload. */
 function opaquePartOf(provider: OpaqueFamily, part: ModelOpaquePart): OpaquePart {
   const payload = asJsonObject(part.providerMetadata?.[provider] ?? undefined)
+  const data = asJsonObject(part.payload ?? undefined)
+  // Where the part belongs in the step's turn: the characters of text before it, in the
+  // provider's own order (`./context` rebuilds the turn from it). A part that led the step
+  // carries none — the shape every entry had before the offsets existed, and the shape a log
+  // stored then must keep replaying as.
+  const textBefore = part.textBefore ?? 0
   return {
     type: part.type,
     text: part.text,
+    ...(textBefore === 0 ? {} : { text_before: textBefore }),
     ...(payload === undefined ? {} : { provider_options: payload }),
+    ...(data === undefined ? {} : { payload: data }),
   }
 }
 
@@ -278,8 +296,47 @@ type AssistantParts = Extract<
   readonly unknown[]
 >
 
-/** One opaque part as it goes back out: an assistant `reasoning` part. */
-export type OpaqueMessagePart = Extract<AssistantParts[number], { type: 'reasoning' }>
+/**
+ * One opaque part as it goes back out: an assistant part, or the text a part stands for when
+ * the request may not have the part itself.
+ */
+export type OpaqueMessagePart = AssistantParts[number]
+
+/**
+ * One replayed part **and its place** in the step's assistant turn (epic #303, X14; issue
+ * #335).
+ *
+ * The place is the payload: a provider's assistant content has an order — text → its own call →
+ * the answer → the text that reads it — and the strategy rebuilds that order by splitting the
+ * step's text at each part's `textBefore` and laying the part between the pieces (`./context`).
+ * It is the part's own offset, out of {@link OpaqueReplayedPart.part} where an assistant part
+ * has nowhere to carry one.
+ */
+export interface OpaqueReplayedPart {
+  /** The assistant part to send. */
+  readonly part: OpaqueMessagePart
+  /** Characters of the step's text that came before it; `0` for a part that led the step. */
+  readonly textBefore: number
+}
+
+/** The types {@link OpaqueMessagePart} takes when it is a part and not a conversion. */
+type OpaqueAssistantPart = Extract<
+  OpaqueMessagePart,
+  { type: 'reasoning' | 'tool-call' | 'tool-result' }
+>
+
+/**
+ * The part types a **provider-executed tool call and its answer** are stored as (epic #303,
+ * X14; issue #335).
+ *
+ * The AI SDK's own two, always paired: a `tool-call` with `providerExecuted: true` and the
+ * `tool-result` that answers it. They are what a provider reads back to continue a turn whose
+ * search it ran itself — Anthropic turns the pair into `server_tool_use` and
+ * `web_search_tool_result` blocks, OpenAI and xAI into the Responses items they came from — and
+ * nothing else in the log can stand in for them: a search result's `encryptedContent` is
+ * opaque to this build.
+ */
+export const PROVIDER_TOOL_PART_TYPES = ['tool-call', 'tool-result'] as const
 
 /** A stored `agent.opaque_content`, as much of it as a replay needs to decide. */
 export interface OpaqueEntry {
@@ -292,8 +349,8 @@ export interface OpaqueEntry {
 }
 
 /**
- * The assistant parts one stored entry contributes to a request, or `[]` when it contributes
- * none (epic #303, X13; #334).
+ * The assistant parts one stored entry contributes to a request, each with the place in the
+ * step's turn the log recorded for it, or `[]` when it contributes none (epic #303, X13; #334).
  *
  * One entry is one step's whole opaque half, and it is replayed whole or not at all: a family
  * needs the same client and (every family today) the same model, and a part whose payload is
@@ -303,48 +360,157 @@ export interface OpaqueEntry {
  * both sides is the sequence: a provider that binds the parts to each other accepts a prefix,
  * never a hole.
  *
+ * A part's place is its stored `text_before`, the characters of the step's text that came
+ * before it — which the strategy splits that text at, so the assistant turn goes back in the
+ * provider's own order (epic #303, X14; #335). An entry written before the offset existed
+ * carries none, reads as `0`, and so replays with its parts ahead of the text, exactly as it
+ * did then.
+ *
  * @param entry the stored entry
  * @param target the request's own family and model, or `null` when its client reads nothing back
  */
 export function opaqueReplayParts(
   entry: OpaqueEntry,
   target: OpaqueTarget | null,
-): readonly OpaqueMessagePart[] {
-  if (target === null || entry.provider !== target.provider) {
-    return []
-  }
+): readonly OpaqueReplayedPart[] {
   const rule = replayRule(entry.provider)
-  if (rule === undefined) {
-    // A family this build does not know — an entry a later version wrote. It is not this
-    // build's to send, and guessing at its payload key would be worse than dropping it.
-    return []
-  }
-  if (rule.sameModel && entry.model !== target.model) {
-    return []
+  if (
+    target === null ||
+    entry.provider !== target.provider ||
+    rule === undefined ||
+    (rule.sameModel && entry.model !== target.model)
+  ) {
+    // Either the request's client cannot read these parts at all, or it is not the family the
+    // entry names — a family this build does not know is one an entry from a later version
+    // names, and guessing at its payload key would be worse than dropping it. What may still
+    // be said is said as text ({@link convertedParts}).
+    return convertedParts(entry)
   }
   const key = rule.providerOptionsKey
-  const parts: OpaqueMessagePart[] = []
+  const replayed: OpaqueReplayedPart[] = []
   for (const part of entry.parts) {
-    if (part.type !== 'reasoning') {
-      // Only the type this build captures. #335 adds a provider-executed call or result here,
-      // and it will be replayed the same way: the AI SDK's own part, with its options.
-      return []
-    }
-    if (key === null) {
-      // The family replays plain text: the part is its text and nothing else.
-      parts.push({ type: 'reasoning', text: part.text })
-      continue
-    }
-    const payload = asJsonObject(part.provider_options)
-    if (payload === undefined) {
+    const textBefore = part.text_before ?? 0
+    const options = providerOptionsFor(part, key)
+    if (options === undefined) {
       // A keyed family's part without its payload — a signature the provider never sent — is a
       // block the client would drop with a warning, so the entry is refused rather than
       // half-sent (see above).
       return []
     }
-    parts.push({ type: 'reasoning', text: part.text, providerOptions: { [key]: payload } })
+    if (part.type === 'reasoning') {
+      replayed.push({ textBefore, part: { type: 'reasoning', text: part.text, ...options } })
+      continue
+    }
+    const tool = toolPartOf(part)
+    if (tool === undefined || (part.type === 'tool-result' && tool.output === undefined)) {
+      // A provider-executed part without the data it is made of — nothing this build writes,
+      // but a log is a log — cannot be rebuilt, and the entry goes as a whole has gone.
+      return []
+    }
+    if (part.type === 'tool-call') {
+      // `providerExecuted` is what tells the provider's client this call is already answered,
+      // and that its answer follows in this same assistant turn rather than in a `tool` message
+      // of ours.
+      replayed.push({
+        textBefore,
+        part: {
+          type: 'tool-call',
+          toolCallId: tool.toolCallId,
+          toolName: tool.toolName,
+          input: tool.input ?? {},
+          providerExecuted: true,
+          ...options,
+        },
+      })
+      continue
+    }
+    if (part.type === 'tool-result') {
+      replayed.push({
+        textBefore,
+        part: {
+          type: 'tool-result',
+          toolCallId: tool.toolCallId,
+          toolName: tool.toolName,
+          output: tool.output as OpaqueToolOutput,
+          ...options,
+        },
+      })
+      continue
+    }
+    // A type this build does not capture — an entry a later version wrote. Not this build's to
+    // send, the same rule an unknown family gets.
+    return []
   }
-  return parts
+  return replayed
+}
+
+/** One tool result's output, as the AI SDK's message part carries it. */
+type OpaqueToolOutput = Extract<OpaqueAssistantPart, { type: 'tool-result' }>['output']
+
+/**
+ * One part's provider metadata, wrapped under the key its client reads it back with — or
+ * `undefined` when the entry may not be replayed at all.
+ *
+ * A family whose parts are plain text (`key === null`) needs none and gets none, and a
+ * provider-executed part is free to carry none: Anthropic's `server_tool_use` sends no
+ * metadata, and only a `caller` ever would. A `reasoning` part of a keyed family without its
+ * payload is the half-written block the caller refuses the entry over — the signature *is* what
+ * the provider checks.
+ */
+function providerOptionsFor(
+  part: OpaquePart,
+  key: string | null,
+): { providerOptions?: Record<string, Record<string, JsonValue>> } | undefined {
+  if (key === null) {
+    return {}
+  }
+  const payload = asJsonObject(part.provider_options)
+  if (payload === undefined) {
+    return part.type === 'reasoning' ? undefined : {}
+  }
+  return { providerOptions: { [key]: payload } }
+}
+
+/** A stored tool part's own data, as {@link OpaquePart.payload} carried it. */
+function toolPartOf(
+  part: OpaquePart,
+): { toolCallId: string; toolName: string; input?: JsonValue; output?: JsonValue } | undefined {
+  const payload = asJsonObject(part.payload)
+  const toolCallId = payload?.toolCallId
+  const toolName = payload?.toolName
+  if (typeof toolCallId !== 'string' || typeof toolName !== 'string') {
+    return undefined
+  }
+  return { toolCallId, toolName, input: payload?.input, output: payload?.output }
+}
+
+/**
+ * The reading an entry contributes to a request that may not have its parts (epic #303, X14;
+ * issue #335).
+ *
+ * One text block, or `[]` when the entry has nothing readable in it. Only a **provider-executed
+ * tool result** is read this way, and only that part: it is the one part that is a fact about
+ * the world — what the previous provider searched and found — which another provider may be
+ * told. A reasoning block is never converted, however much text it carries: a model must not be
+ * handed another model's thoughts, which is the rule #334 states and the reason the family gate
+ * is the family **and** the model.
+ *
+ * The text is what the part was stored with (`./model`): the query, the titles and URLs found,
+ * and the passage each was cited for. It is the rule #334 left room for — a part is replayed,
+ * or it is its text — and it is why a provider switch keeps what the previous provider found
+ * instead of losing it.
+ *
+ * Its place is `0`: the reading stands for the whole entry, and it goes where the entry went
+ * before the parts carried a place — ahead of the step's text — which is the shape a request
+ * built before those offsets existed had (epic #303, X14; #335).
+ */
+function convertedParts(entry: OpaqueEntry): readonly OpaqueReplayedPart[] {
+  const text = entry.parts
+    .filter((part) => part.type === 'tool-result')
+    .map((part) => part.text)
+    .filter((part) => part.length > 0)
+    .join('\n')
+  return text.length === 0 ? [] : [{ textBefore: 0, part: { type: 'text', text } }]
 }
 
 /** The rule for a stored entry's family, or `undefined` when this build has none for it. */

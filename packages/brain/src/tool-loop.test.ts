@@ -18,7 +18,15 @@ import {
   type ToolSettingsResolver,
   type ToolSupportFor,
 } from './tools'
-import { eventTypes, logOf, message, newSession, spanStartOf, textOf } from './testing/harness'
+import {
+  NATIVE_SEARCH_TOOL,
+  eventTypes,
+  logOf,
+  message,
+  newSession,
+  spanStartOf,
+  textOf,
+} from './testing/harness'
 import { mockModel, readPrompt, resolveTestCredential } from './testing/mock-model'
 import { runTurn } from './turn'
 
@@ -135,9 +143,9 @@ describe('the tool loop', () => {
     expect(spans[0]).toMatchObject({
       consumes: [log[0]?.id],
       model: TEST_MODEL_ID,
-      tools: [{ name: 'echo', source: 'builtin' }],
+      tools: [{ name: 'echo', source: 'builtin' }, NATIVE_SEARCH_TOOL],
     })
-    expect(spans[1]?.tools).toEqual([{ name: 'echo', source: 'builtin' }])
+    expect(spans[1]?.tools).toEqual([{ name: 'echo', source: 'builtin' }, NATIVE_SEARCH_TOOL])
 
     const use = of(log, EVENT_TYPES.agentToolUse)[0]
     const result = of(log, EVENT_TYPES.agentToolResult)[0]
@@ -520,9 +528,12 @@ describe('the tool loop', () => {
     })
 
     // The disabled tool is not in the request at all: the model cannot see it or call it.
-    expect(offeredTo(calls[0]!)).toMatchObject([{ type: 'function', name: 'other' }])
+    expect(offeredTo(calls[0]!)).toMatchObject([
+      { type: 'function', name: 'other' },
+      { type: 'provider', name: 'web_search' },
+    ])
     const span = of(await logOf(store, sessionId), EVENT_TYPES.modelRequestStart)[0]
-    expect(span?.tools).toEqual([{ name: 'other', source: 'builtin' }])
+    expect(span?.tools).toEqual([{ name: 'other', source: 'builtin' }, NATIVE_SEARCH_TOOL])
   })
 
   it('offers nothing at all when the settings turn every tool off', async () => {
@@ -535,11 +546,14 @@ describe('the tool loop', () => {
       model: factory,
       resolveCredential: resolveTestCredential,
       tools: createToolRegistry([tool]),
-      toolSettings: () => ({ echo: { enabled: false, permission: 'allow' } }),
+      toolSettings: () => ({
+        echo: { enabled: false, permission: 'allow' },
+        web_search: { enabled: false, permission: 'allow' },
+      }),
     })
 
-    // As if this deployment registered no tools: nothing in the offer, nothing on the span —
-    // which is the same request a tools-less deployment builds, byte for byte.
+    // The user turned every tool off, the native search among them: nothing in the offer,
+    // nothing on the span — the same request a tools-less deployment builds, byte for byte.
     expect(offeredTo(calls[0]!)).toBeUndefined()
     const span = of(await logOf(store, sessionId), EVENT_TYPES.modelRequestStart)[0]
     expect(span?.tools).toBeUndefined()
@@ -605,9 +619,10 @@ describe('the tool loop', () => {
 
     expect(offeredTo(calls[0]!)).toMatchObject([
       { type: 'function', name: 'echo', description: 'Echo the text back.' },
+      { type: 'provider', name: 'web_search' },
     ])
     const span = of(await logOf(store, sessionId), EVENT_TYPES.modelRequestStart)[0]
-    expect(span?.tools).toEqual([{ name: 'echo', source: 'builtin' }])
+    expect(span?.tools).toEqual([{ name: 'echo', source: 'builtin' }, NATIVE_SEARCH_TOOL])
   })
 
   it('offers nothing at all when the host wired no registry', async () => {
@@ -715,15 +730,16 @@ describe('sizing a tool result in the request (epic #303, X9; #306)', () => {
     // The log keeps the whole answer: only the request was shortened.
     const result = of(log, EVENT_TYPES.agentToolResult)[0]
     expect(textOfEvent(result)).toHaveLength(body.length)
-    // The step the answer bought carries a head and a tail around the omission marker, and the
-    // call it answers is still there, right in front of it.
+    // The step the answer bought carries the answer's **beginning** with the omission marker
+    // where the rest went — a tool result gives up its tail, not its head (#314) — and the call
+    // it answers is still there, right in front of it.
     const carried = promptParts(calls[1]!)
       .filter((part) => part.type === 'tool-result')
       .map((part) => part.output?.value)
     expect(carried).toHaveLength(1)
     expect(carried[0]).toMatch(/^HEAD/)
-    expect(carried[0]).toMatch(/\[… \d+ tokens omitted …\]/)
-    expect(typeof carried[0] === 'string' ? carried[0].endsWith('TAIL') : false).toBe(true)
+    expect(carried[0]).toMatch(/\[… \d+ tokens omitted …\]$/)
+    expect(typeof carried[0] === 'string' ? carried[0].endsWith('TAIL') : true).toBe(false)
     expect(promptParts(calls[1]!).filter((part) => part.type === 'tool-call')).toHaveLength(1)
 
     // The request's span says what it had to cut, so a client can tell the user.

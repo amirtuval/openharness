@@ -84,6 +84,41 @@ describe('ToolCallLine (#308)', () => {
     expect(screen.getByText('The page says hello.')).toBeInTheDocument()
   })
 
+  it('draws the pages a search found, under their links (#335)', async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCallLine
+        call={call({
+          name: 'web_search',
+          input: { query: 'openharness architecture' },
+          source: 'provider',
+          sources: [
+            {
+              url: 'https://example.test/architecture',
+              title: 'The architecture',
+              cited_text: 'three ideas carry the design',
+            },
+            { url: 'https://example.test/bare' },
+          ],
+        })}
+      />,
+    )
+
+    // The compact row is the query and nothing else until the reader opens it.
+    expect(screen.queryByText('Sources')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /details for the web_search call/i }))
+
+    const list = screen.getByText('The architecture').closest('[data-slot="tool-sources"]')
+    expect(list).not.toBeNull()
+    // Titled pages link by their title, untitled ones by their URL, and a cited passage is shown.
+    expect(screen.getByRole('link', { name: 'The architecture' })).toHaveAttribute(
+      'href',
+      'https://example.test/architecture',
+    )
+    expect(screen.getByRole('link', { name: 'https://example.test/bare' })).toBeInTheDocument()
+    expect(screen.getByText('three ideas carry the design')).toBeInTheDocument()
+  })
+
   it('draws an error result as an error, and a call with no result without a Result block', async () => {
     const user = userEvent.setup()
     const { unmount } = render(

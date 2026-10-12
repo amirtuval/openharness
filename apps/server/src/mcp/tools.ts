@@ -5,6 +5,12 @@ import type { McpServer, McpToolDefinition, ModeToolOverride, UserId } from '@op
 import { MCP_LAST_ERROR_MAX_LENGTH } from '@openharness/protocol'
 
 import type { Logger } from '../types'
+import {
+  describeMcpFailure,
+  httpStatusOf,
+  recordingMcpFetch,
+  type McpHttpObservation,
+} from './http-failure'
 import { listMcpServersInForce } from './in-force'
 import type { McpServerService } from './service'
 
@@ -128,13 +134,13 @@ export function createMcpToolProvider(options: McpToolProviderOptions): McpToolP
         },
       }
     }
-    const status = recordingFetch(options.fetch)
+    const recorder = recordingMcpFetch(options.fetch)
     const secrets = Object.values(resolved.headers)
     try {
       const session = await openMcpClient({
         url: resolved.url,
         headers: resolved.headers,
-        fetch: status.fetch,
+        fetch: recorder.fetch,
         timeoutMs: options.listingTimeoutMs ?? DEFAULT_MCP_LISTING_TIMEOUT_MS,
       })
       try {
@@ -144,7 +150,10 @@ export function createMcpToolProvider(options: McpToolProviderOptions): McpToolP
         await session.close().catch(() => undefined)
       }
     } catch (error) {
-      return { ok: false, failure: await failureOf(server, error, status.lastStatus(), secrets) }
+      return {
+        ok: false,
+        failure: await failureOf(server, error, recorder.lastFailure(), secrets),
+      }
     }
   }
 
@@ -156,26 +165,32 @@ export function createMcpToolProvider(options: McpToolProviderOptions): McpToolP
    * is a server that could not be reached. An OAuth server whose token was rejected has its
    * tokens dropped, so the settings screen offers the flow again rather than leaving a token
    * that will keep failing; a `headers` server has nothing to reconnect, so it is only reported.
+   *
+   * The message **names the status and quotes the body** when there was a response (issue #314):
+   * the SDK's own error ends at "Error POSTing to endpoint:" for an empty-bodied 401, which left
+   * a reader with nothing to act on. The full sentence is logged too, because the stored one is
+   * bounded.
    */
   async function failureOf(
     server: McpServer,
     error: unknown,
-    httpStatus: number | undefined,
+    observed: McpHttpObservation | null,
     secrets: readonly string[],
   ): Promise<McpListingFailure> {
+    const httpStatus = observed?.status ?? httpStatusOf(error)
     const authentication = httpStatus === 401 || httpStatus === 403
     if (authentication && server.auth === 'oauth') {
       await options.service.disconnect(server.owner_id, server.id).catch(() => null)
     }
-    const message = bound(scrubText(messageOf(error), secrets))
-    options.logger?.debug?.(`mcp server ${server.name} could not be listed: ${message}`, {
+    const message = scrubText(describeMcpFailure(error, observed), secrets)
+    options.logger?.warn?.(`mcp server ${server.name} could not be listed: ${message}`, {
       server_id: server.id,
       status: httpStatus,
     })
     return {
       serverName: server.name,
       kind: authentication ? 'authentication' : 'connection',
-      message,
+      message: bound(message),
     }
   }
 
@@ -227,30 +242,6 @@ export function createMcpToolProvider(options: McpToolProviderOptions): McpToolP
     }
     return { tools, failures }
   }
-}
-
-/** A fetch that remembers the last HTTP status it saw, so a failure can be classified. */
-function recordingFetch(base: McpFetch): { fetch: McpFetch; lastStatus: () => number | undefined } {
-  let last: number | undefined
-  return {
-    fetch: async (url, init) => {
-      const response = await base(url, init)
-      last = response.status
-      return response
-    },
-    lastStatus: () => last,
-  }
-}
-
-/** An error's message, and never its stack: the message is what a user reads. */
-function messageOf(error: unknown): string {
-  if (error instanceof Error && error.message.length > 0) {
-    return error.message
-  }
-  if (typeof error === 'string' && error.length > 0) {
-    return error
-  }
-  return 'the server did not answer'
 }
 
 /** A failure message a client can show, bounded like every other MCP last-error string. */

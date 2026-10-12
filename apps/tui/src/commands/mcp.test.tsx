@@ -1,6 +1,6 @@
 import { makeMcpServer } from '@openharness/protocol/fixtures'
 import { render } from 'ink-testing-library'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { McpServersApp, formatMcpServers } from './mcp'
 import { createFakeClient } from '@openharness/client/testing'
@@ -31,6 +31,17 @@ const NOTES = makeMcpServer({
     { name: 'read', description: null, definition_tokens: 12 },
   ],
   definition_tokens: 53,
+})
+
+/** A server with more tools than any terminal shows at once. */
+const MANY_TOOLS = makeMcpServer({
+  name: 'huge',
+  tools: Array.from({ length: 60 }, (_, index) => ({
+    name: `tool_${String(index)}`,
+    description: null,
+    definition_tokens: 10,
+  })),
+  definition_tokens: 600,
 })
 
 /** Render the screen, and answer what the browser was asked to open. */
@@ -142,21 +153,109 @@ describe('the servers screen', () => {
     await waitForFrame(app, 'notes · OAuth · Connected')
   })
 
+  it('scrolls the server list once it is longer than the screen', async () => {
+    // Ten servers of two lines each are more than a 24-row terminal shows at once, and a
+    // server's tools are worth reaching without a screenful of names to walk past.
+    const many = Array.from({ length: 10 }, (_, index) =>
+      makeMcpServer({ name: `server-${String(index)}`, auth: 'none', status: 'connected' }),
+    )
+    const { app } = renderMcp({ mcpServers: many })
+    await waitForScreen(app, 'MCP servers')
+    await waitForFrame(app, '❯ server-0')
+
+    pressKey(app, 'end')
+    await waitForFrame(app, '❯ server-9')
+    expect(frameOf(app)).toContain('↑ ')
+    pressKey(app, 'home')
+    await waitForFrame(app, '❯ server-0')
+    expect(frameOf(app)).toContain('↓ ')
+  })
+
+  it('keeps a server with sixty tools inside the screen, with the all-tools row on top', async () => {
+    // The reader's report: the tools face drew every tool, so the list ran off the bottom of the
+    // terminal and the selected row went with it — on Linear's server there is no way to see what
+    // is selected or what the batch row says (#335).
+    const { app } = renderMcp({ mcpServers: [MANY_TOOLS] })
+    await waitForScreen(app, 'MCP servers')
+
+    typeText(app, 'p')
+    await waitForFrame(app, 'all tools · Ask (all)')
+    // The batch row is pinned above the window and the cursor starts on it: the frame says both
+    // where the selection is and that there is more below.
+    expect(frameOf(app)).toContain('❯ all tools · Ask (all)')
+    expect(frameOf(app)).toContain('↓ ')
+
+    // Walking down keeps the selected row on screen, and the pinned row with it.
+    for (let press = 0; press < 40; press += 1) {
+      pressKey(app, 'down')
+    }
+    await waitForFrame(app, '❯ huge__tool_39')
+    const scrolled = frameOf(app)
+    expect(scrolled).toContain('↑ ')
+    expect(scrolled).toContain('all tools · Ask (all)')
+
+    // End reaches the last tool, with the count of what is above it.
+    pressKey(app, 'end')
+    await waitForFrame(app, '❯ huge__tool_59')
+    expect(frameOf(app)).toContain('↑ ')
+
+    // Home is the batch row again — the top of the window, still pinned above it.
+    pressKey(app, 'home')
+    await waitForFrame(app, '❯ all tools · Ask (all)')
+    expect(frameOf(app)).toContain('↓ ')
+  })
+
   it('walks a server’s tools and changes one permission', async () => {
     const { app, fake } = renderMcp({ mcpServers: [NOTES] })
     await waitForScreen(app, 'MCP servers')
 
     typeText(app, 'p')
     await waitForFrame(app, 'notes · tools')
+    // The all-tools row comes first (#313), so the cursor starts on it and ↓ reaches a tool.
+    await waitForFrame(app, 'all tools · Ask (all)')
     await waitForFrame(app, 'notes__search · Ask · ~41 tokens')
 
+    pressKey(app, 'down')
     pressKey(app, 'right')
     await waitFor(async () => {
       const { data } = await fake.tools.list()
       return data.find((entry) => entry.name === 'notes__search')?.policy === 'deny'
     })
     await waitForFrame(app, 'notes__search · Deny')
+    // One tool moved: the other still follows its own declaration, and the two now differ.
+    expect(
+      (await fake.tools.list()).data.find((entry) => entry.name === 'notes__read')?.policy,
+    ).toBe('ask')
+    await waitForFrame(app, 'all tools · Mixed')
 
+    pressKey(app, 'escape')
+    await waitForFrame(app, 'MCP servers')
+  })
+
+  it('sets every tool of a server at once, in one write (#313)', async () => {
+    const { app, fake } = renderMcp({ mcpServers: [NOTES] })
+    await waitForScreen(app, 'MCP servers')
+
+    typeText(app, 'p')
+    await waitForFrame(app, 'all tools · Ask (all)')
+
+    // From `Ask (all)`, → is the next of the three: deny, and **every** tool of the server with
+    // it, in one request.
+    const put = vi.spyOn(fake.tools, 'put')
+    pressKey(app, 'right')
+    await waitFor(async () => {
+      const { data } = await fake.tools.list()
+      return data.every((entry) => entry.source !== 'mcp' || entry.policy === 'deny')
+    })
+    expect(put).toHaveBeenCalledTimes(1)
+    expect(put.mock.calls[0]?.[0]).toEqual({ mcp: { notes__search: 'deny', notes__read: 'deny' } })
+
+    await waitForFrame(app, 'all 2 tools set to Deny.')
+    await waitForFrame(app, 'all tools · Deny (all)')
+    await waitForFrame(app, 'notes__search · Deny')
+    await waitForFrame(app, 'notes__read · Deny')
+
+    put.mockRestore()
     pressKey(app, 'escape')
     await waitForFrame(app, 'MCP servers')
   })
@@ -172,13 +271,18 @@ describe('the servers screen', () => {
 
     typeText(app, 'n')
     await waitForFrame(app, 'Add an MCP server')
-    await waitForFrame(app, 'Name (lowercase')
-    submit(app, 'wiki')
+    // The URL comes first (issue #314): it is what the server probes.
     await waitForFrame(app, 'URL (the Streamable HTTP endpoint)')
+    await waitForFrame(app, 'work out how it authenticates')
     submit(app, 'https://wiki.example.com/mcp')
-    // The auth list: Enter takes the highlighted row, which starts on None.
-    await waitForFrame(app, 'Authentication')
-    await waitForFrame(app, '❯ None')
+    // Then an optional name — never an auth type; there is nothing to classify.
+    await waitForFrame(app, 'Name (optional')
+    expect(frameOf(app)).not.toContain('Authentication')
+    submit(app, 'wiki')
+    // Then the optional custom header, which is left blank here.
+    await waitForFrame(app, 'Custom header name')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Custom header value (optional)')
     pressKey(app, 'enter')
     // Whether it is on, then the save.
     await waitForFrame(app, 'On by default for your chats')
@@ -189,26 +293,52 @@ describe('the servers screen', () => {
     expect((await fake.mcpServers.list()).data[0]?.name).toBe('wiki')
   })
 
+  it('opens an edit on the values it holds, so Enter keeps the URL and the name (#314)', async () => {
+    const { app, fake } = renderMcp({ mcpServers: [NOTES] })
+    await waitForScreen(app, 'MCP servers')
+
+    // Enter on the row edits it. There is no auth prompt any more — the URL, the name, the
+    // optional header and on/off — and each field opens on what the server already holds, so a
+    // reader changing nothing presses Enter through it.
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Edit notes')
+    await waitForFrame(app, 'URL (the Streamable HTTP endpoint)')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Name (optional')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Custom header name')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Custom header value (optional)')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'On by default for your chats')
+    pressKey(app, 'enter')
+
+    await waitForFrame(app, 'notes')
+    const updated = (await fake.mcpServers.list()).data[0]
+    // The URL and the name it opened on survived, and no auth type or header map was invented.
+    expect(updated).toMatchObject({ name: 'notes', url: NOTES.url, auth: 'oauth' })
+  })
+
   it('refuses a name and a URL the protocol refuses, on the prompt', async () => {
     const { app } = renderMcp()
     await waitForScreen(app, 'MCP servers')
 
     typeText(app, 'n')
-    await waitForFrame(app, 'Name (lowercase')
-    submit(app, 'Notes Server')
+    await waitForFrame(app, 'URL (the Streamable HTTP endpoint)')
+    submit(app, 'not-a-url')
     // Held on the same prompt, with the reason: what was typed is still in the box to fix.
-    await waitForFrame(app, 'a name is 1–32 lowercase letters')
-    expect(frameOf(app)).not.toContain('URL (the Streamable HTTP endpoint)')
+    await waitForFrame(app, 'an absolute http or https URL')
+    expect(frameOf(app)).not.toContain('Name (optional')
 
-    // Esc leaves the form; a second run checks the URL rule.
+    // Esc leaves the form; a second run checks the name rule.
     pressKey(app, 'escape')
     await waitForFrame(app, 'No servers yet.')
     typeText(app, 'n')
-    await waitForFrame(app, 'Name (lowercase')
-    submit(app, 'notes')
     await waitForFrame(app, 'URL (the Streamable HTTP endpoint)')
-    submit(app, 'not-a-url')
-    await waitForFrame(app, 'an absolute http or https URL')
+    submit(app, 'https://wiki.example.com/mcp')
+    await waitForFrame(app, 'Name (optional')
+    submit(app, 'Notes Server')
+    await waitForFrame(app, 'a name is 1–32 lowercase letters')
     pressKey(app, 'escape')
     await waitForFrame(app, 'No servers yet.')
   })

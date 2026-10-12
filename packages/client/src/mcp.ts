@@ -153,6 +153,57 @@ export function estimatedTokensLabel(tokens: number): string {
   return `~${rounded}k tokens`
 }
 
+/** What a connection check came to, as the one line an inline result shows (issue #314). */
+export interface McpTestOutcome {
+  /** Whether the check listed the server's tools. */
+  readonly ok: boolean
+  /** The sentence to show beside the row: the tool count, or why there is none. */
+  readonly message: string
+}
+
+/**
+ * What to say after a **Test** (issue #314).
+ *
+ * Testing a server that cannot answer used to look like nothing happened: the row's status went
+ * back to the same value and no line was drawn, so a reader pressed the button again. This is
+ * the one line both frontends draw instead, and it is deliberately explicit about the two cases
+ * that are not failures of the server:
+ *
+ * - an **`oauth` server that is not connected** never ran a check at all — the resolve finds no
+ *   token and answers `null` — so the result is "Connect first", not an empty success. A caller
+ *   should not offer Test until then, but a race (a token dropped in another tab) can still
+ *   reach this, and a reader deserves the real reason;
+ * - a **connected** server reports what its last check listed, in the same estimate the row's
+ *   detail line uses, so the result confirms something rather than restating the status.
+ *
+ * Every other outcome carries the server's own `last_error`, which now names the HTTP status
+ * and quotes the body (the server's report, not this module's).
+ *
+ * @param server the refreshed server a `test` answered with
+ */
+export function mcpTestOutcome(server: McpServer): McpTestOutcome {
+  if (server.status === 'connected') {
+    if (server.tools.length === 0) {
+      return { ok: true, message: 'Connected. The server lists no tools.' }
+    }
+    const count = server.tools.length === 1 ? '1 tool' : `${server.tools.length} tools`
+    return {
+      ok: true,
+      message: `Connected. Listed ${count}, about ${estimatedTokensLabel(server.definition_tokens)}.`,
+    }
+  }
+  // A reason the check recorded always wins: it is what really happened — a 401 with its body
+  // excerpt, a server that could not be reached — and an `oauth` server that failed a check
+  // carries one too (its status drops to `needs_reconnect`, which is what offers Connect again).
+  if (server.last_error !== null) {
+    return { ok: false, message: server.last_error }
+  }
+  if (server.auth === 'oauth') {
+    return { ok: false, message: 'Connect first — this server needs a sign-in.' }
+  }
+  return { ok: false, message: 'The check failed.' }
+}
+
 /**
  * One of a server's tools, as a settings screen shows it (epic #303, X6; #313).
  *
@@ -251,6 +302,67 @@ export function mcpToolPolicyBody(
   policy: ToolPermission,
 ): PutToolSettingsRequest {
   return { mcp: { [offeredName]: policy } }
+}
+
+/**
+ * The body that writes one permission for **every** tool of a server (epic #303, #313).
+ *
+ * The batch a server's own control sends: one `PUT /v1/me/tools` naming every tool the server
+ * has — the ones its last check listed and a stored choice for a tool it no longer offers —
+ * each at the same permission, and the `builtin` half untouched. Building it here rather than in
+ * a component is what keeps the two frontends sending the same single request for the same set:
+ * a screen that looped over its rows would send one `PUT` per tool (and two writes for a reader
+ * who pressed twice).
+ *
+ * A server with no tools answers `null` — there is nothing to set, and a `{ mcp: {} }` write
+ * would be a request that changes nothing.
+ *
+ * @param tools the server's tools, as {@link mcpServerTools} joins them
+ * @param policy the permission to store for all of them
+ */
+export function mcpServerPolicyBody(
+  tools: readonly McpServerTool[],
+  policy: ToolPermission,
+): PutToolSettingsRequest | null {
+  if (tools.length === 0) {
+    return null
+  }
+  return { mcp: Object.fromEntries(tools.map((tool) => [tool.offeredName, policy])) }
+}
+
+/**
+ * What a server's tools say about their permission, taken together (epic #303, #313).
+ *
+ * `uniform` when every tool runs under the same permission — the state a reader's "Ask (all)"
+ * is about — and `mixed` when they differ, which is what a control that sets them all at once
+ * has to say before it does. `null` for a server with no tools: there is no state, because there
+ * is nothing to agree or disagree.
+ */
+export type McpToolPolicyState =
+  { readonly kind: 'uniform'; readonly policy: ToolPermission } | { readonly kind: 'mixed' }
+
+/**
+ * The state of a server's tools as one value.
+ *
+ * @param tools the server's tools, as {@link mcpServerTools} joins them
+ */
+export function mcpToolPolicyState(tools: readonly McpServerTool[]): McpToolPolicyState | null {
+  const first = tools[0]
+  if (first === undefined) {
+    return null
+  }
+  const uniform = tools.every((tool) => tool.policy === first.policy)
+  return uniform ? { kind: 'uniform', policy: first.policy } : { kind: 'mixed' }
+}
+
+/**
+ * The words for that state — "Ask (all)" for a permission every tool shares, "Mixed" when they
+ * differ — the same in both frontends.
+ *
+ * @param state the state {@link mcpToolPolicyState} answered
+ */
+export function mcpToolPolicyStateLabel(state: McpToolPolicyState): string {
+  return state.kind === 'mixed' ? 'Mixed' : `${toolPolicyLabel(state.policy)} (all)`
 }
 
 /** The permissions a per-tool picker offers, in the order it offers them. */

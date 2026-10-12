@@ -1,13 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { API_VERSION_PREFIX, ApiErrorBodySchema, SessionUsageSchema } from '@openharness/protocol'
-import type { Session, SessionId, SessionUsage, UserUsage } from '@openharness/protocol'
+import {
+  API_VERSION_PREFIX,
+  ApiErrorBodySchema,
+  EVENT_TYPES,
+  SEARCH_PRICE_PER_CALL,
+  SessionUsageSchema,
+  WEB_SEARCH_TOOL_NAME,
+  type Session,
+  type SessionId,
+  type SessionUsage,
+  type UserUsage,
+} from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 import type { SessionStore } from '@openharness/session'
 
 import { WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
 
 import { createBundledRegistry } from './catalog/registry'
-import { asUser, createTestApp, waitForIdle, type TestContext } from './test-support'
+import { asUser, createTestApp, readHistory, waitForIdle, type TestContext } from './test-support'
 
 /**
  * `GET /v1/sessions/{session_id}/usage` and `GET /v1/me/usage` (epic #245, A2; issue #247).
@@ -83,6 +93,39 @@ async function createSession(test: TestContext, model = PRICED_MODEL): Promise<S
   return (await response.json()) as Session
 }
 
+/**
+ * Give the session's newest request span the provider-executed searches it ran, and answer what
+ * its tokens alone cost.
+ *
+ * A provider-executed search is not a call of ours (#335), so the only place the log holds one is
+ * the request's own span — written here directly, because a scripted model cannot make a
+ * provider search one. The token cost is read back from the usage route before the searches are
+ * written, which is what lets a test assert the two sides separately.
+ */
+async function spanSearches(
+  test: TestContext,
+  sessionId: SessionId,
+  searches: number,
+): Promise<{ readonly spent: number }> {
+  const before = await sessionUsage(test, sessionId)
+  const history = await readHistory(test.store, sessionId)
+  const start = history.findLast((event) => event.type === EVENT_TYPES.modelRequestStart)
+  const end = history.findLast((event) => event.type === EVENT_TYPES.modelRequestEnd)
+  if (start === undefined || end === undefined) {
+    throw new Error('the session has no finished request to attach searches to')
+  }
+  await test.store.appendEvents(sessionId, [
+    {
+      type: EVENT_TYPES.modelRequestEnd,
+      model_request_start_id: start.id,
+      model_usage: end.model_usage,
+      is_error: null,
+      searches,
+    },
+  ])
+  return { spent: before.cost ?? 0 }
+}
+
 /** Send a message and wait for the turn it starts to finish. */
 async function turn(
   test: TestContext,
@@ -120,6 +163,8 @@ async function recordSearch(
     readonly name?: string
     readonly isError?: boolean
     readonly answered?: boolean
+    /** The readable pair #335 writes for a search the provider ran inside its own request. */
+    readonly source?: 'provider'
   } = {},
 ): Promise<void> {
   const [call] = await test.store.appendEvents(sessionId, [
@@ -128,6 +173,7 @@ async function recordSearch(
       name: options.name ?? WEB_SEARCH_TOOL_NAME,
       input: { query: 'anything' },
       evaluated_permission: 'allow',
+      ...(options.source === undefined ? {} : { source: options.source }),
     },
   ])
   if (call === undefined) {
@@ -280,6 +326,48 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
     await recordSearch(test, session.id, { answered: false })
 
     expect((await sessionUsage(test, session.id)).searches).toBe(1)
+  })
+
+  it('counts a provider-executed search once, from the span (#335; issue #338)', async () => {
+    const { test } = usageApp()
+    const session = await createSession(test, 'openai/gpt-5-mini')
+    await turn(test, session.id, { model: 'openai/gpt-5-mini' })
+    // #335 stores a provider-executed search twice — as the readable pair a client draws, and
+    // as the count on the request's own span — and they are **one** search. The readable pair
+    // is not an operator-key-era call, so the route counts it from the span alone.
+    await recordSearch(test, session.id, { source: 'provider' })
+    await recordSearch(test, session.id, { source: 'provider' })
+    await spanSearches(test, session.id, 2)
+
+    expect((await sessionUsage(test, session.id)).searches).toBe(2)
+    const user = (await (
+      await userUsageRequest(test, 'from=2026-10-01&to=2026-10-31&tz=UTC')
+    ).json()) as UserUsage
+    expect(user.searches).toBe(2)
+  })
+
+  it('prices a provider-executed search at the published rate, and counts one it cannot (#335)', async () => {
+    const { test } = usageApp()
+    const session = await createSession(test)
+    await turn(test, session.id)
+
+    // A search the provider ran inside the request is on that request's span, not a call of
+    // ours — and Anthropic charges $10 per 1,000 of them on top of the tokens. The helper
+    // appends a second span end for the same request (the log is append-only), so its tokens
+    // are counted twice and the fee once.
+    const { spent } = await spanSearches(test, session.id, 2)
+    const priced = await sessionUsage(test, session.id)
+    expect(priced.searches).toBe(2)
+    expect(priced.cost).toBeCloseTo(2 * spent + 2 * SEARCH_PRICE_PER_CALL.anthropic!, 10)
+
+    // A provider that charges nothing beside the tokens (OpenAI, xAI) adds no money, and its
+    // searches are counted all the same: the table says "no separate fee", not "unknown".
+    const openai = await createSession(test, 'openai/gpt-5-mini')
+    await turn(test, openai.id, { model: 'openai/gpt-5-mini' })
+    const { spent: openaiSpent } = await spanSearches(test, openai.id, 3)
+    const other = await sessionUsage(test, openai.id)
+    expect(other.searches).toBe(3)
+    expect(other.cost).toBeCloseTo(2 * openaiSpent, 10)
   })
 
   it('is owner-scoped: another user’s session is the 404 an unknown id gets', async () => {

@@ -21,6 +21,7 @@ import {
   readTodoList,
   toolCallInput,
   toolCallOfferedName,
+  toolCallSource,
   toolResultCallId,
   toolResultIsError,
 } from '@openharness/protocol'
@@ -28,7 +29,7 @@ import type { ModelMessage } from 'ai'
 
 import { lastModelRequest } from './log'
 import { opaqueReplayParts } from './opaque'
-import type { OpaqueMessagePart, OpaqueTarget } from './opaque'
+import type { OpaqueMessagePart, OpaqueReplayedPart, OpaqueTarget } from './opaque'
 import { stuckReminder } from './stuck'
 
 /**
@@ -282,9 +283,24 @@ export interface ContextStrategyConfig {
  * ## The newest item (K6)
  *
  * Summarizing cannot help when the newest item alone is over the budget — it has to stay
- * verbatim — so it is not dropped but **capped** to a head and a tail with an
- * {@link OMISSION_MARKER} between them, and the record of what was cut is returned for the span.
- * The newest user message is never dropped, so nothing is silently lost.
+ * verbatim — so it is not dropped but **capped**: a message keeps a head and a tail with an
+ * {@link OMISSION_MARKER} between them (both ends carry what the other side needs), a tool
+ * result keeps its beginning ({@link capResultText} — a tool said what it had to say in the
+ * order it said it), and the record of what was cut is returned for the span. The newest user
+ * message is never dropped, so nothing is silently lost.
+ *
+ * ## Tool results (X9, #306)
+ *
+ * A result is the one part of a request that can be arbitrarily large without anyone having
+ * written it, so it is sized twice. A result older than the verbatim tail of the history — the
+ * recent quarter of the budget the compaction engine keeps in full (K4) — has its body replaced
+ * by {@link CLEARED_TOOL_RESULT}: old tool output is what a request can most afford to give up,
+ * and giving it up is cheaper than a summary, which is why clearing happens first and why a
+ * context it brings back under the threshold is never summarized at all. A result **inside** the
+ * tail is capped to the smaller of its tool's declared `maxResultTokens` and a fifth of the
+ * budget ({@link TOOL_RESULT_BUDGET_RATIO}) — kept from its **beginning**, with the omission
+ * marker where the rest went — and every cap is recorded for the span. Neither touches the log, and neither splits a pair: the result
+ * still answers its call, with a shorter answer.
  *
  * ## Tool results (X9, #306)
  *
@@ -1154,7 +1170,7 @@ function planToolResult(
   if (tokens <= cap) {
     return { text: raw }
   }
-  const capped = capItemText(raw, cap)
+  const capped = capResultText(raw, cap)
   return {
     text: capped,
     truncation: {
@@ -1283,11 +1299,14 @@ function truncationRecord(
  * ## The step's opaque parts (epic #303, X13; #334)
  *
  * An `agent.opaque_content` event's parts are re-attached to the assistant message of the step
- * that produced them, **before** its text and its calls — the order every provider reads them in
- * (a `thinking` block comes before the text and the `tool_use` it reasoned about) — and only
- * when the request goes to the family and model that produced them (`./opaque`). An entry that
- * does not replay is left out entirely, so a model or provider switch builds the assistant turn
- * it built before #334: no parts, the model's own text and calls.
+ * that produced them, **in the order the provider wrote them** — a `thinking` block, then the
+ * text, then the `tool_use` it reasoned about, then the text that reads its answer, which is the
+ * order each part's own `text_before` offset records (epic #303, X14; #335) — and only when the
+ * request goes to the family and model that produced them (`./opaque`). An entry that does not
+ * replay is left out entirely, so a model or provider switch builds the assistant turn it built
+ * before #334: no parts, the model's own text and calls; an entry whose parts carry no offset —
+ * a log written before the order was recorded — lays them all ahead of the text, exactly as it
+ * did then.
  *
  * **Every** matching step's parts are replayed, not only the newest turn's: the
  * OpenAI-compatible family needs the key on each assistant turn of a thinking-mode conversation
@@ -1304,6 +1323,9 @@ function conversationAfter(
 ): BuiltConversation {
   const messages: ConversationMessage[] = []
   const toolNames = toolNamesOf(events)
+  // The provider-executed calls the log holds, by id (#335): neither they nor their answers
+  // belong in a request — the step's opaque content carries them — so both are skipped below.
+  const provider = providerCallIds(events)
   // Every call the user's answers have settled, by the event id that names it (#309). A call with
   // no result is one still waiting on the user: the turn that made it paused instead of asking
   // again (turn.ts), so a request never carries it, and this is what keeps that true here — a
@@ -1332,10 +1354,7 @@ function conversationAfter(
       }
       return
     }
-    const content: AssistantContent = [...parts]
-    if (text.length > 0) {
-      content.push({ type: 'text', text })
-    }
+    const content: AssistantContent = [...orderedAssistantParts(text, parts)]
     content.push(...settled)
     messages.push({ message: { role: 'assistant', content }, seq })
     if (settled.length > 0) {
@@ -1381,6 +1400,71 @@ function conversationAfter(
           assistant = { seq: event.seq, text, calls: [], parts: [] }
         } else {
           assistant.text += text
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          if (toolCallSource(event) === 'provider') {
+            // A call the provider ran inside its own request (epic #303, X14; #335). It is **not**
+            // part of the request this builds: the provider's own call and answer are in the
+            // step's `agent.opaque_content`, and replaying both would send the same call twice —
+            // once as a `tool_use` of ours and once as the `server_tool_use` the provider
+            // recognizes, which the provider refuses. The pair is a record for a reader; this is
+            // where the request is told so.
+            break
+          }
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [], parts: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (event.type === EVENT_TYPES.agentOpaqueContent) {
+          // The step's own opaque parts (X13; #334): the ones this request may carry back, each
+          // with the place in the step's text the log recorded — it is the step's assistant
+          // message they belong to, opened here when the step streamed no text at all, which is
+          // exactly the tool-calling step this exists for.
+          const parts = opaqueReplayParts(event, opaque)
+          if (parts.length > 0) {
+            assistant ??= { seq: event.seq, text: '', calls: [], parts: [] }
+            assistant.parts.push(...parts)
+          }
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          if (provider.has(callId)) {
+            // The answer to a provider-executed call (X14; #335): like the call, it is already in
+            // the step's opaque content, and a `tool_result` for a `tool_use` the request does
+            // not carry is what every provider refuses.
+            break
+          }
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
         }
         break
       }
@@ -1751,6 +1835,17 @@ function answeredCalls(events: readonly StoredEvent[]): Set<string> {
   return answered
 }
 
+/** The provider-executed calls the log holds, by id (epic #303, X14; #335). */
+function providerCallIds(events: readonly StoredEvent[]): Set<string> {
+  const provider = new Set<string>()
+  for (const event of events) {
+    if (isToolCallEvent(event) && toolCallSource(event) === 'provider') {
+      provider.add(event.id)
+    }
+  }
+  return provider
+}
+
 /**
  * What a tool that said nothing is reported as.
  *
@@ -1772,8 +1867,49 @@ interface AssistantTurn {
   readonly seq: number
   text: string
   readonly calls: ToolCallPart[]
-  /** The replayed opaque parts, in the provider's own order, sent before the text and calls. */
-  readonly parts: OpaqueMessagePart[]
+  /**
+   * The replayed opaque parts, in the provider's own order, each with the place in the text the
+   * log recorded for it (X13; #334; the order: #335).
+   */
+  readonly parts: OpaqueReplayedPart[]
+}
+
+/**
+ * The step's own blocks in the order the provider produced them: the text pieces it wrote
+ * around its thinking and its provider-executed calls, and those parts between them (epic #303,
+ * X13/X14; #334, #335).
+ *
+ * A provider requires its assistant content back in the order it wrote it — text, then the
+ * `server_tool_use` it reasoned about, then the `web_search_tool_result` that answers it, then
+ * the text that reads it — so each replayed part carries the character offset in the step's
+ * text that came before it ({@link OpaqueReplayedPart}) and the text is split there. A part that
+ * led the step carries `0`, and a log written before the offsets existed carries none on any
+ * part, so every part is laid ahead of the whole text — the order #334 established, which is
+ * what an old entry must keep replaying as.
+ *
+ * Nothing is added where the text is empty: a step that streamed none contributes its parts
+ * alone, exactly as it did before there was an order to keep.
+ */
+function orderedAssistantParts(
+  text: string,
+  parts: readonly OpaqueReplayedPart[],
+): readonly OpaqueMessagePart[] {
+  const content: OpaqueMessagePart[] = []
+  let cursor = 0
+  for (const { part, textBefore } of parts) {
+    // Clamped to the text this step really carries: an offset past its end — a log nothing this
+    // build writes — puts the part after the text rather than inventing characters.
+    const at = Math.min(Math.max(textBefore, cursor), text.length)
+    if (at > cursor) {
+      content.push({ type: 'text', text: text.slice(cursor, at) })
+      cursor = at
+    }
+    content.push(part)
+  }
+  if (cursor < text.length) {
+    content.push({ type: 'text', text: text.slice(cursor) })
+  }
+  return content
 }
 
 /** One call inside an assistant message. */
@@ -1980,19 +2116,49 @@ export function capItemText(text: string, budget: number): string {
 }
 
 /**
- * `text` cut to a head and a tail that together cost at most `budget` tokens, with
- * {@link OMISSION_MARKER} for the middle.
+ * Cut a **tool result** to at most `budget` tokens, keeping its **beginning** (X9; #314).
+ *
+ * A capped result is not a capped message, and the difference is where its meaning is. A
+ * message is the reader's own words or the model's reply, and both ends of it carry what the
+ * other side needs — the question and the constraint it ends with — which is why K6 keeps a head
+ * *and* a tail. A tool result is what a tool said, in the order it said it: a `web_fetch` page's
+ * main content, a search's hits, a list's first items. Its beginning is the part to keep, and a
+ * tail kept at the beginning's expense is a fragment from the middle of a page that reads as if
+ * it were the answer (#314: the ynet page's headline was cut away and the model was handed the
+ * page's footer instead).
+ */
+function capResultText(text: string, budget: number): string {
+  return capText(text, budget, estimateTokens(text), 'head')
+}
+
+/**
+ * `text` cut to at most `budget` tokens, with {@link OMISSION_MARKER} where the rest went.
+ *
+ * What is kept is the caller's decision and it is the whole of the difference between the two
+ * cuts: a **message** keeps a head and a tail (`both`), because both ends carry what the other
+ * side needs, and a **tool result** keeps its beginning (`head`), because a tool said what it had
+ * to say in the order it said it ({@link capResultText}).
  *
  * The marker's own size is reserved first, at the widest the count it will carry could be, so the
  * result is inside the budget whatever the omitted number turns out to be. A budget too small for
  * the marker alone gives the marker by itself — it is the smallest honest statement that text was
  * left out.
+ *
+ * @param text the text to cut
+ * @param budget the most tokens the answer may cost, marker included
+ * @param tokensBefore what `text` costs, in the same estimate
+ * @param keep which end (or ends) of `text` survives
  */
-function capText(text: string, budget: number, tokensBefore: number): string {
+function capText(
+  text: string,
+  budget: number,
+  tokensBefore: number,
+  keep: 'both' | 'head' = 'both',
+): string {
   const reserved = estimateTokens(OMISSION_MARKER(tokensBefore))
   const keepChars = Math.max(0, budget - reserved) * CHARS_PER_TOKEN
-  const headChars = Math.ceil(keepChars / 2)
-  const tailChars = Math.max(0, keepChars - headChars)
+  const headChars = keep === 'head' ? keepChars : Math.ceil(keepChars / 2)
+  const tailChars = keep === 'head' ? 0 : Math.max(0, keepChars - headChars)
   const head = text.slice(0, headChars)
   const tail = tailChars === 0 ? '' : text.slice(text.length - tailChars)
   // The count the marker reports is what the item cost minus what is left of it — the marker's

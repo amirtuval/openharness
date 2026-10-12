@@ -17,6 +17,7 @@ import {
 } from '@openharness/client'
 import type { UserToolConfirmationEventInput } from '@openharness/protocol'
 import { ArrowDown, MessagesSquare, ShieldQuestion } from 'lucide-react'
+import { memo } from 'react'
 
 import { useStickToBottom } from '../../hooks/use-stick-to-bottom'
 import type { ModelNameLookup } from '../../lib/models'
@@ -62,28 +63,21 @@ import { WorkingRow, type WorkingState } from './working-row'
  *
  * Edit and resend (#238) is offered on **every** message the reader wrote, not just the last:
  * sending one rewinds the session to it, so the edit is what the conversation continues from.
+ *
+ * **It is memoized, and that is load-bearing** (#314). Every prop below is the transcript's own
+ * data — the store's arrays, the client's sentences, the one state object `workingState` builds
+ * — so a render of the screen that is *not* a transcript change (a keystroke in the composer,
+ * which the screen owns) leaves every prop equal by identity and React skips this subtree. An
+ * open chat is the most expensive thing on the page (markdown, highlighted code, one node per
+ * message part), and re-rendering all of it per character was the flicker the maintainer saw:
+ * measured at ~4 ms of scripting per keystroke on a 20-message chat and ~23 ms on a 27-message
+ * one, where the memoized version is flat. The one prop that had to be made stable for this to
+ * hold is `working` — {@link ChatView} memoizes it — because a fresh object every render would
+ * compare unequal and reopen the whole subtree.
  */
-export function MessageList({
-  messages,
-  summaries = [],
-  toolCalls = [],
-  truncation = null,
-  compaction = null,
-  stepLimit = null,
-  toolsUnsupported = false,
-  truncatedResults = null,
-  clearedResults = null,
-  confirmations = [],
-  answering = [],
-  onRespond,
-  loading,
-  nameOf,
-  costOf,
-  working = null,
-  onEdit,
-  editDisabled = false,
-  replacingFrom,
-}: {
+/** One transcript's props, as {@link MessageList} takes them. */
+interface MessageListProps {
+  /** The conversation, in order. */
   messages: readonly TranscriptMessage[]
   /** The summary dividers still in the conversation, in order (epic #277; #280). */
   summaries?: readonly TranscriptSummary[]
@@ -132,7 +126,29 @@ export function MessageList({
    * composer, not gone.
    */
   replacingFrom?: number | undefined
-}) {
+}
+
+export const MessageList = memo(function MessageList({
+  messages,
+  summaries = [],
+  toolCalls = [],
+  truncation = null,
+  compaction = null,
+  stepLimit = null,
+  toolsUnsupported = false,
+  truncatedResults = null,
+  clearedResults = null,
+  confirmations = [],
+  answering = [],
+  onRespond,
+  loading,
+  nameOf,
+  costOf,
+  working = null,
+  onEdit,
+  editDisabled = false,
+  replacingFrom,
+}: MessageListProps) {
   const last = messages.at(-1)
   const { ref, onScroll, isStuck, scrollToLatest } = useStickToBottom(
     // The truncation notice is at the foot too (epic #277, K10; #280), and it can arrive on a
@@ -221,7 +237,12 @@ export function MessageList({
         onScroll={onScroll}
         role="log"
         aria-label="Conversation"
-        className="h-full overflow-y-auto px-4 py-6"
+        // `relative`: the transcript is the scroll pane, so the absolutely positioned thing
+        // inside it that is not in a bubble — the streaming caret's `sr-only` span
+        // ({@link StreamingCaret}) — belongs to *this* box. Positioned against the initial
+        // containing block instead it escaped this clip and stretched the document by the whole
+        // height of the reply (#316).
+        className="relative h-full overflow-y-auto px-4 py-6"
       >
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-block">
           {/* "Empty" is nothing to say **and** nothing done: a call is an entry of its own
@@ -358,7 +379,7 @@ export function MessageList({
       )}
     </div>
   )
-}
+})
 
 /**
  * The history that has not arrived yet, in the shape it will arrive in.

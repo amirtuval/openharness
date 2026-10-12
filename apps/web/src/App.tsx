@@ -308,7 +308,22 @@ function AppFrame({
         />
       ) : null}
 
-      <div className="flex h-full min-h-0">
+      {/* The app shell **is** the viewport: exactly as tall as the visible area, clipped, and
+          the positioned ancestor of everything inside it. Two properties, both load-bearing
+          (#316):
+          - `overflow-clip` — nothing a screen lays out can scroll the *document*. A page that
+            can scroll is a page with a second, useless scrollbar over empty space: a scroll
+            pane clips its own content, but an absolutely positioned element inside it whose
+            containing block is further out — every `sr-only` span, the chat's streaming caret
+            among them — is not clipped by that pane and used to extend the document's scroll
+            area (the settings screen scrolled 2 400px into nothing; a streaming reply, 17 000).
+            `clip` rather than `hidden`: `hidden` still lets the browser scroll the box to
+            reveal a focused descendant, which would shift the whole app.
+          - `relative` — so those elements are positioned *here*, inside the clip, rather than
+            against the initial containing block beyond the shell.
+          `h-dvh` is the dynamic viewport height (`100vh` on a phone is the tall viewport, and
+          using it is how a page gets a scrollbar the reader cannot get rid of). */}
+      <div data-slot="app-shell" className="relative flex h-dvh min-h-0 overflow-clip">
         <Sidebar
           sessions={sessions}
           loading={loading}

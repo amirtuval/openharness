@@ -1,6 +1,6 @@
-import { WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
+import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
 import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
-import { ASK_USER_TOOL_NAME, EVENT_TYPES } from '@openharness/protocol'
+import { ASK_USER_TOOL_NAME, EVENT_TYPES, WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
 import type {
   AgentToolResultEvent,
   AgentToolUseEvent,
@@ -74,20 +74,23 @@ describe('a tool turn', () => {
     // The step's own request offered the tools before one was called, and the answer bought a
     // second request — which is where the model's reply to the result comes from.
     //
-    // The offer is the process's whole registry (epic #303, #305, #309): `ask_user`, which every
-    // deployment gets, beside the test `echo` tool and the built-ins. `web_search` is not among
-    // them, because this server runs with no `OPENHARNESS_SEARCH_API_KEY` — a deployment with
-    // no search provider offers no search tool rather than one that always fails.
+    // The offer is the process's registry (epic #303, #305, #309) — `ask_user`, which every
+    // deployment gets, beside the test `echo` tool and the built-ins — and beside it the one
+    // tool no registry carries (#335): this chat runs a Claude, whose provider has a native
+    // search tool, so the request carries `web_search` too. Nothing here runs it.
     const offered = [
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: TEST_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
+      { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
     ]
     expect(spans).toHaveLength(2)
     expect(spans[0]?.tools).toEqual(offered)
     expect(spans[1]?.tools).toEqual(offered)
-    expect(spans[0]?.tools?.map((tool) => tool.name)).not.toContain(WEB_SEARCH_TOOL_NAME)
+    // What that means for the log is above: **one** `agent.tool_use`, and it is the `echo` the
+    // model asked for. A search the provider ran inside the request would be a second one, with
+    // `source: 'provider'` (#335) — this step ran none.
 
     // The order the log holds is the order the loop ran in.
     const types = typesOf(log)
@@ -113,10 +116,12 @@ describe('a tool turn', () => {
     const client = await harness.client(server)
 
     // `openai/gpt-3.5-turbo` is a chat model models.dev marks `tool_call: false`, so a request
-    // on it offers nothing at all — and the marker that would call the tool is just a message,
-    // which is the whole of "a model that cannot call tools chats as it did before". The
-    // catalogue's own `tool_call` is asserted in the server's in-process suite: it needs a
-    // stored provider key, and the point here is the request the brain builds.
+    // on it offers nothing at all — not even the provider-native `web_search` a newer OpenAI
+    // model would be offered (#335), because "this chat has no tools" is the whole answer — and
+    // the marker that would call the tool is just a message, which is the whole of "a model that
+    // cannot call tools chats as it did before". The catalogue's own `tool_call` is asserted in
+    // the server's in-process suite: it needs a stored provider key, and the point here is the
+    // request the brain builds.
     const session = await client.sessions.create({ model: { id: 'openai/gpt-3.5-turbo' } })
     await client.sendMessage(session.id, `${MOCK_TOOL_MARKER} not for me`)
     await waitForTurnEnd(client, session.id)

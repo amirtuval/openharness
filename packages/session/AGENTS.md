@@ -124,7 +124,7 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | `CompactOptions`                                                                                                                                                                                                   | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                                                                                                                                                                                                                                                                                                                     |
 | `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                                                                                                 | leases over a partition, and the signals sent to its owner                                                                                                                                                                                                                                                                                                                                                                     |
 | `TurnState`, `TurnStateKind`                                                                                                                                                                                       | what `getTurnState()` answers                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `ListModelRequestsOptions`, `ModelRequestUsage`                                                                                                                                                                    | the per-user usage read (#247): its `{ ownerId, from, to }` half-open UTC window, and one request as it answers it — the model, the usage and the instant it finished                                                                                                                                                                                                                                                          |
+| `ListModelRequestsOptions`, `ModelRequestUsage`                                                                                                                                                                    | the per-user usage read (#247; the search count: #335): its `{ ownerId, from, to }` half-open UTC window, and one request as it answers it — the model, the usage, the instant it finished, and how many web searches the provider ran inside it (the end's `searches`, or `0` for one that carried none)                                                                                                                      |
 | `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                                                                                                  | subscription plumbing                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `AuthSessionId`                                                                                                                                                                                                    | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                                                                                                                                                                                                                                                                                                              |
 | `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                                                                                              | the in-memory implementation and its `{ now, partitionCount }` options                                                                                                                                                                                                                                                                                                                                                         |
@@ -395,8 +395,9 @@ once, and the reason it is a method rather than a caller's loop. `listModelReque
 from, to })` answers the model requests one **owner's** sessions recorded in a half-open UTC
 window — `from` in, `to` out — as `ModelRequestUsage[]`: the `model` each request's
 `span.model_request_start` named (`null` when the log cannot attribute one), the `model_usage`
-its `span.model_request_end` reported, and that end's `processed_at`, which is the instant the
-window filters on and the day a caller groups by. The pairing is the whole point: a model
+its `span.model_request_end` reported, that end's `processed_at`, which is the instant the
+window filters on and the day a caller groups by, and the `searches` that end counted (the
+provider-executed searches, or `0` when it carried none, #335). The pairing is the whole point: a model
 request is two events, and answering "what did this user spend between these two instants"
 session by session and page by page would read every event of a month of heavy use on every
 request. It is owner-scoped like the other user-facing reads, it skips what a recorded range
@@ -865,11 +866,15 @@ default 'same-as-chat'` is a real column default instead, the rule `0019` uses: 
 The built-in tools' usage read (epic #303, #305) added one:
 
 - **`0026_agent_tool_use_usage.sql` — the index behind `listToolUses`** (#305): a **partial**
-  index, `(session_id, processed_at) where type = 'agent.tool_use'`. Counting a user's daily
-  `web_search` calls (#305) narrows to the caller's sessions and then to a UTC day's window,
-  and `(session_id, seq)` (0003) seeks by position, not by time — so without this the read
-  would walk every event of every one of the caller's sessions, which is the cost the read
-  exists to remove. The same shape and the same reasoning as `0021`'s, one event type over.
+  index, `(session_id, processed_at) where type = 'agent.tool_use'`. Counting the `web_search`
+  calls a user's log holds narrows to the caller's sessions and then to a UTC day's window, and
+  `(session_id, seq)` (0003) seeks by position, not by time — so without this the read would
+  walk every event of every one of the caller's sessions, which is the cost the read exists to
+  remove. The calls this reads are the ones a log stored in the operator-key era (#305) holds;
+  a provider-executed search has no `agent.tool_use` of its own and is counted from its request
+  span instead (`ModelRequestUsage.searches`, #335), so the two counts are summed by the usage
+  route rather than by this read. The same shape and the same reasoning as `0021`'s, one event
+  type over.
   Partial because only `agent.tool_use` rows are read that way, and idempotent because an
   index is built, not migrated: a re-run leaves it (and the log) exactly as it was. **It keeps
   the number 0026** — it is earlier in the tools stack than #307's file, which took `0027`
@@ -1061,7 +1066,10 @@ dependency table.
   the suite beside it: a call its result answered, a failed call and one nothing answered both
   left out, the `name` filter, owner scoping, the half-open window, the `(session_id, seq)`
   order, the rewind rule, and — since #312 — a remote MCP call never counting: the read is
-  about this build's own tools, and an MCP server is the user's own, whatever its tool is named. The modes (#245, M6) are there as well:
+  about this build's own tools, and an MCP server is the user's own, whatever its tool is named,
+  and — since #338 — a **provider-executed** call never counting either: it is the readable pair
+  #335 writes for a search the provider ran inside its own request, and the request's span
+  already counted that search (counting the pair would count one search twice). The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,

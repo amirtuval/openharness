@@ -36,6 +36,10 @@ const KEYS = {
   ctrlE: '\u0005',
   ctrlK: '\u000B',
   ctrlL: '\u000C',
+  /** Ctrl+O — the detail view of a tool call (#308). */
+  ctrlO: '\u000F',
+  /** Ctrl+T — fold or unfold the task list (#308). */
+  ctrlT: '\u0014',
   ctrlR: '\u0012',
   ctrlU: '\u0015',
   ctrlW: '\u0017',
@@ -55,6 +59,9 @@ const KEYS = {
   right: '\u001B[C',
   home: '\u001B[H',
   end: '\u001B[F',
+  /** PgUp / PgDn: the `~`-terminated cursor sequences. */
+  pageUp: '\u001B[5~',
+  pageDown: '\u001B[6~',
   delete: '\u001B[3~',
   backspace: '\u007F',
   tab: '\t',

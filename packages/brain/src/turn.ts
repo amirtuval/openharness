@@ -1,4 +1,4 @@
-import { EVENT_TYPES, newEventId } from '@openharness/protocol'
+import { EVENT_TYPES, WEB_SEARCH_TOOL_NAME, newEventId } from '@openharness/protocol'
 import type {
   EventId,
   ModeId,
@@ -7,6 +7,7 @@ import type {
   ReasoningEffort,
   SessionCompactionOutcome,
   SessionId,
+  Source,
   StoredEvent,
   Supersedes,
   UserId,
@@ -15,7 +16,7 @@ import type { AppendableEvent, PartitionFence, SessionStore } from '@openharness
 import { SessionNotFoundError } from '@openharness/session'
 import type { ToolRegistry } from '@openharness/hands'
 
-import type { LanguageModel } from 'ai'
+import type { LanguageModel, ToolSet } from 'ai'
 
 import type { ContextStrategy } from './context'
 import {
@@ -26,6 +27,8 @@ import {
 import {
   agentMessage,
   agentOpaqueContent,
+  agentToolResult,
+  agentToolUse,
   compactionOutcome,
   eventDelta,
   eventStart,
@@ -61,7 +64,7 @@ import {
 import type { McpListingFailure, McpToolProvider } from './mcp'
 import { combineTools, resolveMcpTools } from './mcp'
 import { pendingManualCompaction } from './manual'
-import type { ModelFactory, ResolveCredential } from './model'
+import type { ModelFactory, ModelRequestResult, ModelSearchCall, ResolveCredential } from './model'
 import {
   credentialSecrets,
   isUnsupportedProviderError,
@@ -71,6 +74,7 @@ import {
   streamModelRequest,
   ZERO_MODEL_USAGE,
 } from './model'
+import { nativeSearchFor, searchWasRejected, webSearchOffered } from './native-search'
 import { captureOpaque, opaqueTargetOf } from './opaque'
 import type { OpaqueTarget } from './opaque'
 import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
@@ -717,6 +721,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   // with a clear error rather than looping. Once **per turn**, not per request, is what bounds
   // it however many requests the turn makes.
   let overflowRetried = false
+  // Whether the provider refused the native search tool this turn offered (#335). Once it has,
+  // no later request of the turn offers it again: a provider that does not know the tool does
+  // not learn it, and the retry is the request minus the tool.
+  let searchRejected = false
   // The MCP servers this turn has already told the user about (epic #303, X10; #312). The
   // listing is per request, so a server that is down would otherwise write the same
   // `session.error` once per step; one notice per server per turn is what a reader wants, and
@@ -1150,6 +1158,28 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       requestModel.id,
       credential.type,
     )
+    // The request's own provider's search tool, when the model has one and the settings in force
+    // leave it on (epic #303, X14; issue #335). It is not a registry tool: nothing of ours runs
+    // it, and it is attached for exactly one request — the provider runs the search inside it.
+    // It is offered only where the request offers tools at all: a host that wired no registry,
+    // and a model the registry says cannot call tools, get the request they always got — the
+    // native tool is an addition to the offer, never a way round "this chat has no tools".
+    const offersTools =
+      available !== undefined &&
+      options.toolSupportFor?.(requestModel.id, credential.type) !== false
+    // A host that registers a tool of its own under the name keeps it: attaching the provider's
+    // would shadow it in the offer, and the tool a user configured is the one they meant.
+    const search =
+      offersTools &&
+      toolRegistry?.get(WEB_SEARCH_TOOL_NAME) === undefined &&
+      webSearchOffered(requestModel.id, credential.type, toolSettings) &&
+      !searchRejected
+        ? nativeSearchFor(requestModel.id, credential.type)
+        : null
+    const tools: ToolSet = {
+      ...(toolRegistry === undefined ? {} : toolSet(toolRegistry)),
+      ...(search?.tools ?? {}),
+    }
     const [start] = await append([
       spanStart(claims, requestModel.id, {
         ...(reasoning.record === undefined ? {} : { reasoningEffort: reasoning.record }),
@@ -1157,7 +1187,11 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         ...(context.truncated === undefined ? {} : { truncated: context.truncated }),
         ...(context.cleared === undefined ? {} : { cleared: context.cleared }),
         ...(context.reminders === undefined ? {} : { reminders: context.reminders }),
-        ...(toolRegistry === undefined ? {} : { tools: offeredTools(toolRegistry, mcp.refs) }),
+        ...(toolRegistry === undefined && search === null
+          ? {}
+          : {
+              tools: offeredTools(toolRegistry, mcp.refs, search === null ? [] : [search.name]),
+            }),
       }),
     ])
     if (start === undefined) {
@@ -1179,8 +1213,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       model: agentModel,
       messages,
       // The definitions carry no `execute`: the SDK must stop after this step and hand the
-      // calls back, because the loop that stores the call and runs it is this one.
-      ...(toolRegistry === undefined ? {} : { tools: toolSet(toolRegistry) }),
+      // calls back, because the loop that stores the call and runs it is this one. The native
+      // search tool (#335) is the opposite: the provider runs it inside this request, so it is
+      // attached with nothing of ours behind it, and its calls come back as opaque content.
+      ...(Object.keys(tools).length === 0 ? {} : { tools }),
       providerOptions: reasoning.providerOptions,
       signal,
       onTextDelta: async (text) => {
@@ -1209,14 +1245,40 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // the key it did not like); it is scrubbed before the message reaches the log, and the
       // rest of what the provider said is kept.
       const message = redactSecrets(classification.message, credentialSecrets(credential))
+      // The provider does not know the search tool it was handed — its own models vary, and
+      // models.dev records nothing about which have one (X14; #335). Dropping it and asking once
+      // more is the answer: the request is otherwise the same, and a chat that cannot search is
+      // a working chat. Once per turn, and recorded on the span of the request that was refused.
+      const rejectedSearch = search !== null && !searchRejected && searchWasRejected(result.error)
+      if (rejectedSearch) {
+        searchRejected = true
+      }
       // Partial output is never stored, so the span end supersedes the chunks this attempt
       // streamed. The retry below mints a new message id and its own `event_start`.
       await append([
         spanEnd(start.id, ZERO_MODEL_USAGE, {
           error: { type: 'model_error', message },
           supersedes: range,
+          ...(rejectedSearch ? { searchRejected: true as const } : {}),
         }),
       ])
+      if (rejectedSearch) {
+        // The tool was the whole of what was wrong, so this is not the ordinary retry budget's
+        // business: the request is different now, and the model is owed a plain answer.
+        await append([
+          sessionError({
+            type: classification.type,
+            message,
+            retry_status: { type: 'retrying' },
+          }),
+          statusRescheduled(),
+        ])
+        if (isAborted()) {
+          return await endInterrupted()
+        }
+        await append([statusRunning()])
+        continue
+      }
       // The provider refused the request for being too long (K2, C2). That is not a retry — the
       // same request fails the same way — and not a plain terminal error either: the engine
       // compacts with tighter caps and the turn tries once more. Once per turn, so a context
@@ -1342,13 +1404,33 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           agentMessage(eventId, result.text, range),
           ...(stored === undefined ? [] : [stored]),
         ])
-        await append([spanEnd(start.id, result.usage), totals])
+        await append([spanEnd(start.id, result.usage, searchSpan(result)), totals])
       } else {
         await append([
           ...(stored === undefined ? [] : [stored]),
-          spanEnd(start.id, result.usage, { supersedes: range }),
+          spanEnd(start.id, result.usage, { supersedes: range, ...searchSpan(result) }),
           totals,
         ])
+      }
+      // The searches the provider ran inside this request, as the readable pair a client draws
+      // and a transcript keeps (epic #303, X14; #335). It is written **after** the reply and its
+      // opaque content, so the step's assistant turn is complete before the lines that describe
+      // it, and it is a reading and nothing more: the request is rebuilt from the opaque content
+      // above, never from this (`./context`).
+      for (const search of result.searchCalls) {
+        await storeProviderSearch(search, result.sources, append)
+      }
+      if (result.paused) {
+        // The provider paused the turn itself (#335): Anthropic's server-side search loop hit
+        // its own limit, and the answer is to send the assistant turn back unchanged as the next
+        // request — which is what the loop does, because the step is in the log and the context
+        // strategy rebuilds it from the opaque content it stored. The step counts against the
+        // turn's budget like any other, so a provider that kept pausing ends the turn rather
+        // than looping.
+        if (isAborted()) {
+          return await endInterrupted()
+        }
+        continue
       }
     } catch (error) {
       // The events a model's report shapes are the ones that can turn out not to be protocol
@@ -1403,6 +1485,56 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     return { outcome: 'idle' }
   }
 }
+
+/**
+ * What a completed request's span end says about the searches it ran (epic #303, X14; #335).
+ *
+ * Absent when the request searched not at all, which is the shape every span had before the
+ * field existed — a count of nothing is the absence of the field, not a zero.
+ */
+function searchSpan(result: ModelRequestResult): { readonly searches?: number } {
+  return result.searches === 0 ? {} : { searches: result.searches }
+}
+
+/**
+ * Store one provider-executed search as the readable pair a client draws (epic #303, X14;
+ * #335): the `web_search` call, with `source: 'provider'`, and the result that answers it.
+ *
+ * Written by the turn rather than run, so the two appends are adjacent and the call is answered
+ * in the same turn that made it — and the call is `provider`, which is what tells every reader
+ * that nothing of ours ran it: the crash rule leaves it alone (`./tools`), and the request
+ * carries it through `agent.opaque_content` instead of through this pair (`./context`).
+ *
+ * The call's `input` is what the step said the search asked for (`./model`), and the result's
+ * content is the reading of what it found — the same text a provider switch replays — beside the
+ * normalized `sources` a client renders as the reply's citations. A search the provider cited
+ * nothing for streams no `source` parts, so the reading is `''`; the readable block says the
+ * search ran instead, because the protocol refuses an empty text block and an empty one here
+ * ended the turn (issue #339). The reading a switch replays stays empty — there is nothing to
+ * tell another provider — and it is this block, not the log's only record, that gets the
+ * sentence.
+ */
+async function storeProviderSearch(
+  search: ModelSearchCall,
+  sources: readonly Source[],
+  append: (events: AppendableEvent[]) => Promise<StoredEvent[]>,
+): Promise<void> {
+  const [call] = await append([agentToolUse(search.name, search.input, 'allow', 'provider')])
+  if (call === undefined) {
+    return
+  }
+  const text = search.text.length > 0 ? search.text : UNCITED_SEARCH_RESULT
+  await append([agentToolResult(call.id, [{ type: 'text', text }], search.isError, sources)])
+}
+
+/**
+ * What the readable result of a provider-executed search says when the provider cited no pages
+ * this build could read (issue #339).
+ *
+ * A sentence rather than `''`: an `agent.tool_result`'s content is text blocks, and the protocol
+ * refuses a block with no text in it — the append would fail validation and end the turn.
+ */
+const UNCITED_SEARCH_RESULT = 'The provider ran a web search and cited no pages.'
 
 /**
  * The system prompt a request is built with: the session's own, with the mode's addition

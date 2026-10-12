@@ -33,27 +33,27 @@ repo.
 
 ## The `oh` command
 
-| command                                 | what it does                                                                           |
-| --------------------------------------- | -------------------------------------------------------------------------------------- |
-| `oh`                                    | start a new chat on the default model                                                  |
-| `oh -s <id>` / `--session <id>`         | resume a session, showing its history                                                  |
-| `oh -c` / `--continue`                  | resume the most recent session                                                         |
-| `oh sessions`                           | list every session: id, title, status, updated                                         |
-| `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips)                               |
-| `oh agents`                             | list the saved agents (optional presets): id, name                                     |
-| `oh modes`                              | list your modes and what each resolves to (#245, M6)                                   |
-| `oh providers`                          | list the stored model-provider keys: provider, last 4                                  |
-| `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden           |
-| `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                                        |
-| `oh default-model [provider/model]`     | print or set the model a new chat starts on                                            |
-| `oh settings [flags]`                   | print or set the context (compaction) settings (#282)                                  |
-| `oh tools [name] [flags]`               | list which tools your chats may use, or set one (#303 X4; #307; #308)                  |
-| `oh mcp`                                | your remote MCP servers: add, edit, connect, reconnect, test, delete (#303, X10; #313) |
-| `oh login`                              | sign in through the browser (the device flow)                                          |
-| `oh logout`                             | revoke the session on the server, forget the token                                     |
-| `oh whoami`                             | print the signed-in email and server                                                   |
-| `oh update`                             | install the newest published version now                                               |
-| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                                                         |
+| command                                 | what it does                                                                               |
+| --------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `oh`                                    | start a new chat on the default model                                                      |
+| `oh -s <id>` / `--session <id>`         | resume a session, showing its history                                                      |
+| `oh -c` / `--continue`                  | resume the most recent session                                                             |
+| `oh sessions`                           | list every session: id, title, status, updated                                             |
+| `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips)                                   |
+| `oh agents`                             | list the saved agents (optional presets): id, name                                         |
+| `oh modes`                              | list your modes and what each resolves to (#245, M6)                                       |
+| `oh providers`                          | list the stored model-provider keys: provider, last 4                                      |
+| `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden               |
+| `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                                            |
+| `oh default-model [provider/model]`     | print or set the model a new chat starts on                                                |
+| `oh settings [flags]`                   | print or set the context (compaction) settings (#282)                                      |
+| `oh tools [name] [flags]`               | list which of the build's tools your chats may use, or set one (#303 X4; #307; #308; #313) |
+| `oh mcp`                                | your remote MCP servers: add, edit, connect, reconnect, test, delete (#303, X10; #313)     |
+| `oh login`                              | sign in through the browser (the device flow)                                              |
+| `oh logout`                             | revoke the session on the server, forget the token                                         |
+| `oh whoami`                             | print the signed-in email and server                                                       |
+| `oh update`                             | install the newest published version now                                                   |
+| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                                                             |
 
 Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`, and
 `oh sessions delete` / `oh providers remove` take `--yes`. The chat flags are `-s`/`-c`,
@@ -349,6 +349,8 @@ no other file knows its name.
 the current model (the app opens the session the way a first chat does, and the old screen's
 stream is disposed with it), `/providers [provider]` connects a provider without leaving the
 chat (#210), `/mcp` opens the remote MCP servers in the prompt slot (#303, X10; #313),
+`/tools` opens this build's own tools there too — on/off and the permission each call runs
+under, the counterpart of the web app's Settings → Tools (#303, X4; #335) —
 `/compact [instructions]` asks the brain to summarize the older history now
 (#283 — the guidance, if any, is the user's instruction to the summarizer; the outcome arrives
 on the stream and is shown as a notice, so it is never a silent no-op), `/clear` wipes the screen
@@ -501,22 +503,24 @@ install, because there is nothing here for npm to replace.
 
 ## In the chat
 
-| key                     | what it does                                                                                                |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `/` + Enter             | the command menu: `/model`, `/providers`, `/new`, `/compact`, `/clear`, `/help`, `/exit` (#207, #210, #283) |
-| Enter                   | send — also while a reply streams, which is what steering is                                                |
-| Ctrl+J, Alt+Enter       | insert a newline                                                                                            |
-| ←/→, Home/End, Ctrl+A/E | move the cursor; Home/End and Ctrl+A/Ctrl+E take the line's ends                                            |
-| Backspace / Delete      | delete behind the cursor, and at it                                                                         |
-| Ctrl+U / Ctrl+K         | delete to the start of the line, and to its end                                                             |
-| Ctrl+W, Alt+Backspace   | delete the word before the cursor                                                                           |
-| Alt+B / Alt+F, Ctrl+←/→ | jump a word back and forward                                                                                |
-| ↑/↓                     | the menu's rows while it is open (#207), otherwise the buffer's own lines and then the history (#206)       |
-| Tab                     | complete the highlighted command into the buffer (#207)                                                     |
-| Esc                     | close the menu, keeping the text (#207)                                                                     |
-| Ctrl+L                  | clear the screen; the session stays (#206)                                                                  |
-| Ctrl+R                  | reconnect the MCP server a failed turn named (#303, X10; #313)                                              |
-| Ctrl+C                  | interrupt the running turn; pressed again when idle, leave                                                  |
+| key                     | what it does                                                                                                                        |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `/` + Enter             | the command menu: `/model`, `/providers`, `/new`, `/compact`, `/mcp`, `/tools`, `/clear`, `/help`, `/exit` (#207, #210, #283; #335) |
+| Enter                   | send — also while a reply streams, which is what steering is                                                                        |
+| Ctrl+J, Alt+Enter       | insert a newline                                                                                                                    |
+| ←/→, Home/End, Ctrl+A/E | move the cursor; Home/End and Ctrl+A/Ctrl+E take the line's ends                                                                    |
+| Backspace / Delete      | delete behind the cursor, and at it                                                                                                 |
+| Ctrl+U / Ctrl+K         | delete to the start of the line, and to its end                                                                                     |
+| Ctrl+W, Alt+Backspace   | delete the word before the cursor                                                                                                   |
+| Alt+B / Alt+F, Ctrl+←/→ | jump a word back and forward                                                                                                        |
+| ↑/↓                     | the menu's rows while it is open (#207), otherwise the buffer's own lines and then the history (#206)                               |
+| Tab                     | complete the highlighted command into the buffer (#207)                                                                             |
+| Esc                     | close the menu, keeping the text (#207)                                                                                             |
+| Ctrl+L                  | clear the screen; the session stays (#206)                                                                                          |
+| Ctrl+T                  | fold or unfold the task list above the prompt; a list past five items starts folded (#308)                                          |
+| Ctrl+O                  | show every tool call's full input and a capped result, or the compact line again (#308)                                             |
+| Ctrl+R                  | reconnect the MCP server a failed turn named (#303, X10; #313)                                                                      |
+| Ctrl+C                  | interrupt the running turn; pressed again when idle, leave                                                                          |
 
 "Shift+Enter" is not a key a terminal can send — most send the same `\r` for both — so the
 newline is bound to **Ctrl+J** (line feed, `0x0A`, against Enter's `0x0D`), which every
@@ -695,32 +699,114 @@ The terminal's half of the tool UI, all of it from the transcript's `toolCalls`,
 newest request's `truncatedToolResults` / `clearedToolResults`, with the words from
 `@openharness/client`'s `src/tools.ts` — so `oh` and the web app say the same thing.
 
-- **`components/tool-call.tsx` is one call's line**, drawn where its event sits among the
+- **`components/tool-call.tsx` is one call in two lines**, drawn where its event sits among the
   messages (`TranscriptView` renders the client's `transcriptEntries(messages, summaries,
-toolCalls)`): the status mark, the tool's name, the shared `toolCallSummary` and the status
+toolCalls)`) and shaped the way Claude Code draws one. The **first line** is the call: the
+  status mark, the tool's name, the shared `toolCallSummary` (the URL, the query) and the status
   words, with a remote MCP call marked `(mcp: <server>)` (#312) — a terminal has no hover to hide
-  the server behind, and two servers' `search` differ by exactly that. **A terminal has no
-  disclosure control**, so what the page hides behind the line is drawn here as it is worth
-  drawing: the status, and the first line of a failed or interrupted result — the whole input and
-  result would flood the scrollback, and the log holds them.
+  the server behind, and two servers' `search` differ by exactly that. The **second line** is
+  what came back, indented and introduced by `⎿`, from `callResultLine`: a fetch's size
+  (`fetched 12 KB`), a search's page count (`5 results`), a denial (`denied: …`), the first line
+  of a failure, a task list's own count, or how many lines the result had. It is a **summary and
+  never the result** — the whole input and result would flood the scrollback, and the log holds
+  them — which is what **Ctrl+O** is for: it opens each call's input pretty-printed
+  (`formatToolInput`) and the head of its result, capped at `DETAIL_RESULT_MAX_LINES` with
+  `… N more lines` saying what was left out. **The toggle reaches the live area only**: what
+  `<Static>` has already written keeps the compact line it was drawn with, because Ink's
+  scrollback is write-once (#208, X2) — so the useful way to use it is to turn it on and then
+  watch the turn, and a reader who wants a settled call's input has the log.
+- **A provider-executed search keeps its pages** (#335): one line per `call.sources` entry under
+  the result line — the title in bold with the URL beside it, and the cited passage indented
+  under that. A terminal has no link to open, so the URL _is_ the source a reader copies, and a
+  step of five pages is five short lines — what the reader asked for by searching.
 - **A call that is still running or waiting stays in the live area** (`isLiveEntry`), because its
-  status and the reason under it change as the turn goes on — and a settled block is written once
-  and never redrawn (#208, X2), so a committed running call would say "running" for ever.
-- **`components/todo-panel.tsx` is the chat's task list**, under the transcript with the notices
-  (a terminal has no pinned chrome), one line per item with a distinct mark per state (`☐`,
-  `◐`, `☑` — glyphs, so they read under `NO_COLOR`) and "1 of 3 done" in the header.
+  status and the result line under it change as the turn goes on — and a settled block is written
+  once and never redrawn (#208, X2), so a committed running call would say "running" for ever.
+  A settled call is therefore the common case in the scrollback, and it is there in full: its
+  line, its `⎿` line, and a search's sources.
+- **`components/todo-panel.tsx` is the chat's task list, and it is pinned** (#308 — the
+  maintainer's "I expected the todos to be permanent on the bottom"). Whenever the chat has a
+  list it is drawn in the **live area just above the prompt** — while a turn runs, while the chat
+  is idle, and after a resume (`oh -c` / `oh -s`) — rather than travelling up the scrollback with
+  the transcript the way a message does. It is the one region Ink redraws every frame, so the
+  list can be rewritten in place as the model rewrites it, and it can never be scrolled away
+  from. One line per item with a distinct mark per state (`☐`, `◐`, `☑` — glyphs, so they read
+  under `NO_COLOR`) and the header `Tasks · 1 of 3 done` (or `Tasks · cleared`).
+  - **A right-hand column is not feasible here.** Ink lays the frame out over its whole
+    terminal width and `<Static>` — the scrollback, which is where settled messages really live —
+    is a single full-width stream written once and never re-flowed (see "How a message is drawn"
+    and #208/#298). A panel beside the transcript would have to be part of the live frame, which
+    would redraw the history above it on every delta; and it would have to narrow the transcript
+    to the remaining columns, which would re-wrap every settled line — and a terminal cannot
+    rewrite what it has already printed. So "pinned" means the bottom of the live area, which is
+    the same statement the web's slide-over makes with a region a browser can scroll.
+  - **It folds.** **Ctrl+T** folds it to the header plus the item in progress on one line, and
+    unfolds it again; a list longer than `TODO_AUTO_FOLD_THRESHOLD` (five) starts folded, so a
+    model working through ten steps does not own the screen. The choice is remembered **per chat
+    for the process lifetime** (`chat/todo-fold.ts`, keyed by session id — never written to
+    disk: the list itself is in the log, and a fold is a view of it), and a chat nothing was
+    chosen for follows the threshold as the list grows.
+  - **A long unfolded list is windowed, not flooded**: the item in progress and its neighbours
+    are drawn and the rest is counted (`+K more` above and below), within
+    `todoItemRows(stdout.rows)` (three to eight item lines) — so the list can never push the
+    prompt off a 24-row terminal. The window is placed so the item in progress is always visible.
+  - The panel closes with one dim **hint line** (`LIVE_AREA_HINT`) naming **Ctrl+T** and
+    **Ctrl+O**, because a terminal has no menu to find them in; both keys are also in `/help`
+    (`CHAT_KEYS` in `chat/commands.ts`) and in the key table above.
 - **`components/tool-notices.tsx`** draws the step-limit notice — which replaces the generic turn
   error for that one type, because it is a notice rather than a failure — "this model can't use
   tools", and what a request shortened or cleared.
 - **the status line carries `N searches`** beside the cost, from `searchCount` over the calls the
-  transcript holds: a count and never a price, the same statement the usage routes make.
+  transcript holds — a provider-executed search is a `web_search` call in the transcript like any
+  other, so it is counted here too (#335): a count and never a price, the same statement the
+  usage routes make.
 
-`oh tools [name] [--on|--off] [--policy <allow|ask|deny>]` (epic #303, X4; #307) is the
+`oh tools [name] [--on|--off] [--policy <allow|ask|deny>]` (epic #303, X4; #307; #313) is the
 terminal's Tools settings, the counterpart of the web app's Settings → Tools: with no name it
-prints every tool with its on/off, its permission (and the default it agrees with) and `not
-available on this server` for one this deployment does not register; with a name and a flag it
-merges that one change over the stored setting (`PUT /v1/me/tools`), reading the entry first so
-the half the flags did not name is kept. A name nothing registers is a message and exit `1`.
+prints **this build's own** tools with their on/off, their permission (and the default it agrees
+with) and `not available on this server` for one this deployment does not register; with a name
+and a flag it merges that one change over the stored setting (`PUT /v1/me/tools`), reading the
+entry first so the half the flags did not name is kept. A name nothing registers is a message and
+exit `1`.
+
+The same settings are in a chat, as **`/tools`** (#335) — the counterpart of the web app's
+Settings → Tools, and the answer to the reader who could not find a way to set ask/deny/allow for
+a built-in tool without leaving the conversation. `components/tool-settings.tsx` draws one row per
+tool of this build with its on/off and its permission, with the two keys the `/mcp` tools face
+already uses (←/→ cycles the permission, space toggles the tool) plus PgUp/PgDn/Home/End for a
+list that outgrows the terminal; **one change is one `PUT /v1/me/tools`** naming that one tool —
+the route's per-tool merge, so a second tool's setting is never touched — followed by a read of
+the list, because availability is a per-model fact the write's own answer does not carry
+(`?model_id=`, #335). A refusal is drawn inline and the list stays where it was. Remote MCP tools
+are not listed: a line says how many there are and that `/mcp` sets them, per server (#313).
+`oh tools` and `/tools` share the words — `toolPolicyNote` (the permission, and the default it
+agrees with) and `toolAvailabilityNote` (the server's own `reason` where it sent one, the plain
+"not available on this server" otherwise) live in `@openharness/client`, so the two cannot spell
+one permission differently.
+
+**A remote MCP tool is not in the listing** (#313): mixing a server's tools with the build's own
+made the list as long as every server's tool list put together, and put two different kinds of
+setting behind one heading. `formatTools` closes with one line saying how many were left out and
+where they are — `2 tools come from MCP servers; their permissions are set per server with
+`/mcp`.` — so a remote tool that is missing here is named as one that is set elsewhere rather
+than lost. They are set on `/mcp`'s tools face, where a server's tools are the screen.
+
+**A list that can outgrow the screen is windowed by one component** (#335).
+`components/list-viewport.tsx` is where "which rows fit, and where is the cursor among them" lives:
+`viewportRows(terminalRows, chromeRows)` is the terminal's height less the lines the screen draws
+around the list (title, notices, the key hint, and a pinned row) with a floor of three rows; the
+window itself is derived from the cursor (`listWindow`) rather than kept beside it, so a read that
+shortens the list cannot leave the cursor off the end of it; `↑ N more` / `↓ N more` say what is
+out of sight; and `listJump` is PgUp/PgDn/Home/End. It is used by the `/mcp` server list, the
+`/mcp` tools face (with its "all tools" row **pinned** above the window, so the batch row cannot
+scroll away from the tools it sets), `/tools`, the model picker (whose window is ten rows _or_
+what the terminal has room for, whichever is smaller) and the `/providers` target list. The
+selected row is marked with a `❯` and never by colour alone, and a screen that reports a terminal
+with no height — `stdout.rows` is `undefined` in `ink-testing-library`, and in a pipe — gets the
+default rather than a window of no rows. The height comes from `useTerminalRows()`, which
+subscribes to the stream's `resize` event: Ink reports a new size but re-renders nothing on its
+own, so a screen that read `stdout.rows` once would keep the window it computed for the old
+terminal until the next keystroke (visible as a list that stays short in a maximised window).
 
 A **remote MCP tool** (`source: 'mcp'`, offered as `<server>__<tool>`) is set differently, and
 the difference is the point (#314): `--policy` writes the `mcp` map — where a remote tool's
@@ -742,32 +828,45 @@ tone rather than by its words.
 The screen has three faces, because a terminal has no pointer and one flat thing at a time is
 what a keyboard drives:
 
-| key    | on the list                                              |
-| ------ | -------------------------------------------------------- |
-| ↑ / ↓  | move the cursor                                          |
-| Enter  | edit the server (or open its tools while they are shown) |
-| n      | register a new one                                       |
-| space  | turn it on or off                                        |
-| t      | Test — the connection check now                          |
-| c      | Connect / Reconnect an `oauth` server                    |
-| x      | Disconnect — drop its tokens                             |
-| d      | Delete, after a `y/N`                                    |
-| p      | the server's tools                                       |
-| Esc    | back one layer; from the list, done                      |
-| Ctrl+C | leave the form, or the screen                            |
+| key                 | on the list                                              |
+| ------------------- | -------------------------------------------------------- |
+| ↑ / ↓               | move the cursor                                          |
+| PgUp/PgDn, Home/End | jump a screen, or to an end of the list                  |
+| Enter               | edit the server (or open its tools while they are shown) |
+| n                   | register a new one                                       |
+| space               | turn it on or off                                        |
+| t                   | Test — the connection check now                          |
+| c                   | Connect / Reconnect an `oauth` server                    |
+| x                   | Disconnect — drop its tokens                             |
+| d                   | Delete, after a `y/N`                                    |
+| p                   | the server's tools                                       |
+| Esc                 | back one layer; from the list, done                      |
+| Ctrl+C              | leave the form, or the screen                            |
 
+- **Every list here is windowed against the terminal's height** (#335): the server list and the
+  tools face draw only the rows that fit (`components/list-viewport.tsx`), with `↑ N more` /
+  `↓ N more` for the rest, so a server with sixty tools no longer pushes the selected row off the
+  bottom of the screen — the report that started this.
 - **A server's row is what a reader needs to decide**: its name, its auth type, its status (+
   `· off` when it is), and under it the status detail — the last error, what its tools cost, or
-  that no check has run. The tools face lists each one as `<server>__<tool> · <permission> ·
-~N tokens`, and **←/→ cycles the permission** in place: it is the one thing a reader chooses
-  about a remote tool (a server is on or off; a tool's permission is theirs), and the write goes
-  to `PUT /v1/me/tools`'s `mcp` map under the offered name.
-- **The form is one prompt per field**, and its conditional part is the auth type: a `headers`
-  server is asked for **one** masked pair, and the other two are asked nothing more. The pair is
-  optional on an **edit** and required on a create — the values are sealed and never come back,
-  so a blank pair is the only way to say "keep what is stored", while a new `headers` server with
-  no map is a `none` server that says otherwise and the wire refuses one. `src/mcp/form.ts` is
-  the fields, the checks and the body they build, in one testable place.
+  that no check has run. The tools face draws the server's tools **taken together first** —
+  `all tools · Ask (all)`, or `Mixed` when they differ (`mcpToolPolicyState` /
+  `mcpToolPolicyStateLabel`) — and then each tool as `<server>__<tool> · <permission> · ~N
+tokens`. **←/→ cycles the permission** on the highlighted row: on a tool's row it is that
+  tool's (the one thing a reader chooses about a remote tool — a server is on or off, and a
+  tool's permission is theirs), and **on the all-tools row it is every one of them, in one
+  write** (#313) — `mcpServerPolicyBody` builds the single `PUT /v1/me/tools` naming them all in
+  the `mcp` map, so a reader who wants "ask me about all of these" presses one key rather than
+  walking a dozen rows. A mixed set starts the walk at `allow`, and the row then reads the
+  permission the write really left behind.
+- **The form is one prompt per field, and there is no auth-type list** (#314): the **URL**
+  comes first (with a line saying the server is probed on save), then an optional **name** whose
+  placeholder is the one the server would derive from that URL, then one optional **custom
+  header** pair (a terminal has no disclosure control, so the label says it is advanced and
+  optional), then whether it is on. A header implies `headers` on the wire, so nothing is chosen
+  for it; the pair is blank on an edit unless the reader fills it in — the values are sealed and
+  never come back, so a blank pair is the only way to say "keep what is stored".
+  `src/mcp/form.ts` is the fields, the checks and the body they build, in one testable place.
 - **Connect opens the page and waits.** `oh` starts the flow with `client: 'cli'` — decision X10
   has the CLI's browser do the signing in, and that browser may never have a session here — opens
   the authorization URL with the same `openBrowser` rules the login and the provider flow use
@@ -790,17 +889,19 @@ what a keyboard drives:
 The bottom of the screen is its own section (#233): one blank line under the transcript, then a
 **dim full-width rule** (`InputRule`), then the status line, then the prompt — and the command
 menu, the flow in the prompt slot and the hidden key input all render under the rule with it.
+The **task list** is the one thing drawn above the rule and below the transcript (#308): it is
+pinned there, in the live area, whenever the chat has one — see "The tools, in the transcript".
 The rule is drawn from column 0 in the `chrome` colour and dim, like the transcript's own rules,
 and stops one column short of the terminal because the transcript reserves that column for its
 streaming cursor (`CURSOR_COLUMNS`) — and it is the plain `─` under `NO_COLOR`, because a rule
-is a character rather than a surface.
-
-The blank line above it is drawn by the section and only when it is not already there: a user's
+The blank line above the section is drawn by it and only when it is not already there: a user's
 message ends in a blank line of its own (its band does), a notice never does, and an empty
-transcript at the start of a session has nothing to be set off from. The whole rhythm — reply →
-blank → metadata → blank → rule → status → prompt — is held still by a frame test in
-`src/app.test.tsx`, because whether the blanks each piece draws add up to one or two is a fact
-about the screen and not about any one component.
+transcript at the start of a session has nothing to be set off from. A **task list** (#308) is
+not a blank line's business: the section owes one before whichever of the two comes first, and
+the list itself is drawn with no separator above it — the notices above it are contiguous lines,
+and so is it. The whole rhythm — reply → blank → metadata → blank → list? → rule → status →
+prompt — is held still by a frame test in `src/app.test.tsx`, because whether the blanks each
+piece draws add up to one or two is a fact about the screen and not about any one component.
 
 ### What the status line says
 
@@ -898,6 +999,8 @@ src/
                          commands), and the prompt slot's first flow
     commands.ts          the slash-command registry, `parseChatInput`, the "did you mean",
                          the keys `/help` and `oh --help` both list (#207)
+    todo-fold.ts         whether a chat's task list is folded, per chat for the process
+                         lifetime (Ctrl+T; #308)
     target.ts            which session to open, and the model/agent-selection rules
     ctrl-c.ts            the Ctrl+C rules (interrupt / arm / exit)
   markdown/
@@ -924,16 +1027,21 @@ src/
                          summarized" mark and the summary under it, #280), truncation-notice
                          ("your message was too long for this model and was shortened", #280)
                          and compaction-notice (what a manual `/compact` came to, #283),
-                         tool-call (a call's compact line and the reason a failed one owes,
-                         X5; #308), todo-panel (the chat's task list as a compact block,
-                         X5; #305; #308), tool-notices (the step limit, a model that
+                         tool-call (a call's line and the one result line under it, and the
+                         detail view Ctrl+O opens, X5; #308), todo-panel (the chat's task
+                         list, pinned above the prompt: the header, the marks, the fold, the
+                         window and the hint line, X5; #305; #308), tool-notices (the step limit, a model that
                          cannot use tools, and what a request shortened or cleared,
                          X2/X5/X9; #308), pending-prompt (the approvals and questions
                          waiting on the reader, as one keyboard-driven list, X6; #310)
                          and text-entry (the one-line field a pending row's free text
-                         goes through, #310), and mcp-servers (the remote MCP servers: the
-                         list with a key per verb, the form, and the per-tool permissions,
-                         X10; #313)
+                         goes through, #310), mcp-servers (the remote MCP servers: the
+                         list with a key per verb, the form, and the tools face — one
+                         permission per tool, and the all-tools row that sets every one of
+                         them at once, X10; #313), tool-settings (this build's own tools:
+                         on/off and the permission each call runs under, #303 X4; #335) and
+                         list-viewport (the rows a list draws when it is longer than the
+                         terminal, #335)
   update/
     index.ts             the auto-update: the notice, and the decision to check
     decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
@@ -948,7 +1056,7 @@ src/
   commands/preferences.ts  `oh default-model`
   commands/settings.ts   `oh settings` — the context settings, printed and set (#282)
   commands/tools.ts      `oh tools` — which tools a chat may use, listed and set
-                         (#303 X4; #307; #308)
+                         (#303 X4; #307; #308; #313)
   commands/mcp.tsx       `oh mcp` — the remote MCP servers: the screen in a terminal, the
                          listing without one (#303, X10; #313)
   commands/io.ts         what a print-and-stop command writes, how it fails, and the
@@ -1094,16 +1202,19 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/summary-divider.test.tsx`         | the divider's lines (#280): the label with the reason, the model and the passes, the rule drawn to the transcript's width, the summary wrapped under it (and its line breaks kept), a narrow terminal truncating rather than overflowing, `NO_COLOR`, an empty summary, and the two lines the component draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `src/components/truncation-notice.test.tsx`       | the sentence and its count (#280), never a negative one, and the line the component draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/compaction-notice.test.tsx`       | what a manual `/compact` came to (#283): the brain's sentence for `nothing_to_summarize` and `failed`, the shared fallbacks, and nothing drawn for a summary or a pending ask                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `src/components/tool-call.test.tsx`               | one call's line (#303, X5; #308): the mark, the tool, the summary and the status, "waiting for you" and the MCP marker with its server (#312), the reason line a failure owes (and only its first line), the line reading without colour, and the truncation a narrow terminal gets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `src/components/todo-panel.test.tsx`              | the task list (#303, X5; #305; #308): `todoLines`' header, marks and states, a cleared list drawn as cleared, the truncation, and the block a frame draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/components/tool-call.test.tsx`               | one call as the terminal draws it (#303, X5; #308): the head line — the mark, the tool, the summary and the status — "waiting for you" and the MCP marker with its server (#312), the `⎿` result line per case (`callResultLine`: a fetch's size, a search's page count, a denial, a failure's first line, a task list's count, the line count of anything else), the page lines a provider-executed search draws from its `sources` (#335), the detail view Ctrl+O opens — the whole input and the capped result — reading without colour, and the truncation a narrow terminal gets                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/components/todo-panel.test.tsx`              | the task list, pinned (#303, X5; #305; #308): `todoLines`' header, marks and states, a cleared list drawn as cleared, the folded one-line form (with and without an item in progress), the window a long list gets with its `+K more` counts, the item lines a terminal height allows, the hint line, the truncation, and the two frames the component draws (`TodoPanel` folded and not)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/tool-notices.test.tsx`            | the four tool notices (#303, X2/X5/X9; #308): nothing when there is nothing to say, the step limit in the amber, the two result lines in chrome, and the words keeping without colour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `src/components/transcript-view-tools.test.tsx`   | a call in the transcript (#303, X5; #308): drawn between the messages with one blank line around it, kept live while it runs and settled once it does not, and a failed call's reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/chat/live-area.test.tsx`                     | the live area under the transcript, through the whole app (#308): a resumed chat's task list drawn while idle and while a turn runs, the panel above the rule rather than in the scrollback, Ctrl+T folding and unfolding and the choice kept for the chat, the auto-fold past five items, the window of a twelve-item list with its `+4 more`, a settled call's `⎿` line in the committed output, and Ctrl+O opening a live call's full input and closing it again                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/components/pending-prompt.test.tsx`          | the pending list (#303, X6; #310): `pendingRows` and the lines it draws — an approval's four choices and its deny-with-a-message row, a question's options with the mark that says what is chosen, the write-in and the text row, the Submit hint naming what is still missing, the bulk rows, and the truncation a narrow terminal gets — then the component at the keyboard: Enter sends an approval (and ↓ moves to the next one), Esc declines the row's call, space and Enter choose and toggle, Tab crosses to the next question, a text row opens the slot's entry, the message row hands the keyboard back, nothing is read when it is not the list's, and a remote call's heading naming its server (#312)                                                                                                                                                                                                                                                                        |
 | `src/components/text-entry.test.tsx`              | the one-line entry (#303, #310): what is typed is echoed and settled on Enter, it starts from what was said before so an answer can be corrected, Esc and Ctrl+C settle nothing, an empty line is a real answer, and a pasted several-line string stays on one line                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/chat/pausing.test.tsx`                       | the pause end to end in `oh` (#303, X6; #310): a **reloaded** paused chat drawing its questions with the keys that answer them, the answers taken with arrows/Tab/Enter and sent as one confirmation, Esc's decline, the keyboard staying with the list until "write a message instead" hands it back, a message sent that way declining what waited, and a free-text question answered through the prompt slot's entry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |     |
-| `src/commands/tools.test.ts`                      | `oh tools` (#303 X4; #307; #308): `formatTools`' columns and its "not available" case, a plain read, one tool turned off without touching the others, a permission-only change, a name nothing registers, and the remote MCP half (#314) — a remote tool's `--policy` written to the `mcp` map (and not a stray `builtin` row), `--on`/`--off` refused with a pointer at `/mcp`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `src/mcp/form.test.ts`                            | the MCP server form (#303, X10; #313): the fields per auth type (the pair only for `headers`, optional on an edit and required on a create, the protocol's own name/URL rules), the auth a label stands for, and the body the answers become — a create with and without a map, an edit that omits it to keep what is sealed, and a map an edit was given                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `src/commands/mcp.test.tsx`                       | `oh mcp` (#303, X10; #313): `formatMcpServers`' three lines per server and its empty state, and the screen at the keyboard — the rows and their status detail, the on/off key, Test reporting a failure, the delete's `y/N` (a no first), Connect opening the page and reporting the wait's outcome, the tools face and a permission written by ←/→, a registration through the form, the inline refusals held on their prompt, and Esc / Ctrl+C leaving                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/commands/tools.test.ts`                      | `oh tools` (#303 X4; #307; #308; #313): `formatTools`' columns and its "not available" case, **the remote MCP entries left out and the line that says how many and where** (singular and plural), a plain read, one tool turned off without touching the others, a permission-only change, a name nothing registers, and the remote MCP half (#314) — a remote tool's `--policy` written to the `mcp` map (and not a stray `builtin` row), `--on`/`--off` refused with a pointer at `/mcp`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `src/mcp/form.test.ts`                            | the MCP server form (#303, X10; #313; #314): the URL-first field order with no auth prompt, the optional name (and the name a URL derives), the optional header pair with the protocol's own URL/name rules, and the body the answers become — a create with and without a name or a map, an edit that omits the map to keep what is sealed, and a map an edit was given                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/components/list-viewport.test.tsx`           | the window arithmetic (#335): a short list unchanged (no markers, no scrolling), the cursor kept in frame at the bottom and past the top of a 60-row list, the ↑/↓ counts, PgUp/PgDn and Home/End, a cursor clamped when a list shortens under it, fewer rows on a shorter terminal, the `❯` marker in the frame with colour off, and `viewportRows`' floor and no-height fallback                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `src/components/tool-settings.test.tsx`           | `/tools` (#303, X4; #335): the rows with their on/off and permission note, the availability sentence the server sent, the line naming the MCP tools it leaves out (and the count), a plain read, one `PUT` per change with the merge body, **`ask` skipped when cycling `web_search`**, space turning a tool off and on with the permission carried back, a refused write inline with the list where it was, Esc/Ctrl+C leaving, and a list longer than the screen keeping its cursor in frame                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `src/commands/mcp.test.tsx`                       | `oh mcp` (#303, X10; #313; #314): `formatMcpServers`' three lines per server and its empty state, an edit that opens on the values it holds (so Enter keeps the URL and the name), and the screen at the keyboard — the rows and their status detail, the on/off key, Test reporting a failure, the delete's `y/N` (a no first), Connect opening the page and reporting the wait's outcome, the tools face with a permission written by ←/→ on one row (and `Mixed` appearing when the tools part company) **and the all-tools row setting every tool of the server in one `PUT`**, a registration through the form, the inline refusals held on their prompt, Esc / Ctrl+C leaving, **a server with sixty tools whose list stays inside the screen with the cursor in frame and the all-tools row pinned on top**, and a server list long enough to scroll (#335)                                                                                                                         |
 | `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |

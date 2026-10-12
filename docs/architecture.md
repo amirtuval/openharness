@@ -128,13 +128,16 @@ its name is not `@openharness/cli`; the other workspaces are private to the repo
 
 `@openharness/hands` holds the tool registry behind `execute(name, input)` — a tool's name,
 description, input schema, default permission and timeout, and one place to run it — and the
-three built-in tools ([#304](https://github.com/amirtuval/openharness/issues/304),
+built-in tools ([#304](https://github.com/amirtuval/openharness/issues/304),
 [#305](https://github.com/amirtuval/openharness/issues/305)): `web_fetch`, which reads a URL the
 model chose through `safeFetch` — the one outbound-request guard the rest of openharness uses,
-the SSRF guard for a URL a user supplied — and answers it as Markdown; `web_search`, which a
-deployment offers only where an operator configured a search API, behind an adapter and under a
-per-user daily allowance; and `todo_write`, whose list is the newest call in the log and nothing
-else. Every deployment gets the first and the third. Which of them a chat may use is the user's
+the SSRF guard for a URL a user supplied — and answers it as Markdown, and `todo_write`, whose
+list is the newest call in the log and nothing else. Every deployment gets both. The third,
+`web_search`, is a tool this build never runs ([#335](https://github.com/amirtuval/openharness/issues/335)):
+the brain attaches the chat model's own provider's search tool to the request, the provider runs
+the search inside it, and what comes back is stored as the provider's own opaque content for the
+next request and as a readable pair — the query, the pages, the cited passages — for clients.
+Which tools a chat may use is the user's
 own choice, stored beside the log and read per request — on or off and a permission per tool,
 with a mode able to override the on/off part
 ([#307](https://github.com/amirtuval/openharness/issues/307)) — and the loop sizes what a request

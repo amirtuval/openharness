@@ -14,9 +14,12 @@ import {
   UpdateMcpServerRequestSchema,
   estimateToolDefinitionTokens,
   estimateToolsTokens,
+  MCP_SERVER_NAME_FALLBACK,
   isMcpServerName,
   isMcpServerUrl,
+  mcpServerNameFromUrl,
   mcpToolSummary,
+  requestedMcpAuth,
 } from './mcp-server'
 
 /** A minimal valid resource, so a test can override exactly the field it is about. */
@@ -158,7 +161,7 @@ describe('MCP server request bodies', () => {
     expect(oauth).toMatchObject({ auth: 'oauth', enabled: false })
   })
 
-  it('refuses a headers body with no headers, and a body that omits auth', () => {
+  it('refuses a headers body with no headers, and accepts one that omits auth (#314)', () => {
     expect(
       CreateMcpServerRequestSchema.safeParse({
         auth: 'headers',
@@ -166,24 +169,30 @@ describe('MCP server request bodies', () => {
         url: 'https://mcp.example.com/mcp',
       }).success,
     ).toBe(false)
+    // A body that omits `auth` is the normal one now — the server detects it — and it is valid
+    // with or without a name (which is derived from the URL when absent).
     expect(
       CreateMcpServerRequestSchema.safeParse({
         name: 'notes',
         url: 'https://mcp.example.com/mcp',
       }).success,
-    ).toBe(false)
+    ).toBe(true)
+    expect(
+      CreateMcpServerRequestSchema.safeParse({ url: 'https://mcp.example.com/mcp' }).success,
+    ).toBe(true)
   })
 
-  it('strips the other form’s secret field rather than accepting it', () => {
-    // An oauth body carrying `headers` is not a shape the union has: the field is stripped, so
-    // a caller cannot smuggle a header map onto a server that will not send it.
-    const parsed = CreateMcpServerRequestSchema.parse({
-      auth: 'oauth',
-      name: 'notes',
-      url: 'https://mcp.example.com/mcp',
-      headers: { Authorization: 'Bearer x' },
-    })
-    expect(parsed).not.toHaveProperty('headers')
+  it('refuses `headers` beside an auth that is not headers (#314)', () => {
+    // The pair is ambiguous — the map means headers and the field says oauth — so the body is
+    // refused rather than one of the two being silently preferred.
+    expect(
+      CreateMcpServerRequestSchema.safeParse({
+        auth: 'oauth',
+        name: 'notes',
+        url: 'https://mcp.example.com/mcp',
+        headers: { Authorization: 'Bearer x' },
+      }).success,
+    ).toBe(false)
   })
 
   it('updates any subset of the fields, headers included', () => {
@@ -228,5 +237,64 @@ describe('MCP server resource', () => {
     expect(ConnectMcpServerRequestSchema.parse({}).client).toBe('web')
     expect(ConnectMcpServerRequestSchema.parse({ client: 'cli' }).client).toBe('cli')
     expect(ConnectMcpServerRequestSchema.safeParse({ client: 'mobile' }).success).toBe(false)
+  })
+})
+
+describe('the create body is a URL, and the auth is detected (#314)', () => {
+  it('accepts a body with only a URL', () => {
+    const parsed = CreateMcpServerRequestSchema.parse({ url: 'https://mcp.linear.app/mcp' })
+    expect(parsed).toEqual({ url: 'https://mcp.linear.app/mcp' })
+    expect(requestedMcpAuth(parsed)).toBeNull()
+  })
+
+  it('implies `headers` from a map, and refuses one beside another auth', () => {
+    const withMap = CreateMcpServerRequestSchema.parse({
+      url: 'https://mcp.example.com/mcp',
+      headers: { Authorization: 'Bearer k' },
+    })
+    expect(requestedMcpAuth(withMap)).toBe('headers')
+    expect(
+      CreateMcpServerRequestSchema.safeParse({
+        url: 'https://mcp.example.com/mcp',
+        auth: 'oauth',
+        headers: { Authorization: 'Bearer k' },
+      }).success,
+    ).toBe(false)
+  })
+
+  it('still accepts an explicit auth, and requires a map for `headers`', () => {
+    const parsed = CreateMcpServerRequestSchema.parse({
+      auth: 'oauth',
+      url: 'https://mcp.example.com/mcp',
+    })
+    expect(requestedMcpAuth(parsed)).toBe('oauth')
+    expect(
+      CreateMcpServerRequestSchema.safeParse({
+        auth: 'headers',
+        url: 'https://mcp.example.com/mcp',
+      }).success,
+    ).toBe(false)
+  })
+})
+
+describe('the name a URL derives (#314)', () => {
+  it('is the host, reduced to what a name may carry', () => {
+    expect(mcpServerNameFromUrl('https://mcp.linear.app/mcp')).toBe('mcp-linear-app')
+    expect(mcpServerNameFromUrl('https://www.example.com/mcp')).toBe('example-com')
+    expect(mcpServerNameFromUrl('https://NOTES.Example.COM:8443/mcp')).toBe('notes-example-com')
+    expect(mcpServerNameFromUrl('http://127.0.0.1:8080/mcp')).toBe('127-0-0-1')
+  })
+
+  it('always answers a name the schema accepts, and never an empty one', () => {
+    for (const url of [
+      'https://mcp.linear.app/mcp',
+      'https://a.example/mcp',
+      'http://[::1]:8080/mcp',
+      'not a url',
+      'https://' + 'x'.repeat(80) + '.example.com/mcp',
+    ]) {
+      expect(isMcpServerName(mcpServerNameFromUrl(url))).toBe(true)
+    }
+    expect(mcpServerNameFromUrl('not a url')).toBe(MCP_SERVER_NAME_FALLBACK)
   })
 })

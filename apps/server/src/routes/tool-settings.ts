@@ -9,7 +9,7 @@ import type { UserToolSettings } from '@openharness/protocol'
 
 import type { AppEnv } from '../types'
 import { parseBody, parseQuery } from '../http/request'
-import { listToolSettings } from '../tool-settings'
+import { assertWritableToolSettings, listToolSettings } from '../tool-settings'
 import type { RouteDeps } from './deps'
 
 /**
@@ -32,9 +32,11 @@ import type { RouteDeps } from './deps'
  * itself. A mode the caller does not own is the 404 every other mode read gives (A4).
  *
  * The listing is the **effective** answer: the tools this deployment registers, with their
- * declared defaults filled in, plus any stored setting for a tool that is not registered —
- * listed as `available: false` rather than hidden, so a user can see why a tool they switched
- * on is not working here.
+ * declared defaults filled in, plus the provider-native ones a chat's model may offer
+ * (`web_search`, #335), plus any stored setting for a tool that is not registered — listed as
+ * `available: false` rather than hidden, so a user can see why a tool they switched on is not
+ * working here. The `GET` also takes an optional `model_id`: a chat's `web_search` is its own
+ * model's provider's, so an entry that is unavailable *on that model* says so and why.
  */
 export function registerToolSettingsRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   // The remote half reads the same services the turn does (#312): the registry this deployment
@@ -43,14 +45,17 @@ export function registerToolSettingsRoutes(app: Hono<AppEnv>, deps: RouteDeps): 
   const settings = { store: deps.store, tools: deps.tools, mcpServers: deps.mcpServers }
 
   app.get(`${API_VERSION_PREFIX}/me/tools`, async (c) => {
-    const { mode_id: modeId } = parseQuery(c, ListToolSettingsQuerySchema)
-    const data = await listToolSettings(settings, c.get('user').id, modeId)
+    const { mode_id: modeId, model_id: modelId } = parseQuery(c, ListToolSettingsQuerySchema)
+    const data = await listToolSettings(settings, c.get('user').id, modeId, modelId)
     return c.json(ListToolSettingsResponseSchema.parse({ data }))
   })
 
   app.put(`${API_VERSION_PREFIX}/me/tools`, async (c) => {
     const body = await parseBody(c, PutToolSettingsRequestSchema)
     const userId = c.get('user').id
+    // A permission this build cannot honour is refused before anything is written (#335): a
+    // `web_search` set to `ask` would be a switch that says "ask me" and never asks.
+    assertWritableToolSettings(body, deps.tools)
     // A write merges per tool: a tool the body names replaces that tool's whole setting, and
     // every other tool keeps what is stored, so flipping one switch never clears another. The
     // stored value is still written whole, which is the store's contract.

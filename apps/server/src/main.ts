@@ -266,15 +266,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
 
   // The tools a turn may offer (epic #303, X4; the built-ins are #305, the per-user settings
   // are #307 and the pause is #309): `ask_user`, `web_fetch` and `todo_write` for every
-  // deployment, `web_search` where an operator configured a search API, and the test `echo`
-  // tool behind `OPENHARNESS_TEST_MODEL=mock`. Which models may call tools at all comes from
-  // the same registry, as `models.dev`'s `tool_call`. The registry is built once here and
-  // handed to both readers — the turn options and the `/v1/me/tools` routes (`createApp`) — so
-  // a tool the settings screen calls available is one a chat can really call.
-  // The search request goes out through the server's egress, like every provider call (#270);
-  // the fixed endpoint and the operator's key are the only things it carries.
-  const searchTransport = createProviderFetch()
-  const turnRegistry = createTurnRegistry({ config, kind: resolvedModel.kind, searchTransport })
+  // deployment, and the test `echo` tool behind `OPENHARNESS_TEST_MODEL=mock`. Which models may
+  // call tools at all comes from the same registry, as `models.dev`'s `tool_call`. The registry
+  // is built once here and handed to both readers — the turn options and the `/v1/me/tools`
+  // routes (`createApp`) — so a tool the settings screen calls available is one a chat can
+  // really call. `web_search` is not in it (#335): the brain attaches the chat model's own
+  // provider's search tool per request, and nothing of ours runs a search.
+  const turnRegistry = createTurnRegistry({ kind: resolvedModel.kind })
   // The remote-MCP-server resource (epic #303, X10; the loop's half: #312). Built once here and
   // handed to **both** readers — the turn options, whose provider lists a chat's in-force
   // servers and calls their tools, and `createApp`, whose routes manage them — so a settings
@@ -291,13 +289,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const turnTools = createTurnTools({
     config,
     kind: resolvedModel.kind,
-    searchTransport,
     registry,
     tools: turnRegistry,
-    allowance:
-      config.search === null
-        ? undefined
-        : createSearchAllowance({ store, dailyLimit: config.search.dailyLimit }),
     store,
     mcp: { service: mcpServers, fetch: mcpFetch },
     logger,

@@ -1,17 +1,21 @@
-import type { ToolSettings, ToolSettingsResolver } from '@openharness/brain'
+import type { NativeToolDeclaration, ToolSettings, ToolSettingsResolver } from '@openharness/brain'
+import { NATIVE_TOOL_DECLARATIONS, modelSearches } from '@openharness/brain'
 import type { ToolDefinition, ToolRegistry } from '@openharness/hands'
-import type {
-  McpServer,
-  ModeId,
-  ModeToolOverride,
-  ToolPermission,
-  ToolSettingEntry,
-  UserId,
-  UserToolSettings,
+import {
+  DEFAULT_MCP_TOOL_PERMISSION,
+  mcpToolOfferedName,
+  type McpServer,
+  type ModeId,
+  type ModeToolOverride,
+  type PutToolSettingsRequest,
+  type ToolPermission,
+  type ToolSettingEntry,
+  type UserId,
+  type UserToolSettings,
 } from '@openharness/protocol'
-import { DEFAULT_MCP_TOOL_PERMISSION, mcpToolOfferedName } from '@openharness/protocol'
 import type { SessionStore } from '@openharness/session'
 
+import { invalidRequest } from './http/errors'
 import { listMcpServersInForce } from './mcp/in-force'
 import type { McpServerService } from './mcp/service'
 import { requireOwnedMode } from './modes'
@@ -58,6 +62,13 @@ export interface EffectiveTool {
   readonly tool: ToolDefinition | undefined
   /** The name of the in-force MCP server that offers it, for a remote tool. */
   readonly server?: string
+  /**
+   * Whether this is a **provider-native** tool rather than one of this build's (epic #303, X14;
+   * issue #335) — `web_search`, which is offered by attaching the chat model's own provider's
+   * search tool to the request. Its `tool` is `undefined` for a reason that is nothing like a
+   * missing registration: nothing of ours runs it.
+   */
+  readonly native?: NativeToolDeclaration
 }
 
 /**
@@ -82,14 +93,30 @@ export interface EffectiveTool {
  *   only a user sets, and a name nothing declares may not be run. A remote tool's declaration is
  *   `ask` (X6): a third party's tool is not run without the user saying so.
  * - A mode never touches `policy` (E6): its override is on/off only.
+ *
+ * A **provider-native** tool ({@link EffectiveTool.native}) is listed beside the registered
+ * ones and follows the same rules, with two exceptions:
+ *
+ * - It is listed only where the process registers **some** registry (`registry !== undefined`),
+ *   because the brain offers it only there too (`@openharness/brain`'s `webSearchOffered`): a
+ *   deployment with no tools has no provider tool either, and a listing that said otherwise
+ *   would call a tool available that no chat can be offered.
+ * - A stored `ask` for one reads as `allow`. There is no moment at which this build could pause
+ *   a search the provider runs inside its own request, so an `ask` would be a switch that says
+ *   "ask me" and never asks — the settings route refuses a new one, and this is what a stored
+ *   one becomes.
  */
 export function effectiveTools(
   registry: ToolRegistry | undefined,
   stored: UserToolSettings,
   override: ModeToolOverride | null,
   servers: readonly McpServer[] = [],
+  natives: readonly NativeToolDeclaration[] = NATIVE_TOOL_DECLARATIONS,
 ): EffectiveTool[] {
   const registered = registry?.tools ?? []
+  const registeredNames = new Set(registered.map((tool) => tool.name))
+  // A process that registers nothing offers nothing, native tools included: see the note above.
+  const offeredNatives = registry === undefined ? [] : natives
   const builtin: EffectiveTool[] = registered.map((tool) => {
     const setting = stored.builtin[tool.name]
     return {
@@ -100,6 +127,27 @@ export function effectiveTools(
       tool,
     }
   })
+  // A native tool is a built-in as far as the settings are concerned — the same map, the same
+  // mode override, so a user's `builtin.web_search` carries over from before #335 — and it is
+  // listed after the registered ones unless a host registered one of its own under the name.
+  builtin.push(
+    ...offeredNatives
+      .filter((native) => !registeredNames.has(native.name))
+      .map((native) => {
+        const setting = stored.builtin[native.name]
+        return {
+          name: native.name,
+          source: 'builtin' as const,
+          enabled: override?.builtin[native.name] ?? setting?.enabled ?? true,
+          policy:
+            (setting?.policy ?? native.permission) === 'ask'
+              ? 'allow'
+              : (setting?.policy ?? native.permission),
+          tool: undefined,
+          native,
+        }
+      }),
+  )
   // A remote tool is offered under the model-facing name the call is recorded by
   // (`mcpToolOfferedName`), which is what its policy is keyed under — so a settings screen, the
   // brain's decisions and the log all speak of the same tool.
@@ -157,22 +205,43 @@ export function toolSettingEntries(
   stored: UserToolSettings,
   override: ModeToolOverride | null,
   servers: readonly McpServer[] = [],
+  modelId?: string,
 ): ToolSettingEntry[] {
-  return effectiveTools(registry, stored, override, servers).map((tool) => ({
-    name: tool.name,
-    source: tool.source,
-    enabled: tool.enabled,
-    policy: tool.policy,
-    default_policy:
-      tool.source === 'mcp'
-        ? tool.server === undefined
-          ? null
-          : DEFAULT_MCP_TOOL_PERMISSION
-        : (tool.tool?.permission ?? null),
-    available: tool.source === 'mcp' ? tool.server !== undefined : tool.tool !== undefined,
-    ...(tool.server === undefined ? {} : { mcp_server: tool.server }),
-  }))
+  return effectiveTools(registry, stored, override, servers).map((tool) => {
+    const native = tool.native
+    // A native tool is available where the **chat's model** has the provider tool (#335), which
+    // is a question about the model and not about this process: a read that named no model is
+    // answered as the old listing was — available, nothing claimed about a model nobody named.
+    const searchable = modelId === undefined || modelSearches(modelId)
+    return {
+      name: tool.name,
+      source: tool.source,
+      enabled: tool.enabled,
+      policy: tool.policy,
+      default_policy:
+        tool.source === 'mcp'
+          ? tool.server === undefined
+            ? null
+            : DEFAULT_MCP_TOOL_PERMISSION
+          : (tool.tool?.permission ?? native?.permission ?? null),
+      available:
+        tool.source === 'mcp'
+          ? tool.server !== undefined
+          : (tool.tool !== undefined || native !== undefined) && searchable,
+      ...(tool.server === undefined ? {} : { mcp_server: tool.server }),
+      ...(native === undefined || searchable ? {} : { reason: MODEL_CANNOT_SEARCH }),
+    }
+  })
 }
+
+/**
+ * Why `web_search` is unavailable on a model whose provider has no search tool (#335).
+ *
+ * A sentence rather than an enum, because it is what a settings screen shows and what the
+ * composer's tool list says: a user who finds the switch greyed out is owed the reason, and the
+ * reason is the model.
+ */
+export const MODEL_CANNOT_SEARCH = 'This model has no web search.'
 
 /**
  * The effective settings as the brain reads them (#307; the remote half: #312): a decision per
@@ -258,11 +327,16 @@ export function createToolSettingsResolver(deps: ToolSettingsDeps): ToolSettings
  *
  * A mode id the caller does not own is the 404 every other mode read gives (A4) — the same
  * `requireOwnedMode` the mode routes use — and a mode with no tool override changes nothing.
+ *
+ * `modelId` is the chat's model, and only `web_search`'s availability depends on it (#335):
+ * that tool is the model's own provider's, so whether it can be offered at all is a question
+ * about the model. A read that names none answers as it always did.
  */
 export async function listToolSettings(
   deps: ToolSettingsDeps,
   ownerId: UserId,
   modeId: ModeId | undefined,
+  modelId?: string,
 ): Promise<ToolSettingEntry[]> {
   const stored = await deps.store.getToolSettings(ownerId)
   const override =
@@ -272,5 +346,42 @@ export async function listToolSettings(
     stored,
     override,
     await serversInForce(deps, ownerId, override),
+    modelId,
   )
+}
+
+/**
+ * Refuse a permission this build cannot honour, before it is stored (#335).
+ *
+ * `ask` is a pause: the turn stops and waits for the user's `user.tool_confirmation`. That is
+ * possible for a tool **this build runs** — it simply does not run the call yet — and impossible
+ * for one the model's own provider runs inside the request it was attached to: by the time a
+ * call exists, the search is already done. So `ask` on `web_search` is a request for something
+ * nothing can do, and it is refused with the reason rather than stored and quietly read as
+ * `allow` (`effectiveTools` does read a stored one that way, for the choices written before
+ * this check existed).
+ *
+ * A name this process **registers** is not refused: a host whose own tool is called
+ * `web_search` has a tool that really can be paused, and its policy is its own to set. What is
+ * refused is the name of a tool that would be the provider's.
+ *
+ * @throws HttpError 400 `invalid_request_error` naming the tool and why
+ */
+export function assertWritableToolSettings(
+  body: PutToolSettingsRequest,
+  registry: ToolRegistry | undefined,
+  natives: readonly NativeToolDeclaration[] = NATIVE_TOOL_DECLARATIONS,
+): void {
+  for (const native of natives) {
+    if (registry?.get(native.name) !== undefined) {
+      continue
+    }
+    if (body.builtin?.[native.name]?.policy === 'ask') {
+      throw invalidRequest(
+        `${native.name} cannot be set to "ask": the model's provider runs the search inside ` +
+          'the request, so there is no moment at which it could be held for your answer. ' +
+          'Use "allow" or "deny".',
+      )
+    }
+  }
 }

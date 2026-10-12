@@ -5,8 +5,9 @@ something, so this is the document that says what that changes and what stands i
 It was written with the tools epic ([#303](https://github.com/amirtuval/openharness/issues/303))
 and is the pair every later sub-issue is held to; the loop it describes is
 [#304](https://github.com/amirtuval/openharness/issues/304), the built-in tools are
-[#305](https://github.com/amirtuval/openharness/issues/305) — built: `web_fetch`, `web_search`
-and `todo_write` — and the MCP client is
+[#305](https://github.com/amirtuval/openharness/issues/305) — built: `web_fetch` and
+`todo_write`, beside `web_search`, which is the model's own provider's tool and not this build's
+([#335](https://github.com/amirtuval/openharness/issues/335)) — and the MCP client is
 [#311](https://github.com/amirtuval/openharness/issues/311)–[#312](https://github.com/amirtuval/openharness/issues/312).
 
 ## What is trusted, and what is data
@@ -68,10 +69,33 @@ the proxy resolves the target. This is the same caveat the guard's own documenta
 (`packages/hands/AGENTS.md`).
 
 Nothing else in the tools epic invents an address: every provider, catalogue and credential
-endpoint is a constant the server wrote, `web_search` calls one fixed API the operator
-configured ([#305](https://github.com/amirtuval/openharness/issues/305)) — a URL that is not a
-user's to choose — and an MCP server's URL is one the user typed when they added it, a
-user-supplied address, which `safeFetch` is what guards.
+endpoint is a constant the server wrote, and an MCP server's URL is one the user typed when they
+added it, a user-supplied address, which `safeFetch` is what guards.
+
+## Web search
+
+`web_search` is the one tool this build **does not run**
+([#335](https://github.com/amirtuval/openharness/issues/335)): the request carries the chat
+model's own provider's search tool, the provider searches its own index while the request is in
+flight, and the results arrive as part of the model's answer.
+
+- **The search content is untrusted data**, exactly as a fetched page is, and for the same
+  reason: it is text a stranger wrote, shown to the model. What follows a search inside a reply
+  is the same reply text every model request produces, so nothing new reads it as an
+  instruction — and the readable record the log keeps (`agent.tool_result.sources`) is a list of
+  URLs, titles and cited passages, never markup and never a link a client follows by itself.
+- **It is outside our SSRF guard, and that is deliberate rather than overlooked.** There is no
+  address here for this server to check: the provider chooses what to fetch, from its own index,
+  on its own infrastructure, and what reaches us is what a model request may carry. The guard
+  exists for a URL _a user supplied_; a search has none. What a deployment can still decide is
+  whether the tool is offered at all — `web_search` set to `deny`, or off, is never attached.
+- **The provider's own payload never leaves the provider's family.** The `encryptedContent` and
+  the encrypted citation indices a search returns are stored only to be replayed to the same
+  provider and the same model ([#334](https://github.com/amirtuval/openharness/issues/334)); a
+  chat that switches converts them to the plain text they stand for and sends that.
+- **Nothing of the user's is handed over beyond the query.** There is no key to leak — the tool
+  runs on the model key the request already used — and no per-user value of ours is in the
+  request the provider executes the search in.
 
 ## Exfiltration: a URL is a way out
 
@@ -151,7 +175,7 @@ Written honestly, so nothing here is read as a promise the code does not keep:
 | tool results are data, never instructions                                    | the loop never reads one as an instruction ([#304](https://github.com/amirtuval/openharness/issues/304))                                                                                                                                                                 |
 | a per-call policy, recorded as `evaluated_permission`                        | built (#304, and for remote MCP tools #312); `allow`, `ask` and `deny` are all honoured since [#309](https://github.com/amirtuval/openharness/issues/309)                                                                                                                |
 | `safeFetch` for a user-supplied URL                                          | built ([#245](https://github.com/amirtuval/openharness/issues/245)), and `web_fetch` is the tool that uses it on every hop ([#305](https://github.com/amirtuval/openharness/issues/305))                                                                                 |
-| secrets scrubbed out of every tool result                                    | built (`@openharness/hands`): the operator's search key travels the same per-user channel, and a result that quoted it stores `[REDACTED]`                                                                                                                               |
+| secrets scrubbed out of every tool result                                    | built (`@openharness/hands`): a per-user value a tool is handed travels that channel, and a result that quoted one stores `[REDACTED]`                                                                                                                                   |
 | the per-user policy store: on/off and `allow`/`ask`/`deny` per tool          | built ([#307](https://github.com/amirtuval/openharness/issues/307)), over the built-in tools of [#305](https://github.com/amirtuval/openharness/issues/305)                                                                                                              |
 | `web_fetch` defaulting to allow, and the user setting that to ask            | the default is `allow` ([#305](https://github.com/amirtuval/openharness/issues/305)); the setting is [#307](https://github.com/amirtuval/openharness/issues/307)'s                                                                                                       |
 | the approval UI a paused turn needs                                          | [#310](https://github.com/amirtuval/openharness/issues/310)                                                                                                                                                                                                              |
@@ -164,5 +188,5 @@ There is **no sandbox** in this epic, deliberately (the sandboxed tools moved to
 so a tool that is unsafe to run there must not be registered at all. That is why #304 shipped
 nothing beyond a test `echo` tool, and why each built-in of #305 arrived with its own review of
 what it may touch: `web_fetch` reaches only what `safeFetch` lets it and says in its own result
-that the page is data; `web_search` reaches one fixed API and is offered only where an operator
-configured one; `todo_write` reaches nothing at all.
+that the page is data; `web_search` runs inside the model request on the provider's side and
+reaches nothing of ours (above); `todo_write` reaches nothing at all.

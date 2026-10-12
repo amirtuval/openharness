@@ -16,6 +16,7 @@ import {
   newProviderCredentialId,
   newSessionId,
   partitionOf,
+  toolCallSource,
   type Agent,
   type AgentId,
   type CreateAgentRequest,
@@ -675,6 +676,7 @@ export class InMemorySessionStore implements SessionStore {
             model: modelOf.get(event.model_request_start_id) ?? null,
             usage: { ...event.model_usage },
             processed_at: event.processed_at,
+            searches: event.searches ?? 0,
           }),
         )
       }
@@ -701,6 +703,11 @@ export class InMemorySessionStore implements SessionStore {
       for (const entry of record.events) {
         const event = entry.event
         if (event.type !== EVENT_TYPES.agentToolUse) {
+          continue
+        }
+        // A provider-executed call is a readable record of a search the provider ran inside its
+        // own request, and its request's span already counted it (#335; issue #338).
+        if (toolCallSource(event) === 'provider') {
           continue
         }
         const atMs = new Date(event.processed_at).getTime()

@@ -1133,6 +1133,47 @@ the user ended and a delete answered "no"), `1` for a server, network or sign-in
 bad command line or config, and `130`/`143` when signalled
 ([#197](https://github.com/amirtuval/openharness/issues/197)).
 
+**A terminal's scrollback is write-once, so anything that must change lives in the live area — and
+a second column is impossible.** Ink's `<Static>` prints each item once and never rewrites it (it
+renders `items.slice(index)` from the last length it saw), which is exactly what stops a streamed
+reply from repainting the scrollback on every delta — and also a one-way door. A toggle such as `oh`'s
+Ctrl+O detail view can only expand calls still in the live area; calls above it keep their compact
+line, so say so rather than letting the key look broken. For the same reason the task list is pinned
+at the bottom of the live area, folded and windowed to fit the terminal's height: a panel "on the
+right" would have to be part of the live frame, redraw on every delta and narrow — re-wrap — lines
+the terminal has already printed. When choosing control keys, remember Ink reports raw bytes
+(`Ctrl+O` is `0x0F`, `Ctrl+T` `0x14`) and that some multiplexers swallow keys before they arrive
+(epic [#303](https://github.com/amirtuval/openharness/issues/303); on the tools stack:
+`apps/tui/src/components/tool-call.tsx`, `todo-panel.tsx`).
+
+**Ink gives `useInput` the last _committed_ render, so a key that acts on what a write just did has
+to read a ref — and a screen's own cursor cannot be the only source of truth.** A write is a round
+trip, so for the length of it the handler still closes over the value from before the keystroke: two
+quick presses of a permission key compute the _same_ next permission and send it twice, which a test
+that polls the stored value sees as "the second press did nothing". The fix is the one the command
+menu and the provider form already use — the row the key acts on lives in a ref, patched the instant
+the write resolves and replaced by the read-back that follows — and it is why every screen in `oh`
+keeps an `indexRef` next to its `index`. The same trap has a second face: `ink-testing-library`'s
+fake stdout reports `columns = 100` and **no `rows` at all**, so a screen that sizes a list from the
+terminal must tolerate `undefined` and fall back to a height of its own, or every test of it runs
+against a zero-row window. And a terminal's height changes without Ink re-rendering anything —
+`stdout.rows` is updated on the stream's `resize` event, but a component that only _read_ it keeps
+the window it computed for the old size until some other state changes, which reads as a list that
+stays short in a maximised window; `oh` subscribes in one hook (`useTerminalRows`), so every list
+gets the redraw.
+
+**A list that can outgrow the screen has to be windowed against the terminal's height, and the
+selected row has to be marked with a glyph.** The `/mcp` tools face drew every tool of the server,
+so on a server with sixty of them the reader saw the end of the list and nothing about what was
+selected — a list is not a screen, and `rows - chrome` is the arithmetic that turns one into the
+other. `oh` now has one place for it (`components/list-viewport.tsx`): the rows that fit after the
+title, notices, pinned rows and key hints are subtracted, a floor of three rows so the `↑ N more` /
+`↓ N more` markers still fit on a short terminal, the window derived from the cursor so the two
+cannot get out of step when a read shortens the list underneath it, and PgUp/PgDn/Home/End for the
+rows an arrow key should not have to walk. Colour is never the selection: the marker is a `❯`, which
+is the one thing that survives `NO_COLOR`, and a test per screen asserts the frame carries it
+([#335](https://github.com/amirtuval/openharness/issues/335)).
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take

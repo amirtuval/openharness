@@ -16,6 +16,7 @@ import {
   isToolCallEvent,
   isToolResultEvent,
   toolCallOfferedName,
+  toolCallSource,
   toolResultCallId,
 } from '@openharness/protocol'
 import type { AppendableEvent } from '@openharness/session'
@@ -185,22 +186,30 @@ function isEnabled(decision: ToolDecision | undefined): boolean {
 }
 
 /**
- * The tools a request offers, as its `span.model_request_start` records them (epic #303, X1; #312).
+ * The tools a request offers, as its `span.model_request_start` records them (epic #303, X1;
+ * #312; the provider-executed ones are #335).
  *
  * @param registry the tools the request offered — the deployment's and the remote ones together
  * @param mcp which server each remote tool came from, by offered name, or `undefined` for a
  *   request that offered none. A tool the map does not name is this build's own.
+ * @param native the names of the tools the request offered that its **model provider** runs
+ *   itself (#335) — `web_search` when the chat's model has one — recorded after the registry's
+ *   own, in the order they were attached.
  */
 export function offeredTools(
-  registry: ToolRegistry,
+  registry: ToolRegistry | undefined,
   mcp?: ReadonlyMap<string, McpToolRef>,
+  native: readonly string[] = [],
 ): ToolReference[] {
-  return registry.tools.map((tool) => {
-    const remote = mcp?.get(tool.name)
-    return remote === undefined
-      ? { name: tool.name, source: 'builtin' }
-      : { name: tool.name, source: 'mcp', server: remote.serverName }
-  })
+  return [
+    ...(registry?.tools ?? []).map((tool) => {
+      const remote = mcp?.get(tool.name)
+      return remote === undefined
+        ? { name: tool.name, source: 'builtin' as const }
+        : { name: tool.name, source: 'mcp' as const, server: remote.serverName }
+    }),
+    ...native.map((name) => ({ name, source: 'provider' as const })),
+  ]
 }
 
 /**
@@ -418,6 +427,13 @@ export function lostExecutions(events: readonly StoredEvent[]): ToolCallEvent[] 
  * `agent.tool_use` it answers — so a call whose answer is missing is exactly a call no event
  * points at. A `session.rewind` that took a call back removes it from the replay read the
  * caller passes here, so a branch nobody is on contributes nothing.
+ *
+ * A **provider-executed** call is left out (#335). Nothing of ours ran it, so there is no
+ * execution to have been lost: if a turn died between writing the call and writing its answer,
+ * the provider's own content is in `agent.opaque_content` and the next request carries it
+ * regardless, and answering the call `execution lost` would be a sentence about a call that
+ * succeeded. The call is answered when the turn that made it got that far, and the readable
+ * line is what is short by one result otherwise.
  */
 export function pendingToolUse(events: readonly StoredEvent[]): ToolCallEvent[] {
   const answered = new Set<string>()
@@ -427,7 +443,8 @@ export function pendingToolUse(events: readonly StoredEvent[]): ToolCallEvent[] 
     }
   }
   return events.filter(
-    (event): event is ToolCallEvent => isToolCallEvent(event) && !answered.has(event.id),
+    (event): event is ToolCallEvent =>
+      isToolCallEvent(event) && toolCallSource(event) !== 'provider' && !answered.has(event.id),
   )
 }
 

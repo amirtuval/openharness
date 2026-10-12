@@ -1989,15 +1989,33 @@ describe('the fake’s MCP servers (#303, X10; #313)', () => {
     await expect(fake.mcpServers.delete(seeded!.id)).rejects.toMatchObject({ status: 404 })
   })
 
-  it('refuses a headers map for a server that is not headers-authenticated', async () => {
+  it('implies headers from a map, and refuses one sent beside another auth (#314)', async () => {
     const fake = createFakeClient({
       mcpServers: [makeMcpServer({ name: 'notes', auth: 'none' })],
     })
     const server = (await fake.mcpServers.list()).data[0]
 
+    // A map on its own is a reader adding a key under "Advanced: custom headers" — it *means*
+    // `headers`, and the server switches the type rather than refusing the write.
+    const updated = await fake.mcpServers.update(server!.id, {
+      headers: { Authorization: 'Bearer x' },
+    })
+    expect(updated).toMatchObject({ auth: 'headers', header_names: ['Authorization'] })
+
+    // Saying otherwise beside the map is the ambiguous body the protocol refuses.
     await expect(
-      fake.mcpServers.update(server!.id, { headers: { Authorization: 'Bearer x' } }),
+      fake.mcpServers.update(server!.id, {
+        auth: 'oauth',
+        headers: { Authorization: 'Bearer x' },
+      }),
     ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+  })
+
+  it('derives the name from the URL and detects what the body did not say (#314)', async () => {
+    const fake = createFakeClient({ mcpTools: [{ server: 'mcp-linear-app', name: 'search' }] })
+    const created = await fake.mcpServers.create({ url: 'https://mcp.linear.app/mcp' })
+    expect(created).toMatchObject({ name: 'mcp-linear-app', auth: 'none', status: 'connected' })
+    expect(created.tools.map((tool) => tool.name)).toEqual(['search'])
   })
 
   it('answers 401 while signed out, like every other /v1 method', async () => {

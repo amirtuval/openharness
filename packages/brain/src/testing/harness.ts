@@ -28,6 +28,16 @@ import type { TestClock } from '@openharness/session/testing'
 export const TEST_MODEL_ID = 'anthropic/claude-sonnet-5'
 
 /**
+ * The native search tool the fixture's model is offered (epic #303, X14; issue #335).
+ *
+ * {@link TEST_MODEL_ID} is a Claude, so every request a test builds with a tool registry
+ * carries `web_search` beside the tools the test wired — as an `agent.tool_use` source and on
+ * the request's span. Exported so a test that lists a request's offer says so once instead of
+ * spelling the entry out, and so a test that wants **no** native tool can assert its absence.
+ */
+export const NATIVE_SEARCH_TOOL = { name: 'web_search', source: 'provider' } as const
+
+/**
  * The owner the fixture creates its agent and session as (epic #65, A4).
  *
  * The brain never looks at ownership — it acts for a session — so any valid user id does; the

@@ -1,6 +1,8 @@
 import { EVENT_TYPES, isStoredEvent, newEventId } from '@openharness/protocol'
 import {
   makeAgentMessage,
+  makeAgentToolResult,
+  makeAgentToolUse,
   makeContextSummary,
   makeContextSummaryProgress,
   makeStoredEventDelta,
@@ -40,6 +42,7 @@ import {
   selectSummaries,
   selectSummarizing,
   selectTranscriptEntries,
+  selectTruncatedToolResults,
   selectTruncation,
   replyCost,
   sessionCost,
@@ -1914,6 +1917,65 @@ describe('context summaries (#277, K10; #280)', () => {
     // A later request that capped nothing is the answer to "is the newest item too long?".
     const next = makeModelRequestStart({ seq: 3, model: 'anthropic/claude-sonnet-5' })
     expect(selectTruncation(reduceEvents([long, capped, next]))).toBeNull()
+  })
+
+  it("does not read a shortened tool result as the reader's own message (#314)", () => {
+    // One request, one cut — of a `web_fetch` answer. The span's record names the newest item it
+    // shortened, and that item is the result, so `truncated.seq` is the result's seq: read as the
+    // message notice it reported the reader's short question as too long, and the chat showed
+    // both notices for one cut.
+    const ask = makeUserMessage('Can you check the main headline in ynet?', {
+      seq: 1,
+      processed_at: fixtureTimestamp(),
+    })
+    // The tool builders allocate their own `seq` from the running counter, so the position is
+    // set here — what the test is about is the record's two halves, not the fixture's counter.
+    const call = makeAgentToolUse('web_fetch', { url: 'https://x' }, { seq: 2 })
+    const result = makeAgentToolResult(call, 'a very long page', { seq: 3 })
+    const capped = makeModelRequestStart({
+      seq: 4,
+      consumes: [],
+      truncated: {
+        seq: 3,
+        tokens_before: 12_000,
+        tokens_after: 4_096,
+        results: [{ seq: 3, tool: 'web_fetch', tokens_before: 12_000, tokens_after: 4_096 }],
+      },
+    })
+
+    const state = reduceEvents([ask, call, result, capped])
+    // The result's cut is the result notice's business (the web draws it from
+    // `truncatedResultsNotice`), and the message notice is not owed at all.
+    expect(selectTruncation(state)).toBeNull()
+    expect(selectTruncatedToolResults(state)).toEqual([
+      { seq: 3, tool: 'web_fetch', tokensBefore: 12_000, tokensAfter: 4_096 },
+    ])
+  })
+
+  it('still names a message when one request cuts both a message and a result (#314)', () => {
+    // `capNewest` caps the newest **message**, and the results are capped before it, so a request
+    // can carry both records: the message's is the triple's, and the result's is the list's.
+    const long = makeUserMessage('x'.repeat(400), { seq: 1, processed_at: fixtureTimestamp() })
+    // The tool builders allocate their own `seq` from the running counter, so the position is
+    // set here — what the test is about is the record's two halves, not the fixture's counter.
+    const call = makeAgentToolUse('web_fetch', { url: 'https://x' }, { seq: 2 })
+    const result = makeAgentToolResult(call, 'a very long page', { seq: 3 })
+    const capped = makeModelRequestStart({
+      seq: 4,
+      truncated: {
+        seq: 1,
+        tokens_before: 100,
+        tokens_after: 40,
+        results: [{ seq: 3, tool: 'web_fetch', tokens_before: 12_000, tokens_after: 4_096 }],
+      },
+    })
+
+    expect(selectTruncation(reduceEvents([long, call, result, capped]))).toEqual({
+      seq: 1,
+      tokensBefore: 100,
+      tokensAfter: 40,
+      recordedAt: 4,
+    })
   })
 
   it('takes the truncation notice back with the message a rewind replaced', () => {

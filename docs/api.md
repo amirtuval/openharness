@@ -83,49 +83,49 @@ the only way an event is ever removed together with its session.
 
 ## Routes
 
-| method   | path                                            | what it does                                                                                    |
-| -------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                       | liveness — always `{ status: 'ok' }` while the process lives; open                              |
-| `GET`    | `/ready`                                        | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open |
-| `GET`    | `/v1/auth-config`                               | unauthenticated: which providers are on, and whether dev login is                               |
-| `GET`    | `/v1/me`                                        | the signed-in user                                                                              |
-| `GET`    | `/v1/me/preferences`                            | the caller's preferences — the default model, the web theme and the context settings            |
-| `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit               |
-| `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`     |
-| `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                  |
-| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode                              |
-| `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                   |
-| `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                   |
-| `POST`   | `/v1/me/modes/{mode_id}`                        | update a mode; omitted fields keep their value, `null` clears one                               |
-| `DELETE` | `/v1/me/modes/{mode_id}`                        | delete one; answers `204`, and the chats that followed it keep their last model                 |
-| `POST`   | `/v1/agents`                                    | create an agent                                                                                 |
-| `GET`    | `/v1/agents`                                    | list agents, oldest first                                                                       |
-| `GET`    | `/v1/agents/{agent_id}`                         | read one agent                                                                                  |
-| `POST`   | `/v1/agents/{agent_id}`                         | update an agent; sessions already created keep their snapshot                                   |
-| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one)                                    |
-| `GET`    | `/v1/sessions`                                  | list sessions, newest first (`agent_id` filters)                                                |
-| `GET`    | `/v1/sessions/{session_id}`                     | read one session                                                                                |
-| `DELETE` | `/v1/sessions/{session_id}`                     | delete it and its whole log; answers `204` with no body                                         |
-| `POST`   | `/v1/sessions/{session_id}/events`              | append user events; the server owns every other event type                                      |
-| `GET`    | `/v1/sessions/{session_id}/events`              | read the log, with `types[]`, `after_seq`, `limit` and `page`                                   |
-| `GET`    | `/v1/sessions/{session_id}/events/stream`       | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                            |
-| `POST`   | `/v1/sessions/{session_id}/compact`             | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                      |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | AI SDK `useChat` compatibility — an extension, not the protocol                                 |
-| `PUT`    | `/v1/provider-credentials/{name}`               | add or replace one of the caller's credentials, under that name (write-only)                    |
-| `GET`    | `/v1/provider-credentials`                      | list the caller's credential metadata; never the secrets                                        |
-| `DELETE` | `/v1/provider-credentials/{name}`               | delete one; answers `204` with no body                                                          |
-| `POST`   | `/v1/me/mcp_servers`                            | register a remote MCP server (epic #303, X10); `409` for a duplicate name or the twenty-first   |
-| `GET`    | `/v1/me/mcp_servers`                            | list the caller's servers, oldest first (no cursor: at most 20)                                 |
-| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | read one server                                                                                 |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | update one; omitted fields keep their value, and `headers` replaces the sealed map              |
-| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | delete one and its pending OAuth states; `204`                                                  |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | run the connection check now: initialize, list tools, price their definitions                   |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                 |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                    |
-| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**    |
-| `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                         |
-| `GET`    | `/v1/sessions/{session_id}/usage`               | what one session spent: totals, cost, and the per-model breakdown                               |
-| `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day          |
+| method   | path                                            | what it does                                                                                                                              |
+| -------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                       | liveness — always `{ status: 'ok' }` while the process lives; open                                                                        |
+| `GET`    | `/ready`                                        | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open                                           |
+| `GET`    | `/v1/auth-config`                               | unauthenticated: which providers are on, and whether dev login is                                                                         |
+| `GET`    | `/v1/me`                                        | the signed-in user                                                                                                                        |
+| `GET`    | `/v1/me/preferences`                            | the caller's preferences — the default model, the web theme and the context settings                                                      |
+| `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit                                                         |
+| `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`                                               |
+| `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                                                            |
+| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode                                                                        |
+| `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                                                             |
+| `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                                                             |
+| `POST`   | `/v1/me/modes/{mode_id}`                        | update a mode; omitted fields keep their value, `null` clears one                                                                         |
+| `DELETE` | `/v1/me/modes/{mode_id}`                        | delete one; answers `204`, and the chats that followed it keep their last model                                                           |
+| `POST`   | `/v1/agents`                                    | create an agent                                                                                                                           |
+| `GET`    | `/v1/agents`                                    | list agents, oldest first                                                                                                                 |
+| `GET`    | `/v1/agents/{agent_id}`                         | read one agent                                                                                                                            |
+| `POST`   | `/v1/agents/{agent_id}`                         | update an agent; sessions already created keep their snapshot                                                                             |
+| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one)                                                                              |
+| `GET`    | `/v1/sessions`                                  | list sessions, newest first (`agent_id` filters)                                                                                          |
+| `GET`    | `/v1/sessions/{session_id}`                     | read one session                                                                                                                          |
+| `DELETE` | `/v1/sessions/{session_id}`                     | delete it and its whole log; answers `204` with no body                                                                                   |
+| `POST`   | `/v1/sessions/{session_id}/events`              | append user events; the server owns every other event type                                                                                |
+| `GET`    | `/v1/sessions/{session_id}/events`              | read the log, with `types[]`, `after_seq`, `limit` and `page`                                                                             |
+| `GET`    | `/v1/sessions/{session_id}/events/stream`       | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                                                                      |
+| `POST`   | `/v1/sessions/{session_id}/compact`             | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                                                                |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | AI SDK `useChat` compatibility — an extension, not the protocol                                                                           |
+| `PUT`    | `/v1/provider-credentials/{name}`               | add or replace one of the caller's credentials, under that name (write-only)                                                              |
+| `GET`    | `/v1/provider-credentials`                      | list the caller's credential metadata; never the secrets                                                                                  |
+| `DELETE` | `/v1/provider-credentials/{name}`               | delete one; answers `204` with no body                                                                                                    |
+| `POST`   | `/v1/me/mcp_servers`                            | register a remote MCP server — a URL, and the auth is **detected** (epic #303, X10; #314); `409` for a duplicate name or the twenty-first |
+| `GET`    | `/v1/me/mcp_servers`                            | list the caller's servers, oldest first (no cursor: at most 20)                                                                           |
+| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | read one server                                                                                                                           |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | update one; omitted fields keep their value, a `headers` map replaces the sealed one and implies `headers`                                |
+| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | delete one and its pending OAuth states; `204`                                                                                            |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | run the connection check now: initialize, list tools, price their definitions                                                             |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                                                           |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                                                              |
+| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                              |
+| `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                                                                   |
+| `GET`    | `/v1/sessions/{session_id}/usage`               | what one session spent: totals, cost, and the per-model breakdown                                                                         |
+| `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day                                                    |
 
 Every `/v1` resource belongs to the caller and is scoped to them.
 
@@ -255,11 +255,37 @@ what came back:
 The tools this build offers (epic #303, [#305](https://github.com/amirtuval/openharness/issues/305))
 are `builtin` ones — a call's `input` is the JSON object below, and the result is text:
 
-| tool         | input                                                    | what it does                                                                                                                                                                                                                          |
-| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `web_fetch`  | `{ "url": "https://…" }`                                 | GETs one `http`/`https` URL through the SSRF guard (every redirect hop re-checked) and answers its main content as Markdown. Text and JSON pass through; anything else is an error.                                                   |
-| `web_search` | `{ "query": "…", "count": 5 }`                           | One search of the deployment's search API, as titles, URLs and snippets. **Offered only where an operator configured a provider**; each user has a daily allowance of searches, and a call over it is an `is_error` result saying so. |
-| `todo_write` | `{ "todos": [{ "content": "…", "status": "pending" }] }` | Replaces the model's whole task list. The list is the newest successful call's own input — nothing is stored beside it — and `readTodoList` in `@openharness/protocol` reads it back out of a log.                                    |
+| tool         | input                                                    | what it does                                                                                                                                                                                                                                                                                                                                               |
+| ------------ | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web_fetch`  | `{ "url": "https://…" }`                                 | GETs one `http`/`https` URL through the SSRF guard (every redirect hop re-checked) and answers its main content as Markdown. Text and JSON pass through; anything else is an error.                                                                                                                                                                        |
+| `web_search` | `{ "query": "…" }`                                       | The chat **model's own provider's** search, run inside the model request ([#335](https://github.com/amirtuval/openharness/issues/335)): the query is the model's, the results are the provider's, and the reply's cited pages come back as a `sources` list. Offered only on a model whose provider has one, and never executed by this build — see below. |
+| `todo_write` | `{ "todos": [{ "content": "…", "status": "pending" }] }` | Replaces the model's whole task list. The list is the newest successful call's own input — nothing is stored beside it — and `readTodoList` in `@openharness/protocol` reads it back out of a log.                                                                                                                                                         |
+
+`web_search` is the one tool this build does **not** run. The request carries the model's own
+provider's search tool, the provider runs the search while the request is in flight, and what
+comes back is stored twice: the provider's own opaque content, which only that provider can read
+again and which the next request sends back unchanged (`agent.opaque_content`, #334), and a
+**readable** pair for clients — the `agent.tool_use` with `"source": "provider"`, and the
+`agent.tool_result` that answers it with the pages it found:
+
+```json
+{ "id": "sevt_…", "type": "agent.tool_use", "name": "web_search",
+  "input": { "query": "openharness architecture" }, "evaluated_permission": "allow",
+  "source": "provider" }
+
+{ "id": "sevt_…", "type": "agent.tool_result", "tool_use_id": "sevt_…",
+  "content": [{ "type": "text", "text": "Web search results:\n1. …" }], "is_error": false,
+  "sources": [{ "url": "https://example.test/architecture", "title": "The architecture",
+                "cited_text": "three ideas carry the design" }] }
+```
+
+The readable pair is a record and **never** part of a request: the provider's own content is what
+a request carries, so a call that ran a search is not replayed as a `tool_use` of ours. A chat
+that switches to another provider (or another model) cannot send that content on, so what the
+search found is replayed as **plain text** — the titles, the URLs and the cited passages — and
+the model that cannot read the provider's payload gets the facts instead. A provider that
+refuses the tool it was handed is answered by dropping it and asking once more; that request's
+span says so (`search_rejected`).
 
 A `web_fetch` result **leads with the address it finally came from** and says the content is
 untrusted data from the web, not instructions: it is the one tool whose text arrives from a
@@ -323,7 +349,10 @@ it into the transcript:
   "processed_at": "…",
   "provider": "anthropic",
   "model": "anthropic/claude-sonnet-5",
-  "parts": [{ "type": "reasoning", "text": "…", "provider_options": { "signature": "…" } }]
+  "parts": [
+    { "type": "reasoning", "text": "…", "provider_options": { "signature": "…" } },
+    { "type": "tool-call", "text": "", "text_before": 21, "payload": { "toolCallId": "…" } }
+  ]
 }
 ```
 
@@ -331,6 +360,13 @@ it into the transcript:
   `agent.message` beside it; a client that does not know this event skips it, and a frontend
   renders neither `parts` nor their text. It is stored whether or not the step streamed text —
   the step this exists for is a thinking model's tool call, which streams none.
+- **The parts go back in the step's own order.** A provider's assistant content has one — a
+  Claude reply that wrote "Let me look that up." then called `server_tool_use` then answered from
+  the results is text → call → result → text — and the brain rebuilds it by splitting the step's
+  `agent.message` text at each part's `text_before` (the characters of that text that came before
+  the part) and laying the parts between the pieces. A part that led the step, and every part of
+  an event stored before the field existed, carries no `text_before`, reads as `0`, and goes
+  ahead of the text — the order those logs have always replayed as.
 - **`provider` and `model` are what the parts may be replayed to, and both must match.** The
   brain re-attaches a step's parts to that step's assistant message on the **next request** only
   when it goes to the same client family **and** the same model; a model or provider switch
@@ -428,20 +464,21 @@ Which of those tools a chat may use is a **per-user choice**, stored beside the 
 at `/v1/me/tools`:
 
 ```json
-// GET /v1/me/tools            (optionally ?mode_id=<the mode the chat follows>)
+// GET /v1/me/tools            (optionally ?mode_id=<the mode the chat follows>
+//                                              &model_id=<the model the chat runs>)
 { "data": [
   { "name": "web_fetch",  "source": "builtin", "enabled": true, "policy": "allow",
     "default_policy": "allow", "available": true },
   { "name": "todo_write", "source": "builtin", "enabled": false, "policy": "ask",
     "default_policy": "allow", "available": true },
   { "name": "web_search", "source": "builtin", "enabled": true, "policy": "allow",
-    "default_policy": null, "available": false },
+    "default_policy": "allow", "available": false, "reason": "This model has no web search." },
   { "name": "notes__search", "source": "mcp", "enabled": true, "policy": "ask",
     "default_policy": "ask", "available": true, "mcp_server": "notes" }
 ] }
 
 // PUT /v1/me/tools            — merges per tool; a tool the body does not name keeps its setting
-{ "builtin": { "web_search": { "enabled": false, "policy": "ask" } },
+{ "builtin": { "web_search": { "enabled": false, "policy": "deny" } },
   "mcp":     { "notes__search": "allow" } }
 ```
 
@@ -458,12 +495,18 @@ at `/v1/me/tools`:
   the mode's override applied), because a remote tool has no on/off of its own. Its policy is
   the `mcp` map's value for that name, and `PUT` writes it there — a permission and nothing
   else. A policy for a tool no in-force server offers is listed with `available: false`.
-- **A tool this deployment does not register is listed as `available: false`** — a
-  `web_search` whose operator key is missing, say — rather than hidden, and `default_policy` is
-  `null` for it: nothing here declares it. It is never offered, whatever `enabled` says. So the
-  `data` list is the deployment's tools — `web_fetch` and `todo_write` always, `web_search` and
-  the test `echo` where the deployment registered them — plus any tool the caller has a setting
-  for.
+- **A tool this deployment does not register is listed as `available: false`** — a stored
+  setting for a tool that is gone, say — rather than hidden, and `default_policy` is `null` for
+  it: nothing here declares it. It is never offered, whatever `enabled` says. So the `data` list
+  is the deployment's tools — `web_fetch` and `todo_write` always, `web_search` (which no
+  registry carries, and which the chat model's provider supplies) and the test `echo` where the
+  deployment registered it — plus any tool the caller has a setting for.
+- **`web_search` is available or not depending on the model** (`?model_id=`), and says why when
+  it is not: `{"available": false, "reason": "This model has no web search."}`. A read that
+  names no model claims nothing about one. Its `policy` may be `allow` or `deny` only — an
+  `ask` cannot be honoured, because the provider runs the search inside the request — so a
+  `PUT` setting one is a 400 that says so, and a choice stored before that rule existed reads
+  as `allow`.
 - **A mode may override which built-in tools are on** (a `tools` field on the mode,
   `{ "builtin": { "web_search": true } }` — a patch, so a tool it does not name follows the
   user). The same field's `mcp_servers` map does the same for the user's **remote MCP servers**
@@ -665,9 +708,13 @@ capped (epic #303, X9) and the old ones it cleared:
 
 `seq` names the newest event whose text was cut, and the two counts bracket what it cost before
 and after — so a client can tell the user their message was shortened rather than let it
-silently disappear. `results` lists every tool result the request capped: a result is cut to the
-smaller of what its tool declares and a fifth of the chat model's budget, and the log keeps the
-whole of it. `cleared` says how many old tool results — those older than the recent quarter of
+silently disappear. The triple describes a **message**'s cut: it names a tool result only when
+no message had to be capped, which is what `results` says — a `seq` that list also carries is a
+result's cut and is reported by the results notice alone, never as the reader's own message
+(#314). `results` lists every tool result the request capped: a result is cut to the smaller of
+what its tool declares and a fifth of the chat model's budget, **keeping its beginning** — a
+tool's output means what it said first, so the tail is what it gives up, with the omission
+marker where the rest went — and the log keeps the whole of it. `cleared` says how many old tool results — those older than the recent quarter of
 the budget the summary engine keeps verbatim — had their bodies replaced by
 `result cleared, N tokens — call the tool again if you need it` (issue #331): clearing them is
 what the brain tries **before** summarizing, so a context that clearing alone brings back under
@@ -1156,28 +1203,43 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
 
 ### Remote MCP servers
 
-A user registers the remote **MCP** servers they operate (epic #303, X10): a URL, how requests
-authenticate, and whether the server is on by default. openharness is the MCP **client**; it
-never holds a server's tools as its own — they are listed per request and called on demand
-([Remote MCP tools](#remote-mcp-tools-epic-303-x10-issue-312)).
+A user registers the remote **MCP** servers they operate (epic #303, X10): a URL, and whether
+the server is on by default. **The authentication is detected, not chosen** (#314): the reader
+types a URL, and the server probes it on save — an unauthenticated request answered `401` (or
+`403`) by a resource whose RFC 9728 metadata advertises an authorization server means OAuth, a
+successful initialize means `none`, and a server with no such metadata that wants a key is
+stored in `error` with a reason telling the reader to add one. openharness is the MCP
+**client**; it never holds a server's tools as its own — they are listed per request and called
+on demand ([Remote MCP tools](#remote-mcp-tools-epic-303-x10-issue-312)).
 
 ```bash
-# An open server, checked on save: a server it cannot reach is still stored, in status error.
+# The whole body is a URL. The name is derived from its host when it is left out, and the auth
+# type is what the probe finds.
 curl -X POST localhost:3000/v1/me/mcp_servers \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"auth":"none","name":"notes","url":"https://mcp.example.com/mcp"}'
-# → 201 {"id":"mcps_01J…","type":"mcp_server","name":"notes","url":"https://mcp.example.com/mcp",
+  -d '{"url":"https://mcp.example.com/mcp"}'
+# → 201 {"id":"mcps_01J…","type":"mcp_server","name":"mcp-example-com",
+#        "url":"https://mcp.example.com/mcp",
 #        "auth":"none","enabled":true,"status":"connected","last_error":null,"header_names":[],
 #        "tools":[{"name":"search","description":"Search notes","definition_tokens":41}, …],
 #        "definition_tokens":83,"last_tested_at":"…","created_at":"…","updated_at":"…"}
 
-# A server authenticated with headers. The values are sealed and never come back; only the
-# names do.
+# The same URL behind an OAuth server: the probe sees the 401 and its metadata, so the server
+# is stored as OAuth and the reader is offered the Connect flow.
+# → 201 {… "auth":"oauth","status":"needs_reconnect","last_error":null,"tools":[] …}
+
+# A server that authenticates with a header: the map implies `auth: "headers"`. The values are
+# sealed and never come back; only the names do.
 curl -X POST localhost:3000/v1/me/mcp_servers \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"auth":"headers","name":"notes","url":"https://mcp.example.com/mcp",
+  -d '{"name":"notes","url":"https://mcp.example.com/mcp",
        "headers":{"Authorization":"Bearer sk-…"}}'
-# → 201 {… "header_names":["Authorization"], …}
+# → 201 {… "auth":"headers","header_names":["Authorization"], …}
+
+# An explicit `auth` is still accepted, for a caller that knows better than the probe.
+curl -X POST localhost:3000/v1/me/mcp_servers \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"auth":"oauth","name":"linear","url":"https://mcp.linear.app/mcp"}'
 
 # An OAuth server: start the flow, then open the URL it answers.
 curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
@@ -1191,6 +1253,11 @@ curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
   refresh. A failure here never blocks a chat: an MCP server that is down is a tool source that
   is unavailable, not a failed turn — and when a chat cannot use one it says so with a
   `session.error` and carries on without that server's tools.
+- **What a failure says (#314).** `last_error` names the **HTTP status and a bounded excerpt of
+  the body** — `the MCP server answered 401 Unauthorized: {"error":"invalid_token"}` — because
+  the transport's own message ends at a colon for the empty-bodied `401` a resource server such
+  as Linear's answers. A request that never got a response carries the transport's reason
+  instead, and the whole sentence is logged server-side.
 - **URL rules.** Streamable HTTP only, at an absolute `http(s)` URL. Every request goes through
   `safeFetch`, so a private, loopback, link-local or metadata address is refused unless
   `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` is on (the same self-host setting a custom
@@ -1457,12 +1524,18 @@ GET /v1/me/usage?from=&to=&tz=         -> { from, to, tz, totals, cost, unpriced
   million tokens, from the vendored models.dev snapshot (see `apps/server/AGENTS.md`).
 - **Cache tokens are priced separately.** `cache_read` and `cache_write` are their own rates at
   every provider that publishes them, not a fraction of the input rate.
-- **Searches are counted, and never priced** (epic #303, #305). `searches` is how many
-  `web_search` calls the covered log holds — the call and its successful result, so a refused,
-  failed or never-answered call is not one — and it is a **count**: the operator pays the search
-  provider, no rate for that is in this repository, and inventing one would be the estimate the
-  rest of this surface refuses to make. It is a sibling of the totals rather than a member of
-  them, and every per-day entry of `by_day` carries its own.
+- **Searches are counted, and priced where a rate is published** (epic #303, #305; #335).
+  `searches` is a **count**, summed from two places because a log may hold both: the
+  `web_search` **calls** a session made in the operator-key era — the call and its successful
+  result, so a refused, failed or never-answered call is not one — and the count each request's
+  own `span.model_request_end` carries, which is what a provider-executed search is. The count
+  is a sibling of the totals rather than a member of them, and every per-day entry of `by_day`
+  carries its own.
+  Anthropic charges $10 per 1,000 searches **on top of** the tokens, and that fee is in `cost`
+  like any other published rate (`@openharness/protocol`'s `SEARCH_PRICE_PER_CALL` — the one
+  table, because models.dev prices tokens and records nothing about a tool). OpenAI and xAI
+  charge nothing beside the tokens: the table says so by naming no rate for them, which is not
+  the same as not knowing one, and their searches are counted all the same.
 - **Usage is broken down by model, never by mode.** A session may switch models mid-conversation
   (U3), so `by_model` is what separates the cheap requests from the expensive ones. The per-user
   route adds `by_day`; there is no third axis.

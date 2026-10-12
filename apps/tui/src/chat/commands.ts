@@ -52,6 +52,12 @@ export interface CommandContext {
    * set the permission each of its tools runs under.
    */
   readonly openMcpServers: () => void
+  /**
+   * Open this build's own tools in the prompt slot — `/tools` (epic #303, X4; #335). The
+   * counterpart of the web app's Settings → Tools: a row per tool with its on/off and the
+   * permission a call runs under, written one change at a time.
+   */
+  readonly openToolSettings: () => void
   /** Wipe the screen, the session untouched — the Ctrl+L wipe, by another name. */
   readonly clearScreen: () => void
   /** Leave the chat, the way the second idle Ctrl+C does. */
@@ -125,6 +131,13 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     },
   },
   {
+    name: 'tools',
+    description: 'which tools may run, and whether each asks first',
+    run: (context) => {
+      context.openToolSettings()
+    },
+  },
+  {
     name: 'clear',
     description: 'clear the screen; the session stays',
     run: (context) => {
@@ -169,6 +182,14 @@ export const CHAT_KEYS: readonly { readonly keys: string; readonly description: 
   { keys: 'Tab', description: 'complete the command the menu has selected' },
   { keys: 'Esc', description: 'close the command menu, keeping what is typed' },
   { keys: 'Ctrl+L', description: 'clear the screen; the session stays' },
+  {
+    keys: 'Ctrl+T',
+    description: 'fold or unfold the task list above the prompt — a long one starts folded',
+  },
+  {
+    keys: 'Ctrl+O',
+    description: "show every tool call's full input and result, or the compact line again",
+  },
   {
     keys: 'Ctrl+R',
     description: 'reconnect the MCP server a failed turn named — a notice says when to',

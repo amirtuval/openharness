@@ -25,7 +25,15 @@ import type {
   TodoList,
   UserToolConfirmationEventInput,
 } from '@openharness/protocol'
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useState,
+} from 'react'
 
 import { describeError } from '../lib/errors'
 import { noteAuthenticationError } from '../lib/auth-store'
@@ -175,14 +183,40 @@ export interface SessionView {
  */
 export function useSession(client: Client, sessionId: string): SessionView {
   const transcript = useMemo(() => createTranscript(), [client, sessionId])
-  // `useSyncExternalStore` wants the two functions as values; taken off the store they would
-  // be unbound methods, so hand it closures over this transcript instead.
-  const subscribe = useCallback(
-    (listener: () => void) => transcript.subscribe(listener),
-    [transcript],
-  )
-  const getSnapshot = useCallback(() => transcript.getState(), [transcript])
-  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  // **The transcript's updates are transitions.**
+  //
+  // The stream folds a whole network read's worth of events in one turn of the event loop — a
+  // resumed connection's backlog, a big tool result and the turn it ends, a fast provider's
+  // deltas — and the store notifies on every one of them. `useSyncExternalStore` answers each
+  // notification with a **synchronous** update (`forceStoreRerender`, React's own sync lane),
+  // so a burst is a run of synchronous commits with more of them already pending; React counts
+  // those as nested updates and gives up past fifty with "Maximum update depth exceeded" (React
+  // #185). The throw comes out of the store's notify call — inside `transcript.apply` in the
+  // stream loop below, whose `catch` reports it as a failed *request* — which is exactly what a
+  // chat showed: a "Request failed" banner whose message was React's own minified #185.
+  //
+  // A transition is the right lane for this data: the conversation is not urgent, only the
+  // newest state matters, and React coalesces the updates that arrive before it renders instead
+  // of committing each one. The reader's own input — a keystroke in the composer, a click — stays
+  // urgent and can interrupt a long transcript render.
+  //
+  // The subscription is React's own pattern, with the two things `useSyncExternalStore` does
+  // internally that a hand-rolled one must not forget: the subscribe happens in a layout effect
+  // (before the paint, and after every render, so the window between the render and the
+  // subscription is closed by the catch-up read below), and the snapshot the render used is
+  // compared with the store's newest — an event folded in *between* the two would otherwise
+  // leave the screen a state behind until the next event arrived.
+  const [, rerender] = useReducer((count: number) => count + 1, 0)
+  const state = transcript.getState()
+  useLayoutEffect(() => {
+    const unsubscribe = transcript.subscribe(() => {
+      startTransition(rerender)
+    })
+    if (!Object.is(state, transcript.getState())) {
+      startTransition(rerender)
+    }
+    return unsubscribe
+  }, [transcript, state])
 
   const [loaded, setLoaded] = useState<Session | null>(null)
   const [loadingHistory, setLoadingHistory] = useState(true)

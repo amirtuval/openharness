@@ -49,7 +49,6 @@ import { createReasoningSupportResolver } from '../catalog/reasoning-support'
 import { createContextCompactionResolver } from '../context-compaction'
 import { createModeResolver } from '../modes'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
-import { createSearchAllowance } from '../searches'
 import { createMcpFetch } from '../mcp/fetch'
 import { createMcpServerService } from '../mcp/service'
 import { InMemoryMcpServerStore } from '@openharness/session'
@@ -280,12 +279,6 @@ export interface TestOptions {
   /** `OPENHARNESS_TODO_NUDGE` for {@link testConfig} (#331). */
   readonly todoNudge?: boolean
   /**
-   * The search API `testConfig` reports (epic #303, #305) — a `brave` provider with a key and a
-   * daily limit, for the tests that assert what `web_search` is offered and how the allowance
-   * is enforced. `null` — no search provider, which is a deployment without a key — by default.
-   */
-  readonly search?: SearchConfig | null
-  /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
    */
@@ -370,8 +363,8 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   // The tools and their settings (epic #303, X4; the built-ins are #305, the per-user settings
   // are #307), wired as `main.ts` wires a deployment's: one registry, read by the turn options
   // and by the `/v1/me/tools` routes. A test passes its own small registry rather than #305's
-  // built-ins, so `kind` never has to build one here — but the search allowance is built from
-  // the harness's config when a test turned search on, exactly as `main.ts` builds it.
+  // built-ins, so `kind` never has to build one here — and `web_search` is not in it (#335):
+  // the brain attaches a provider's native one per request.
   const turnConfig = testConfig(options)
   // The remote-MCP-server resource (epic #303, X10; the loop's half: #312), built **once** here
   // and handed to both readers exactly as `main.ts` hands it: the routes that manage the
@@ -398,11 +391,6 @@ export function createTestApp(options: TestOptions = {}): TestContext {
           tools: options.tools,
           store,
           registry,
-          searchTransport: createProviderFetch(),
-          allowance:
-            turnConfig.search === null
-              ? undefined
-              : createSearchAllowance({ store, dailyLimit: turnConfig.search.dailyLimit }),
           ...(options.mcpTools === true ? { mcp: { service: mcpServers, fetch: mcpFetch } } : {}),
         })
   const scheduler = new LocalScheduler({
@@ -791,7 +779,6 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     clearThreshold: options.clearThreshold ?? DEFAULT_CLEAR_THRESHOLD,
     todoNudge: options.todoNudge ?? false,
     maxToolSteps: options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS,
-    search: options.search ?? null,
     // Observability (#158) is off in a test by default: the readable log format, and no
     // exporter to load. The suites that assert on the JSON shape call `jsonLogger` directly.
     logFormat: options.logFormat ?? DEFAULT_LOG_FORMAT,

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { FakeClientOptions } from '@openharness/client/testing'
+import { ApiError } from '@openharness/client'
 
 import { makeFake, renderApp } from '../../test-support/render-app'
 
@@ -41,6 +42,20 @@ async function serverRow(name: string): Promise<HTMLElement> {
   return row as HTMLElement
 }
 
+/**
+ * The batch control's state line, read out of its element.
+ *
+ * The line is two text nodes inside one span, so the element with the slot is what says what a
+ * reader sees — and it is what a stylesheet (and this test) can address on a page of servers.
+ */
+function batchState(row: HTMLElement): HTMLElement {
+  const found = row.querySelector('[data-slot="mcp-tools-batch-state"]')
+  if (found === null) {
+    throw new Error('no batch state line on the row')
+  }
+  return found as HTMLElement
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -58,8 +73,8 @@ describe('Settings → MCP servers', () => {
 
     await user.click(screen.getByRole('button', { name: 'Add server' }))
     const dialog = await screen.findByRole('dialog')
-    await user.type(within(dialog).getByLabelText('Name'), 'wiki')
-    await user.type(within(dialog).getByLabelText('URL'), 'https://wiki.example.com/mcp')
+    await user.type(within(dialog).getByLabelText(/^Name/), 'wiki')
+    await user.type(within(dialog).getByLabelText('Server URL'), 'https://wiki.example.com/mcp')
     await user.click(within(dialog).getByRole('button', { name: 'Add server' }))
 
     const row = await serverRow('wiki')
@@ -81,8 +96,8 @@ describe('Settings → MCP servers', () => {
     await user.click(await screen.findByRole('button', { name: 'Add server' }))
     const dialog = await screen.findByRole('dialog')
 
-    await user.type(within(dialog).getByLabelText('Name'), 'Notes Server')
-    await user.type(within(dialog).getByLabelText('URL'), 'not-a-url')
+    await user.type(within(dialog).getByLabelText(/^Name/), 'Notes Server')
+    await user.type(within(dialog).getByLabelText('Server URL'), 'not-a-url')
     expect(await within(dialog).findByText(/lowercase letters, digits/)).toBeInTheDocument()
     expect(within(dialog).getByText(/absolute http or https URL/)).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: 'Add server' })).toBeDisabled()
@@ -94,8 +109,8 @@ describe('Settings → MCP servers', () => {
 
     await user.click(screen.getByRole('button', { name: 'Add server' }))
     const dialog = await screen.findByRole('dialog')
-    await user.type(within(dialog).getByLabelText('Name'), 'notes')
-    await user.type(within(dialog).getByLabelText('URL'), 'https://other.example.com/mcp')
+    await user.type(within(dialog).getByLabelText(/^Name/), 'notes')
+    await user.type(within(dialog).getByLabelText('Server URL'), 'https://other.example.com/mcp')
     await user.click(within(dialog).getByRole('button', { name: 'Add server' }))
 
     const failure = await within(dialog).findByRole('alert')
@@ -103,30 +118,46 @@ describe('Settings → MCP servers', () => {
     expect(failure).toHaveAttribute('data-kind', 'conflict')
   })
 
-  it('asks for a header when a new server authenticates with one', async () => {
+  it('has no auth-type choice, and implies headers from a custom header (#314)', async () => {
     renderApp(makeFake(), { hash: '#/settings' })
     await user.click(await screen.findByRole('button', { name: 'Add server' }))
     const dialog = await screen.findByRole('dialog')
 
-    await user.type(within(dialog).getByLabelText('Name'), 'wiki')
-    await user.type(within(dialog).getByLabelText('URL'), 'https://wiki.example.com/mcp')
-    await user.selectOptions(within(dialog).getByLabelText('Authentication'), 'headers')
+    // The reader is not asked to pick an auth type — the server detects it — so the only choice
+    // is the URL (and, optionally, a name and a header).
+    expect(within(dialog).queryByLabelText('Authentication')).toBeNull()
+    await user.type(within(dialog).getByLabelText('Server URL'), 'https://wiki.example.com/mcp')
+    expect(within(dialog).getByText(/work out how it authenticates/)).toBeInTheDocument()
 
-    // A `headers` server with no header is a `none` server that says otherwise, and the wire
-    // refuses one: the form holds the save and says why.
-    expect(await within(dialog).findByText(/needs at least one header/)).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: 'Add server' })).toBeDisabled()
-
+    // The custom-header fields live behind the Advanced disclosure.
+    await user.click(within(dialog).getByRole('button', { name: 'Advanced: custom headers' }))
+    await user.type(within(dialog).getByLabelText(/^Name/), 'wiki')
     await user.click(within(dialog).getByRole('button', { name: 'Add header' }))
     await user.type(within(dialog).getByLabelText('Header 1 name'), 'Authorization')
     await user.type(within(dialog).getByLabelText('Header 1 value'), 'Bearer sk-secret')
-    expect(within(dialog).getByRole('button', { name: 'Add server' })).toBeEnabled()
-
     await user.click(within(dialog).getByRole('button', { name: 'Add server' }))
+
     const row = await serverRow('wiki')
-    // The listing reports the header's **name** and never its value.
+    // The listing reports the header's **name** and never its value, and the server stored the
+    // server as header-authenticated because a header was sent.
     expect(within(row).getByText('Headers')).toBeInTheDocument()
     expect(row.textContent).not.toContain('sk-secret')
+  })
+
+  it('derives a name from the URL and checks the server on save', async () => {
+    const fake = makeFake()
+    renderApp(fake, { hash: '#/settings' })
+    await user.click(await screen.findByRole('button', { name: 'Add server' }))
+    const dialog = await screen.findByRole('dialog')
+
+    await user.type(within(dialog).getByLabelText('Server URL'), 'https://mcp.linear.app/mcp')
+    // The name field offers the name the server would derive, so a reader can see it without
+    // typing one.
+    expect(within(dialog).getByPlaceholderText('mcp-linear-app')).toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Add server' }))
+    const row = await serverRow('mcp-linear-app')
+    expect(row).toHaveAttribute('data-auth', 'none')
   })
 
   it('shows a server’s tools with their policies and estimated cost, and writes one', async () => {
@@ -153,9 +184,73 @@ describe('Settings → MCP servers', () => {
     })
   })
 
+  it('sets every tool of a server at once, in one write, and the rows follow it (#313)', async () => {
+    const fake = makeFake({ mcpServers: [NOTES] })
+    renderApp(fake, { hash: '#/settings' })
+
+    const row = await serverRow('notes')
+    // Visible without opening anything: the state the server's tools are in together, and the
+    // three choices, each named for its server.
+    expect(await within(row).findByText(/All tools:/)).toBeInTheDocument()
+    expect(batchState(row)).toHaveTextContent('All tools: Ask (all)')
+
+    const put = vi.spyOn(fake.tools, 'put')
+    await user.click(within(row).getByRole('button', { name: 'Set every tool on notes to Deny' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.tools.list()
+      expect(data.find((entry) => entry.name === 'notes__search')?.policy).toBe('deny')
+      expect(data.find((entry) => entry.name === 'notes__read')?.policy).toBe('deny')
+    })
+    // **One** request, carrying every tool of that server at the permission chosen — never one
+    // write per row.
+    expect(put).toHaveBeenCalledTimes(1)
+    expect(put.mock.calls[0]?.[0]).toEqual({ mcp: { notes__search: 'deny', notes__read: 'deny' } })
+
+    // The state line reads what the write left behind, and so does each row of the list.
+    await waitFor(() => expect(batchState(row)).toHaveTextContent('All tools: Deny (all)'))
+    await user.click(within(row).getByRole('button', { name: /2 tools/ }))
+    expect(await within(row).findByLabelText('notes__search when called')).toHaveValue('deny')
+    expect(within(row).getByLabelText('notes__read when called')).toHaveValue('deny')
+
+    put.mockRestore()
+  })
+
+  it('says Mixed when a server’s tools differ, and the rows say which is which', async () => {
+    const fake = makeFake({
+      mcpServers: [NOTES],
+      toolSettings: { builtin: {}, mcp: { notes__search: 'allow' } },
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    const row = await serverRow('notes')
+    await waitFor(() => expect(batchState(row)).toHaveTextContent('All tools: Mixed'))
+
+    await user.click(within(row).getByRole('button', { name: /2 tools/ }))
+    expect(await within(row).findByLabelText('notes__search when called')).toHaveValue('allow')
+    expect(within(row).getByLabelText('notes__read when called')).toHaveValue('ask')
+  })
+
+  it('reports a refused batch write inline, and leaves the state where it was', async () => {
+    const fake = makeFake({ mcpServers: [NOTES] })
+    vi.spyOn(fake.tools, 'put').mockRejectedValue(
+      new ApiError(500, 'the server fell over', { type: 'api_error' }),
+    )
+    renderApp(fake, { hash: '#/settings' })
+
+    const row = await serverRow('notes')
+    await user.click(within(row).getByRole('button', { name: 'Set every tool on notes to Allow' }))
+
+    // The card's own failure banner, in the server's words, and nothing claimed about the rows.
+    const banner = await screen.findByRole('alert')
+    expect(banner).toHaveTextContent('The MCP server request failed')
+    expect(banner).toHaveTextContent('the server fell over')
+    expect(batchState(row)).toHaveTextContent('All tools: Ask (all)')
+  })
+
   it('tests a server, reports its failure, and turns it off', async () => {
     const fake = makeFake({
-      mcpServers: [makeMcpServer({ name: 'git', status: 'connected' })],
+      mcpServers: [makeMcpServer({ name: 'git', auth: 'none', status: 'connected' })],
       mcpUnreachable: ['git'],
     })
     renderApp(fake, { hash: '#/settings' })
@@ -164,7 +259,17 @@ describe('Settings → MCP servers', () => {
     await user.click(within(row).getByRole('button', { name: 'Test git' }))
 
     await waitFor(() => expect(row).toHaveAttribute('data-status', 'error'))
-    expect(await within(row).findByText('The server could not be reached.')).toBeInTheDocument()
+    // The result is drawn **on the row** (issue #314): a check that used to leave no visible
+    // trace now says what happened, in place.
+    const result = await waitFor(() => {
+      const found = row.querySelector('[data-slot="mcp-test-result"]')
+      if (found === null) {
+        throw new Error('no test result yet')
+      }
+      return found as HTMLElement
+    })
+    expect(result).toHaveAttribute('data-ok', 'false')
+    expect(result).toHaveTextContent('The server could not be reached.')
 
     await user.click(within(row).getByLabelText('Enable git'))
     await waitFor(async () => {
@@ -172,30 +277,46 @@ describe('Settings → MCP servers', () => {
     })
   })
 
-  it('connects a server in a new tab, and disconnects it', async () => {
+  it('offers Connect, not Test, until an OAuth server is connected (#314)', async () => {
     const fake = makeFake({ mcpServers: [{ ...NOTES, status: 'needs_reconnect' }] })
     const open = vi.spyOn(window, 'open').mockReturnValue({} as Window)
     renderApp(fake, { hash: '#/settings' })
 
     const row = await serverRow('notes')
-    await user.click(within(row).getByRole('button', { name: 'Connect notes' }))
+    // There is no token for a check to use, and pressing Test only ever looked like a button
+    // that did nothing: the action that exists while a sign-in is outstanding is Connect.
+    expect(within(row).queryByRole('button', { name: 'Test notes' })).toBeNull()
 
+    await user.click(within(row).getByRole('button', { name: 'Connect notes' }))
     await waitFor(() => expect(fake.mcpConnects).toEqual([{ serverId: NOTES.id, client: 'web' }]))
     expect(open).toHaveBeenCalledWith(
       `https://auth.example.com/authorize?server=${NOTES.id}&state=fake_state`,
       '_blank',
       'noopener,noreferrer',
     )
-
-    // The browser comes back: the callback completes the flow, and the row's own Test reads the
-    // new status — this screen's Disconnect is for a server that has tokens.
-    fake.completeMcpOAuth(NOTES.id)
     open.mockRestore()
+  })
+
+  it('shows a Test result inline, and Disconnects a connected server', async () => {
+    const fake = makeFake({ mcpServers: [NOTES] })
+    renderApp(fake, { hash: '#/settings' })
+
+    const row = await serverRow('notes')
     await user.click(within(row).getByRole('button', { name: 'Test notes' }))
-    await waitFor(() => expect(row).toHaveAttribute('data-status', 'connected'))
+    const result = await waitFor(() => {
+      const found = row.querySelector('[data-slot="mcp-test-result"]')
+      if (found === null) {
+        throw new Error('no test result yet')
+      }
+      return found as HTMLElement
+    })
+    expect(result).toHaveAttribute('data-ok', 'true')
+    expect(result).toHaveTextContent('Listed 2 tools')
 
     await user.click(within(row).getByRole('button', { name: 'Disconnect notes' }))
     await waitFor(() => expect(row).toHaveAttribute('data-status', 'needs_reconnect'))
+    // A disconnected OAuth server has no Test again.
+    expect(within(row).queryByRole('button', { name: 'Test notes' })).toBeNull()
   })
 
   it('edits an address, and keeps a sealed header map when nothing is typed', async () => {
@@ -213,18 +334,22 @@ describe('Settings → MCP servers', () => {
 
     // The values are sealed and never come back: the form shows the names it holds and starts
     // the map empty.
-    expect(within(dialog).getByText(/Stored: Authorization/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/Stored:/)).toBeInTheDocument()
+    expect(dialog.querySelector('[data-slot="mcp-stored-headers"]')).toHaveTextContent(
+      'Authorization',
+    )
 
-    const url = within(dialog).getByLabelText('URL')
+    const url = within(dialog).getByLabelText('Server URL')
     await user.clear(url)
     await user.type(url, 'https://wiki-2.example.com/mcp')
     await user.click(within(dialog).getByRole('button', { name: 'Save changes' }))
 
     await waitFor(() => expect(update).toHaveBeenCalled())
+    // No auth type is sent, and no header map either: leaving the fields empty keeps what is
+    // sealed (the wire's omitted-field-means-keep rule).
     expect(update.mock.calls[0]?.[1]).toEqual({
       name: 'wiki',
       url: 'https://wiki-2.example.com/mcp',
-      auth: 'headers',
       enabled: true,
     })
     expect((await fake.mcpServers.list()).data[0]).toMatchObject({
@@ -262,5 +387,22 @@ describe('Settings → MCP servers', () => {
     expect(confirmation).toHaveAttribute('data-slot', 'mcp-connected')
     // The parameter is taken off the URL, so a reload does not confirm it again.
     expect(window.location.search).toBe('')
+  })
+
+  it('does not claim Connected when the callback’s check failed (#314)', async () => {
+    // The maintainer's report: Linear authenticated, the callback listed no tools and stored an
+    // error, and the card still said "Connected linear". The confirmation now reads the status
+    // the callback wrote.
+    const linear = makeMcpServer({
+      name: 'linear',
+      status: 'error',
+      last_error: 'the MCP server answered 401 Unauthorized, with no message',
+    })
+    const fake = makeFake({ mcpServers: [linear] })
+    renderApp(fake, { hash: '#/settings', search: `?mcp_connected=${linear.id}` })
+
+    const confirmation = await screen.findByText(/could not be listed/)
+    expect(confirmation).toHaveAttribute('data-slot', 'mcp-connected')
+    expect(confirmation).toHaveTextContent('401')
   })
 })

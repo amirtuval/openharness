@@ -1,6 +1,11 @@
 import type { GetPreferencesResponse, ModelEntry } from '@openharness/protocol'
 
-import type { TranscriptContext, TranscriptManualCompaction, TranscriptSummary } from './transcript'
+import type {
+  TranscriptContext,
+  TranscriptManualCompaction,
+  TranscriptSummary,
+  TranscriptTruncation,
+} from './transcript'
 
 /**
  * How full the context is, and where the line the user chose sits (epic #277, K10/C1–C4; #280).
@@ -377,5 +382,40 @@ export function manualCompactionNotice(
   return {
     tone: 'info',
     text: compaction.message ?? 'There was no older history to summarize.',
+  }
+}
+
+/** The line the truncation notice draws, and the number behind its tooltip (#280; #314). */
+export interface TruncationNotice {
+  /** The sentence: the reader's newest message was over the model's budget and was cut. */
+  readonly text: string
+  /**
+   * What the notice's `title` says: about how many tokens of the message the request left out.
+   * A count and not a promise — it is the characters-per-token estimate the budget is measured
+   * in, which is why the sentence says "about".
+   */
+  readonly detail: string
+}
+
+/**
+ * The line a reader is owed when a request had to shorten the newest **message** (epic #277, K6;
+ * #280; #314).
+ *
+ * The transcript hands this only a message's cut: a tool result's cut is its own notice
+ * (`truncatedResultsNotice`), and reading the request's truncation record as this one is what
+ * made a shortened `web_fetch` answer report the reader's own message as too long (#314 — the
+ * record names the newest item the request shortened, whichever kind it was, and
+ * `messageTruncation` in `./transcript` is the rule that tells the two apart).
+ *
+ * The words live here rather than in each frontend, like the manual-compaction notice's, so the
+ * web and `oh` cannot say different things about the same log.
+ */
+export function truncationNotice(
+  truncation: Pick<TranscriptTruncation, 'tokensBefore' | 'tokensAfter'>,
+): TruncationNotice {
+  const omitted = Math.max(0, truncation.tokensBefore - truncation.tokensAfter)
+  return {
+    text: 'Your message was too long for this model and was shortened.',
+    detail: `About ${String(omitted)} tokens of it were left out of the request.`,
   }
 }

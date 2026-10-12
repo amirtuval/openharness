@@ -356,3 +356,60 @@ describe('MCP servers: resolve, for the tool loop (#312)', () => {
     expect(resolved.map((entry) => entry.server.id)).toEqual([on.id])
   })
 })
+
+describe('an update that carries a header map implies headers (#314)', () => {
+  it('switches a none server to headers, and stores the map it was given', async () => {
+    // The server wants a token, and the reader supplies it as a header — so the check after the
+    // update can only pass if the map was really sent.
+    const mcp = await stubMcp({ requiredToken: 'lab-token' })
+    const test = app()
+    const created = (await (
+      await test.request(BASE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        // Saved with no headers and an explicit `none`, so the check is refused and the server
+        // starts as an open one that cannot reach its target.
+        body: JSON.stringify({ name: 'notes', url: mcp.url, auth: 'none' }),
+      })
+    ).json()) as McpServer
+    expect(created).toMatchObject({ auth: 'none', status: 'error' })
+
+    // A reader adds a key under "Advanced: custom headers": the map means `headers`, and the
+    // row must stop claiming to be an open server — the stored auth is the **resolved** one,
+    // not only what the body's `auth` field said (which is nothing).
+    const updated = (await (
+      await test.request(`${BASE}/${created.id}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: mcp.url, headers: { Authorization: 'Bearer lab-token' } }),
+      })
+    ).json()) as McpServer
+    expect(updated).toMatchObject({
+      auth: 'headers',
+      status: 'connected',
+      header_names: ['Authorization'],
+      // The names are the server's own report; the value never comes back.
+      url: mcp.url,
+    })
+    // And the check the update ran really sent the header it was given.
+    expect(mcp.authorizations).toContain('Bearer lab-token')
+  })
+
+  it('refuses a map sent beside a different explicit auth', async () => {
+    const mcp = await stubMcp({})
+    const test = app()
+    const created = (await (
+      await test.request(BASE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'notes', url: mcp.url }),
+      })
+    ).json()) as McpServer
+    const refused = await test.request(`${BASE}/${created.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ auth: 'oauth', headers: { 'X-Lab': 'yes' } }),
+    })
+    expect(refused.status).toBe(400)
+  })
+})

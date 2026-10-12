@@ -13,6 +13,7 @@ import type {
   SessionCompactionOutcome,
   SessionError,
   SessionModelUsage,
+  Source,
   SpanError,
   StopReason,
   Supersedes,
@@ -21,6 +22,7 @@ import type {
   ToolCallEvent,
   ToolPermission,
   ToolReference,
+  ToolSource,
   Truncation,
 } from '@openharness/protocol'
 import { EVENT_TYPES, isMcpToolCall } from '@openharness/protocol'
@@ -306,6 +308,17 @@ export interface SpanEndOptions {
    * claimed here rather than by a span of their own. Omitted (or empty) claims nothing.
    */
   readonly consumes?: readonly EventId[]
+  /**
+   * How many web searches the provider ran inside this request (epic #303, X14; issue #335).
+   * Omitted when the request searched not at all, which is every span of a log stored before
+   * the field existed.
+   */
+  readonly searches?: number
+  /**
+   * Whether this request had to be made again without the native search tool the provider
+   * refused (#335). Omitted for every request that was not.
+   */
+  readonly searchRejected?: true
 }
 
 /**
@@ -319,7 +332,7 @@ export function spanEnd(
   modelUsage: ModelUsage,
   options: SpanEndOptions = {},
 ): AppendableEvent {
-  const { error, supersedes, consumes } = options
+  const { error, supersedes, consumes, searches, searchRejected } = options
   return {
     type: EVENT_TYPES.modelRequestEnd,
     model_request_start_id: modelRequestStartId,
@@ -328,6 +341,8 @@ export function spanEnd(
     ...(error === undefined ? {} : { error }),
     ...(supersedes === undefined ? {} : { supersedes }),
     ...(consumes === undefined || consumes.length === 0 ? {} : { consumes: [...consumes] }),
+    ...(searches === undefined || searches === 0 ? {} : { searches }),
+    ...(searchRejected === true ? { search_rejected: true as const } : {}),
   }
 }
 
@@ -391,8 +406,10 @@ export function agentMessage(id: EventId, text: string, supersedes?: Supersedes)
  * One event per step, written whether or not the step streamed text — the step this exists for
  * is a thinking model's call, which streams none. `provider` is the client family the parts may
  * be replayed to and `model` the `provider/model` that produced them, which are the two things
- * the context strategy checks before it puts them back in a request (`./opaque`); `dropped` is
- * written only when an oversized step kept none of its parts.
+ * the context strategy checks before it puts them back in a request (`./opaque`); each part
+ * keeps the place it had in the step (`text_before`), which is how the assistant turn goes back
+ * in the provider's own order (epic #303, X14; #335); `dropped` is written only when an
+ * oversized step kept none of its parts.
  *
  * @param provider the family the parts must be replayed to
  * @param model the model id that produced them
@@ -412,7 +429,9 @@ export function agentOpaqueContent(
     parts: parts.map((part) => ({
       type: part.type,
       text: part.text,
+      ...(part.text_before === undefined ? {} : { text_before: part.text_before }),
       ...(part.provider_options === undefined ? {} : { provider_options: part.provider_options }),
+      ...(part.payload === undefined ? {} : { payload: part.payload }),
     })),
     ...(dropped === 0 ? {} : { dropped }),
   }
@@ -429,17 +448,20 @@ export function agentOpaqueContent(
  * @param name the tool's name, as it was offered to the model
  * @param input the arguments, as a JSON object
  * @param permission what the policy in force said about this call
+ * @param source where the tool comes from, when it is not this build's own (`provider`, #335)
  */
 export function agentToolUse(
   name: string,
   input: ToolInput,
   permission: ToolPermission,
+  source?: ToolSource,
 ): AppendableEvent {
   return {
     type: EVENT_TYPES.agentToolUse,
     name,
     input,
     evaluated_permission: permission,
+    ...(source === undefined || source === 'builtin' ? {} : { source }),
   }
 }
 
@@ -453,17 +475,20 @@ export function agentToolUse(
  * @param toolUseId the `agent.tool_use` this answers — its event id
  * @param content the blocks the model is shown
  * @param isError whether the call failed
+ * @param sources the web sources a provider-executed search answered with, when any (#335)
  */
 export function agentToolResult(
   toolUseId: EventId,
   content: readonly TextBlock[],
   isError: boolean,
+  sources?: readonly Source[],
 ): AppendableEvent {
   return {
     type: EVENT_TYPES.agentToolResult,
     tool_use_id: toolUseId,
     content: [...content],
     is_error: isError,
+    ...(sources === undefined || sources.length === 0 ? {} : { sources: [...sources] }),
   }
 }
 

@@ -290,11 +290,6 @@ export {
 } from './tools'
 export { askUserTool, withAlwaysApprovals } from './pausing'
 export {
-  createSearchAllowance,
-  type SearchAllowance,
-  type SearchAllowanceOptions,
-} from './searches'
-export {
   createToolSettingsResolver,
   effectiveTools,
   listToolSettings,

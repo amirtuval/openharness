@@ -72,6 +72,43 @@ export interface OAuthClientRegistration {
   readonly issuer?: string
   /** The scopes the resource asked for, if it asked. */
   readonly scopes?: readonly string[]
+  /**
+   * The protected resource this registration's tokens are for, as RFC 8707's `resource`
+   * (`{@link resourceParameter}`'s answer during `connect`).
+   *
+   * Persisted **with the registration** so the authorization URL, the code exchange and every
+   * later refresh name the same value: an authorization server serving several APIs binds the
+   * token it mints to the resource that asked, and a flow whose steps disagree can be answered
+   * with a token the resource server refuses (`invalid_token`). Absent on a registration stored
+   * before the field existed, and the caller falls back to the server's own URL.
+   */
+  readonly resource?: string
+}
+
+/**
+ * The RFC 8707 `resource` parameter for one server.
+ *
+ * RFC 9728's protected-resource metadata names the resource it describes, and that is the value
+ * a token should be minted **for** — Linear answers `{"resource":"https://mcp.linear.app/mcp"}`,
+ * which is exactly the server's own URL, while another deployment's document may name the API
+ * behind a different path. It is used when it is present **and on the server's own origin**: a
+ * metadata document that names a third party's resource is either a mistake or an attempt to
+ * have this deployment mint tokens for somebody else's API, and the server's own URL is the
+ * right answer in both readings.
+ *
+ * @param serverUrl the MCP server's Streamable HTTP endpoint, as the user registered it
+ * @param advertised the metadata's own `resource`, when it carried one
+ */
+export function resourceParameter(serverUrl: string, advertised?: string): string {
+  if (advertised === undefined || advertised.length === 0) {
+    return serverUrl
+  }
+  try {
+    return new URL(advertised).origin === new URL(serverUrl).origin ? advertised : serverUrl
+  } catch {
+    // Not a URL this server can make sense of; the server's own address is the safe answer.
+    return serverUrl
+  }
 }
 
 /** The tokens a token response carried, as this server stores them (sealed). */
@@ -305,6 +342,16 @@ export async function refreshAccessToken(
     readonly refreshToken: string
     readonly clientId: string
     readonly clientSecret?: string
+    /**
+     * The protected resource the token is for (RFC 8707).
+     *
+     * Optional here only so a caller that has no resource to name can still refresh; a remote
+     * MCP server always has one, and **omitting it is a bug**: an authorization server serving
+     * several APIs may mint a refreshed token for the wrong audience, and the resource refuses
+     * it with a 401 (issue #314 — Linear answers exactly that way). The code exchange and the
+     * authorization URL both carry it; the refresh must too.
+     */
+    readonly resource?: string
     /** The clock `expires_in` is turned into an instant with; `Date.now` by default. */
     readonly now?: () => Date
   },
@@ -314,6 +361,9 @@ export async function refreshAccessToken(
     refresh_token: request.refreshToken,
     client_id: request.clientId,
   })
+  if (request.resource !== undefined) {
+    body.set('resource', request.resource)
+  }
   return readTokenResponse(
     await sendJson(fetch, metadata.token_endpoint, {
       method: 'POST',

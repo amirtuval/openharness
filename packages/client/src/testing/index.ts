@@ -39,7 +39,9 @@ import {
   encodeKeyCursor,
   mcpToolOfferedName,
   newAgentId,
+  mcpServerNameFromUrl,
   newMcpServerId,
+  requestedMcpAuth,
   newModeId,
   newProviderCredentialId,
   newSessionId,
@@ -294,6 +296,13 @@ export interface FakeClientOptions {
    * unregistered-tool state of #307 — which is how a screen that says "not configured" is seen.
    */
   toolsAvailable?: Readonly<Record<string, boolean>>
+  /**
+   * Why a tool is unavailable, by name, over the default of none — the server's own sentence
+   * (`ToolSettingEntry.reason`, #335). A fake that says a tool is unavailable without saying why
+   * is the unregistered-tool state; one that names a reason is the server answering about a
+   * model, which is what `web_search` on a model with no native search tool gets.
+   */
+  toolsReason?: Readonly<Record<string, string>>
   /**
    * The remote MCP tools this fake deployment offers, over the default of none (#312).
    *
@@ -1529,9 +1538,14 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!request.success) {
         return Promise.reject(badRequestFor(request.error.issues))
       }
-      if ([...mcpServers.values()].some((server) => server.name === request.data.name)) {
+      // The server's own two rules (issue #314): a name the reader did not type comes from the
+      // URL's host, and the auth type is what the body said — a header map implying `headers`,
+      // and an explicit `auth` winning — or `none` when the body named neither.
+      const name = request.data.name ?? mcpServerNameFromUrl(request.data.url)
+      const auth = requestedMcpAuth(request.data) ?? 'none'
+      if ([...mcpServers.values()].some((server) => server.name === name)) {
         return Promise.reject(
-          new ApiError(409, `an MCP server named ${request.data.name} already exists`, {
+          new ApiError(409, `an MCP server named ${name} already exists`, {
             type: 'conflict_error',
           }),
         )
@@ -1549,13 +1563,13 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           id: newMcpServerId(),
           type: 'mcp_server',
           owner_id: user.id,
-          name: request.data.name,
+          name,
           url: request.data.url,
-          auth: request.data.auth,
+          auth,
           enabled: request.data.enabled ?? true,
           status: 'needs_reconnect',
           last_error: null,
-          header_names: request.data.auth === 'headers' ? Object.keys(request.data.headers) : [],
+          header_names: request.data.headers === undefined ? [] : Object.keys(request.data.headers),
           tools: [],
           definition_tokens: 0,
           last_tested_at: null,
@@ -1609,17 +1623,24 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           )
         }
       }
-      const auth = patch.auth ?? found.auth
-      // A `headers` map is only meaningful for a `headers` server; a body that carries one while
-      // the resulting auth is something else is the 400 the route gives.
-      if (patch.headers !== undefined && auth !== 'headers') {
+      // A `headers` map **implies** `headers` (issue #314), exactly as the server's update does:
+      // a reader adds a key without also choosing a type. An explicit `auth` that disagrees with
+      // a map is the 400 the server gives.
+      const auth =
+        patch.headers !== undefined
+          ? patch.auth !== undefined && patch.auth !== 'headers'
+            ? null
+            : 'headers'
+          : (patch.auth ?? found.auth)
+      if (auth === null) {
         return Promise.reject(
-          new ApiError(400, 'headers are only accepted for a headers-authenticated server', {
+          new ApiError(400, "a headers map implies auth: 'headers'", {
             type: 'invalid_request_error',
           }),
         )
       }
-      const changedAuth = patch.auth !== undefined && patch.auth !== found.auth
+      // The *resolved* auth: a header map implies headers, so that is a change too (#314).
+      const changedAuth = auth !== found.auth
       if (changedAuth) {
         // Whatever the old auth type carried is gone: a header map for anything that is no
         // longer `headers`, and the tokens for anything whose auth changed at all.
@@ -1748,15 +1769,19 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     }
     const entries: ToolSettingEntry[] = FAKE_TOOLS.map((tool) => {
       const choice = toolSettings.builtin[tool.name]
+      const reason = options.toolsReason?.[tool.name]
       return {
         name: tool.name,
         source: 'builtin' as const,
         // A mode's override is on/off only (#307); the user's choice, else on.
         enabled: override?.builtin[tool.name] ?? choice?.enabled ?? true,
         policy: choice?.policy ?? tool.policy,
-        // A tool this deployment does not register has no declaration to report.
-        default_policy: toolsAvailable[tool.name] === false ? null : tool.policy,
+        // A tool this deployment does not register has no declaration to report; one it does
+        // declare and cannot offer — a `reason` is what says so (#335) — still has one.
+        default_policy:
+          toolsAvailable[tool.name] !== false || reason !== undefined ? tool.policy : null,
         available: toolsAvailable[tool.name] !== false,
+        ...(reason === undefined ? {} : { reason }),
       }
     })
     // A stored setting for a tool this deployment does not register is listed, by name, after

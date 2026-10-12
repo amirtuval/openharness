@@ -879,6 +879,9 @@ export class PostgresSessionStore implements SessionStore {
       // selected value is an instant, and the raw select says so.
       .select(sql<Date>`e.processed_at`.as('processed_at'))
       .select(sql<string | null>`start.payload ->> 'model'`.as('model'))
+      // The provider-executed searches the request ran (#335), read straight off the end's own
+      // payload: they are the provider's count, and nothing else in the log has it.
+      .select(sql<number | null>`(e.payload ->> 'searches')::int`.as('searches'))
       .where('se.owner_id', '=', options.ownerId)
       .where('e.type', '=', EVENT_TYPES.modelRequestEnd)
       .where('e.processed_at', '>=', instant(fromMs))
@@ -918,6 +921,9 @@ export class PostgresSessionStore implements SessionStore {
       .where('e.type', '=', EVENT_TYPES.agentToolUse)
       .where('e.processed_at', '>=', instant(fromMs))
       .where('e.processed_at', '<', instant(toMs))
+      // A provider-executed call is a readable record of a search the provider ran inside its
+      // own request, and its request's span already counted it (#335; issue #338).
+      .where(sql<SqlBool>`(e.payload ->> 'source') is distinct from 'provider'`)
       .where('r.type', '=', EVENT_TYPES.agentToolResult)
       .where(sql<SqlBool>`(r.payload ->> 'is_error') = 'false'`)
       .$if(options.name !== undefined, (query) =>

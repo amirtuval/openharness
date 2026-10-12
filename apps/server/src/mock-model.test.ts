@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   EVENT_TYPES,
+  TODO_WRITE_TOOL_NAME,
+  readTodoList,
   type AgentMessageEvent,
   type ModelRequestEndEvent,
   type ModelRequestStartEvent,
@@ -11,7 +13,6 @@ import {
 import { InMemorySessionStore } from '@openharness/session'
 import type { RetryPolicy } from '@openharness/brain'
 
-import { createProviderFetch } from './catalog/provider-fetch'
 import { createBundledRegistry } from './catalog/registry'
 import { LocalScheduler } from './scheduler'
 import { createTurnTools, TEST_TOOL_NAME } from './tools'
@@ -26,6 +27,9 @@ import {
   MOCK_SLOW_MARKER,
   MOCK_SLOW_TOTAL_MS,
   MOCK_TERMINAL_MARKER,
+  MOCK_TODO_DEFAULT_COUNT,
+  MOCK_TODO_MARKER,
+  MOCK_TODO_MAX_COUNT,
   MOCK_TOOL_MARKER,
   chunkText,
   createMockModelFactory,
@@ -50,7 +54,7 @@ import {
 /** Run one whole turn of a session through the mock model. */
 async function runTurn(
   text: string,
-  options: { retry?: RetryPolicy; tools?: boolean } = {},
+  options: { retry?: RetryPolicy; tools?: boolean; followUp?: string } = {},
 ): Promise<{ history: Awaited<ReturnType<typeof readHistory>>; previews: StreamEvent[] }> {
   const store = new InMemorySessionStore()
   const config = testConfig({})
@@ -61,8 +65,7 @@ async function runTurn(
     onError: () => {},
     ...(options.retry === undefined ? {} : { retry: options.retry }),
     // The tools as `main.ts` wires them: the built-ins plus the test `echo` tool for the mock
-    // model (epic #303; the built-ins are #305), and the support gate over the registry. No
-    // search is configured, so nothing here reaches the operator's key.
+    // model (epic #303; the built-ins are #305), and the support gate over the registry.
     ...(options.tools === true
       ? {
           tools: createTurnTools({
@@ -70,8 +73,6 @@ async function runTurn(
             kind: 'mock',
             store,
             registry: createBundledRegistry(),
-            searchTransport: createProviderFetch(),
-            allowance: undefined,
           }),
         }
       : {}),
@@ -92,6 +93,16 @@ async function runTurn(
   ])
   scheduler.signal(session.id, 'work')
   await waitForIdle(store, session.id, 30_000)
+  if (options.followUp !== undefined) {
+    // A second turn in the same chat: what a marker has to survive once the first one left
+    // something in the log (a task list, most of all — the brain's reminder then rides after the
+    // history of every later request, #331).
+    await store.appendEvents(session.id, [
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: options.followUp }] },
+    ])
+    scheduler.signal(session.id, 'work')
+    await waitForIdle(store, session.id, 30_000)
+  }
   const history = await readHistory(store, session.id)
   await scheduler.stop()
   return { history, previews }
@@ -158,6 +169,50 @@ describe('the echo', () => {
     // offered no tools has no call in its log, and the turn ends idle behind it.
     expect(replies(history)).toEqual([])
     expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+  })
+
+  it('writes a task list for __todos__, and answers with it (#305)', async () => {
+    const { history } = await runTurn(`${MOCK_TODO_MARKER} 6`, { tools: true })
+
+    // The call is `todo_write`, and the list a client draws is its own input — the newest
+    // successful call is the state, which is what makes the terminal's pinned panel (#308) and
+    // a reloaded chat agree about it.
+    const call = history.find((event) => event.type === EVENT_TYPES.agentToolUse)
+    expect(call).toMatchObject({
+      name: TODO_WRITE_TOOL_NAME,
+      evaluated_permission: 'allow',
+    })
+    const todos = readTodoList(history)
+    expect(todos).toHaveLength(6)
+    expect(todos?.[0]).toEqual({ content: 'step 1', status: 'done' })
+    expect(todos?.[1]).toEqual({ content: 'step 2', status: 'in_progress' })
+    expect(todos?.[5]).toEqual({ content: 'step 6', status: 'pending' })
+    // The turn carries on: the second request is answered, and what it is answered to is the
+    // list itself — the brain attaches the chat's task list to every request once it has one
+    // (#331), and the mock echoes whatever it is shown.
+    expect(history.filter((event) => event.type === EVENT_TYPES.modelRequestStart)).toHaveLength(2)
+    expect(replies(history).join('\n')).toContain('[x] step 1')
+    expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+  })
+
+  it('still answers a marker once the chat has a task list (#331: the reminder rides last)', async () => {
+    const { history } = await runTurn(`${MOCK_TODO_MARKER} 3`, {
+      tools: true,
+      followUp: `${MOCK_TODO_MARKER} 6`,
+    })
+
+    // The reminder the brain appends after the history is a user message, so a request in a chat
+    // that has a list ends with it rather than with what the test wrote. The second marker still
+    // reaches the model — the list is the six the second turn wrote.
+    expect(readTodoList(history)).toHaveLength(6)
+  })
+
+  it('answers a bare __todos__ with the default list, and never an unbounded one', async () => {
+    const { history } = await runTurn(MOCK_TODO_MARKER, { tools: true })
+    expect(readTodoList(history)).toHaveLength(MOCK_TODO_DEFAULT_COUNT)
+
+    const { history: silly } = await runTurn(`${MOCK_TODO_MARKER} 100000`, { tools: true })
+    expect(readTodoList(silly)).toHaveLength(MOCK_TODO_MAX_COUNT)
   })
 
   it('reports fixed usage, so a test can assert the exact numbers', async () => {
