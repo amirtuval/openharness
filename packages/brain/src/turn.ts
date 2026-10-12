@@ -1064,7 +1064,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           nowMs,
         }),
       )
-      const stillWaiting = outcomes.filter((outcome) => outcome.kind === 'waiting')
+      const stillWaiting = outcomes.filter(
+        (outcome): outcome is Extract<TaskWaitOutcome, { kind: 'waiting' }> =>
+          outcome.kind === 'waiting',
+      )
       const results = openWaits.flatMap((call, index) => {
         const outcome = outcomes[index]
         if (outcome === undefined || outcome.kind === 'waiting') {
@@ -1089,9 +1092,6 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         // one the host arms from the outcome below. The task set is the union of the calls
         // still waiting and the deadline the earliest of them, so a session that goes back to
         // waiting for something else wakes no later than it asked to.
-        const waiting = stillWaiting.flatMap((outcome) =>
-          outcome.kind === 'waiting' ? [outcome] : [],
-        )
         const taskIds = [
           ...new Set(
             openWaits.flatMap(
@@ -1100,7 +1100,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
             ),
           ),
         ]
-        const deadlineMs = Math.min(...waiting.map((outcome) => outcome.deadlineMs))
+        const deadlineMs = Math.min(...stillWaiting.map((outcome) => outcome.deadlineMs))
         const deadline = new Date(deadlineMs).toISOString()
         await append([
           statusIdle({ stopReason: { type: 'waiting_on_tasks', task_ids: taskIds, deadline } }),
