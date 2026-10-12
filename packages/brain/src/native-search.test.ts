@@ -103,6 +103,82 @@ describe('the model families that can search (#335)', () => {
   })
 })
 
+describe('the generation rules keep working for models nobody has seen (#335 retest)', () => {
+  /**
+   * The table the issue is about, one row per model id: the three readers must agree about every
+   * one of them, because they are what a request (`searchFamilyOf`), the settings listing
+   * (`modelSearches`) and the offer (`nativeSearchFor`) are built from.
+   *
+   * `gpt-6-astra` is the id a reader typed — as `gpt6-astra`, without the hyphen — and was told
+   * there is no search; the negatives are the generations that really predate the tool, which a
+   * forward-compatible rule must still leave out.
+   */
+  const cases: readonly { readonly id: string; readonly searches: boolean }[] = [
+    // OpenAI: 4o and 4.1, then every gpt-N with N ≥ 5 however it is spelled.
+    { id: 'openai/gpt-4o', searches: true },
+    { id: 'openai/gpt-4o-mini', searches: true },
+    { id: 'openai/gpt-4.1', searches: true },
+    { id: 'openai/gpt-4.1-mini', searches: true },
+    { id: 'openai/gpt-5', searches: true },
+    { id: 'openai/gpt-5.1-codex', searches: true },
+    { id: 'openai/gpt-6-astra', searches: true },
+    { id: 'openai/gpt6-astra', searches: true },
+    { id: 'openai/gpt-10', searches: true },
+    { id: 'openai/gpt-12-preview', searches: true },
+    // The o-series, from o1 on — a later generation is assumed to have the tool too.
+    { id: 'openai/o1', searches: true },
+    { id: 'openai/o3-mini', searches: true },
+    { id: 'openai/o4-mini', searches: true },
+    { id: 'openai/o7', searches: true },
+    { id: 'openai/chatgpt-4o-latest', searches: true },
+    // Still out: the generations that predate the tool, and ids that are not chat models.
+    { id: 'openai/gpt-3.5-turbo', searches: false },
+    { id: 'openai/gpt-4', searches: false },
+    { id: 'openai/gpt-4-turbo', searches: false },
+    { id: 'openai/gpt-4-0613', searches: false },
+    { id: 'openai/omni-moderation-latest', searches: false },
+    { id: 'openai/text-embedding-3-small', searches: false },
+    // Anthropic: 3.5 on, and every claude-<family>-<N ≥ 4> for any family name.
+    { id: 'anthropic/claude-3-5-sonnet-20241022', searches: true },
+    { id: 'anthropic/claude-3-7-sonnet-latest', searches: true },
+    { id: 'anthropic/claude-sonnet-4-5', searches: true },
+    { id: 'anthropic/claude-opus-4-1', searches: true },
+    { id: 'anthropic/claude-haiku-4-5', searches: true },
+    { id: 'anthropic/claude-fable-5-1', searches: true },
+    { id: 'anthropic/claude-opus-5-5', searches: true },
+    { id: 'anthropic/claude-sonnet-5-5', searches: true },
+    { id: 'anthropic/claude-haiku-5-5', searches: true },
+    { id: 'anthropic/claude-mythos-10', searches: true },
+    { id: 'anthropic/claude-3-opus-20240229', searches: false },
+    { id: 'anthropic/claude-3-haiku-20240307', searches: false },
+    { id: 'anthropic/claude-2.1', searches: false },
+    // xAI: grok-3 on, multi-digit included.
+    { id: 'xai/grok-3', searches: true },
+    { id: 'xai/grok-3-mini', searches: true },
+    { id: 'xai/grok-4', searches: true },
+    { id: 'xai/grok-10', searches: true },
+    { id: 'xai/grok-2-1212', searches: false },
+    { id: 'xai/grok-beta', searches: false },
+  ]
+
+  it.each(cases)('$id searches: $searches', ({ id, searches }) => {
+    // The offer the loop makes, the family it reads, and the answer the settings listing gives
+    // are one decision, so they are asserted together: a table that let them drift is the bug.
+    expect(offered(id) !== null).toBe(searches)
+    expect(searchFamilyOf(id, 'api_key') !== null).toBe(searches)
+    expect(modelSearches(id)).toBe(searches)
+  })
+
+  it('reads a Vertex Claude through the same Claude rule', () => {
+    // A named credential's id carries the credential's name, so the settings listing cannot
+    // resolve one — but the request's own path (which knows the type) reads the model half.
+    expect(offered('vertex-cred/claude-fable-5-1', 'vertex')?.id).toBe(
+      'anthropic.web_search_20250305',
+    )
+    expect(offered('vertex-cred/claude-3-opus-20240229', 'vertex')).toBeNull()
+  })
+})
+
 describe('the settings decide whether it is offered (#335)', () => {
   const CLAUDE = 'anthropic/claude-sonnet-4-5'
 
