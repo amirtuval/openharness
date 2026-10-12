@@ -9,6 +9,7 @@ import type { DefaultModelPicker } from '../default-model'
 import type { SessionScheduler } from '../scheduler'
 import type { SessionRevocations } from '../session-watch'
 import type { McpServerService } from '../mcp/service'
+import type { SkillImportService } from '../skills-import'
 import type { ProviderCredentialDeps } from './provider-credentials'
 
 /**
@@ -43,6 +44,16 @@ export interface RouteDeps {
    * text.
    */
   readonly skills: SkillStore
+  /**
+   * Importing a skill from a public repository, and refreshing one (epic #349, K3/K5): the
+   * clone through `safeFetch`, the candidate discovery and the diff behind the four routes
+   * that read a repository.
+   *
+   * The service rather than the pieces: the clone is the one outbound path this deployment
+   * offers a user-supplied URL besides a tool's, so it belongs with the settings that decide
+   * where it may reach (`skills-import.ts`).
+   */
+  readonly skillImport: SkillImportService
   /**
    * The model catalogue (epic #92): `GET /v1/models`, and the hook a saved or deleted
    * credential drops that provider's cached answer with (C4).

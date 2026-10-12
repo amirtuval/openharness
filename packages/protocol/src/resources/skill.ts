@@ -323,3 +323,299 @@ export const UpdateSkillRequestSchema = z.object({
 })
 
 export type UpdateSkillRequest = z.infer<typeof UpdateSkillRequestSchema>
+
+/**
+ * The distinct ways an import can fail (K3), as stable codes.
+ *
+ * Every one of them is a **request the server understood** and could not carry out — the URL
+ * is fine as a URL, but it is not a repository, or not this one's branch, or the deployment
+ * refuses to dial the address it names. They are deliberately apart from one another rather
+ * than one generic refusal, because a user who pasted a URL is owed the difference between
+ * *their* mistake (a path that is not there, a branch that does not exist), *the
+ * repository's* state (empty, or not a repository at all), and *this deployment's* policy (a
+ * private address, no credentials to send); only the last two are the server's to explain,
+ * and all three are the caller's to act on differently.
+ *
+ * The code does not travel on its own — the error envelope has room for a type and a message
+ * and nothing else — so {@link SKILL_IMPORT_MESSAGES} is the one spelling of each sentence,
+ * shared by the server that raises it and the client that shows it.
+ */
+export const SKILL_IMPORT_FAILURES = [
+  /** The host could not be reached at all: DNS failed, or the connection did not open. */
+  'unreachable',
+  /** Something answered, but it is not a git repository — an HTML page, a 404, a proxy. */
+  'not_a_repository',
+  /** The repository is private, or the server demanded credentials this deployment never sends. */
+  'authentication_required',
+  /** The repository exists, but it has no such branch, tag or commit. */
+  'ref_not_found',
+  /** The repository exists, but it holds no such folder. */
+  'path_not_found',
+  /** The path holds no `SKILL.md` at all, so there is nothing to import (K1). */
+  'no_skills_found',
+  /**
+   * The repository was read, and a skill the caller picked cannot be imported as it stands:
+   * its frontmatter does not parse, its name is not the folder's, or it breaks a limit of K4
+   * ({@link SKILL_PROBLEM_CODES}). The distinction from the failures above is which side is at
+   * fault — the repository read worked and the skill is the problem.
+   */
+  'skill_not_importable',
+  /** The clone broke one of the limits of K4 — the 20 MB download, or its deadline. */
+  'over_limit',
+  /** The address the URL names is private, loopback, link-local or metadata — refused (K3). */
+  'refused_address',
+] as const
+
+/** One of the ways an import can fail ({@link SKILL_IMPORT_FAILURES}). */
+export type SkillImportFailure = (typeof SKILL_IMPORT_FAILURES)[number]
+
+/**
+ * What each import failure says to the user, as a sentence.
+ *
+ * One spelling per code, so the server that raises the error, the tests that pin it and a
+ * client that shows it cannot drift apart. A failure whose message needs a detail — which
+ * ref, which path — takes the sentences below and appends it, which is what the server's
+ * import does; the detail is always the caller's own input, never anything the server knows.
+ */
+export const SKILL_IMPORT_MESSAGES: Record<SkillImportFailure, string> = {
+  unreachable: 'The repository could not be reached.',
+  not_a_repository: 'That URL is not a public git repository.',
+  authentication_required:
+    'That repository is private or requires credentials, and openharness imports public repositories only.',
+  ref_not_found: 'That branch, tag or commit is not in the repository.',
+  path_not_found: 'That folder is not in the repository.',
+  no_skills_found: 'That folder holds no SKILL.md, so there is no skill to import.',
+  skill_not_importable: 'That skill cannot be imported as it stands.',
+  over_limit: 'That repository is larger than the import limit.',
+  refused_address: 'That address is not a public one, so this deployment will not fetch it.',
+}
+
+/**
+ * One thing wrong with a candidate skill an import found (K1, K4).
+ *
+ * A **candidate** is a folder holding a `SKILL.md`; a problem is a reason it cannot be
+ * imported as it stands, and a candidate carries every problem it has rather than the first,
+ * so a preview can show a user the whole story of a folder at once. Nothing here fails the
+ * preview: a repository holding one good skill and one broken one offers the good one, and the
+ * broken one with its reasons.
+ *
+ * `code` is the stable half a client branches on, `message` the sentence it shows.
+ */
+export const SKILL_PROBLEM_CODES = [
+  /** The `SKILL.md` has no frontmatter, or the YAML does not parse, or `name`/`description` are missing or malformed (K1). */
+  'invalid-frontmatter',
+  /** The frontmatter's `name` is not the folder's name (K1). */
+  'name-mismatch',
+  /** The name is a built-in slash command's ({@link RESERVED_SKILL_NAMES}, K7). */
+  'reserved-name',
+  /** Two candidates under the path would import under the same name. */
+  'duplicate-name',
+  /** One of the limits of K4 is broken: the `SKILL.md`, a file, the whole skill, or the file count. */
+  'over-limit',
+] as const
+
+/** One of the reasons a candidate skill cannot be imported ({@link SKILL_PROBLEM_CODES}). */
+export type SkillProblemCode = (typeof SKILL_PROBLEM_CODES)[number]
+
+/** One reason a candidate cannot be imported as it stands. */
+export const SkillProblemSchema = z.object({
+  /** The stable code; see {@link SKILL_PROBLEM_CODES}. */
+  code: z.enum(SKILL_PROBLEM_CODES),
+  /** The sentence to show, naming the field or the limit it is about. */
+  message: z.string(),
+})
+
+export type SkillProblem = z.infer<typeof SkillProblemSchema>
+
+/**
+ * One folder holding a `SKILL.md` that an import found, as a **preview** reports it (K3).
+ *
+ * Nothing has been stored: this is what the server would import, so the user can read the
+ * `SKILL.md` and the file list and decide. `name` is the **folder's** name — the identity a
+ * candidate is picked by, and the name the frontmatter has to agree with (K1) — while
+ * `description` is the frontmatter's, or `null` when the frontmatter did not parse (`name`
+ * then carries the folder's name alone, and what the frontmatter said is in its problems).
+ *
+ * `skill_md` is the **whole** `SKILL.md` — frontmatter and body — because that is what a
+ * reader reviews before approving an import, and `files` is a listing (paths and sizes,
+ * never contents) exactly as a stored skill's is.
+ */
+export const SkillImportCandidateSchema = z.object({
+  /** The folder's name (K1) — the key an import picks this candidate by. */
+  name: z.string(),
+  /** The folder's path in the repository, from the repository's root, forward-slashed. */
+  folder: z.string(),
+  /** The frontmatter's `description` (K1), or `null` when the frontmatter did not parse. */
+  description: z.string().nullable(),
+  /** The folder's files, relative to it, each with its size — never its content. */
+  files: z.array(SkillFileSchema),
+  /** `SKILL.md` as it is in the repository: the frontmatter, then the Markdown body. */
+  skill_md: z.string(),
+  /** Everything wrong with this candidate ({@link SkillProblemSchema}); empty when it is importable. */
+  problems: z.array(SkillProblemSchema),
+  /**
+   * Whether the caller already has a skill by this name.
+   *
+   * A preview carries it — rather than leaving the client to diff two reads — because it is
+   * the one reason a candidate a user picked will be refused on the import that follows, and
+   * the store's rule is per user (K4). It is a separate field and not a {@link SkillProblem}:
+   * nothing is wrong with the skill, and the answer a user wants is "you already have one of
+   * these", which is not a shape a code could carry without naming the other skill.
+   */
+  name_taken: z.boolean(),
+})
+
+export type SkillImportCandidate = z.infer<typeof SkillImportCandidateSchema>
+
+/**
+ * Where an import is to read from: the repository, and the optional ref and path inside it.
+ *
+ * The three fields a user types, and the three `SkillSource` records. `ref` and `path` are
+ * optional rather than nullable because a body names only what the user said — a browse URL
+ * (`…/tree/<ref>/<path>`) fills them in server-side, and a repository's default branch is what
+ * an absent `ref` means (K3).
+ */
+export const SkillImportSourceSchema = z.object({
+  /** A public `https://` git URL, or a GitHub/GitLab browse URL (`…/tree/<ref>/<path>`). */
+  url: z.string(),
+  /** The branch, tag or commit to read, or absent for the repository's default branch. */
+  ref: z.string().optional(),
+  /** The folder inside the repository to look in, or absent for its root. */
+  path: z.string().optional(),
+})
+
+export type SkillImportSource = z.infer<typeof SkillImportSourceSchema>
+
+/**
+ * Body of `POST /v1/me/skills/import/preview`. Response: {@link PreviewSkillImportResponseSchema}.
+ *
+ * The first of the import's two steps (K3): nothing is stored, and the answer is what a
+ * repository holds under the path. The same body is the second step's, plus the commit the
+ * preview resolved and the names the user picked — see {@link SkillImportRequestSchema}.
+ */
+export const PreviewSkillImportRequestSchema = SkillImportSourceSchema
+
+export type PreviewSkillImportRequest = z.infer<typeof PreviewSkillImportRequestSchema>
+
+/**
+ * Response of `POST /v1/me/skills/import/preview`: the commit the clone landed on and every
+ * candidate it found (K3).
+ *
+ * `url`, `ref` and `path` are the server's reading of the request — a browse URL arrives as
+ * one string and leaves split in three — and `commit_sha` is the commit that reading landed
+ * on. The three are echoed because they are what a following
+ * {@link SkillImportRequestSchema} has to name, together with that commit, for the import to
+ * be the one that was previewed.
+ */
+export const PreviewSkillImportResponseSchema = z.object({
+  /** The `https://` git URL the clone was made from, with a browse URL split apart. */
+  url: z.string(),
+  /** The ref the clone was made at, or `null` for the repository's default branch. */
+  ref: z.string().nullable(),
+  /** The folder that was looked in, or `null` for the repository's root. */
+  path: z.string().nullable(),
+  /** The commit the clone landed on; an import naming this commit is the one that was previewed. */
+  commit_sha: z.string(),
+  /** Every `SKILL.md` under the path, each with its problems; empty only when there are none. */
+  candidates: z.array(SkillImportCandidateSchema),
+})
+
+export type PreviewSkillImportResponse = z.infer<typeof PreviewSkillImportResponseSchema>
+
+/**
+ * Body of `POST /v1/me/skills/import`. Response: {@link ImportSkillsResponseSchema}.
+ *
+ * The second step (K3): the same source, the commit the preview resolved, and the **names** of
+ * the candidates the user picked. The server clones again — it holds nothing between the two
+ * calls — and refuses the import when the ref no longer resolves to `commit_sha`, so what is
+ * stored is what was reviewed rather than whatever the branch has become. `names` is
+ * deliberately the candidates' names and not their folders: a name is what a skill is
+ * identified by among its owner's skills (K4), and a candidate whose name is `null` could not
+ * be stored under one anyway.
+ */
+export const SkillImportRequestSchema = SkillImportSourceSchema.extend({
+  /** The commit the preview resolved; the clone must land on it again or the import is refused. */
+  commit_sha: z.string(),
+  /** The names of the candidates to import, at least one, as the preview spelled them. */
+  names: z.array(z.string()).min(1),
+})
+
+export type SkillImportRequest = z.infer<typeof SkillImportRequestSchema>
+
+/**
+ * Response of `POST /v1/me/skills/import`: the skills that were stored, in the order asked for.
+ *
+ * The same envelope {@link ListSkillsResponseSchema} uses — a `data` array, no pagination —
+ * because the answer is the resources themselves, so a client can draw the new rows without a
+ * second read.
+ *
+ * The whole batch is stored or nothing is (the same rule every other write here follows): a
+ * picked name that is not a candidate is the 400 `invalid_request_error`, a picked candidate
+ * that still has a problem is the 422 `skill_import_error` carrying that candidate's own
+ * problems, and a name the caller already has is the 409 `conflict_error` the store raises —
+ * each of them before the first skill is written.
+ */
+export const ImportSkillsResponseSchema = z.object({
+  data: z.array(SkillSchema),
+})
+
+export type ImportSkillsResponse = z.infer<typeof ImportSkillsResponseSchema>
+
+/**
+ * Body of `POST /v1/me/skills/{skill_id}/refresh`. Response: {@link SkillSchema}.
+ *
+ * A refresh is by hand and always previewed first (K5): the preview clones the skill's stored
+ * source again and answers what changed, and this confirms it by naming the commit the preview
+ * resolved. As with an import, a ref that has moved since the preview is refused, so what a
+ * user confirmed is what gets stored.
+ */
+export const RefreshSkillRequestSchema = z.object({
+  /** The commit the refresh preview resolved. */
+  commit_sha: z.string(),
+})
+
+export type RefreshSkillRequest = z.infer<typeof RefreshSkillRequestSchema>
+
+/**
+ * Response of `POST /v1/me/skills/{skill_id}/refresh/preview`: what a re-clone found (K5).
+ *
+ * The clone is of the skill's **stored** source — the same URL, ref and path it was imported
+ * from — and the comparison is against the stored snapshot, so nothing here depends on the
+ * caller remembering anything. `changed` is the whole answer in one boolean (a client that
+ * only wants to offer a button reads it and skips the rest); the three lists are the file
+ * story, and `skill_md_diff` is the unified diff of the one file a skill is really read by.
+ *
+ * The lists hold **paths** (relative to the skill folder) rather than listings, because what a
+ * reader wants from a diff is which files moved; the sizes are on the snapshot the skill
+ * already carries.
+ */
+export const RefreshSkillPreviewResponseSchema = z.object({
+  /** The commit the re-clone landed on. */
+  commit_sha: z.string(),
+  /**
+   * Whether anything at all is different from the stored snapshot — the three lists empty and
+   * no diff. `false` is the "already up to date" answer, and it is still a commit: a refresh
+   * preview of an unchanged skill names the commit it is unchanged at, so a confirm is
+   * still possible (and is a no-op on the snapshot but moves `refreshed_at`).
+   */
+  changed: z.boolean(),
+  /** Files the new snapshot has and the stored one does not. */
+  files_added: z.array(z.string()),
+  /** Files the stored snapshot has and the new one does not. */
+  files_removed: z.array(z.string()),
+  /** Files both hold with different content. */
+  files_changed: z.array(z.string()),
+  /** The unified diff of `SKILL.md`, or `null` when that file is unchanged. */
+  skill_md_diff: z.string().nullable(),
+  /**
+   * Everything wrong with the new snapshot (K1, K4).
+   *
+   * A refresh is not refused by a preview: a repository that has since grown a `SKILL.md` over
+   * the limit is shown as such, and whether to keep the snapshot the user has is the user's
+   * answer to give. A confirm of a snapshot with a problem is the one thing the route refuses
+   * — replacing a working skill with a broken one is not a refresh.
+   */
+  problems: z.array(SkillProblemSchema),
+})
+
+export type RefreshSkillPreviewResponse = z.infer<typeof RefreshSkillPreviewResponseSchema>

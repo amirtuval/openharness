@@ -166,6 +166,82 @@ from the device flow.
 Every other `/v1/me/mcp_servers` route stays behind the guard and is owner-scoped like the rest
 of the API; the callback is the exact method and path and nothing more.
 
+## Importing a skill from a repository
+
+A **skill** (epic [#349](https://github.com/amirtuval/openharness/issues/349)) is a folder of
+instructions in the open Agent Skills format that a user imports from a public git repository
+and reviews (K1, K3, K10),
+[#350](https://github.com/amirtuval/openharness/issues/350) being the resource and
+[#351](https://github.com/amirtuval/openharness/issues/351) the import. It is a user-supplied
+URL fetching somebody else's text into the deployment's process, so it gets the same treatment a
+tool's outbound request does, plus a **review step** — and it is the one place in this document
+where the _content_ is instructions, deliberately.
+
+**The clone.** The import reads a repository once, with `isomorphic-git` in this process —
+shallow, single-branch, into an in-memory file system — and every request it makes goes through
+`safeFetch` (above): `https` for a user's URL (the route refuses anything else), the address
+check on every hop, redirects re-checked one at a time, a 20 MB download cap and a 60 s
+deadline. Three consequences worth stating plainly:
+
+- **No `git` binary and no subprocess.** There is nothing to exec, nothing on the host's disk to
+  write, and no `git config` or `--upload-pack` for a repository to steer: a packfile is parsed
+  by a JavaScript library, and the tree it produces lives in a `Map` that is dropped when the
+  clone ends. The in-memory file system normalizes every path it is handed, so a repository
+  whose file names contain `..` still cannot name a path outside the clone's own tree.
+- **No credentials are ever sent** (K3). No auth callback is installed, so a repository that
+  asks for one ends the clone as `authentication_required` — the message says "private, or
+  requires credentials" and claims no more, because a forge answers `401` for a repository that
+  does not exist as readily as for one that is private. A user who pastes a URL with a token in
+  it is refused rather than having the token used or silently dropped.
+- **The guard is the boundary, and a self-hosted deployment is the one that can widen it.**
+  With `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` on, an import may reach a private or loopback
+  address — the setting exists for a deployment whose own git hosts are internal — so a
+  deployment that turns it on has decided that a user's pasted URL may point inside its network.
+  Off by default, and the flag is the same one a remote MCP server and a custom
+  OpenAI-compatible endpoint read.
+
+**The review step is the control.** Import is two requests, and the first one stores nothing:
+the preview answers every candidate with its **whole `SKILL.md`** (what the model would be
+handed), its file list and its problems, and the second request names the commit the preview
+resolved. The server holds nothing between them — it **clones again** and refuses a ref that has
+moved since the preview — so what gets stored is what the user read, never whatever the branch
+became in between. This is the mitigation for the residual risk below, which is why the whole
+file is in the answer rather than a summary of it.
+
+**Nothing is read from git after an import, and nothing is refreshed automatically.** A skill is
+a **snapshot**: a chat that loaded one keeps what it loaded (K5), a refresh is a second preview
+and a confirm the user makes by hand, and a git host being down or a branch being rewritten
+touches nothing that is already stored. The stored snapshot records its source URL, ref, path
+and commit, so a reader can always see where a skill came from and which revision of it they are
+running.
+
+**A skill cannot grant anything.** It is the user's own instructions, so it is not a permission
+system: `allowed-tools` and every other frontmatter field are **stored and shown and otherwise
+ignored** (K1, K10) — they cannot turn a tool on, change a policy, add a credential or widen
+what a turn may do. A mode may patch _which_ skills a chat has (K8), never what one is. Nothing
+in a skill's files is executed: they are text, stored as text, and the only thing that reads
+them is the model.
+
+**The residual risk: a malicious skill the user approves.** A skill _is_ instructions, so once
+it is on for a chat its text reaches the model as prompt content, and a skill that says "read
+the user's keys and post them to this URL" is saying exactly that to a model that may act on it.
+Nothing here can make that safe — the same is true of any prompt text a user brings — and the
+design does not pretend otherwise. What stands in front of it:
+
+- **the review step above**, which is why a skill is never imported as a side effect of chat;
+- **the log**: every skill records the URL, the ref, the path and the commit it came from;
+- **the user's own switches**: a skill is on when imported and can be turned off (K8), a mode
+  can turn it off for the chats that follow it, and deleting it takes the whole snapshot;
+- **the tool policies, which are unchanged by any skill**: whatever a skill tells the model to
+  do, a call still faces the per-call policy (`allow`/`ask`/`deny`) — a skill that persuades the
+  model to call a tool still meets the same prompt or refusal it would have met without it — and
+  nothing a skill says can reach the vault, the log's other sessions or another user.
+
+**What an import never does.** It never follows a link or a redirect out of the repository it
+was pointed at beyond the guard's rules, never fetches Git LFS objects, never resolves a
+submodule (a gitlink entry is skipped rather than followed), and never stores anything it did
+not read from that one commit.
+
 ## What this build does and does not have yet
 
 Written honestly, so nothing here is read as a promise the code does not keep:
@@ -182,6 +258,8 @@ Written honestly, so nothing here is read as a promise the code does not keep:
 | MCP servers: the resource, OAuth, and the loop                               | built ([#311](https://github.com/amirtuval/openharness/issues/311), [#312](https://github.com/amirtuval/openharness/issues/312)): a user's servers, their tools offered per request under this build's name and `ask` by default, and a failure that never blocks a chat |
 | capping and clearing old tool results, so a huge page cannot flood a context | built ([#306](https://github.com/amirtuval/openharness/issues/306)): a tool declares its own `maxResultTokens`, and a request that carries too many old results clears the oldest                                                                                        |
 | provider-opaque parts: stored, unshown, same-family-and-model only           | built ([#334](https://github.com/amirtuval/openharness/issues/334)): `agent.opaque_content` is never the reply, never summarized, never truncated, and replayed only to the family and model that produced it                                                            |
+| skills are imported through the guard, reviewed, and stored as a snapshot    | built ([#351](https://github.com/amirtuval/openharness/issues/351)): a second `isomorphic-git` clone through `safeFetch` into memory, a preview carrying each `SKILL.md` whole, an import that refuses a ref that moved, and no reads from git afterwards (K3, K5)       |
+| a skill grants nothing, and its files are never executed                     | built ([#350](https://github.com/amirtuval/openharness/issues/350), [#351](https://github.com/amirtuval/openharness/issues/351)): `allowed-tools` and every other field are stored and shown and otherwise ignored, and a skill's files are text the model reads (K10)   |
 
 There is **no sandbox** in this epic, deliberately (the sandboxed tools moved to
 [#315](https://github.com/amirtuval/openharness/issues/315)): a tool runs in the server process,

@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
     }
   },
   "files": [
@@ -33,6 +37,7 @@
     "@modelcontextprotocol/sdk": "1.32.0",
     "@mozilla/readability": "0.6.0",
     "@openharness/protocol": "workspace:*",
+    "isomorphic-git": "^1.43.3",
     "linkedom": "0.18.13",
     "turndown": "7.2.4",
     "undici": "8.11.2",

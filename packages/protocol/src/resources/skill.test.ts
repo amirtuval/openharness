@@ -6,15 +6,23 @@ import {
   ListSkillsResponseSchema,
   MAX_SKILL_FILES,
   MAX_SKILLS_PER_USER,
+  PreviewSkillImportRequestSchema,
+  PreviewSkillImportResponseSchema,
   RESERVED_SKILL_NAMES,
+  RefreshSkillPreviewResponseSchema,
+  RefreshSkillRequestSchema,
   SKILL_CLONE_MAX_BYTES,
   SKILL_DESCRIPTION_MAX_LENGTH,
   SKILL_FILE_MAX_BYTES,
+  SKILL_IMPORT_FAILURES,
+  SKILL_IMPORT_MESSAGES,
   SKILL_MAX_BYTES,
   SKILL_MD_FILENAME,
   SKILL_MD_MAX_BYTES,
   SKILL_NAME_MAX_LENGTH,
   SkillFileContentSchema,
+  SkillImportCandidateSchema,
+  SkillImportRequestSchema,
   SkillNameSchema,
   SkillSchema,
   UpdateSkillRequestSchema,
@@ -206,5 +214,147 @@ describe('skillFileSize', () => {
     expect(skillFileSize('—')).toBe(3)
     expect(skillFileSize('🙂')).toBe(4)
     expect(skillFileSize('héllo')).toBe(6)
+  })
+})
+
+describe('the import request shapes (K3)', () => {
+  it('take a URL alone, or with a ref and a path', () => {
+    const bare = PreviewSkillImportRequestSchema.parse({ url: 'https://github.com/a/b' })
+    expect(bare).toEqual({ url: 'https://github.com/a/b' })
+    const full = PreviewSkillImportRequestSchema.parse({
+      url: 'https://github.com/a/b',
+      ref: 'main',
+      path: 'skills',
+    })
+    expect(full.ref).toBe('main')
+    expect(full.path).toBe('skills')
+  })
+
+  it('carry the previewed commit and the picked names on the import itself', () => {
+    const body = SkillImportRequestSchema.parse({
+      url: 'https://github.com/a/b',
+      commit_sha: 'abc123',
+      names: ['release-notes'],
+    })
+    expect(body.names).toEqual(['release-notes'])
+    // An import that picks nothing says nothing: there is no batch to store.
+    expect(
+      SkillImportRequestSchema.safeParse({
+        url: 'https://github.com/a/b',
+        commit_sha: 'a',
+        names: [],
+      }).success,
+    ).toBe(false)
+    // The commit is what makes the second step the one that was previewed.
+    expect(
+      SkillImportRequestSchema.safeParse({ url: 'https://github.com/a/b', names: ['x'] }).success,
+    ).toBe(false)
+  })
+
+  it('answer a preview with the commit and the candidates', () => {
+    const answer = PreviewSkillImportResponseSchema.parse({
+      url: 'https://github.com/a/b',
+      ref: null,
+      path: 'skills',
+      commit_sha: 'abc123',
+      candidates: [
+        {
+          name: 'release-notes',
+          folder: 'skills/release-notes',
+          description: 'Writes the release notes.',
+          files: [{ path: 'SKILL.md', size: 120 }],
+          skill_md: '---\nname: release-notes\n---\n\nbody\n',
+          problems: [],
+          name_taken: false,
+        },
+      ],
+    })
+    expect(answer.candidates[0]?.name_taken).toBe(false)
+    // A name that could not be read out of the frontmatter is `null`, and the folder's name
+    // still says what the candidate is.
+    const broken = PreviewSkillImportResponseSchema.parse({
+      url: 'https://github.com/a/b',
+      ref: 'main',
+      path: null,
+      commit_sha: 'abc123',
+      candidates: [
+        {
+          name: 'broken',
+          folder: 'broken',
+          description: null,
+          files: [],
+          skill_md: 'no frontmatter here',
+          problems: [{ code: 'invalid-frontmatter', message: 'no frontmatter' }],
+          name_taken: true,
+        },
+      ],
+    })
+    expect(broken.candidates[0]?.description).toBeNull()
+  })
+
+  it('refuse a problem code the protocol does not have', () => {
+    const parsed = SkillImportCandidateSchema.safeParse({
+      name: 'x',
+      folder: 'x',
+      description: 'd',
+      files: [],
+      skill_md: 'x',
+      problems: [{ code: 'made-up', message: 'no' }],
+      name_taken: false,
+    })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('name every failure, and say something for each', () => {
+    for (const failure of SKILL_IMPORT_FAILURES) {
+      expect(SKILL_IMPORT_MESSAGES[failure].length).toBeGreaterThan(10)
+      expect(SKILL_IMPORT_MESSAGES[failure].endsWith('.')).toBe(true)
+    }
+    // The codes are the ones the issue names, one each — plus the one that says the repository
+    // was read and the *skill* could not be stored.
+    expect([...SKILL_IMPORT_FAILURES]).toEqual([
+      'unreachable',
+      'not_a_repository',
+      'authentication_required',
+      'ref_not_found',
+      'path_not_found',
+      'no_skills_found',
+      'skill_not_importable',
+      'over_limit',
+      'refused_address',
+    ])
+  })
+})
+
+describe('the refresh shapes (K5)', () => {
+  it('confirm a refresh by naming the commit the preview resolved', () => {
+    expect(RefreshSkillRequestSchema.parse({ commit_sha: 'abc123' })).toEqual({
+      commit_sha: 'abc123',
+    })
+    expect(RefreshSkillRequestSchema.safeParse({}).success).toBe(false)
+  })
+
+  it('answer a preview with the three file lists, the diff and the problems', () => {
+    const answer = RefreshSkillPreviewResponseSchema.parse({
+      commit_sha: 'def456',
+      changed: true,
+      files_added: ['reference/new.md'],
+      files_removed: ['reference/old.md'],
+      files_changed: ['SKILL.md'],
+      skill_md_diff: '--- a/SKILL.md\n+++ b/SKILL.md\n',
+      problems: [],
+    })
+    expect(answer.changed).toBe(true)
+    // An unchanged skill is a `false` and no diff, and the lists are empty rather than absent.
+    const same = RefreshSkillPreviewResponseSchema.parse({
+      commit_sha: 'def456',
+      changed: false,
+      files_added: [],
+      files_removed: [],
+      files_changed: [],
+      skill_md_diff: null,
+      problems: [],
+    })
+    expect(same.skill_md_diff).toBeNull()
   })
 })

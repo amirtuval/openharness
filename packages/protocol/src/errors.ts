@@ -45,6 +45,10 @@ export const API_ERROR_TYPES = [
   // registration failed (epic #303, X10). Anthropic holds the MCP servers and so has nothing
   // to connect.
   'mcp_connection_error',
+  // extension: a skill import that could not turn its URL into a snapshot (epic #349, K3) —
+  // unreachable, not a repository, private, no such ref, no such path, no skills under it, or
+  // a clone over the limit. Anthropic holds the skills and has nothing to import.
+  'skill_import_error',
   'rate_limit_error',
   'api_error',
   'timeout_error',
@@ -98,6 +102,15 @@ export const API_ERROR_STATUS_BY_TYPE: Record<ApiErrorType, number> = {
    * request is well-formed, but the server could not be brought into a usable state.
    */
   mcp_connection_error: 422,
+  /**
+   * 422 — a skill import could not turn its URL into a snapshot (epic #349, K3): the host was
+   * unreachable, what answered was not a repository, the repository is private, the ref or the
+   * path is not there, the path holds no `SKILL.md`, the clone broke a limit of K4, or the
+   * address is one this deployment refuses. Unprocessable rather than a conflict: the request
+   * is well-formed, but no snapshot can be read from it. Which of those it was is
+   * `SKILL_IMPORT_MESSAGES` (`resources/skill.ts`), one sentence per failure.
+   */
+  skill_import_error: 422,
   /** 429 — rate limited, or a spend limit was reached. */
   rate_limit_error: 429,
   /** 500 — an unexpected internal error. */
