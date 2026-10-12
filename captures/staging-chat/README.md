@@ -7,18 +7,27 @@ screenshots are of the real bundle the server serves.
 
 ## The task list, on screen (item 2)
 
-`todo-panel-<width>-<theme>.png` — the panel as it opens, and `…-folded.png` the same chat after
-one click on the header's chevron. `todo-panel-1440-light-folded-after-reload.png` is the same
-chat **reloaded** with the fold still in place, which is the per-chat `localStorage` memory.
+`todo-panel-<width>-<theme>.png` is the panel **as it opens** in that size and theme,
+`…-toggled.png` the same chat after one click on the header's chevron, and `…-remembered.png`
+the same chat **reloaded** with that choice still in effect — which is the per-chat
+`localStorage` memory.
 
-| capture                                    | what it shows                                                                    |
-| ------------------------------------------ | -------------------------------------------------------------------------------- |
-| `todo-panel-1440-{light,dark}.png`         | **1440px**: the list as a 280px column **beside** the transcript, expanded        |
-| `todo-panel-1440-{light,dark}-folded.png`  | the same, folded to "Tasks · 2 of 6 done" and the item in progress                |
-| `todo-panel-1440-light-folded-after-reload.png` | reloaded: still folded — the state is remembered per chat                     |
-| `todo-panel-1024-{light,dark}.png`         | **1024px**: below `xl`, so the list is the **row above the composer**, expanded   |
-| `todo-panel-1024-{light,dark}-folded.png`  | the same, folded                                                                  |
-| `todo-panel-400-{light,dark}.png`          | **400px**: the row above the composer, folded by default (six items)              |
+| capture                                          | what it shows                                                                  |
+| ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `todo-panel-1440-{light,dark}.png`               | **1440px**: the list as a 280px column **beside** the transcript, open          |
+| `todo-panel-1440-{light,dark}-toggled.png`       | the same, folded to "Tasks · 2 of 6 done" and the item in progress              |
+| `todo-panel-1440-{light,dark}-remembered.png`    | reloaded: still folded — the choice is remembered per chat                      |
+| `todo-panel-1024-{light,dark}.png`               | **1024px**: below `xl`, so the list is the **row above the composer**, folded   |
+| `todo-panel-1024-{light,dark}-toggled.png`       | the same, opened — the six items, two struck through, the one in progress coral |
+| `todo-panel-1024-{light,dark}-remembered.png`    | reloaded: still open                                                            |
+| `todo-panel-400-{light,dark}.png`                | **400px**: the row above the composer, folded, on a phone-width page            |
+
+The three states were read back from the DOM rather than eyeballed, one run per size and theme:
+`aria-expanded` is `true` as the 1440 side panel opens and `false` after the click and after the
+reload, and `false` as the 1024 and 400 rows open and `true` after their click and reload —
+which is the rule the panel documents: the row above the composer starts folded once the list is
+longer than five items (it takes the conversation's height) while the side panel starts open (it
+does not).
 
 The list itself was put in the log by inserting one `agent.tool_use` (`todo_write`) and its
 `agent.tool_result` into the chat's event rows — the built server has no model in this sandbox
