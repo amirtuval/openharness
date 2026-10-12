@@ -37,7 +37,8 @@ disclosure leads with the page's main headline — `# הרצוג: "אעשה הכ
 No "your message was too long" and no "a tool result was too long" notice is drawn: nothing was
 cut, which is the point of the larger per-tool cap.
 
-The model's own words (from the log, `agent.message`):
+The model's own words (from the log, `agent.message`), the second run being the one the
+screenshots are of — ynet's front page rotates, so the headline differs between them:
 
 > The main headline on ynet right now (front page) is:
 >
@@ -48,6 +49,37 @@ The model's own words (from the log, `agent.message`):
 > It's from a special interview — full article: https://www.ynet.co.il/news/article/rkpyi3difx
 >
 > Would you like a short summary or translation of the article?
+
+and, with the same question after the extraction's last fix:
+
+> The main headline on ynet's homepage right now is (Hebrew):
+>
+> אוחנה: אם יהיה רוב של 61, לגיטימי שיחליפו אותי; איזנקוט? שיישאר עם חצי עין פקוחה
+>
+> Link: https://www.ynet.co.il/news/elections2026/article/b1mszy9igl
+>
+> Would you like a translation or a short summary?
+
+The fetched Markdown the model read began `# [אוחנה: …](https://www.ynet.co.il/news/elections2026/article/b1mszy9igl)`
+— the page's headline as a linked heading, which is what "the content comes first" means.
+
+## Which notice a cut is reported by (item 3a)
+
+The screenshots of the fix are the two `notices-…` pairs. The chat's log was given one
+`span.model_request_start` whose `truncated` record names a **tool result** (exactly what the
+brain writes when a fetch came back too long), and the app draws **one** notice —
+"One tool result was too long for this model and was shortened." — and no "your message was too
+long" line, although the message above it is four words long. `notices-both-…` is the record
+naming a message *and* a result: there, both notices are owed and both are drawn.
+
+### Not the browser this time: the fixture's own trap
+
+Worth writing down, because it cost an hour: the first version of that fixture inserted events
+with random `sevt_` ids, and the client's history read validates every event against the
+protocol — so the app dropped the two fixture events, showed the call as `execution lost`, and
+looked exactly like a *different* bug. The ids were regenerated as real ULIDs (a timestamp
+prefix, first character ≤ `7`) and the page then drew what the unit tests said it would. A
+hand-written log is only a fixture if it validates.
 
 ## The flicker, measured (item 1)
 
