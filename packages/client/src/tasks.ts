@@ -5,6 +5,7 @@ import type {
   StoredEvent,
   TaskKind,
   TaskNotificationKind,
+  TaskStatus,
   ToolInput,
 } from '@openharness/protocol'
 
@@ -31,7 +32,7 @@ import type {
  * The status a card draws (epic #340, S9).
  *
  * Five words, and they are not the protocol's four: the parent's log records `running`,
- * `idle`, `failed` and `stopped` ({@link TaskStatus}), and a card says **done** for an `idle`
+ * `idle`, `failed` and `stopped` (the protocol's {@link TaskStatus}), and a card says **done** for an `idle`
  * task whose result was delivered, and **waiting** for a task the parent's log still calls
  * `running` but whose own session is paused in an `agent_wait` — a distinction only the
  * child's log can make, which is why {@link taskCardStatus} takes it as its own input.
@@ -284,17 +285,14 @@ interface Builder {
   readonly childSessionId: SessionId | null
   readonly type: string | null
   readonly description: string
-  parentStatus: ParentTaskStatus
+  parentStatus: TaskStatus
   readonly messages: TaskMessage[]
   result: TaskResult | null
   position: number
 }
 
-/** The statuses the parent's log records — the protocol's four, restated as a local alias. */
-type ParentTaskStatus = 'running' | 'idle' | 'failed' | 'stopped'
-
 /** The card's status from the parent's four and whether a turn's outcome has landed. */
-function cardStatus(status: ParentTaskStatus, hasResult: boolean): TaskCardStatus {
+function cardStatus(status: TaskStatus, hasResult: boolean): TaskCardStatus {
   if (status === 'idle') {
     return hasResult ? 'done' : 'running'
   }
