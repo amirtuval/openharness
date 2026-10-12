@@ -153,6 +153,57 @@ export function estimatedTokensLabel(tokens: number): string {
   return `~${rounded}k tokens`
 }
 
+/** What a connection check came to, as the one line an inline result shows (issue #314). */
+export interface McpTestOutcome {
+  /** Whether the check listed the server's tools. */
+  readonly ok: boolean
+  /** The sentence to show beside the row: the tool count, or why there is none. */
+  readonly message: string
+}
+
+/**
+ * What to say after a **Test** (issue #314).
+ *
+ * Testing a server that cannot answer used to look like nothing happened: the row's status went
+ * back to the same value and no line was drawn, so a reader pressed the button again. This is
+ * the one line both frontends draw instead, and it is deliberately explicit about the two cases
+ * that are not failures of the server:
+ *
+ * - an **`oauth` server that is not connected** never ran a check at all — the resolve finds no
+ *   token and answers `null` — so the result is "Connect first", not an empty success. A caller
+ *   should not offer Test until then, but a race (a token dropped in another tab) can still
+ *   reach this, and a reader deserves the real reason;
+ * - a **connected** server reports what its last check listed, in the same estimate the row's
+ *   detail line uses, so the result confirms something rather than restating the status.
+ *
+ * Every other outcome carries the server's own `last_error`, which now names the HTTP status
+ * and quotes the body (the server's report, not this module's).
+ *
+ * @param server the refreshed server a `test` answered with
+ */
+export function mcpTestOutcome(server: McpServer): McpTestOutcome {
+  if (server.status === 'connected') {
+    if (server.tools.length === 0) {
+      return { ok: true, message: 'Connected. The server lists no tools.' }
+    }
+    const count = server.tools.length === 1 ? '1 tool' : `${server.tools.length} tools`
+    return {
+      ok: true,
+      message: `Connected. Listed ${count}, about ${estimatedTokensLabel(server.definition_tokens)}.`,
+    }
+  }
+  // A reason the check recorded always wins: it is what really happened — a 401 with its body
+  // excerpt, a server that could not be reached — and an `oauth` server that failed a check
+  // carries one too (its status drops to `needs_reconnect`, which is what offers Connect again).
+  if (server.last_error !== null) {
+    return { ok: false, message: server.last_error }
+  }
+  if (server.auth === 'oauth') {
+    return { ok: false, message: 'Connect first — this server needs a sign-in.' }
+  }
+  return { ok: false, message: 'The check failed.' }
+}
+
 /**
  * One of a server's tools, as a settings screen shows it (epic #303, X6; #313).
  *

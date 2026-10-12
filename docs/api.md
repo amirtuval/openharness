@@ -83,49 +83,49 @@ the only way an event is ever removed together with its session.
 
 ## Routes
 
-| method   | path                                            | what it does                                                                                    |
-| -------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                       | liveness — always `{ status: 'ok' }` while the process lives; open                              |
-| `GET`    | `/ready`                                        | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open |
-| `GET`    | `/v1/auth-config`                               | unauthenticated: which providers are on, and whether dev login is                               |
-| `GET`    | `/v1/me`                                        | the signed-in user                                                                              |
-| `GET`    | `/v1/me/preferences`                            | the caller's preferences — the default model, the web theme and the context settings            |
-| `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit               |
-| `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`     |
-| `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                  |
-| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode                              |
-| `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                   |
-| `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                   |
-| `POST`   | `/v1/me/modes/{mode_id}`                        | update a mode; omitted fields keep their value, `null` clears one                               |
-| `DELETE` | `/v1/me/modes/{mode_id}`                        | delete one; answers `204`, and the chats that followed it keep their last model                 |
-| `POST`   | `/v1/agents`                                    | create an agent                                                                                 |
-| `GET`    | `/v1/agents`                                    | list agents, oldest first                                                                       |
-| `GET`    | `/v1/agents/{agent_id}`                         | read one agent                                                                                  |
-| `POST`   | `/v1/agents/{agent_id}`                         | update an agent; sessions already created keep their snapshot                                   |
-| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one)                                    |
-| `GET`    | `/v1/sessions`                                  | list sessions, newest first (`agent_id` filters)                                                |
-| `GET`    | `/v1/sessions/{session_id}`                     | read one session                                                                                |
-| `DELETE` | `/v1/sessions/{session_id}`                     | delete it and its whole log; answers `204` with no body                                         |
-| `POST`   | `/v1/sessions/{session_id}/events`              | append user events; the server owns every other event type                                      |
-| `GET`    | `/v1/sessions/{session_id}/events`              | read the log, with `types[]`, `after_seq`, `limit` and `page`                                   |
-| `GET`    | `/v1/sessions/{session_id}/events/stream`       | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                            |
-| `POST`   | `/v1/sessions/{session_id}/compact`             | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                      |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | AI SDK `useChat` compatibility — an extension, not the protocol                                 |
-| `PUT`    | `/v1/provider-credentials/{name}`               | add or replace one of the caller's credentials, under that name (write-only)                    |
-| `GET`    | `/v1/provider-credentials`                      | list the caller's credential metadata; never the secrets                                        |
-| `DELETE` | `/v1/provider-credentials/{name}`               | delete one; answers `204` with no body                                                          |
-| `POST`   | `/v1/me/mcp_servers`                            | register a remote MCP server (epic #303, X10); `409` for a duplicate name or the twenty-first   |
-| `GET`    | `/v1/me/mcp_servers`                            | list the caller's servers, oldest first (no cursor: at most 20)                                 |
-| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | read one server                                                                                 |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | update one; omitted fields keep their value, and `headers` replaces the sealed map              |
-| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | delete one and its pending OAuth states; `204`                                                  |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | run the connection check now: initialize, list tools, price their definitions                   |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                 |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                    |
-| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**    |
-| `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                         |
-| `GET`    | `/v1/sessions/{session_id}/usage`               | what one session spent: totals, cost, and the per-model breakdown                               |
-| `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day          |
+| method   | path                                            | what it does                                                                                                                              |
+| -------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/health`                                       | liveness — always `{ status: 'ok' }` while the process lives; open                                                                        |
+| `GET`    | `/ready`                                        | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open                                           |
+| `GET`    | `/v1/auth-config`                               | unauthenticated: which providers are on, and whether dev login is                                                                         |
+| `GET`    | `/v1/me`                                        | the signed-in user                                                                                                                        |
+| `GET`    | `/v1/me/preferences`                            | the caller's preferences — the default model, the web theme and the context settings                                                      |
+| `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit                                                         |
+| `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`                                               |
+| `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                                                            |
+| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode                                                                        |
+| `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                                                             |
+| `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                                                             |
+| `POST`   | `/v1/me/modes/{mode_id}`                        | update a mode; omitted fields keep their value, `null` clears one                                                                         |
+| `DELETE` | `/v1/me/modes/{mode_id}`                        | delete one; answers `204`, and the chats that followed it keep their last model                                                           |
+| `POST`   | `/v1/agents`                                    | create an agent                                                                                                                           |
+| `GET`    | `/v1/agents`                                    | list agents, oldest first                                                                                                                 |
+| `GET`    | `/v1/agents/{agent_id}`                         | read one agent                                                                                                                            |
+| `POST`   | `/v1/agents/{agent_id}`                         | update an agent; sessions already created keep their snapshot                                                                             |
+| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one)                                                                              |
+| `GET`    | `/v1/sessions`                                  | list sessions, newest first (`agent_id` filters)                                                                                          |
+| `GET`    | `/v1/sessions/{session_id}`                     | read one session                                                                                                                          |
+| `DELETE` | `/v1/sessions/{session_id}`                     | delete it and its whole log; answers `204` with no body                                                                                   |
+| `POST`   | `/v1/sessions/{session_id}/events`              | append user events; the server owns every other event type                                                                                |
+| `GET`    | `/v1/sessions/{session_id}/events`              | read the log, with `types[]`, `after_seq`, `limit` and `page`                                                                             |
+| `GET`    | `/v1/sessions/{session_id}/events/stream`       | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                                                                      |
+| `POST`   | `/v1/sessions/{session_id}/compact`             | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                                                                |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | AI SDK `useChat` compatibility — an extension, not the protocol                                                                           |
+| `PUT`    | `/v1/provider-credentials/{name}`               | add or replace one of the caller's credentials, under that name (write-only)                                                              |
+| `GET`    | `/v1/provider-credentials`                      | list the caller's credential metadata; never the secrets                                                                                  |
+| `DELETE` | `/v1/provider-credentials/{name}`               | delete one; answers `204` with no body                                                                                                    |
+| `POST`   | `/v1/me/mcp_servers`                            | register a remote MCP server — a URL, and the auth is **detected** (epic #303, X10; #314); `409` for a duplicate name or the twenty-first |
+| `GET`    | `/v1/me/mcp_servers`                            | list the caller's servers, oldest first (no cursor: at most 20)                                                                           |
+| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | read one server                                                                                                                           |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | update one; omitted fields keep their value, a `headers` map replaces the sealed one and implies `headers`                                |
+| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | delete one and its pending OAuth states; `204`                                                                                            |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | run the connection check now: initialize, list tools, price their definitions                                                             |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                                                           |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                                                              |
+| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                              |
+| `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                                                                   |
+| `GET`    | `/v1/sessions/{session_id}/usage`               | what one session spent: totals, cost, and the per-model breakdown                                                                         |
+| `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day                                                    |
 
 Every `/v1` resource belongs to the caller and is scoped to them.
 
@@ -1203,28 +1203,43 @@ curl -X DELETE localhost:3000/v1/provider-credentials/azure-eu \
 
 ### Remote MCP servers
 
-A user registers the remote **MCP** servers they operate (epic #303, X10): a URL, how requests
-authenticate, and whether the server is on by default. openharness is the MCP **client**; it
-never holds a server's tools as its own — they are listed per request and called on demand
-([Remote MCP tools](#remote-mcp-tools-epic-303-x10-issue-312)).
+A user registers the remote **MCP** servers they operate (epic #303, X10): a URL, and whether
+the server is on by default. **The authentication is detected, not chosen** (#314): the reader
+types a URL, and the server probes it on save — an unauthenticated request answered `401` (or
+`403`) by a resource whose RFC 9728 metadata advertises an authorization server means OAuth, a
+successful initialize means `none`, and a server with no such metadata that wants a key is
+stored in `error` with a reason telling the reader to add one. openharness is the MCP
+**client**; it never holds a server's tools as its own — they are listed per request and called
+on demand ([Remote MCP tools](#remote-mcp-tools-epic-303-x10-issue-312)).
 
 ```bash
-# An open server, checked on save: a server it cannot reach is still stored, in status error.
+# The whole body is a URL. The name is derived from its host when it is left out, and the auth
+# type is what the probe finds.
 curl -X POST localhost:3000/v1/me/mcp_servers \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"auth":"none","name":"notes","url":"https://mcp.example.com/mcp"}'
-# → 201 {"id":"mcps_01J…","type":"mcp_server","name":"notes","url":"https://mcp.example.com/mcp",
+  -d '{"url":"https://mcp.example.com/mcp"}'
+# → 201 {"id":"mcps_01J…","type":"mcp_server","name":"mcp-example-com",
+#        "url":"https://mcp.example.com/mcp",
 #        "auth":"none","enabled":true,"status":"connected","last_error":null,"header_names":[],
 #        "tools":[{"name":"search","description":"Search notes","definition_tokens":41}, …],
 #        "definition_tokens":83,"last_tested_at":"…","created_at":"…","updated_at":"…"}
 
-# A server authenticated with headers. The values are sealed and never come back; only the
-# names do.
+# The same URL behind an OAuth server: the probe sees the 401 and its metadata, so the server
+# is stored as OAuth and the reader is offered the Connect flow.
+# → 201 {… "auth":"oauth","status":"needs_reconnect","last_error":null,"tools":[] …}
+
+# A server that authenticates with a header: the map implies `auth: "headers"`. The values are
+# sealed and never come back; only the names do.
 curl -X POST localhost:3000/v1/me/mcp_servers \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"auth":"headers","name":"notes","url":"https://mcp.example.com/mcp",
+  -d '{"name":"notes","url":"https://mcp.example.com/mcp",
        "headers":{"Authorization":"Bearer sk-…"}}'
-# → 201 {… "header_names":["Authorization"], …}
+# → 201 {… "auth":"headers","header_names":["Authorization"], …}
+
+# An explicit `auth` is still accepted, for a caller that knows better than the probe.
+curl -X POST localhost:3000/v1/me/mcp_servers \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"auth":"oauth","name":"linear","url":"https://mcp.linear.app/mcp"}'
 
 # An OAuth server: start the flow, then open the URL it answers.
 curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
@@ -1238,6 +1253,11 @@ curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
   refresh. A failure here never blocks a chat: an MCP server that is down is a tool source that
   is unavailable, not a failed turn — and when a chat cannot use one it says so with a
   `session.error` and carries on without that server's tools.
+- **What a failure says (#314).** `last_error` names the **HTTP status and a bounded excerpt of
+  the body** — `the MCP server answered 401 Unauthorized: {"error":"invalid_token"}` — because
+  the transport's own message ends at a colon for the empty-bodied `401` a resource server such
+  as Linear's answers. A request that never got a response carries the transport's reason
+  instead, and the whole sentence is logged server-side.
 - **URL rules.** Streamable HTTP only, at an absolute `http(s)` URL. Every request goes through
   `safeFetch`, so a private, loopback, link-local or metadata address is refused unless
   `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` is on (the same self-host setting a custom

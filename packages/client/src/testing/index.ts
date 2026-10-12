@@ -39,7 +39,9 @@ import {
   encodeKeyCursor,
   mcpToolOfferedName,
   newAgentId,
+  mcpServerNameFromUrl,
   newMcpServerId,
+  requestedMcpAuth,
   newModeId,
   newProviderCredentialId,
   newSessionId,
@@ -1536,9 +1538,14 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (!request.success) {
         return Promise.reject(badRequestFor(request.error.issues))
       }
-      if ([...mcpServers.values()].some((server) => server.name === request.data.name)) {
+      // The server's own two rules (issue #314): a name the reader did not type comes from the
+      // URL's host, and the auth type is what the body said — a header map implying `headers`,
+      // and an explicit `auth` winning — or `none` when the body named neither.
+      const name = request.data.name ?? mcpServerNameFromUrl(request.data.url)
+      const auth = requestedMcpAuth(request.data) ?? 'none'
+      if ([...mcpServers.values()].some((server) => server.name === name)) {
         return Promise.reject(
-          new ApiError(409, `an MCP server named ${request.data.name} already exists`, {
+          new ApiError(409, `an MCP server named ${name} already exists`, {
             type: 'conflict_error',
           }),
         )
@@ -1556,13 +1563,13 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           id: newMcpServerId(),
           type: 'mcp_server',
           owner_id: user.id,
-          name: request.data.name,
+          name,
           url: request.data.url,
-          auth: request.data.auth,
+          auth,
           enabled: request.data.enabled ?? true,
           status: 'needs_reconnect',
           last_error: null,
-          header_names: request.data.auth === 'headers' ? Object.keys(request.data.headers) : [],
+          header_names: request.data.headers === undefined ? [] : Object.keys(request.data.headers),
           tools: [],
           definition_tokens: 0,
           last_tested_at: null,
@@ -1616,17 +1623,24 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           )
         }
       }
-      const auth = patch.auth ?? found.auth
-      // A `headers` map is only meaningful for a `headers` server; a body that carries one while
-      // the resulting auth is something else is the 400 the route gives.
-      if (patch.headers !== undefined && auth !== 'headers') {
+      // A `headers` map **implies** `headers` (issue #314), exactly as the server's update does:
+      // a reader adds a key without also choosing a type. An explicit `auth` that disagrees with
+      // a map is the 400 the server gives.
+      const auth =
+        patch.headers !== undefined
+          ? patch.auth !== undefined && patch.auth !== 'headers'
+            ? null
+            : 'headers'
+          : (patch.auth ?? found.auth)
+      if (auth === null) {
         return Promise.reject(
-          new ApiError(400, 'headers are only accepted for a headers-authenticated server', {
+          new ApiError(400, "a headers map implies auth: 'headers'", {
             type: 'invalid_request_error',
           }),
         )
       }
-      const changedAuth = patch.auth !== undefined && patch.auth !== found.auth
+      // The *resolved* auth: a header map implies headers, so that is a change too (#314).
+      const changedAuth = auth !== found.auth
       if (changedAuth) {
         // Whatever the old auth type carried is gone: a header map for anything that is no
         // longer `headers`, and the tokens for anything whose auth changed at all.

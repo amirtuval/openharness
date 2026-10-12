@@ -305,6 +305,16 @@ export async function refreshAccessToken(
     readonly refreshToken: string
     readonly clientId: string
     readonly clientSecret?: string
+    /**
+     * The protected resource the token is for (RFC 8707).
+     *
+     * Optional here only so a caller that has no resource to name can still refresh; a remote
+     * MCP server always has one, and **omitting it is a bug**: an authorization server serving
+     * several APIs may mint a refreshed token for the wrong audience, and the resource refuses
+     * it with a 401 (issue #314 — Linear answers exactly that way). The code exchange and the
+     * authorization URL both carry it; the refresh must too.
+     */
+    readonly resource?: string
     /** The clock `expires_in` is turned into an instant with; `Date.now` by default. */
     readonly now?: () => Date
   },
@@ -314,6 +324,9 @@ export async function refreshAccessToken(
     refresh_token: request.refreshToken,
     client_id: request.clientId,
   })
+  if (request.resource !== undefined) {
+    body.set('resource', request.resource)
+  }
   return readTokenResponse(
     await sendJson(fetch, metadata.token_endpoint, {
       method: 'POST',

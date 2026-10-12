@@ -1,6 +1,7 @@
 import {
   estimatedTokensLabel,
   mcpAuthLabel,
+  mcpTestOutcome,
   mcpServerTools,
   mcpStatusDetail,
   mcpStatusLabel,
@@ -17,9 +18,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { describeError, type ErrorContext } from '../errors'
 import {
-  MCP_AUTH_FIELD,
-  authFromLabel,
-  authHint,
+  MCP_URL_FIELD,
   mcpHeaderProblem,
   mcpServerBody,
   mcpServerFields,
@@ -158,14 +157,15 @@ export function McpServersScreen({
   /** Register or edit, then read back: a create changes the list, and the server owns its order. */
   const save = useCallback(async (): Promise<void> => {
     const target = editing
-    const auth = authFromLabel(valuesRef.current[MCP_AUTH_FIELD] ?? mcpAuthLabel('none'))
-    const problem = mcpHeaderProblem(auth, valuesRef.current, { required: target === null })
+    // No auth is chosen here (issue #314): the server probes the URL, and a header the reader
+    // typed implies `headers`.
+    const problem = mcpHeaderProblem(valuesRef.current)
     if (problem !== null) {
       setError(problem)
       return
     }
     const built = mcpServerBody(
-      { editing: target !== null && target !== undefined, auth },
+      { editing: target !== null && target !== undefined },
       valuesRef.current,
     )
     busyRef.current = true
@@ -296,17 +296,12 @@ export function McpServersScreen({
     [client, context, read],
   )
 
-  // The form's fields, computed from what has been answered: the auth choice decides whether a
-  // header pair is asked for.
+  // The form's fields: the URL, an optional name, an optional custom header, and on/off.
   const fields: readonly McpField[] =
     editing === undefined
       ? []
       : mcpServerFields({
           editing: editingServer !== null,
-          auth:
-            values[MCP_AUTH_FIELD] === undefined
-              ? null
-              : authFromLabel(values[MCP_AUTH_FIELD] ?? ''),
           storedHeaderNames: editingServer?.header_names ?? [],
         })
   const currentField = fields[Math.min(step, Math.max(fields.length - 1, 0))]
@@ -457,11 +452,13 @@ export function McpServersScreen({
       return
     }
     if (input === 't') {
-      // The check's own answer is what a reader is shown: the status detail the server wrote.
+      // The check's own answer, in the words both frontends use (`mcpTestOutcome`, issue #314):
+      // the tool count when it listed, and — for an `oauth` server with no token, which cannot
+      // be checked at all — "Connect first" rather than the row's own status read back.
       void act(
         current,
         () => client.mcpServers.test(current.id),
-        (checked) => mcpStatusDetail(checked),
+        (checked) => mcpTestOutcome(checked).message,
       )
       return
     }
@@ -506,17 +503,22 @@ export function McpServersScreen({
         {currentField === undefined ? null : (
           <Box flexDirection="column" marginTop={1}>
             <Text>{currentField.label}</Text>
-            {currentField.name === MCP_AUTH_FIELD && currentField.options !== undefined ? (
-              <Text dimColor>{authHint(authFromLabel(currentField.options[choice] ?? ''))}</Text>
+            {currentField.name === MCP_URL_FIELD ? (
+              <Text dimColor>We check the URL on save and work out how it authenticates.</Text>
             ) : null}
             {currentField.options === undefined ? (
               <SecretInput
                 // A new prompt is a new input, so a value from the previous field is never
-                // carried into this one.
+                // carried into this one — and an **edit** opens each field on the value it
+                // already holds, so Enter keeps it and only what the reader retypes changes
+                // (issue #314: with no auth prompt, the URL is the one field an edit always
+                // needs, and retyping it to change nothing would be absurd). A secret field is
+                // never prefilled: the value is sealed and never came back.
                 key={`${String(editingServer?.id)}:${currentField.name}:${step}`}
                 placeholder={currentField.secret ? 'paste it' : 'type it'}
                 mask={currentField.secret}
                 optional={currentField.optional}
+                initialValue={currentField.secret ? undefined : values[currentField.name]}
                 busy={busy}
                 onSubmit={(value) => {
                   void answer(value)

@@ -699,6 +699,55 @@ describe('an OAuth server whose token is expiring', () => {
     expect(world.mcp.calls).toEqual([{ name: 'search', args: { query: 'x' } }])
     expect(world.mcp.authorizations).toContain(`Bearer ${authorization?.issuedTokens.at(-1) ?? ''}`)
   })
+
+  it('carries the turn on without its tools when a mid-chat refresh fails (issue #314)', async () => {
+    // The maintainer's question: a token that expires mid-chat is refreshed; if the refresh
+    // fails the turn goes on without that server's tools and the chat is told, with a Reconnect
+    // to act on. This pins that ending against a real short-lived token from the local OAuth
+    // server — the token the flow granted is already expiring, so the chat's listing must
+    // refresh, and the refresh is made to fail.
+    const world = await makeWorld({
+      oauth: { expiresIn: 1 },
+      replies: [{ text: ['answered without the server'] }],
+    })
+    const authorization = world.authorization
+    expect(authorization).not.toBeNull()
+    const server = await addServer(world, { auth: 'oauth' })
+
+    const started = await postJson(world.test, `${SERVERS}/${server.id}/connect`, {})
+    const { authorization_url } = (await started.json()) as { authorization_url: string }
+    const { code, state } = await simulateAuthorization(authorization_url)
+    const callback = await world.test.request(
+      `${SERVERS}/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    )
+    expect(callback.status).toBe(302)
+
+    // The authorization server starts refusing refreshes, and the token in hand is expiring.
+    authorization?.setRefreshWorking(false)
+    world.clock.advance(60_000)
+
+    await putTools(world.test, { mcp: { notes__search: 'allow' } })
+    const session = await createSession(world.test)
+    await say(world.test, session.id, 'search my notes')
+    await waitForIdle(world.test.store, session.id)
+
+    const events = await readHistory(world.test.store, session.id)
+    const error = of(events, EVENT_TYPES.sessionError)[0]
+    // The turn is a notice, not an ending: the chat answered, without the remote tool.
+    expect(error).toMatchObject({ error: { type: 'mcp_authentication_failed_error' } })
+    expect(of(events, EVENT_TYPES.agentMessage)).toHaveLength(1)
+    const span = of(events, EVENT_TYPES.modelRequestStart)[0]
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : []).toEqual([
+      { name: 'ask_user', source: 'builtin' },
+      { name: 'echo', source: 'builtin' },
+      { name: 'web_search', source: 'provider' },
+    ])
+    // No remote call went out, and the server is left on `needs_reconnect` so the settings
+    // screen offers the flow again.
+    expect(world.mcp.calls).toEqual([])
+    const after = await world.test.request(`${SERVERS}/${server.id}`)
+    expect((await after.json()) as McpServer).toMatchObject({ status: 'needs_reconnect' })
+  })
 })
 
 describe('a session remembered approval', () => {

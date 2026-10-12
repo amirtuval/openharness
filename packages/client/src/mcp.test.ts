@@ -17,6 +17,7 @@ import {
   mcpStatusDetail,
   mcpStatusLabel,
   mcpStatusTone,
+  mcpTestOutcome,
   mcpToolEntriesByServer,
   mcpToolPolicyBody,
   toolPolicyLabel,
@@ -388,5 +389,59 @@ describe('waitForMcpConnection', () => {
     })
 
     expect(wait.outcome).toBe('stopped')
+  })
+})
+
+describe('what a Test came to (#314)', () => {
+  it('reports the tools a check listed, in the same estimate the row uses', () => {
+    const outcome = mcpTestOutcome(
+      makeMcpServer({
+        status: 'connected',
+        tools: [
+          { name: 'search', description: 'Search', definition_tokens: 41 },
+          { name: 'read', description: null, definition_tokens: 12 },
+        ],
+        definition_tokens: 53,
+      }),
+    )
+    expect(outcome).toEqual({ ok: true, message: 'Connected. Listed 2 tools, about ~53 tokens.' })
+  })
+
+  it('says a connected server lists nothing, rather than reporting a bare success', () => {
+    expect(mcpTestOutcome(makeMcpServer({ status: 'connected', tools: [] }))).toEqual({
+      ok: true,
+      message: 'Connected. The server lists no tools.',
+    })
+  })
+
+  it('shows the reason a check recorded, status and body included', () => {
+    // The maintainer's Linear report: a 401 whose SDK message stopped at a colon. The server
+    // stores the status and a body excerpt now, and the row shows exactly that.
+    const outcome = mcpTestOutcome(
+      makeMcpServer({
+        status: 'error',
+        last_error: 'the MCP server answered 401 Unauthorized: {"error":"invalid_token"}',
+      }),
+    )
+    expect(outcome.ok).toBe(false)
+    expect(outcome.message).toContain('401')
+    expect(outcome.message).toContain('invalid_token')
+  })
+
+  it('tells a reader to connect when an OAuth server has no token at all', () => {
+    const outcome = mcpTestOutcome(
+      makeMcpServer({ auth: 'oauth', status: 'needs_reconnect', last_error: null }),
+    )
+    expect(outcome).toEqual({
+      ok: false,
+      message: 'Connect first — this server needs a sign-in.',
+    })
+  })
+
+  it('never reports an empty message', () => {
+    const outcome = mcpTestOutcome(
+      makeMcpServer({ auth: 'none', status: 'error', last_error: null }),
+    )
+    expect(outcome.message.length).toBeGreaterThan(0)
   })
 })

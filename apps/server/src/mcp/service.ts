@@ -2,10 +2,12 @@ import { randomBytes } from 'node:crypto'
 
 import {
   estimateToolsTokens,
+  mcpServerNameFromUrl,
   mcpToolSummary,
-  MCP_LAST_ERROR_MAX_LENGTH,
   newMcpServerId,
+  requestedMcpAuth,
   type CreateMcpServerRequest,
+  type McpAuthType,
   type McpOAuthClient,
   type McpServer,
   type McpServerId,
@@ -14,17 +16,20 @@ import {
   type UpdateMcpServerRequest,
   type UserId,
 } from '@openharness/protocol'
-import {
-  isSafeFetchError,
-  openMcpClient,
-  type McpFetch,
-  type SafeFetchError,
-} from '@openharness/hands'
+import { openMcpClient, type McpFetch } from '@openharness/hands'
 import type { McpServerStore, StoredMcpServer, UpdateMcpServerInput } from '@openharness/session'
 import type { Vault } from '@openharness/vault'
 
 import { invalidRequest } from '../http/errors'
 import type { Logger } from '../types'
+import {
+  describeMcpFailure,
+  httpStatusOf,
+  isMcpFetchRefusal,
+  recordingMcpFetch,
+  refusalMessage,
+  type McpHttpObservation,
+} from './http-failure'
 import {
   authorizationUrl,
   createPkce,
@@ -64,9 +69,11 @@ type CheckOutcome =
       readonly ok: false
       /** A URL the guard refused; the caller answers 400 rather than storing an error. */
       readonly refused: boolean
-      /** A bounded, secret-free reason. */
+      /** A bounded, secret-free reason naming the HTTP status when there was one. */
       readonly error: string
-      /** The underlying error, so a 401 can be told from any other failure. */
+      /** The HTTP status the guarded fetch saw, when it saw one (401 tells OAuth from a fault). */
+      readonly status: number | undefined
+      /** The underlying error, so a 401 can still be told from any other failure. */
       readonly raw: unknown
     }
 
@@ -266,49 +273,124 @@ class McpServerServiceImpl implements McpServerService {
     // headers are.
     const id = newMcpServerId(this.#now().getTime())
     const enabled = body.enabled ?? true
-    const headerMap = body.auth === 'headers' ? body.headers : undefined
+    const name = body.name ?? mcpServerNameFromUrl(body.url)
+    const requested = requestedMcpAuth(body)
+    const headerMap = requested === 'headers' ? body.headers : undefined
     const sealedHeaders =
       headerMap === undefined
         ? undefined
         : await sealMcpJson(this.#vault, binding(userId, id, 'headers'), headerMap)
 
-    let status: McpServer['status'] = 'needs_reconnect'
-    let lastError: string | null = null
-    let tools: McpToolSummary[] = []
-    let definitionTokens = 0
-    let lastTestedAt: string | null = null
-
-    if (body.auth !== 'oauth') {
-      const outcome = await this.#checkAddressAndTools(body.url, headerMap ?? {})
-      if (!outcome.ok) {
-        if (outcome.refused) {
-          throw invalidRequest(outcome.error)
-        }
-        status = 'error'
-        lastError = outcome.error
-      } else {
-        status = 'connected'
-        tools = outcome.tools.map(mcpToolSummary)
-        definitionTokens = estimateToolsTokens(outcome.tools)
-        lastTestedAt = this.#now().toISOString()
-      }
-    }
+    const detected = await this.#resolveAuth(body.url, requested, headerMap ?? {})
 
     return this.#store.create({
       id,
       ownerId: userId,
-      name: body.name,
+      name,
       url: body.url,
-      auth: body.auth,
+      auth: detected.auth,
       enabled,
-      status,
-      lastError,
+      status: detected.status,
+      lastError: detected.lastError,
       headerNames: headerMap === undefined ? [] : Object.keys(headerMap),
-      tools,
-      definitionTokens,
-      lastTestedAt,
+      tools: detected.tools,
+      definitionTokens: detected.definitionTokens,
+      lastTestedAt: detected.lastTestedAt,
       ...(sealedHeaders === undefined ? {} : { secrets: { headers: sealedHeaders } }),
     })
+  }
+
+  /**
+   * What a create ends up storing: the auth the server found, and the check's outcome.
+   *
+   * This is the heart of "the harness detects what the server needs" (issue #314). The reader
+   * types a URL, and the **server** decides:
+   *
+   * - a caller that said so — an explicit `auth`, or a `headers` map (which implies `headers`) —
+   *   is taken at its word, and checked with those headers;
+   * - otherwise the URL is probed **unauthenticated**. A successful initialize means `none`; a
+   *   `401`/`403` from a resource that advertises an authorization server (RFC 9728) means
+   *   `oauth`, and the server is stored `needs_reconnect` for the Connect flow. A `401` from a
+   *   server with no such metadata is not OAuth — it wants a key — and is stored in `error`
+   *   with a reason saying so, rather than sending the reader down a flow that cannot exist;
+   * - a server that cannot be reached at all (nothing answers, DNS fails) is stored in `error`
+   *   with the transport's own reason, which is the "clear message" a failed detection owes.
+   *
+   * A refused URL is still a 400 and nothing is stored, exactly as before.
+   */
+  async #resolveAuth(
+    url: string,
+    requested: McpAuthType | null,
+    headerMap: Record<string, string>,
+  ): Promise<{
+    auth: McpAuthType
+    status: McpServer['status']
+    lastError: string | null
+    tools: McpToolSummary[]
+    definitionTokens: number
+    lastTestedAt: string | null
+  }> {
+    const empty = {
+      lastError: null as string | null,
+      tools: [] as McpToolSummary[],
+      definitionTokens: 0,
+      lastTestedAt: null as string | null,
+    }
+    if (requested === 'oauth') {
+      // The caller asserted OAuth: nothing to probe, and nothing is stored until the flow runs.
+      return { auth: 'oauth', status: 'needs_reconnect', ...empty }
+    }
+
+    const secrets = Object.values(headerMap)
+    const outcome = await this.#checkAddressAndTools(url, headerMap, secrets)
+    if (outcome.ok) {
+      return {
+        auth: requested ?? 'none',
+        status: 'connected',
+        lastError: null,
+        tools: outcome.tools.map(mcpToolSummary),
+        definitionTokens: estimateToolsTokens(outcome.tools),
+        lastTestedAt: this.#now().toISOString(),
+      }
+    }
+    if (outcome.refused) {
+      throw invalidRequest(outcome.error)
+    }
+    if (requested === undefined || requested === null) {
+      // Detection: an authenticated-looking refusal pointed at an authorization server is OAuth.
+      if (isAuthRequired(outcome.status) && (await this.#advertisesOAuth(url))) {
+        return { auth: 'oauth', status: 'needs_reconnect', ...empty }
+      }
+      if (isAuthRequired(outcome.status)) {
+        return {
+          auth: 'none',
+          status: 'error',
+          ...empty,
+          lastError:
+            `${outcome.error} — it wants credentials, but it advertises no OAuth authorization ` +
+            'server; add an API key under "Advanced: custom headers"',
+        }
+      }
+    }
+    // Everything else — unreachable, refused by the probe, a server error — is a detection that
+    // could not run. It is stored in `error` with the reason, which is what the reader needs to
+    // fix it, exactly as a failed on-demand check is.
+    return {
+      auth: requested ?? 'none',
+      status: 'error',
+      ...empty,
+      lastError: outcome.error,
+    }
+  }
+
+  /** Whether a URL's protected-resource metadata advertises an authorization server (RFC 9728). */
+  async #advertisesOAuth(url: string): Promise<boolean> {
+    try {
+      const resource = await discoverResource(this.#fetch, url)
+      return resource.authorization_servers.length > 0
+    } catch {
+      return false
+    }
   }
 
   list(userId: UserId): Promise<McpServer[]> {
@@ -329,7 +411,15 @@ class McpServerServiceImpl implements McpServerService {
     if (current === null) {
       return null
     }
-    const auth = body.auth ?? current.auth
+    // A `headers` map **implies** `headers` on an update too (issue #314): the reader adds a key
+    // under "Advanced: custom headers" without also choosing an auth type, and the two spellings
+    // must not disagree.
+    if (body.headers !== undefined && body.auth !== undefined && body.auth !== 'headers') {
+      throw invalidRequest(
+        "a `headers` map implies `auth: 'headers'`; send one or the other, not both",
+      )
+    }
+    const auth = body.headers !== undefined ? 'headers' : (body.auth ?? current.auth)
     const url = body.url ?? current.url
     const authChanged = auth !== current.auth
     const urlChanged = url !== current.url
@@ -361,7 +451,11 @@ class McpServerServiceImpl implements McpServerService {
     const patch: MutableUpdate = {
       ...(body.name === undefined ? {} : { name: body.name }),
       ...(body.url === undefined ? {} : { url: body.url }),
-      ...(body.auth === undefined ? {} : { auth: body.auth }),
+      // The **resolved** auth, not just what the body said (issue #314): a `headers` map implies
+      // `headers`, and a patch that stored the map but left `auth` alone would leave a server
+      // reporting `header_names` it never sends under. Written only when it changes, so a plain
+      // rename does not churn the row.
+      ...(auth === current.auth ? {} : { auth }),
       ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
       // The names a list shows follow the map the server now sends: a replaced map has new
       // names, and a server that is no longer `headers` has none.
@@ -624,7 +718,12 @@ class McpServerServiceImpl implements McpServerService {
     let outcome = await this.#checkAddressAndTools(stored.url, headers, secretValues(headers))
     // A token the server rejected is worth exactly one refresh: an OAuth access token can be
     // revoked before its stated expiry, and a 401 is the only signal of it.
-    if (!outcome.ok && !outcome.refused && stored.auth === 'oauth' && isUnauthorized(outcome.raw)) {
+    if (
+      !outcome.ok &&
+      !outcome.refused &&
+      stored.auth === 'oauth' &&
+      isAuthRequired(outcome.status ?? httpStatusOf(outcome.raw))
+    ) {
       const refreshed = await this.#refreshTokens(userId, stored)
       if (refreshed !== null) {
         const refreshedHeaders = bearerHeaders(refreshed.access_token, refreshed.token_type)
@@ -652,6 +751,12 @@ class McpServerServiceImpl implements McpServerService {
     if (outcome.refused) {
       throw invalidRequest(outcome.error)
     }
+    // The full reason, status and body excerpt included, is logged here — the stored `last_error`
+    // is bounded, and a deployment diagnosing a real server wants what was really said.
+    this.#logger?.warn?.(`MCP connection check failed for ${stored.name}: ${outcome.error}`, {
+      server_id: stored.id,
+      status: outcome.status,
+    })
     const updated = await this.#store.update(
       stored.id,
       { ownerId: userId },
@@ -673,24 +778,35 @@ class McpServerServiceImpl implements McpServerService {
     secrets: readonly string[] = [],
   ): Promise<CheckOutcome> {
     let session: Awaited<ReturnType<typeof openMcpClient>> | undefined
+    // The recording wrapper is what makes the reported reason name the status and quote the
+    // body: the SDK's own error does not carry the status as a field, and a resource server's
+    // 401 is often an empty body.
+    const recorder = recordingMcpFetch(this.#fetch)
     try {
       session = await openMcpClient({
         url,
         headers,
-        fetch: this.#fetch,
+        fetch: recorder.fetch,
         timeoutMs: this.#checkTimeoutMs,
       })
       const tools = await session.listTools()
       return { ok: true, tools }
     } catch (error) {
-      const refusal = findSafeFetchRefusal(error)
-      if (refusal !== null) {
-        return { ok: false, refused: true, error: refusal.message, raw: error }
+      if (isMcpFetchRefusal(error)) {
+        return {
+          ok: false,
+          refused: true,
+          error: refusalMessage(error),
+          status: undefined,
+          raw: error,
+        }
       }
+      const observed: McpHttpObservation | null = recorder.lastFailure()
       return {
         ok: false,
         refused: false,
-        error: describeCheckError(error, secrets),
+        error: describeMcpFailure(error, observed, secrets),
+        status: observed?.status ?? httpStatusOf(error),
         raw: error,
       }
     } finally {
@@ -780,6 +896,10 @@ class McpServerServiceImpl implements McpServerService {
           ...(registration.client_secret === undefined
             ? {}
             : { clientSecret: registration.client_secret }),
+          // RFC 8707: a refresh must name the same protected resource the token is for, or the
+          // authorization server may mint one for the wrong audience (issue #314 — the flow's
+          // code exchange and the authorization URL both carry `resource`; this one did not).
+          resource: stored.url,
           now: this.#now,
         },
       )
@@ -796,8 +916,14 @@ class McpServerServiceImpl implements McpServerService {
       )
       return refreshed
     } catch (error) {
-      this.#logger?.warn('MCP token refresh failed', { server_id: stored.id })
-      await this.#markNeedsReconnect(userId, stored, describeCheckError(error, []))
+      // Logged whole (the token endpoint's own words, which the OAuth client bounds and keeps
+      // secret-free), and stored bounded: a reader needs to know a refresh failed and roughly
+      // why (issue #314).
+      const reason = describeMcpFailure(error, null)
+      this.#logger?.warn(`MCP token refresh failed for ${stored.name}: ${reason}`, {
+        server_id: stored.id,
+      })
+      await this.#markNeedsReconnect(userId, stored, reason)
       return null
     }
   }
@@ -891,57 +1017,12 @@ function secretValues(headers: Record<string, string>): string[] {
 }
 
 /**
- * A short, secret-free description of a failed check.
- *
- * The server's own words where it has any, with every value this server sent — a header, a
- * bearer token — removed first: an error page that quotes the request must not turn into a
- * stored (or displayed) secret. Bounded to {@link MCP_LAST_ERROR_MAX_LENGTH}.
+ * Whether an HTTP status means "this server wants credentials" — `401`, or a `403` a resource
+ * server uses for a missing scope. Both are what sends an unauthenticated probe down the OAuth
+ * path (when the metadata agrees) and what earns an OAuth token one refresh-and-retry.
  */
-function describeCheckError(error: unknown, secrets: readonly string[]): string {
-  const message = error instanceof Error ? error.message : 'the connection failed'
-  const scrubbed =
-    secrets.length === 0
-      ? message
-      : secrets.reduce((text, secret) => text.split(secret).join('[redacted]'), message)
-  const reason = scrubbed.trim().length === 0 ? 'the connection failed' : scrubbed.trim()
-  return reason.length > MCP_LAST_ERROR_MAX_LENGTH
-    ? `${reason.slice(0, MCP_LAST_ERROR_MAX_LENGTH - 1)}…`
-    : reason
-}
-
-/** Find a {@link SafeFetchError} anywhere in an error's cause chain, or `null`. */
-function findSafeFetchRefusal(error: unknown): SafeFetchError | null {
-  let current: unknown = error
-  for (let depth = 0; depth < 8 && current !== null && current !== undefined; depth += 1) {
-    if (isSafeFetchError(current) && isRefusalCode(current.code)) {
-      return current
-    }
-    current = current instanceof Error ? current.cause : undefined
-  }
-  return null
-}
-
-/** The refusal codes of `safeFetch` — a URL this server will not fetch at all. */
-function isRefusalCode(code: string): boolean {
-  return (
-    code === 'blocked_address' ||
-    code === 'metadata_host' ||
-    code === 'invalid_protocol' ||
-    code === 'invalid_url'
-  )
-}
-
-/** Whether an error is the transport's 401 (an OAuth access token the server rejected). */
-function isUnauthorized(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) {
-    return false
-  }
-  const candidate = error as { name?: unknown; code?: unknown; message?: unknown }
-  return (
-    candidate.name === 'UnauthorizedError' ||
-    candidate.code === 401 ||
-    (typeof candidate.message === 'string' && candidate.message.includes('401'))
-  )
+function isAuthRequired(status: number | undefined): boolean {
+  return status === 401 || status === 403
 }
 
 /** A fresh, unguessable OAuth `state`. */
