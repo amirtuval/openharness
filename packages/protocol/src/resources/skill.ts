@@ -108,6 +108,118 @@ export const SKILL_DESCRIPTION_MAX_LENGTH = 1024
 export const SKILL_MD_FILENAME = 'SKILL.md'
 
 /**
+ * The most characters a slash invocation's arguments may carry (K7).
+ *
+ * The arguments ride the `user.message` as typed and are substituted into the body the model is
+ * given, so they are part of a request's size like anything else; the cap keeps a paste from
+ * becoming a message the protocol stores without bound. It is generous — a skill invocation is a
+ * sentence, not a document.
+ */
+export const SKILL_ARGUMENTS_MAX_LENGTH = 10_000
+
+/**
+ * The honoured frontmatter fields, as a `Skill` states them (epic #349, K1).
+ *
+ * Three of the format's fields change what a skill *is* to this build, and every consumer that
+ * has to know — the listing (K6), the `/` menu (K7), the settings screens (#353) — reads them
+ * through {@link skillSettingsOf} rather than off `frontmatter` itself, so "what does
+ * `user-invocable` default to?" has one answer. The rest of the frontmatter is stored and shown
+ * and otherwise ignored.
+ */
+export interface SkillSettings {
+  /**
+   * `disable-model-invocation: true`: a command only the **user** runs (K6).
+   *
+   * The model is not told the skill exists — it is out of the listing — and `skill` refuses it
+   * if the model asks for it anyway by name.
+   */
+  readonly disableModelInvocation: boolean
+  /**
+   * `user-invocable: false`: a skill only the **model** uses (K7), refused as a slash command.
+   *
+   * Absent means `true`: a skill is something its user can run, which is the format's own
+   * reading and the one that makes importing a skill do something.
+   */
+  readonly userInvocable: boolean
+  /** `argument-hint`: shown beside the command in a `/` menu, or `null` when the file names none. */
+  readonly argumentHint: string | null
+}
+
+/**
+ * The three honoured fields of a skill's snapshot (K1), read one way by every consumer.
+ *
+ * A field is honoured only in the shape the format documents — a real `true` for
+ * `disable-model-invocation`, a real `false` for `user-invocable`, a string for `argument-hint`
+ * — because the frontmatter is open and untyped ({@link SkillFrontmatterSchema}): a value a
+ * hand-written file got wrong is an ignored field rather than a skill that behaves differently
+ * from what it says. The lookup is case-sensitive to the field names the format uses.
+ */
+export function skillSettingsOf(skill: Skill): SkillSettings {
+  const frontmatter = skill.frontmatter
+  return {
+    disableModelInvocation: frontmatter['disable-model-invocation'] === true,
+    userInvocable: frontmatter['user-invocable'] !== false,
+    argumentHint: argumentHintOf(frontmatter['argument-hint']),
+  }
+}
+
+/** `argument-hint` as a non-empty string, or `null` for a value that is not one. */
+function argumentHintOf(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const hint = value.trim()
+  return hint.length === 0 ? null : hint
+}
+
+/**
+ * A `SKILL.md` file's **body**: everything after its YAML frontmatter (K1, K6).
+ *
+ * The one reading of where the frontmatter ends, so the body a model is handed is the same in
+ * the tool that serves it, the context builder that renders a slash invocation and any client
+ * that shows a skill. The rules are the format's own:
+ *
+ * - the file opens with a line that is exactly `---` (a leading byte-order mark is tolerated);
+ * - the frontmatter runs to the next line that is exactly `---` or `...`;
+ * - everything after it is the body, trimmed of the blank lines that separate the two.
+ *
+ * A file that does not open a frontmatter block has no frontmatter to strip and is its own body,
+ * and so is one whose block never closes — the markers are what make a block, and a file without
+ * them is not one. Nothing here parses YAML: the parsed frontmatter is the resource's own field
+ * ({@link Skill.frontmatter}), and this helper only knows where the text it came from begins.
+ */
+export function skillBody(content: string): string {
+  const text = content.startsWith(BOM) ? content.slice(BOM.length) : content
+  const lines = text.split('\n')
+  if (!isFrontmatterFence(lines[0])) {
+    return text.trim()
+  }
+  for (let index = 1; index < lines.length; index += 1) {
+    if (isClosingFence(lines[index])) {
+      return lines
+        .slice(index + 1)
+        .join('\n')
+        .trim()
+    }
+  }
+  return text.trim()
+}
+
+/** The byte-order mark a file saved by a Windows editor may open with. */
+const BOM = '\uFEFF'
+
+/** Whether a line opens a `SKILL.md`'s frontmatter block. */
+function isFrontmatterFence(line: string | undefined): boolean {
+  return line?.trim() === '---'
+}
+
+/** Whether a line closes one: the format's ending marker, or YAML's own document end. */
+function isClosingFence(line: string | undefined): boolean {
+  const trimmed = line?.trim()
+  return trimmed === '---' || trimmed === '...'
+}
+
+/**
  * The size limits of K4, in bytes.
  *
  * They bound what one import may store, and they are enforced by the store's callers — the

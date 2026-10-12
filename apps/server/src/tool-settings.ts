@@ -1,5 +1,9 @@
 import type { NativeToolDeclaration, ToolSettings, ToolSettingsResolver } from '@openharness/brain'
-import { NATIVE_TOOL_DECLARATIONS, modelSearches } from '@openharness/brain'
+import {
+  NATIVE_TOOL_DECLARATIONS,
+  SKILL_TOOL_DECLARATIONS,
+  modelSearches,
+} from '@openharness/brain'
 import type { ToolDefinition, ToolRegistry } from '@openharness/hands'
 import {
   DEFAULT_MCP_TOOL_PERMISSION,
@@ -50,6 +54,22 @@ import { requireOwnedMode } from './modes'
  * where it is from, and a stored setting for neither is listed as unavailable rather than
  * dropped.
  */
+/**
+ * Every tool the settings list that this process's registry does not hold (epic #303, X14; #335;
+ * the skills half: epic #349, K6).
+ *
+ * Two kinds, and the declaration says which: the provider-native `web_search`, whose
+ * availability is the chat **model**'s ({@link NativeToolDeclaration.modelGated}), and the two
+ * tools that read a user's skills (#352), which the brain builds per request from whatever that
+ * request has. Both are absent from every registry this process builds — a request's set is the
+ * user's, not the deployment's — so without this they would not appear in a settings screen at
+ * all, and a user could not turn either off.
+ */
+const DECLARED_TOOL_SETTINGS: readonly NativeToolDeclaration[] = [
+  ...NATIVE_TOOL_DECLARATIONS,
+  ...SKILL_TOOL_DECLARATIONS,
+]
+
 export interface EffectiveTool {
   readonly name: string
   /** Which half of the settings the tool belongs to. */
@@ -111,7 +131,7 @@ export function effectiveTools(
   stored: UserToolSettings,
   override: ModeToolOverride | null,
   servers: readonly McpServer[] = [],
-  natives: readonly NativeToolDeclaration[] = NATIVE_TOOL_DECLARATIONS,
+  natives: readonly NativeToolDeclaration[] = DECLARED_TOOL_SETTINGS,
 ): EffectiveTool[] {
   const registered = registry?.tools ?? []
   const registeredNames = new Set(registered.map((tool) => tool.name))
@@ -209,10 +229,13 @@ export function toolSettingEntries(
 ): ToolSettingEntry[] {
   return effectiveTools(registry, stored, override, servers).map((tool) => {
     const native = tool.native
-    // A native tool is available where the **chat's model** has the provider tool (#335), which
-    // is a question about the model and not about this process: a read that named no model is
-    // answered as the old listing was — available, nothing claimed about a model nobody named.
-    const searchable = modelId === undefined || modelSearches(modelId)
+    // A **model-gated** tool is available only where the chat's model has the thing it offers
+    // (#335) — `web_search`, which is the model's own provider's tool — and a read that named no
+    // model is answered as the old listing was: available, with nothing claimed about a model
+    // nobody named. A declaration that is not model-gated (#352's skill tools) is offered
+    // wherever this process offers tools at all, and no model capability has a say in it.
+    const searchable =
+      native?.modelGated !== true || modelId === undefined || modelSearches(modelId)
     return {
       name: tool.name,
       source: tool.source,
@@ -370,10 +393,13 @@ export async function listToolSettings(
 export function assertWritableToolSettings(
   body: PutToolSettingsRequest,
   registry: ToolRegistry | undefined,
-  natives: readonly NativeToolDeclaration[] = NATIVE_TOOL_DECLARATIONS,
+  natives: readonly NativeToolDeclaration[] = DECLARED_TOOL_SETTINGS,
 ): void {
   for (const native of natives) {
-    if (registry?.get(native.name) !== undefined) {
+    // Only a tool the **provider** runs has no moment to be paused (#335); a tool this build
+    // runs — the two that read a user's skills (#352) — can be held for an answer like any
+    // other, so `ask` on one is a setting that really does something.
+    if (native.modelGated !== true || registry?.get(native.name) !== undefined) {
       continue
     }
     if (body.builtin?.[native.name]?.policy === 'ask') {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { EventId } from '../ids'
-import { newEventId } from '../ids'
+import { newEventId, newSkillId } from '../ids'
 import {
   AgentEventSchema,
   AgentMessageEventSchema,
@@ -204,6 +204,17 @@ const storedSamples = {
     seq: 12,
     processed_at: '2026-03-15T10:00:00Z',
     supersedes: { from_seq: 1, to_seq: 11 },
+  },
+  'session.skill_loaded': {
+    id: eventId(),
+    type: 'session.skill_loaded',
+    seq: 13,
+    processed_at: '2026-03-15T10:00:00Z',
+    message_seq: 4,
+    name: 'release-notes',
+    skill_id: newSkillId(),
+    commit_sha: null,
+    content: 'Write the release notes for v1.2.',
   },
   'session.context_summary': {
     id: eventId(),

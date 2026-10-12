@@ -209,7 +209,13 @@ describe('the settings decide whether it is offered (#335)', () => {
   })
 
   it('declares the tool the settings are keyed by', () => {
-    expect(NATIVE_TOOL_DECLARATIONS).toEqual([{ name: WEB_SEARCH_TOOL_NAME, permission: 'allow' }])
+    // `modelGated`, because whether this tool can be offered at all is the **chat model's**
+    // question (#335): the search is the model's own provider's, so a model whose provider has
+    // none cannot be offered it. A tool this build's own turn builds — the two that read a
+    // user's skills (#352) — declares nothing of the kind.
+    expect(NATIVE_TOOL_DECLARATIONS).toEqual([
+      { name: WEB_SEARCH_TOOL_NAME, permission: 'allow', modelGated: true },
+    ])
   })
 })
 

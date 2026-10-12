@@ -28,8 +28,11 @@ import {
   UpdateSkillRequestSchema,
   isReservedSkillName,
   isSkillName,
+  skillBody,
   skillFileSize,
+  skillSettingsOf,
 } from './skill'
+import type { Skill } from './skill'
 
 /** One fixed id for the fixture, so two builds of it are the same value. */
 const SKILL_ID = newSkillId(1_700_000_000_000)
@@ -356,5 +359,86 @@ describe('the refresh shapes (K5)', () => {
       problems: [],
     })
     expect(same.skill_md_diff).toBeNull()
+  })
+})
+
+describe('skillSettingsOf', () => {
+  const parsed = (frontmatter: Record<string, unknown>): Skill =>
+    SkillSchema.parse(skill({ frontmatter }))
+
+  it('defaults to a skill the model may use and the user may run', () => {
+    expect(skillSettingsOf(parsed({}))).toEqual({
+      disableModelInvocation: false,
+      userInvocable: true,
+      argumentHint: null,
+    })
+  })
+
+  it('reads the three honoured fields', () => {
+    expect(
+      skillSettingsOf(
+        parsed({
+          'disable-model-invocation': true,
+          'user-invocable': false,
+          'argument-hint': '[version]',
+        }),
+      ),
+    ).toEqual({ disableModelInvocation: true, userInvocable: false, argumentHint: '[version]' })
+  })
+
+  it('honours only the shapes the format documents', () => {
+    // The frontmatter is open and untyped, so a value a hand-written file got wrong is an
+    // ignored field rather than a skill that behaves differently from what it says.
+    expect(
+      skillSettingsOf(parsed({ 'disable-model-invocation': 'true' })).disableModelInvocation,
+    ).toBe(false)
+    expect(skillSettingsOf(parsed({ 'user-invocable': 'false' })).userInvocable).toBe(true)
+    expect(skillSettingsOf(parsed({ 'argument-hint': '' })).argumentHint).toBe(null)
+    expect(skillSettingsOf(parsed({ 'argument-hint': 42 })).argumentHint).toBe(null)
+    // A hint is trimmed, and a padding-only one names nothing.
+    expect(skillSettingsOf(parsed({ 'argument-hint': '  [version] ' })).argumentHint).toBe(
+      '[version]',
+    )
+    expect(skillSettingsOf(parsed({ 'argument-hint': '   ' })).argumentHint).toBe(null)
+  })
+
+  it('reads the fields by the names the format uses, and nothing else', () => {
+    expect(skillSettingsOf(parsed({ disableModelInvocation: true })).disableModelInvocation).toBe(
+      false,
+    )
+    expect(skillSettingsOf(parsed({ userInvocable: false })).userInvocable).toBe(true)
+  })
+})
+
+describe('skillBody', () => {
+  it('strips a frontmatter block and keeps the instructions', () => {
+    const file = '---\nname: release-notes\ndescription: Writes them.\n---\n\nWrite the notes.\n'
+    expect(skillBody(file)).toBe('Write the notes.')
+  })
+
+  it('ends the block at either marker the format allows', () => {
+    expect(skillBody('---\nname: a\n...\nbody\n')).toBe('body')
+  })
+
+  it('is the whole file when there is no frontmatter to strip', () => {
+    expect(skillBody('Just instructions.\n')).toBe('Just instructions.')
+    // A thematic break is not a frontmatter fence: the file does not *open* with one.
+    expect(skillBody('Intro.\n\n---\n\nMore.\n')).toBe('Intro.\n\n---\n\nMore.')
+    // A block that never closes is not a block.
+    expect(skillBody('---\nname: a\nbody\n')).toBe('---\nname: a\nbody')
+  })
+
+  it('tolerates a byte-order mark, and trims the blank lines between the two halves', () => {
+    expect(skillBody('﻿---\nname: a\n---\n\n  body  \n')).toBe('body')
+  })
+
+  it('answers an empty body for a file that is only frontmatter', () => {
+    expect(skillBody('---\nname: a\n---\n')).toBe('')
+  })
+
+  it('does not parse YAML: the body starts where the marker says', () => {
+    // A `---` inside the body is left alone, and a field whose value looks like a fence is a
+    // field's problem rather than the body's.
+    expect(skillBody('---\nname: a\n---\nbody\n\n---\nmore\n')).toBe('body\n\n---\nmore')
   })
 })

@@ -243,6 +243,9 @@ export {
   MOCK_HOLD_TEXT,
   MOCK_MCP_MARKER,
   MOCK_MODEL_ENV_VALUE,
+  MOCK_SKILL_MARKER,
+  MOCK_SKILL_READ_MARKER,
+  skillReadCallOf,
   MOCK_MODEL_USAGE,
   MOCK_RETRYABLE_MARKER,
   MOCK_SLOW_CHUNKS,
@@ -250,7 +253,11 @@ export {
   MOCK_SLOW_TOTAL_MS,
   MOCK_TERMINAL_MARKER,
   MOCK_TOOL_MARKER,
+  MOCK_TODO_DEFAULT_COUNT,
+  MOCK_TODO_MARKER,
+  MOCK_TODO_MAX_COUNT,
   planFor,
+  todoInputOf,
 } from './mock-model'
 export {
   MOCK_CREDENTIAL,
@@ -290,11 +297,18 @@ export {
 } from './tools'
 export { askUserTool, withAlwaysApprovals } from './pausing'
 // The skills in force for a request (epic #349, K8): the owner's own `enabled`, overridden by
-// the mode's `skills` map — the settings answer the brain reads (#352).
+// the mode's `skills` map — the settings answer the brain reads (#352) — plus the two things
+// #352 adds on top: the provider the loop's `skill`/`skill_read` tools read a snapshot through
+// (K6), and the check a slash invocation passes before it is stored (K7).
 export {
+  assertInvocableSkills,
+  createSkillProvider,
   createSkillSettingsResolver,
   listSkillsInForce,
+  modeToolOverride,
   skillsInForce,
+  type SkillInvocationDeps,
+  type SkillProviderDeps,
   type SkillSettingsDeps,
   type SkillSettingsResolver,
 } from './skills'

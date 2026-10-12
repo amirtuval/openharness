@@ -146,6 +146,17 @@ export const EVENT_TYPES = {
    * longer pending. See {@link SessionCompactionEventSchema}.
    */
   sessionCompaction: 'session.compaction',
+  /**
+   * // extension: a skill's instructions were loaded for a slash invocation (epic #349, K7).
+   *
+   * The brain writes it when it first handles a `user.message` carrying a `skill`: `content` is
+   * the skill's body with the arguments substituted, exactly as the model was given it, so the
+   * log says what a request ran on rather than what the skill happens to say now. It is written
+   * **once** per invoked message — an edit or a refresh never rewrites a chat — and every later
+   * reader (the context builder, the summarizer, compaction) reads this event rather than the
+   * current snapshot. See {@link SessionSkillLoadedEventSchema}.
+   */
+  sessionSkillLoaded: 'session.skill_loaded',
   /** A previewed event started generating. A stored chunk since D9; stream-only before it. */
   eventStart: 'event_start',
   /** Incremental content for a previewed event. A stored chunk since D9; stream-only before it. */
@@ -206,6 +217,7 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.sessionContextSummaryProgress,
   EVENT_TYPES.sessionCompact,
   EVENT_TYPES.sessionCompaction,
+  EVENT_TYPES.sessionSkillLoaded,
   EVENT_TYPES.eventStart,
   EVENT_TYPES.eventDelta,
   EVENT_TYPES.sessionRewind,

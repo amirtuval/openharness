@@ -302,6 +302,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     tools: turnRegistry,
     store,
     mcp: { service: mcpServers, fetch: mcpFetch },
+    // The skills a chat has, and the two tools that read one (epic #349, K6; #352): the same
+    // store the `/v1/me/skills` routes read, so what a settings screen shows and what a chat can
+    // read are one set of snapshots.
+    skills,
     logger,
   })
 

@@ -13,6 +13,7 @@ import type {
   SessionCompactionOutcome,
   SessionError,
   SessionModelUsage,
+  SkillId,
   Source,
   SpanError,
   StopReason,
@@ -376,6 +377,39 @@ export function sessionUsage(models: readonly SessionModelUsage[]): AppendableEv
       usage: { ...entry.usage },
       requests: entry.requests,
     })),
+  }
+}
+
+/**
+ * The instructions a slash invocation loaded (epic #349, K7).
+ *
+ * Written once, when the brain first handles the `user.message` the invocation arrived as:
+ * `content` is the skill's body with the message's arguments substituted in — exactly what the
+ * request that follows is built with — and `message_seq` is the message it belongs to, which is
+ * how every later reader of the chat knows to render that message as instructions rather than as
+ * the command the user typed. `skill_id` and `commit_sha` record which snapshot it came from, so
+ * a chat stays readable after a refresh (K5) and a client can link back to the skill.
+ *
+ * @param messageSeq the `seq` of the `user.message` that invoked the skill
+ * @param name the skill's name, as the message named it
+ * @param skillId the `skl_` id of the skill whose snapshot was read
+ * @param commitSha the commit the snapshot was cloned at, or `null` for one nothing cloned
+ * @param content the body the model was given — the instructions, arguments substituted in
+ */
+export function skillLoaded(
+  messageSeq: number,
+  name: string,
+  skillId: SkillId,
+  commitSha: string | null,
+  content: string,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionSkillLoaded,
+    message_seq: messageSeq,
+    name,
+    skill_id: skillId,
+    commit_sha: commitSha,
+    content,
   }
 }
 

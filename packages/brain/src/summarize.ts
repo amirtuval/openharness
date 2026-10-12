@@ -31,6 +31,7 @@ import {
   ZERO_MODEL_USAGE,
 } from './model'
 import { redactSecrets } from './redact'
+import { skillsInUse } from './skills'
 
 /**
  * The compaction engine: turning older history into a summary (epic #277, C2; issue #279).
@@ -177,8 +178,14 @@ export const MIN_SUMMARY_TOKENS = 256
  * `context-summary-v2` adds the tool-work section (#306, X9): a history that called tools has
  * pages fetched, searches made, actions taken and errors to account for, and a summary that
  * dropped them would leave the model unable to say what the tools already did.
+ *
+ * `context-summary-v3` adds the skills line (epic #349, K9): a history built on one or more
+ * skills names them, so the summary says which instructions came from where — and so a skill
+ * whose instructions were folded away is not silently lost as "the user asked for something".
+ * Loaded skills are ordinary history otherwise: the instructions are prose the summarizer reads
+ * like any other message, and a chat reloads a skill with the tool when it needs it again.
  */
-export const SUMMARY_PROMPT_VERSION = 'context-summary-v2'
+export const SUMMARY_PROMPT_VERSION = 'context-summary-v3'
 
 /**
  * The prompt a summary is written with (K7).
@@ -443,12 +450,16 @@ export async function summarizeContext(options: SummarizeContextOptions): Promis
   // The user's guidance for a manual summary (K8), or `null` for none — the engine folds it into
   // the summarizer's instructions, and the caller records it on the outcome event.
   const guidance = options.reason === 'manual' ? (options.guidance ?? null) : null
+  // The skills the span being replaced was built on (epic #349, K9): read off the log's own
+  // `session.skill_loaded` events, so what the summary is told about is what the model was
+  // really given rather than what a skill says now.
+  const skills = skillsInUse(events, coversTo)
   // Everything that depends on which model writes the summary, in one place, so the plan the
   // fallback is judged by and the plan the run follows are computed the same way.
   const plan = (modelId: string) => {
     const budget = budgetFor(config, modelId)
     const cap = summarySizeCap(config, budget, chatBudget, modelId)
-    const instructions = instructionsFor(previous !== null, cap, guidance)
+    const instructions = instructionsFor(previous !== null, cap, guidance, skills)
     const sliceBudget = sliceBudgetOf(budget, estimateTokens(instructions), cap)
     const needsFold = runningSummary !== null && estimateTokens(runningSummary) > cap
     const units = coveredUnits(covered, budget)
@@ -645,13 +656,38 @@ function sliceBudgetOf(summaryBudget: number, instructionTokens: number, sizeCap
  * of it, and it does not change what {@link SUMMARY_PROMPT_VERSION} names: the base prompt's
  * meaning is the same whether or not someone asked for a particular emphasis.
  */
-function instructionsFor(incremental: boolean, sizeCap: number, guidance: string | null): string {
+function instructionsFor(
+  incremental: boolean,
+  sizeCap: number,
+  guidance: string | null,
+  skills: readonly string[],
+): string {
   const base = `${SUMMARY_PROMPT}${incremental ? SUMMARY_UPDATE_CLAUSE : ''}`
   const tailored =
     guidance === null || guidance.trim().length === 0
       ? base
       : `${base}\n\nThe user asked for this summary and gave you this guidance, which you must follow:\n${guidance}`
-  return `${tailored}\n\nKeep the summary under ${sizeCap} tokens.`
+  return `${tailored}${skillsLine(skills)}\n\nKeep the summary under ${sizeCap} tokens.`
+}
+
+/**
+ * What a summary's instructions say when the history it folds used skills (epic #349, K9).
+ *
+ * One line, and only when there is something to say: a chat that never ran a slash command is
+ * summarized with the prompt it always was, so the version bump is the whole of what changes for
+ * it. The point is the provenance rather than the content — the instructions a skill loaded are
+ * ordinary messages the summarizer reads like any other, and what a summary that folded them
+ * away would lose is *which* skill they came from, which is what a reader who wants the same
+ * behaviour again needs to know.
+ */
+function skillsLine(skills: readonly string[]): string {
+  if (skills.length === 0) {
+    return ''
+  }
+  return (
+    `\n\nSkills in use: ${skills.join(', ')}. Their instructions were invoked as slash ` +
+    "commands and are the user's own — keep what they asked for, and say which skill it came from."
+  )
 }
 
 /**

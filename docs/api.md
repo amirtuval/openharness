@@ -149,38 +149,73 @@ The log is the source of truth, and `seq` is the order it happened in: `1`, `2`,
 session. It is also the SSE `id` and the resume position, so a client that reconnects with
 `last-event-id: 7` gets `8` next — never `7` twice, never a gap.
 
-| event                              | who writes it | what it means                                                                           |
-| ---------------------------------- | ------------- | --------------------------------------------------------------------------------------- |
-| `user.message`                     | the client    | a message, until the brain claims it                                                    |
-| `user.interrupt`                   | the client    | stop the turn in flight                                                                 |
-| `user.tool_confirmation`           | the server    | // extension: the user answered a call that was waiting on them (#309)                  |
-| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
-| `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                         |
-| `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
-| `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)     |
-| `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)         |
-| `agent.opaque_content`             | the brain     | // extension: the parts of a step only its own provider can read back (#334)            |
-| `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
-| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
-| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
-| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is    |
-| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at                 |
-| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                                  |
-| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                     |
-| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                     |
-| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage      |
-| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)       |
-| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)                 |
-| `session.compact`                  | the server    | // extension: the user asked for a manual compaction, `/compact [instructions]` (#283)  |
-| `session.compaction`               | the brain     | // extension: what came of it — `summarized`, `nothing_to_summarize` or `failed` (#283) |
-| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)                |
-| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)          |
+| event                              | who writes it | what it means                                                                                      |
+| ---------------------------------- | ------------- | -------------------------------------------------------------------------------------------------- |
+| `user.message`                     | the client    | a message, until the brain claims it                                                               |
+| `user.interrupt`                   | the client    | stop the turn in flight                                                                            |
+| `user.tool_confirmation`           | the server    | // extension: the user answered a call that was waiting on them (#309)                             |
+| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                                 |
+| `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                                    |
+| `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)                     |
+| `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)                |
+| `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)                    |
+| `agent.opaque_content`             | the brain     | // extension: the parts of a step only its own provider can read back (#334)                       |
+| `session.status_running`           | the brain     | a turn started (also after a retry)                                                                |
+| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                                   |
+| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                                |
+| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is               |
+| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at                            |
+| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                                             |
+| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                                |
+| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                                |
+| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage                 |
+| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)                  |
+| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)                            |
+| `session.compact`                  | the server    | // extension: the user asked for a manual compaction, `/compact [instructions]` (#283)             |
+| `session.compaction`               | the brain     | // extension: what came of it — `summarized`, `nothing_to_summarize` or `failed` (#283)            |
+| `session.skill_loaded`             | the brain     | // extension: the instructions a slash invocation loaded — the body the model was given (#349, K7) |
+| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)                           |
+| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)                     |
 
 A `user.message` may also carry a `model` (`{ "id": "provider/model" }`): it switches the
 model the session runs from that message on, and the session keeps running it until another
 message changes it (epic #116, U3). The switch is stored on the message — the log stays the
 source of truth — and each `span.model_request_start` still records the model its request
 actually used.
+
+A `user.message` may also carry a `skill` — `{ "name": "release-notes", "arguments": "v1.2" }`
+— which is how a skill is run as a slash command (epic #349, K7): `/release-notes v1.2`. The
+message's `content` stays **what the user typed**, so a transcript shows the command and a
+client that knows nothing of skills renders it as the text it is. The server refuses, with a
+`400` and nothing stored, a name that is not one of the caller's skills in force for the chat
+(or a mode turns off), and one whose frontmatter says `user-invocable: false`; a
+`disable-model-invocation: true` skill is exactly the kind the user runs by hand.
+
+```json
+{
+  "type": "user.message",
+  "content": [{ "type": "text", "text": "/release-notes v1.2" }],
+  "skill": { "name": "release-notes", "arguments": "v1.2" }
+}
+```
+
+When the brain first handles that message it writes a `session.skill_loaded` naming it, whose
+`content` is the skill's `SKILL.md` **body** with the arguments substituted — every
+`$ARGUMENTS` replaced, or the arguments appended after a body that has none. The log therefore
+holds exactly what the model was given, and from then on the chat is built from that event and
+never from the snapshot: refreshing a skill or editing it changes what the _next_ `/name` loads
+and nothing about a conversation that already ran.
+
+```json
+{
+  "type": "session.skill_loaded",
+  "message_seq": 7,
+  "name": "release-notes",
+  "skill_id": "skl_01J…",
+  "commit_sha": "9f2c1b4…",
+  "content": "Write the release notes for v1.2."
+}
+```
 
 It may carry a `reasoning_effort` (`"low"`, `"medium"` or `"high"`) the same way: the effort
 the session runs at from that message on, until another message changes it or clears it with
@@ -1389,6 +1424,21 @@ imports racing for the last slot cannot both land.
 format requires it to match the folder's name, and a built-in slash command's name is
 **reserved** — `compact`, `new`, `model`, `mode`, `agents`, `skills` — because a built-in is a
 client action and never a skill (K7). A skill cannot be called `compact`.
+
+**The model can read a skill, and nothing runs.** A chat whose owner has a skill enabled is
+offered two tools (K6): `skill { "name": "release-notes" }` answers the skill's instructions —
+`SKILL.md` with its frontmatter removed — and the list of files the folder holds, and
+`skill_read { "name": "release-notes", "path": "reference/tone.md" }` answers one of them. A
+skill's scripts are files to read and never to execute, and the tool's own description says so.
+`skill`'s description **is** the listing: the names and descriptions of every skill the model
+may invoke, so a chat with none offers neither tool. A `disable-model-invocation: true` skill is
+left out of that listing and refused by both tools — only the user runs it, with `/name`. An
+unknown name answers the names there are, and an unknown path the files the skill holds.
+
+**A skill is the user's own instructions, not third-party data** (K10). Its text is framed to
+the model as the user's own request, and it cannot grant a permission: a skill's frontmatter may
+say anything — `allowed-tools` is stored and otherwise ignored — and what a tool call is
+evaluated under comes from the caller's own settings and the mode in force, never from a skill.
 
 **A skill is on when it is imported, and a mode may override which are on** (K8):
 `Mode.tools.skills` is an on/off map keyed by skill id, a sibling of `builtin` and

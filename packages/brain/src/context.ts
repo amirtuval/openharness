@@ -30,6 +30,7 @@ import type { ModelMessage } from 'ai'
 import { lastModelRequest } from './log'
 import { opaqueReplayParts } from './opaque'
 import type { OpaqueMessagePart, OpaqueReplayedPart, OpaqueTarget } from './opaque'
+import { skillTextsByMessage } from './skills'
 import { stuckReminder } from './stuck'
 
 /**
@@ -995,6 +996,10 @@ export function conversationItems(
   cap: ToolResultCap,
 ): ContextCutItem[] {
   const calls = toolCallsOf(events)
+  // A slash invocation reads as its skill's instructions here too (epic #349, K7): what the
+  // summarizer folds is what the model was given, so a chat built on `/release-notes` summarizes
+  // the notes format rather than the line the user typed to start it.
+  const skillTexts = skillTextsByMessage(events)
   const items: ContextCutItem[] = []
   for (const event of events) {
     if (event.seq <= afterSeq) {
@@ -1006,7 +1011,10 @@ export function conversationItems(
     let pairSeq: number | undefined
     if (event.type === EVENT_TYPES.userMessage || event.type === EVENT_TYPES.agentMessage) {
       role = event.type === EVENT_TYPES.userMessage ? 'user' : 'assistant'
-      text = textOf(event.content)
+      text =
+        event.type === EVENT_TYPES.userMessage
+          ? (skillTexts.get(event.seq) ?? textOf(event.content))
+          : textOf(event.content)
     } else if (isToolCallEvent(event)) {
       role = 'assistant'
       text = toolCallText(toolCallOfferedName(event), toolCallInput(event))
@@ -1309,6 +1317,12 @@ function conversationAfter(
 ): BuiltConversation {
   const messages: ConversationMessage[] = []
   const toolNames = toolNamesOf(events)
+  // The messages a slash invocation loaded, by the message they belong to (epic #349, K7): a
+  // `user.message` that ran `/name` is sent as the skill's instructions — the text the log
+  // recorded a brain giving the model — rather than as the command the user typed. An invocation
+  // whose skill a later `session.rewind` took back is gone with it, because the replay read the
+  // caller passes here has already dropped the message it belonged to.
+  const skillTexts = skillTextsByMessage(events)
   // The provider-executed calls the log holds, by id (#335): neither they nor their answers
   // belong in a request — the step's opaque content carries them — so both are skipped below.
   const provider = providerCallIds(events)
@@ -1373,7 +1387,7 @@ function conversationAfter(
         closeAssistant()
         // Not flushed here: a call the user's message arrived in front of is still answered
         // behind it, and the `tool` message is inserted before the user message when it lands.
-        const text = textOf(event.content)
+        const text = skillTexts.get(event.seq) ?? textOf(event.content)
         if (text.length > 0) {
           messages.push({ message: { role: 'user', content: text }, seq: event.seq })
         }

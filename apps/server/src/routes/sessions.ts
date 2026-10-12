@@ -13,6 +13,7 @@ import { invalidRequest, notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import { isModelId } from '../model-id'
 import { requireUsableMode, type ModeDeps } from '../modes'
+import { assertInvocableSkills } from '../skills'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
 import { signalKinds } from './signals'
@@ -49,6 +50,17 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
     // rather than silently replaced (a 422 `mode_unavailable_error`).
     const mode =
       body.mode === undefined ? null : await requireUsableMode(modeDeps(deps), ownerId, body.mode)
+    // A slash invocation among `initial_events` is checked here exactly as `POST …/events`
+    // checks one (epic #349, K7): the session's skills are the owner's, the mode it is created on
+    // is the override the next request will resolve, and a name the chat cannot run refuses the
+    // whole creation — nothing is stored, so no log holds a message nothing would answer.
+    const skillDeps = { skills: deps.skills, modes: deps.store }
+    await assertInvocableSkills(
+      skillDeps,
+      ownerId,
+      mode?.mode.id ?? null,
+      body.initial_events ?? [],
+    )
     const options: CreateSessionOptions = {
       // Every session belongs to the caller (epic #65, A4), and the agent it snapshots has
       // to be theirs too: `createSession` answers `AgentNotFoundError` — a 404 — for an

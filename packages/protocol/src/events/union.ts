@@ -18,6 +18,7 @@ import {
   SessionErrorEventSchema,
   SessionRewindEventInputSchema,
   SessionRewindEventSchema,
+  SessionSkillLoadedEventSchema,
   SessionStatusIdleEventSchema,
   SessionStatusRescheduledEventSchema,
   SessionStatusRunningEventSchema,
@@ -79,6 +80,7 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
   ContextSummaryProgressEventSchema,
   SessionCompactEventSchema,
   SessionCompactionEventSchema,
+  SessionSkillLoadedEventSchema,
 ])
 
 /**
