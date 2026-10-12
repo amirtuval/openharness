@@ -23,7 +23,13 @@ import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import type { UpsertCredentialInput } from '../credentials'
-import { DuplicateEventIdError, FencedError, isFencedError } from '../errors'
+import type { CreateMcpServerInput } from '../mcp-servers'
+import {
+  DuplicateEventIdError,
+  DuplicateMcpServerNameError,
+  FencedError,
+  isFencedError,
+} from '../errors'
 import type { AppendableEvent } from '../store'
 import { timestampAt } from '../clock'
 import { createTestClock, type TestClock } from '../testing/clock'
@@ -34,8 +40,10 @@ import {
   type MakeSessionStore,
 } from '../testing/conformance'
 import { runCredentialStoreConformance } from '../testing/credentials-conformance'
+import { runMcpServerStoreConformance } from '../testing/mcp-servers-conformance'
 import {
   createPostgresCredentialStore,
+  createPostgresMcpServerStore,
   createPostgresSessionStore,
   migrate,
   type PostgresSchema,
@@ -116,6 +124,9 @@ if (target === null) {
   /** Every credential store a test made, closed again afterwards. */
   const credentialStores: ReturnType<typeof createPostgresCredentialStore>[] = []
 
+  /** Every MCP server store a test made, closed again afterwards. */
+  const mcpStores: ReturnType<typeof createPostgresMcpServerStore>[] = []
+
   beforeAll(async () => {
     let connectionString = DATABASE_URL
     if (connectionString === '') {
@@ -130,6 +141,7 @@ if (target === null) {
   afterEach(async () => {
     await Promise.all(stores.splice(0).map((store) => store.close()))
     await Promise.all(credentialStores.splice(0).map((store) => store.close()))
+    await Promise.all(mcpStores.splice(0).map((store) => store.close()))
   })
 
   afterAll(async () => {
@@ -161,6 +173,15 @@ if (target === null) {
       return trackCredentials(createPostgresCredentialStore({ pool }, { now: clock.now }))
     },
     { name: 'PostgresCredentialStore', ensureUsers },
+  )
+
+  /** The MCP server store's conformance suite, on the same tables and users (#303, X10). */
+  runMcpServerStoreConformance(
+    async (clock) => {
+      await truncateAll()
+      return trackMcpServers(createPostgresMcpServerStore({ pool }, { now: clock.now }))
+    },
+    { name: 'PostgresMcpServerStore', ensureUsers },
   )
 
   // -------------------------------------------------------------- extra tests
@@ -507,11 +528,13 @@ if (target === null) {
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
       // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
       // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql` and
-      // `0027_tool_settings.sql` one or more `add column if not exists` (#150, #203, #282,
-      // #307), and `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
-      // `0027_tool_settings.sql` and `0028_paused_confirmation_work.sql` build an index or a
-      // table (#247, #305, #307, #309): a re-run has to leave the tables, the indexes and the
-      // columns working, which the store calls below prove.
+      // `0027_tool_settings.sql` and `0030_mcp_oauth_state_client.sql` one or more
+      // `add column if not exists` (#150, #203, #282, #307, #311), and
+      // `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
+      // `0027_tool_settings.sql`, `0028_paused_confirmation_work.sql` and
+      // `0029_mcp_servers.sql` build an index or a table (#247, #305, #307, #309, #311): a
+      // re-run has to leave the tables, the indexes and the columns working, which the store
+      // calls below prove.
       expect(files).toContain('0016_user_preferences.sql')
       expect(files).toContain('0017_scheduler_instances.sql')
       expect(files).toContain('0018_credential_key_provider.sql')
@@ -527,11 +550,23 @@ if (target === null) {
       // `0028_paused_confirmation_work.sql` builds the fourth partial index on the log's event
       // types (#309), and must come after the files the tools stack already numbered.
       expect(files).toContain('0028_paused_confirmation_work.sql')
+      // #311's two files are numbered after `0028`, since pausing (#309) is beneath them in the
+      // stack: `0029_mcp_servers.sql` creates the two tables and `0030` adds the OAuth flow's
+      // `client` column, so the number that used to be `0026`/`0027` on the MCP branch moved —
+      // and the assertions below are what keeps the pair unique and ordered.
+      expect(files).toContain('0029_mcp_servers.sql')
+      expect(files).toContain('0030_mcp_oauth_state_client.sql')
       expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
         files.indexOf('0027_tool_settings.sql'),
       )
       expect(files.indexOf('0027_tool_settings.sql')).toBeLessThan(
         files.indexOf('0028_paused_confirmation_work.sql'),
+      )
+      expect(files.indexOf('0028_paused_confirmation_work.sql')).toBeLessThan(
+        files.indexOf('0029_mcp_servers.sql'),
+      )
+      expect(files.indexOf('0029_mcp_servers.sql')).toBeLessThan(
+        files.indexOf('0030_mcp_oauth_state_client.sql'),
       )
       expect(await migrate(db)).toEqual(files)
 
@@ -742,6 +777,50 @@ if (target === null) {
     })
   })
 
+  // ----------------------------------------- the MCP server store's extra tests
+
+  describe('PostgresMcpServerStore: more than the contract asks', () => {
+    it('keeps one row per (user, name) when two stores create at once', async () => {
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const first = trackMcpServers(createPostgresMcpServerStore({ pool }, { now: () => START_MS }))
+      const second = trackMcpServers(
+        createPostgresMcpServerStore({ pool }, { now: () => START_MS }),
+      )
+      // Two uncoordinated creates of the same name: the unique constraint decides, one wins and
+      // the other is refused — never two rows.
+      const results = await Promise.allSettled([
+        first.create(mcpServerInput()),
+        second.create(mcpServerInput()),
+      ])
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      const refused = results.find((result) => result.status === 'rejected')
+      if (refused?.status !== 'rejected') {
+        throw new Error('expected one of the two creates to be refused')
+      }
+      expect(refused.reason).toBeInstanceOf(DuplicateMcpServerNameError)
+      expect(await first.list({ ownerId: OWNER_A })).toHaveLength(1)
+    })
+
+    it('deletes a server and its pending OAuth states with the user', async () => {
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const store = trackMcpServers(createPostgresMcpServerStore({ pool }, { now: () => START_MS }))
+      const server = await store.create(mcpServerInput({ auth: 'oauth' }))
+      await store.createOAuthState({
+        state: 'state-1',
+        userId: OWNER_A,
+        serverId: server.id,
+        codeVerifier: 'v1',
+        client: 'web',
+        expiresAt: timestampAt(START_MS + 60_000),
+      })
+      // A server delete cascades to its pending states, so a callback can no longer complete.
+      expect(await store.delete(server.id, { ownerId: OWNER_A })).toBe(true)
+      expect(await store.consumeOAuthState('state-1')).toBeNull()
+    })
+  })
+
   /** The store a test works with: a clock it can move, and one seeded session. */
   async function seeded(clock: TestClock = createTestClock(START_MS)): Promise<{
     store: ReturnType<typeof createPostgresSessionStore>
@@ -765,6 +844,12 @@ if (target === null) {
   /** Remember a credential store so `afterEach` closes it. */
   function trackCredentials(store: ReturnType<typeof createPostgresCredentialStore>) {
     credentialStores.push(store)
+    return store
+  }
+
+  /** Remember an MCP server store so `afterEach` closes it. */
+  function trackMcpServers(store: ReturnType<typeof createPostgresMcpServerStore>) {
+    mcpStores.push(store)
     return store
   }
 
@@ -832,10 +917,31 @@ if (target === null) {
     // them are the ones `ensureUsers` inserts per test, and a `"user"` row carries the
     // `owner_id`s everything else references. `user_preferences` is here so one test's
     // preferences cannot leak into the next (#111), `user_tool_settings` so one test's tool
-    // choices cannot (#307), and `scheduler_instances` so one test's memberships cannot (#122).
+    // choices cannot (#307), `mcp_servers` and `mcp_oauth_states` so one test's remote MCP
+    // servers and their pending OAuth flows cannot (#303, X10; #311), and `scheduler_instances`
+    // so one test's memberships cannot (#122).
     await sql`truncate table
       events, event_claims, event_supersessions, sessions, agents, modes, partition_leases,
-      scheduler_instances, provider_credentials, user_preferences, user_tool_settings`.execute(db)
+      scheduler_instances, provider_credentials, user_preferences, user_tool_settings,
+      mcp_oauth_states, mcp_servers`.execute(db)
+  }
+}
+
+/** A create body for a Postgres MCP server test. */
+function mcpServerInput(overrides: Partial<CreateMcpServerInput> = {}): CreateMcpServerInput {
+  return {
+    ownerId: OWNER_A,
+    name: 'notes',
+    url: 'https://mcp.example.com/mcp',
+    auth: 'none',
+    enabled: true,
+    status: 'connected',
+    lastError: null,
+    headerNames: [],
+    tools: [],
+    definitionTokens: 0,
+    lastTestedAt: null,
+    ...overrides,
   }
 }
 

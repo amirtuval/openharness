@@ -12,6 +12,7 @@ import {
   encodeSeqCursor,
   isStoredEvent,
   newEventId,
+  newMcpServerId,
   partitionOf,
   SUMMARY_MODEL_SAME_AS_CHAT,
   type Agent,
@@ -323,10 +324,27 @@ export function runSessionStoreConformance(
 
       it('carries the tool override a mode may set, and null when it sets none (#307)', async () => {
         const { store } = await setup()
-        const override = { builtin: { web_search: true, todo_write: false } }
+        // The override's two halves: the built-in tools by name, and the user's MCP servers by
+        // id — a sibling key of `builtin`, never more entries in it (#311). A mode that names a
+        // server the user no longer has is stored as given and simply has no effect: nothing at
+        // this layer checks the id, which is what makes deleting a server leave such a mode
+        // alone.
+        const gone = newMcpServerId()
+        const override = {
+          builtin: { web_search: true, todo_write: false },
+          mcp_servers: { [newMcpServerId()]: true, [gone]: false },
+        }
         const withTools = await store.createMode(modeInput('deep', { tools: override }), OWNER_A)
         expect(withTools.tools).toEqual(override)
         expectExact(ModeSchema, withTools, 'a mode with a tool override')
+        // An override without the MCP half is the mode saying nothing about servers — the shape
+        // every mode stored before #311 has.
+        const builtinOnly = await store.createMode(
+          modeInput('builtins', { tools: { builtin: { web_fetch: false } } }),
+          OWNER_A,
+        )
+        expect(builtinOnly.tools).toEqual({ builtin: { web_fetch: false } })
+        expect(builtinOnly.tools).not.toHaveProperty('mcp_servers')
         // A mode that says nothing about tools has no override, not an empty one: the two mean
         // different things, and only `null` means "follow the user's settings".
         const plain = await store.createMode(

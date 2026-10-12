@@ -17,14 +17,19 @@
  * - **{@link CredentialStore}** (`./credentials`) — the sealed-blob storage contract for
  *   users' provider credentials: metadata in and out, the sealed form only for the one read
  *   the server's model path makes.
+ * - **{@link McpServerStore}** (`./mcp-servers`) — the storage contract for users' remote MCP
+ *   servers and their pending OAuth states (epic #303, X10): the resource's metadata in and
+ *   out, the sealed header map, tokens and registered OAuth client only for the reads the
+ *   server's connection check and token refresh make.
  * - **{@link InMemorySessionStore}** and **{@link InMemoryCredentialStore}** (`./memory`) —
  *   the in-memory implementations: the test fakes for every other package, and the reference
- *   behaviour for the contracts.
+ *   behaviour for the contracts. **{@link InMemoryMcpServerStore}** is the third.
  * - **{@link Clock}** and {@link timestampAt} (`./clock`) — the injectable time source every
  *   store takes, so tests can move time instead of waiting for it.
  * - **{@link FencedError}**, {@link SessionNotFoundError}, {@link AgentNotFoundError},
  *   {@link DuplicateEventIdError}, {@link ClaimConflictError}, {@link DuplicateModeNameError},
- *   {@link ModeLimitReachedError} (`./errors`) — the typed failures a store raises.
+ *   {@link ModeLimitReachedError}, {@link DuplicateMcpServerNameError},
+ *   {@link McpServerLimitReachedError} (`./errors`) — the typed failures a store raises.
  *
  * Since #245 (M6) the contract also carries a user's **modes** — the named presets a chat can
  * follow — in `./store`: `createMode`, `getMode`, `listModes`, `updateMode` and `deleteMode`.
@@ -41,5 +46,6 @@ export const PACKAGE_NAME = '@openharness/session'
 export * from './clock'
 export * from './credentials'
 export * from './errors'
+export * from './mcp-servers'
 export * from './memory'
 export * from './store'

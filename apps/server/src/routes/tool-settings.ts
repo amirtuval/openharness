@@ -19,9 +19,11 @@ import type { RouteDeps } from './deps'
  * the shape: preferences are one value of scalars — a default model, a theme, three compaction
  * controls — while tool settings are a **map** keyed by tool name that grows with the build,
  * whose entries a settings screen flips one at a time, and whose MCP half (#311/#312) will be
- * siblings of that map rather than more scalars. A `PUT` here merges per tool, the same "a
- * write changes what it names" rule the preferences route follows at the one granularity the
- * caller has.
+ * siblings of that map — a permission per MCP tool — rather than more scalars. What this route
+ * does not carry is which MCP **servers** are in play: that is the resource's own `enabled`
+ * (`/v1/me/mcp_servers`), which a mode may override (`tools.mcp_servers`, #311). A `PUT` here
+ * merges per tool, the same "a write changes what it names" rule the preferences route follows
+ * at the one granularity the caller has.
  *
  * Both verbs are owner-only, like every `/v1/me` route: the resource is the caller, and there
  * is no id in the path to get wrong. The `GET` takes an optional `mode_id` and answers as a

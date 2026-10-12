@@ -23,6 +23,15 @@ import type { RouteDeps } from './deps'
  *
  * Two store refusals reach the client as the protocol's `conflict_error` (409), mapped in
  * `app.ts`: a name the caller already has, and the twentieth-plus-one mode.
+ *
+ * A mode's **tool override** (`tools`, #307/#311) is stored exactly as the body spells it and
+ * is not checked against anything: the built-in names are free text a settings screen writes,
+ * and the `mcp_servers` map is keyed by `mcps_` id — validated as an id by the protocol's
+ * schema, never against the servers the caller happens to have. That is deliberate: a mode
+ * naming a server that is later deleted must keep working, because deleting the server is a
+ * separate act and rewriting every mode that mentioned it would make the delete fail or
+ * silently edit a user's presets. The override is resolved at request time instead, where a
+ * name nothing matches is simply no instruction (`mcp/in-force.ts`, `tool-settings.ts`).
  */
 export function registerModeRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   const modes = `${API_VERSION_PREFIX}/me/modes`

@@ -65,10 +65,12 @@ export function modeModelId(mode: Mode, defaultModel: string | null): string | n
  * does (`missing_provider_credential`). The *refusal* — the clear message a user gets for an
  * unusable mode — is the routes', checked where a chat starts or continues.
  *
- * Since #307 it also carries the mode's **tool override**: which built-in tools a chat on this
- * mode has on or off. The loop hands it to the tool-settings resolver with the owner, where it
- * is applied over the user's own choices — a mode decides the tool set, never a permission — so
- * the override travels with the mode rather than being resolved into the answer here.
+ * Since #307 it also carries the mode's **tool override**: which tools a chat on this mode has
+ * on or off — the built-in ones by name, and the user's remote MCP servers by id (#311). The
+ * loop hands it to the tool-settings resolver with the owner, where the built-in half is applied
+ * over the user's own choices, and to `listMcpServersInForce` (`mcp/in-force.ts`) for the MCP
+ * half — a mode decides the tool set and which servers are in play, never a permission — so the
+ * override travels with the mode rather than being resolved into the answer here.
  */
 export async function resolveMode(
   deps: ModeDeps,

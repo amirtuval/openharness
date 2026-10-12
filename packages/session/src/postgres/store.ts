@@ -2126,7 +2126,7 @@ const MODE_CREATE_LOCK = 'openharness:mode-create:'
  * constraint matters: a violation of another constraint is a different bug — a `(session_id,
  * seq)` collision the append lock means cannot happen, say — and it surfaces as itself.
  */
-function isUniqueViolation(error: unknown, constraints: ReadonlySet<string>): boolean {
+export function isUniqueViolation(error: unknown, constraints: ReadonlySet<string>): boolean {
   if (typeof error !== 'object' || error === null) {
     return false
   }

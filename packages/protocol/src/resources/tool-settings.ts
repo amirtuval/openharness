@@ -71,7 +71,10 @@ export type BuiltinToolSetting = z.infer<typeof BuiltinToolSettingSchema>
  * user's MCP servers are on or off as a resource of their own (#311 carries the `enabled`
  * field that is the user's default), and a permission for one MCP tool is keyed by its server
  * and its tool (#312), which will be a sibling entry of this object rather than a change to
- * this one.
+ * this one. What #311 did land is the **mode's** view of the servers: whether one is in play at
+ * all is a mode's override (`{@link ModeToolOverrideSchema}`'s `mcp_servers`), not a per-tool
+ * setting here — a mode never carries a permission, and a user's tool settings never carry a
+ * server.
  *
  * A tool absent from the map follows **its own declared default** — the permission its
  * `ToolDefinition` carries, which is `allow` for every built-in tool and `ask` for every MCP
