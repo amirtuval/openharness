@@ -1,9 +1,16 @@
 import type { Mode, ModelEntry } from '@openharness/protocol'
-import { Box, Text, useInput, useStdout } from 'ink'
+import { Box, Text, useInput } from 'ink'
 import { useRef, useState, type ReactElement } from 'react'
 
 import { modeLabel } from '../modes'
-import { listJump, listWindow, moreMarker, viewportRows, type ListWindow } from './list-viewport'
+import {
+  listJump,
+  listWindow,
+  moreMarker,
+  useTerminalRows,
+  viewportRows,
+  type ListWindow,
+} from './list-viewport'
 
 /**
  * How many models the picker draws at once.
@@ -129,7 +136,7 @@ export function ModelPicker({
   onSelect,
   onCancel,
 }: ModelPickerProps) {
-  const { stdout } = useStdout()
+  const terminalRows = useTerminalRows()
   const [query, setQuery] = useState('')
   const [index, setIndex] = useState(0)
   // `null` while the list is shown; the buffer while the free-text entry is being typed.
@@ -154,7 +161,7 @@ export function ModelPicker({
   // beside it, so the two cannot get out of step — the cursor stays in frame wherever it is.
   const capacity = Math.min(
     MODEL_PICKER_VISIBLE_ROWS,
-    viewportRows(stdout.rows, MODEL_PICKER_CHROME),
+    viewportRows(terminalRows, MODEL_PICKER_CHROME),
   )
   const window = listWindow(index, rows.length, capacity)
   const visible = rows.slice(window.first, window.first + window.count)

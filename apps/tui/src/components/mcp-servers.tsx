@@ -16,7 +16,7 @@ import {
   type McpServerTone,
 } from '@openharness/client'
 import type { McpServer, ToolPermission, ToolSettingEntry } from '@openharness/protocol'
-import { Box, Text, useInput, useStdout } from 'ink'
+import { Box, Text, useInput } from 'ink'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { describeError, type ErrorContext } from '../errors'
@@ -28,7 +28,13 @@ import {
   mcpServerValues,
   type McpField,
 } from '../mcp/form'
-import { listJump, ScrollingList, VIEWPORT_HINT, viewportRows } from './list-viewport'
+import {
+  listJump,
+  ScrollingList,
+  useTerminalRows,
+  VIEWPORT_HINT,
+  viewportRows,
+} from './list-viewport'
 import { SecretInput } from './secret-input'
 
 /** The permissions a remote tool's row cycles through, in the order the key walks them. */
@@ -79,7 +85,7 @@ export function McpServersScreen({
   /** Called when the reader leaves: Esc on the list, or Ctrl+C. */
   readonly onDone: () => void
 }) {
-  const { stdout } = useStdout()
+  const terminalRows = useTerminalRows()
   const [servers, setServers] = useState<readonly McpServer[] | null>(null)
   const [tools, setTools] = useState<readonly ToolSettingEntry[]>([])
   const [index, setIndex] = useState(0)
@@ -345,8 +351,8 @@ export function McpServersScreen({
   // as many of them.
   const TOOLS_CHROME = 6
   const SERVERS_CHROME = 7
-  const toolPage = viewportRows(stdout.rows, TOOLS_CHROME)
-  const serverPage = Math.max(1, Math.floor(viewportRows(stdout.rows, SERVERS_CHROME) / 2))
+  const toolPage = viewportRows(terminalRows, TOOLS_CHROME)
+  const serverPage = Math.max(1, Math.floor(viewportRows(terminalRows, SERVERS_CHROME) / 2))
 
   /** One prompt answered: remember it, and move on — or save on the last one. */
   const answer = async (value: string): Promise<void> => {
@@ -643,7 +649,7 @@ export function McpServersScreen({
                 items={serverTools}
                 index={Math.max(toolCursor - 1, 0)}
                 selected={toolCursor > 0}
-                rows={stdout.rows}
+                rows={terminalRows}
                 chrome={TOOLS_CHROME}
                 pinned={
                   <Text color={toolCursor === 0 ? 'cyan' : undefined}>
@@ -676,7 +682,7 @@ export function McpServersScreen({
         <ScrollingList
           items={list}
           index={index}
-          rows={stdout.rows}
+          rows={terminalRows}
           chrome={SERVERS_CHROME}
           rowLines={2}
           renderRow={(server, position, marker) => (

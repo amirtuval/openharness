@@ -765,7 +765,10 @@ scroll away from the tools it sets), `/tools`, the model picker (whose window is
 what the terminal has room for, whichever is smaller) and the `/providers` target list. The
 selected row is marked with a `❯` and never by colour alone, and a screen that reports a terminal
 with no height — `stdout.rows` is `undefined` in `ink-testing-library`, and in a pipe — gets the
-default rather than a window of no rows.
+default rather than a window of no rows. The height comes from `useTerminalRows()`, which
+subscribes to the stream's `resize` event: Ink reports a new size but re-renders nothing on its
+own, so a screen that read `stdout.rows` once would keep the window it computed for the old
+terminal until the next keystroke (visible as a list that stays short in a maximised window).
 
 A **remote MCP tool** (`source: 'mcp'`, offered as `<server>__<tool>`) is set differently, and
 the difference is the point (#314): `--policy` writes the `mcp` map — where a remote tool's

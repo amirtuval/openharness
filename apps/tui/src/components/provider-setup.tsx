@@ -6,7 +6,7 @@ import {
   type Client,
   type CredentialTarget,
 } from '@openharness/client'
-import { Box, Text, useInput, useStdout } from 'ink'
+import { Box, Text, useInput } from 'ink'
 import { readFile } from 'node:fs/promises'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -18,7 +18,7 @@ import {
   nameErrorMessage,
   type CredentialField,
 } from '../providers/credential-form'
-import { listJump, ScrollingList, VIEWPORT_HINT } from './list-viewport'
+import { listJump, ScrollingList, useTerminalRows, VIEWPORT_HINT } from './list-viewport'
 import { SecretInput } from './secret-input'
 
 /**
@@ -92,7 +92,7 @@ export function ProviderSetup({
   const [target, setTarget] = useState<CredentialTarget | null>(() =>
     targetForName(initialProvider),
   )
-  const { stdout } = useStdout()
+  const terminalRows = useTerminalRows()
   const [index, setIndex] = useState(() => targetIndex(initialProvider))
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
@@ -363,7 +363,7 @@ export function ProviderSetup({
           <ScrollingList
             items={CREDENTIAL_TARGETS}
             index={index}
-            rows={stdout.rows}
+            rows={terminalRows}
             chrome={PROVIDER_PICKER_CHROME}
             renderRow={(entry, position, marker) => (
               <Text color={position === index ? 'cyan' : undefined}>

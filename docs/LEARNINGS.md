@@ -1112,7 +1112,11 @@ the write resolves and replaced by the read-back that follows — and it is why 
 keeps an `indexRef` next to its `index`. The same trap has a second face: `ink-testing-library`'s
 fake stdout reports `columns = 100` and **no `rows` at all**, so a screen that sizes a list from the
 terminal must tolerate `undefined` and fall back to a height of its own, or every test of it runs
-against a zero-row window.
+against a zero-row window. And a terminal's height changes without Ink re-rendering anything —
+`stdout.rows` is updated on the stream's `resize` event, but a component that only *read* it keeps
+the window it computed for the old size until some other state changes, which reads as a list that
+stays short in a maximised window; `oh` subscribes in one hook (`useTerminalRows`), so every list
+gets the redraw.
 
 **A list that can outgrow the screen has to be windowed against the terminal's height, and the
 selected row has to be marked with a glyph.** The `/mcp` tools face drew every tool of the server,

@@ -11,6 +11,7 @@ import {
   listJump,
   listWindow,
   moreMarker,
+  useTerminalRows,
   viewportRows,
 } from './list-viewport'
 
@@ -85,6 +86,28 @@ describe('listJump', () => {
   it('leaves the arrow keys alone, and an empty list with nothing to jump to', () => {
     expect(listJump(3, 60, { upArrow: true, downArrow: true }, page)).toBeNull()
     expect(listJump(0, 0, { pageDown: true, home: true }, page)).toBeNull()
+  })
+})
+
+/** A screen that only reports the height it reads, so the hook can be held on its own. */
+function HeightProbe() {
+  const rows = useTerminalRows()
+  return <Text>{`rows: ${String(rows ?? 'none')}`}</Text>
+}
+
+describe('useTerminalRows', () => {
+  it('reports what the terminal says, and re-renders when it is resized', async () => {
+    const instance = render(<HeightProbe />)
+    // `ink-testing-library`'s fake stdout reports no height at all — the case a screen must
+    // tolerate, and the reason `viewportRows` has a fallback.
+    await waitForFrame(instance, 'rows: none')
+
+    // A real terminal reports one, and reports it again when it changes: a list that read it
+    // once would stay short in a maximised window until the next keystroke.
+    Object.assign(instance.stdout, { rows: 40 })
+    instance.stdout.emit('resize')
+    await waitForFrame(instance, 'rows: 40')
+    instance.unmount()
   })
 })
 

@@ -1,5 +1,5 @@
-import { Box, Text } from 'ink'
-import type { ReactElement, ReactNode } from 'react'
+import { Box, Text, useStdout } from 'ink'
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 /**
  * A scrolling list viewport: the rows that fit, the cursor always among them, and a count of
@@ -44,6 +44,33 @@ export function viewportRows(terminalRows: number | undefined, chromeRows: numbe
   const rows =
     terminalRows === undefined || terminalRows <= 0 ? DEFAULT_TERMINAL_ROWS : terminalRows
   return Math.max(MIN_VIEWPORT_ROWS, rows - chromeRows)
+}
+
+/**
+ * The terminal's height in rows, re-read when the terminal is resized.
+ *
+ * Ink's stream reports the new size on `resize` but nothing re-renders on its own, so a screen
+ * that read `stdout.rows` once would keep the window it computed for the old height until the
+ * next keystroke — visible as a list that stays short in a maximised window. Subscribing here
+ * means the resize itself redraws, and every list gets it rather than each screen remembering to.
+ * `undefined` (a test frame, a pipe) is passed through: {@link viewportRows} has the fallback.
+ */
+export function useTerminalRows(): number | undefined {
+  const { stdout } = useStdout()
+  const [rows, setRows] = useState<number | undefined>(() => stdout.rows)
+
+  useEffect(() => {
+    const onResize = (): void => {
+      setRows(stdout.rows)
+    }
+    stdout.on('resize', onResize)
+    onResize()
+    return () => {
+      stdout.off('resize', onResize)
+    }
+  }, [stdout])
+
+  return rows
 }
 
 /** The slice of a list that is on screen, and what is not. */

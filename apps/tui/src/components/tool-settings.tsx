@@ -5,11 +5,17 @@ import {
   type Client,
 } from '@openharness/client'
 import type { ToolPermission, ToolSettingEntry } from '@openharness/protocol'
-import { Box, Text, useInput, useStdout } from 'ink'
+import { Box, Text, useInput } from 'ink'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { describeError, type ErrorContext } from '../errors'
-import { listJump, ScrollingList, VIEWPORT_HINT, viewportRows } from './list-viewport'
+import {
+  listJump,
+  ScrollingList,
+  useTerminalRows,
+  VIEWPORT_HINT,
+  viewportRows,
+} from './list-viewport'
 
 /**
  * This build's own tools, in the terminal (epic #303, X4; #335) — `/tools`, the counterpart of
@@ -54,7 +60,7 @@ export function ToolSettingsScreen({
   /** Called when the reader leaves: Esc, or Ctrl+C. */
   readonly onDone: () => void
 }) {
-  const { stdout } = useStdout()
+  const terminalRows = useTerminalRows()
   const [entries, setEntries] = useState<readonly ToolSettingEntry[] | null>(null)
   const [remote, setRemote] = useState(0)
   const [index, setIndex] = useState(0)
@@ -104,7 +110,7 @@ export function ToolSettingsScreen({
   // The title, the key hints and one line for a note or an error, fixed: the window must not
   // move under a keystroke because a note appeared or went away.
   const chrome = 5
-  const capacity = viewportRows(stdout.rows, chrome)
+  const capacity = viewportRows(terminalRows, chrome)
 
   /**
    * Write one tool's whole setting — `enabled` and `policy` together, which is what the schema
@@ -217,7 +223,7 @@ export function ToolSettingsScreen({
         <ScrollingList
           items={rows}
           index={at}
-          rows={stdout.rows}
+          rows={terminalRows}
           chrome={chrome}
           renderRow={(entry, position, marker) => {
             const availability = toolAvailabilityNote(entry)
