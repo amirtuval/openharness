@@ -5,14 +5,15 @@ import { z } from 'zod'
  *
  * Every id is `<prefix><ULID>`, using the same prefixes as Anthropic's Managed Agents API —
  * `agent_` for agents, `sesn_` for sessions and `sevt_` for stored session events — plus
- * `pcred_` for provider credentials, `mode_` for modes and `mcps_` for remote MCP servers
- * (openharness extensions; Anthropic has none of the three). A ULID is 26 Crockford base32 characters: a 48-bit millisecond
+ * `pcred_` for provider credentials, `mode_` for modes, `mcps_` for remote MCP servers and
+ * `task_` for background tasks
+ * (openharness extensions; Anthropic has none of the four). A ULID is 26 Crockford base32 characters: a 48-bit millisecond
  * timestamp followed by 80 random bits, so ids sort by creation time and are globally unique
  * without coordination.
  *
  * The ids this module produces are also **branded** at the type level
  * ({@link AgentId}, {@link SessionId}, {@link EventId}, {@link ProviderCredentialId},
- * {@link ModeId}, {@link McpServerId}), so a session id cannot be passed where an event id is
+ * {@link ModeId}, {@link McpServerId}, {@link TaskId}), so a session id cannot be passed where an event id is
  * expected.
  */
 
@@ -24,11 +25,12 @@ export const ID_PREFIXES = {
   providerCredential: 'pcred_',
   mode: 'mode_',
   mcpServer: 'mcps_',
+  task: 'task_',
 } as const
 
 /**
  * A key of {@link ID_PREFIXES}:
- * `'agent' | 'session' | 'event' | 'providerCredential' | 'mode' | 'mcpServer'`.
+ * `'agent' | 'session' | 'event' | 'providerCredential' | 'mode' | 'mcpServer' | 'task'`.
  */
 export type IdType = keyof typeof ID_PREFIXES
 
@@ -39,6 +41,7 @@ const ID_PREFIX_ENTRIES: readonly (readonly [IdType, string])[] = [
   ['providerCredential', ID_PREFIXES.providerCredential],
   ['mode', ID_PREFIXES.mode],
   ['mcpServer', ID_PREFIXES.mcpServer],
+  ['task', ID_PREFIXES.task],
 ]
 
 /** Length of the ULID part of an id. */
@@ -236,9 +239,19 @@ export function newMcpServerId(timestampMs?: number): McpServerId {
   return McpServerIdSchema.parse(generateId('mcpServer', timestampMs))
 }
 
+/** A new `task_` id: one background task a session started (epic #340, S4; #343). */
+export function newTaskId(timestampMs?: number): TaskId {
+  return TaskIdSchema.parse(generateId('task', timestampMs))
+}
+
 /** Whether `value` is an `mcps_` id. */
 export function isMcpServerId(value: unknown): value is string {
   return isId(value, 'mcpServer')
+}
+
+/** Whether `value` is a `task_` id. */
+export function isTaskId(value: unknown): value is string {
+  return isId(value, 'task')
 }
 
 /**
@@ -300,3 +313,14 @@ export const McpServerIdSchema = z
   .brand<'McpServerId'>()
 
 export type McpServerId = z.infer<typeof McpServerIdSchema>
+
+/**
+ * Branded `task_` id. // extension: Anthropic's Managed Agents API has no background tasks, so
+ * this prefix is openharness' own (epic #340, S4; #343).
+ */
+export const TaskIdSchema = z
+  .string()
+  .refine(isTaskId, { error: 'must be a `task_` id' })
+  .brand<'TaskId'>()
+
+export type TaskId = z.infer<typeof TaskIdSchema>

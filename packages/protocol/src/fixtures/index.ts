@@ -1,4 +1,4 @@
-import type { EventId } from '../ids'
+import type { EventId, TaskId } from '../ids'
 import {
   newAgentId,
   newEventId,
@@ -6,8 +6,10 @@ import {
   newModeId,
   newProviderCredentialId,
   newSessionId,
+  newTaskId,
 } from '../ids'
 import { SUMMARY_MODEL_SAME_AS_CHAT } from '../index'
+import type { TaskStatus } from '../tasks'
 import { DEFAULT_MCP_TOOL_PERMISSION, mcpToolOfferedName } from '../tools'
 import type {
   Agent,
@@ -42,6 +44,9 @@ import type {
   SessionStatusIdleEvent,
   SessionStatusRescheduledEvent,
   SessionStatusRunningEvent,
+  SessionTaskNotificationEvent,
+  SessionTaskStartedEvent,
+  SessionTaskStatusEvent,
   SessionUsageEvent,
   StoredEvent,
   StoredEventDelta,
@@ -919,6 +924,87 @@ export function makeSessionCompaction(
     outcome: 'summarized',
     instructions: 'keep the API decisions in detail',
     summary_seq: 8,
+  }
+  return { ...event, ...overrides }
+}
+
+// ------------------------------------------------------- background tasks (#343)
+
+/**
+ * A stored `session.task_started`: the session started a background task (epic #340, S4; #343).
+ *
+ * The default is a subagent — the first kind of task, and the one the first user of this
+ * mechanism starts — with a child session and a type. Override `kind`/`task_type` as the epic
+ * grows more kinds, or drop `child_session_id` for a task that is not a session of its own.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionTaskStarted(
+  overrides: Partial<SessionTaskStartedEvent> = {},
+): SessionTaskStartedEvent {
+  const event: SessionTaskStartedEvent = {
+    id: newEventId(),
+    type: 'session.task_started',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    task_id: newTaskId(),
+    kind: 'subagent',
+    child_session_id: newSessionId(),
+    task_type: 'researcher',
+    description: 'Research how the event log handles a rewind',
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `session.task_status`: what the task is doing now (epic #340, S4; #343).
+ *
+ * The default is `running` — the status written when a task starts, so a client draws a card
+ * for a task that has not finished anything yet.
+ *
+ * @param taskId the task this status is of
+ * @param status what it is doing; `running` by default
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionTaskStatus(
+  taskId: TaskId,
+  status: TaskStatus = 'running',
+  overrides: Partial<SessionTaskStatusEvent> = {},
+): SessionTaskStatusEvent {
+  const event: SessionTaskStatusEvent = {
+    id: newEventId(),
+    type: 'session.task_status',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    task_id: taskId,
+    status,
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `session.task_notification`: something reached the parent model (epic #340, S4; #343).
+ *
+ * The one **queued** event of the three, so its default `processed_at` is `null` — a
+ * notification nobody has claimed yet. Pass a `processed_at` to build the read a client sees
+ * once a turn has claimed it.
+ *
+ * @param taskId the task this came from
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionTaskNotification(
+  taskId: TaskId,
+  overrides: Partial<SessionTaskNotificationEvent> = {},
+): SessionTaskNotificationEvent {
+  const event: SessionTaskNotificationEvent = {
+    id: newEventId(),
+    type: 'session.task_notification',
+    seq: takeSeq(),
+    processed_at: null,
+    task_id: taskId,
+    kind: 'result',
+    text: 'The rewind supersedes the tail of the log from the edited message.',
+    source_key: `${taskId}:3`,
   }
   return { ...event, ...overrides }
 }
