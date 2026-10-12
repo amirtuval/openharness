@@ -2011,6 +2011,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       return SessionUsageSchema.parse({
         session_id: sessionId,
         ...fakeUsage(fakeRequestsOf(brain), priceOf),
+        // The fake starts no child sessions — a child is the **server's** to create (epic #340,
+        // S3; #344) — so a chat it serves never delegated anything and the subtree's share is
+        // zeroed. The field is carried because it is part of the protocol's answer.
+        descendants: fakeUsage([], priceOf),
       })
     },
 

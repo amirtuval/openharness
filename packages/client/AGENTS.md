@@ -1165,7 +1165,9 @@ matches the real route's (a base URL's host). The recommendation table the serve
 one thing the fake does not restate.
 
 The usage reads are answered from the fake's own logs (#247), the way the server answers them
-from a real one — and `searches` is `0`, because the fake's brain runs no tool loop and so serves
+from a real one — and `descendants` is zeroed in a session's answer, because the fake starts no
+child sessions (a child is the **server's** to create, epic #340, S3; #344), while the field is
+carried because it is part of the protocol's shape — and `searches` is `0`, because the fake's brain runs no tool loop and so serves
 a chat that asks for no searches (#305; the real count is the server's): `fakeRequestsOf` pairs a session's spans (through the replay read, so a rewound
 branch is not counted), `fakeUsage` prices them with the catalog the fake lists and assembles the
 totals and the per-model split, and `usage.me` groups the caller's requests by the local day they
