@@ -55,6 +55,7 @@ function fakeContext(session: ChatSession) {
     clears: 0,
     exits: 0,
     mcp: 0,
+    tools: 0,
     notices: [] as { readonly kind: string; readonly text: string }[],
   }
   const context: CommandContext = {
@@ -70,6 +71,9 @@ function fakeContext(session: ChatSession) {
     },
     openMcpServers: () => {
       calls.mcp += 1
+    },
+    openToolSettings: () => {
+      calls.tools += 1
     },
     compact: (instructions) => {
       calls.compactions.push(instructions)
@@ -323,6 +327,15 @@ describe('running a command', () => {
     await run('mcp', context)
 
     expect(calls.mcp).toBe(1)
+  })
+
+  it('/tools opens this build’s tools (#335)', async () => {
+    const { session } = chatSession()
+    const { context, calls } = fakeContext(session)
+
+    await run('tools', context)
+
+    expect(calls.tools).toBe(1)
   })
 
   it('/compact asks for a manual compaction, with the guidance it was given (#283)', async () => {

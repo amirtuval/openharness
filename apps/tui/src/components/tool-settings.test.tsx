@@ -3,7 +3,14 @@ import { createFakeClient } from '@openharness/client/testing'
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { frameOf, pressKey, typeText, waitFor, waitForFrame, waitForScreen } from '../test-support/input'
+import {
+  frameOf,
+  pressKey,
+  typeText,
+  waitFor,
+  waitForFrame,
+  waitForScreen,
+} from '../test-support/input'
 import { ToolSettingsScreen } from './tool-settings'
 
 /** The environment a chat screen has: the server an error is described against. */
@@ -220,7 +227,7 @@ describe('/tools: a list longer than the screen', () => {
     pressKey(app, 'end')
     await waitForFrame(app, '❯ tool_9')
     const atEnd = frameOf(app)
-    expect(atEnd).toContain("↑ 24 more")
+    expect(atEnd).toContain('↑ 24 more')
     expect(atEnd).not.toContain('web_fetch')
 
     pressKey(app, 'home')

@@ -41,7 +41,8 @@ export const DEFAULT_TERMINAL_ROWS = 24
  * shorter than its own chrome would otherwise ask for a list of no rows at all.
  */
 export function viewportRows(terminalRows: number | undefined, chromeRows: number): number {
-  const rows = terminalRows === undefined || terminalRows <= 0 ? DEFAULT_TERMINAL_ROWS : terminalRows
+  const rows =
+    terminalRows === undefined || terminalRows <= 0 ? DEFAULT_TERMINAL_ROWS : terminalRows
   return Math.max(MIN_VIEWPORT_ROWS, rows - chromeRows)
 }
 

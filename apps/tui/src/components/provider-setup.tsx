@@ -6,7 +6,7 @@ import {
   type Client,
   type CredentialTarget,
 } from '@openharness/client'
-import { Box, Text, useInput } from 'ink'
+import { Box, Text, useInput, useStdout } from 'ink'
 import { readFile } from 'node:fs/promises'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -18,6 +18,7 @@ import {
   nameErrorMessage,
   type CredentialField,
 } from '../providers/credential-form'
+import { listJump, ScrollingList, VIEWPORT_HINT } from './list-viewport'
 import { SecretInput } from './secret-input'
 
 /**
@@ -73,6 +74,12 @@ export interface ProviderSetupProps {
   readonly onStaleSession: () => void
 }
 
+/** The lines the picker draws around its list: two of copy, a note, and the key hint. */
+const PROVIDER_PICKER_CHROME = 5
+
+/** How far PgUp/PgDn move the target list: about a screenful of them. */
+const JUMP_PAGE = 10
+
 export function ProviderSetup({
   client,
   context,
@@ -85,6 +92,7 @@ export function ProviderSetup({
   const [target, setTarget] = useState<CredentialTarget | null>(() =>
     targetForName(initialProvider),
   )
+  const { stdout } = useStdout()
   const [index, setIndex] = useState(() => targetIndex(initialProvider))
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
@@ -326,6 +334,12 @@ export function ProviderSetup({
       moveTo(indexRef.current + 1)
       return
     }
+    // Fifteen targets are more than a short terminal shows: jump by a page, and to either end.
+    const jumped = listJump(indexRef.current, CREDENTIAL_TARGETS.length, key, JUMP_PAGE)
+    if (jumped !== null) {
+      moveTo(jumped)
+      return
+    }
     if (key.return) {
       const picked = CREDENTIAL_TARGETS[indexRef.current]
       if (picked !== undefined) choose(picked)
@@ -346,16 +360,24 @@ export function ProviderSetup({
           server, never on this machine.
         </Text>
         <Box flexDirection="column" marginTop={1}>
-          {CREDENTIAL_TARGETS.map((entry, position) => (
-            <Text key={entry.name} color={position === index ? 'cyan' : undefined}>
-              {`${position === index ? '❯' : ' '} ${entry.displayName}${
-                entry.freeTier === undefined ? '' : ` · ${entry.freeTier}`
-              }`}
-            </Text>
-          ))}
+          <ScrollingList
+            items={CREDENTIAL_TARGETS}
+            index={index}
+            rows={stdout.rows}
+            chrome={PROVIDER_PICKER_CHROME}
+            renderRow={(entry, position, marker) => (
+              <Text color={position === index ? 'cyan' : undefined}>
+                {`${marker} ${entry.displayName}${
+                  entry.freeTier === undefined ? '' : ` · ${entry.freeTier}`
+                }`}
+              </Text>
+            )}
+          />
         </Box>
         {note !== null && <Text dimColor>{note}</Text>}
-        <Text dimColor>↑/↓ to choose, Enter to connect, o for its key page, Esc to skip.</Text>
+        <Text dimColor>
+          ↑/↓ to choose, {VIEWPORT_HINT}, Enter to connect, o for its key page, Esc to skip.
+        </Text>
       </Box>
     )
   }

@@ -100,7 +100,6 @@ export function ToolSettingsScreen({
 
   const rows = entries ?? []
   const at = Math.min(index, Math.max(rows.length - 1, 0))
-  const current = rows[at]
 
   // The title, the key hints and one line for a note or an error, fixed: the window must not
   // move under a keystroke because a note appeared or went away.
@@ -135,7 +134,9 @@ export function ToolSettingsScreen({
         // that arrives before the read-back has rendered cycles from **this** permission and
         // not from the one before the write.
         const patched = rowsRef.current.map((row) =>
-          row.name === entry.name ? { ...row, enabled: next.enabled ?? row.enabled, policy: next.policy ?? row.policy } : row,
+          row.name === entry.name
+            ? { ...row, enabled: next.enabled ?? row.enabled, policy: next.policy ?? row.policy }
+            : row,
         )
         rowsRef.current = patched
         setEntries(patched)
@@ -234,9 +235,7 @@ export function ToolSettingsScreen({
         />
       )}
       <Text dimColor>{mcpToolsNote(remote)}</Text>
-      <Text dimColor>
-        ←/→ permission · space on/off · ↑/↓ choose · {VIEWPORT_HINT} · Esc done
-      </Text>
+      <Text dimColor>←/→ permission · space on/off · ↑/↓ choose · {VIEWPORT_HINT} · Esc done</Text>
     </Box>
   )
 }
