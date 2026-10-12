@@ -9,6 +9,7 @@ import {
   pendingCallsNotice,
   sessionCost,
   stepLimitNotice,
+  stuckNotice,
   truncatedResultsNotice,
 } from '@openharness/client'
 import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
@@ -175,8 +176,9 @@ export function ChatView({
   // step limit and the two result notices come from the transcript's records, and the model's
   // ability to call tools from its catalog entry's `tool_call` (which the server answers). The
   // step-limit sentence replaces the generic error banner — it is a notice, not a failure to
-  // retry — so the reader is told once.
-  const stepLimit = stepLimitNotice(lastError)
+  // retry — so the reader is told once. A turn the model looped on (#331) is the same kind of
+  // notice, drawn in the same place.
+  const stepLimit = stepLimitNotice(lastError) ?? stuckNotice(lastError)
   // An MCP server that could not be used is a notice, not a failure (epic #303, X10; #313): the
   // chat goes on without that server's tools, and the one thing a reader can do about it is
   // reconnect it — so it is drawn with that action rather than as the generic red banner. The

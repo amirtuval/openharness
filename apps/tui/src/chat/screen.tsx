@@ -16,6 +16,7 @@ import {
   selectSessionUsage,
   sessionCost,
   stepLimitNotice,
+  stuckNotice,
   truncatedResultsNotice,
 } from '@openharness/client'
 import type { Client, TranscriptError } from '@openharness/client'
@@ -311,8 +312,9 @@ export function ChatScreen({
   // on its own is a notice.
   const error = view.transcript.lastError
   // The step limit is a notice rather than a failure to retry (X2), so its own line replaces the
-  // generic turn error for that one type — the reader is told once.
-  const stepLimit = stepLimitNotice(error)
+  // generic turn error for that one type — the reader is told once. A turn the model looped on
+  // (#331) is the same kind of notice and replaces the generic error the same way.
+  const stepLimit = stepLimitNotice(error) ?? stuckNotice(error)
   // An MCP server the turn could not use is a notice, not a failure (epic #303, X10; #313): the
   // chat carries on without its tools, and the one thing a reader can do is reconnect it. The
   // sentence and the server it names are the client's own reading, so the page and the terminal

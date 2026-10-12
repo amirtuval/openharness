@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 
 import {
+  CLEARED_TOOL_RESULT,
   conversationItems,
   createContextStrategy,
   cutAtUserBoundary,
@@ -1046,7 +1047,7 @@ describe('clearing old results before summarizing (epic #303, X9; #306)', () => 
 
     // The request carries the placeholder where the answer was, and the request's span records
     // what was cleared — the one place a reader learns the model did not get the body.
-    expect(toolResultValues(scripts.chat.calls[0]!)).toEqual(['result cleared, 1000 tokens'])
+    expect(toolResultValues(scripts.chat.calls[0]!)).toEqual([CLEARED_TOOL_RESULT(1000)])
     const spans = events.filter((event) => event.type === 'span.model_request_start')
     expect(spans[0]).toMatchObject({
       model: CHAT_MODEL,

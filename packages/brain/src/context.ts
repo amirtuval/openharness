@@ -7,8 +7,10 @@ import type {
   ModelConfig,
   ModelRequestPurpose,
   ModelUsage,
+  RequestReminder,
   StoredEvent,
   Supersedes,
+  TodoList,
   ToolResultTruncation,
   Truncation,
 } from '@openharness/protocol'
@@ -16,6 +18,7 @@ import {
   EVENT_TYPES,
   isToolCallEvent,
   isToolResultEvent,
+  readTodoList,
   toolCallInput,
   toolCallOfferedName,
   toolResultCallId,
@@ -24,6 +27,7 @@ import {
 import type { ModelMessage } from 'ai'
 
 import { lastModelRequest } from './log'
+import { stuckReminder } from './stuck'
 
 /**
  * Turning the session log into the messages a model request is made with — and measuring how
@@ -87,6 +91,13 @@ export interface ContextStrategyResult {
    * records it on the request's span; the results themselves stay whole in the log.
    */
   readonly cleared?: ClearedResults
+  /**
+   * The reminders the request carried besides the history (#331), or absent when it carried none:
+   * the session's current todo list, and the stuck reminder a streak of identical calls earns.
+   * The loop records them on the request's span — the only place the log says the model was told,
+   * because none of it is stored as a message.
+   */
+  readonly reminders?: readonly RequestReminder[]
 }
 
 /** What a {@link ContextStrategy} is told about the session it is building a context for. */
@@ -101,6 +112,22 @@ export interface ContextStrategyOptions {
    * even for a request that offers no tools: a result from an earlier step is still capped.
    */
   readonly tools?: ToolRegistry
+  /**
+   * // extension: the share of the budget at which old tool results are cleared (#331);
+   * {@link DEFAULT_CLEAR_THRESHOLD} when absent.
+   *
+   * Per request rather than baked into the strategy, because the size accounting has to read the
+   * same number: the loop hands its `clearThreshold` to this and to
+   * {@link estimateContextSize}, so the request it measures and the request it builds clear on
+   * the same condition (#306's invariant).
+   */
+  readonly clearThreshold?: number
+  /**
+   * // extension: whether to nudge the model to write a todo list before its first tool call
+   * (#331). Off when absent, which is the default everywhere: the study's benefit for showing a
+   * plan is real but small, and a nudge on every turn's first request is not free.
+   */
+  readonly todoNudge?: boolean
 }
 
 /** Characters per token in {@link estimateTokens}. Rough, and deliberately so. */
@@ -138,17 +165,51 @@ export const TOOL_RESULT_BUDGET_RATIO = 0.2
 export const RECENT_TAIL_RATIO = 0.25
 
 /**
- * What an old tool result's body is replaced by in a request (epic #303, X9).
+ * The share of the chat model's budget at which clearing turns on (#331): a half.
+ *
+ * Clearing old tool results is the first answer to a filling context (X9) — cheaper than a
+ * summary, and the only answer that costs no model call — but clearing on *every* request, as
+ * #306 did, throws away output a chat at 30% of its budget could still use. The study this comes
+ * from stages its two levers: it elides old tool output at 0.6 of the usable window and only
+ * summarizes past 0.85. Its clearing sits at 0.6/0.85 ≈ 0.71 of its summarization threshold, so
+ * this one sits at the same ~0.71 of **this** deployment's 0.7 ({@link DEFAULT_COMPACTION_THRESHOLD}
+ * in `./summarize`) ≈ 0.5 — a half of the budget. Below it a request carries its results as they
+ * were stored (still capped, X9); at or above it, old ones are cleared, and the
+ * {@link CLEAR_STEP_RATIO} step keeps the boundary still between requests (see
+ * {@link resultPolicy}).
+ */
+export const DEFAULT_CLEAR_THRESHOLD = 0.5
+
+/**
+ * How far the clearing boundary moves when it moves (#331): a tenth of the chat model's budget.
+ *
+ * The boundary is a prefix of the request, and a provider's prompt cache keys on that prefix, so
+ * a boundary that crept forward on every turn would invalidate the cache with it. Instead the
+ * cleared span is snapped **up** to a whole step of {@link CLEAR_STEP_RATIO} of the budget (see
+ * {@link clearingCut}): a step costs at most that much extra tool output, and it is a whole
+ * {@link RECENT_TAIL_RATIO} — one tail — because a turn that leaves the tail does so in about a
+ * tail's worth of tokens, so a step of the same size is the smallest that can hold the boundary
+ * across a turn rather than follow it. The boundary therefore moves about once per tail's worth
+ * of new history and holds still for the requests in between, which is what keeps the request
+ * prefix — and the provider's prompt cache on it — stable.
+ */
+export const CLEAR_STEP_RATIO = 0.25
+
+/**
+ * What an old tool result's body is replaced by in a request (epic #303, X9; #331).
  *
  * The result keeps its place — the call it answers is still answered, so a request stays one a
- * provider accepts — and says what it cost instead of what it said. The stored
- * `agent.tool_result` is untouched: replay, the transcript and the summarizer still read the
- * body, and only the request the model is sent carries this.
+ * provider accepts — and says what it cost instead of what it said, **and that the model can have
+ * it back**: nothing else tells the model that a whole fetch or search it once ran is still one
+ * call away, and the study's finding that a `recall` tool goes unused is what makes saying so the
+ * whole of the answer rather than adding a tool for it. The stored `agent.tool_result` is
+ * untouched: replay, the transcript and the summarizer still read the body, and only the request
+ * the model is sent carries this.
  *
  * @param tokens what the cleared body cost
  */
 export function CLEARED_TOOL_RESULT(tokens: number): string {
-  return `result cleared, ${tokens} tokens`
+  return `result cleared, ${tokens} tokens — call the tool again if you need it`
 }
 
 /** How {@link createContextStrategy} budgets, per model and overall. */
@@ -237,7 +298,7 @@ export function createContextStrategy(config: ContextStrategyConfig = {}): Conte
     // request boundary, so a switch applies to the next request's budget as well as its model.
     const budget = budgetFor?.(options.model.id) ?? defaultBudget
     const summary = latestContextSummary(events)
-    return planRequest(events, options.system, summary, budget, options.tools)
+    return planRequest(events, options, summary, budget)
   }
 }
 
@@ -392,6 +453,17 @@ export interface ContextSizeOptions {
    * resolver the strategy is given (#246); omitted means {@link DEFAULT_CONTEXT_TOKEN_BUDGET}.
    */
   readonly budget?: number
+  /**
+   * // extension: the share of the budget at which old tool results are cleared (#331); the
+   * strategy's own `clearThreshold` when absent, so the two agree on what this request clears.
+   */
+  readonly clearThreshold?: number
+  /**
+   * // extension: whether the request would carry the off-by-default todo nudge (#331). The
+   * nudge is part of the request, so it is part of the size; a caller that leaves it out measures
+   * the request without it, exactly as a strategy built with no nudge builds it.
+   */
+  readonly todoNudge?: boolean
 }
 
 /**
@@ -405,7 +477,9 @@ export interface ContextSizeOptions {
  * it. When there is no usable baseline — the session's first request, a model switch, a summary
  * request, a failed summary pass, or a summary written since — the whole visible history is the
  * estimate's input: the session's system prompt, the summary in force when there is one, and the
- * messages after its `covers.to_seq`.
+ * messages after its `covers.to_seq`. The reminders a request carries — the todo block, a stuck
+ * reminder, the nudge — ride after the history and are counted too, because the strategy sends
+ * them (#331).
  *
  * The result is a token count, not a decision: the trigger that compares it against a share of
  * the chat model's budget is the compaction engine's (C2).
@@ -414,7 +488,9 @@ export interface ContextSizeOptions {
  * beyond its cap counts as the capped text, and one older than the verbatim tail counts as the
  * placeholder that replaces it. That is what makes clearing the first answer to a filling context
  * — a context that clearing alone brings under the threshold is never summarized (X9), because
- * the trigger never sees a size that needs one.
+ * the trigger never sees a size that needs one. Since #331 clearing is itself gated (see
+ * {@link clearingBoundary}), and the estimate reads the same gate the strategy does, so the two
+ * still describe one request.
  *
  * @param events the session's log, as {@link readLog} handed it over
  * @param options the model the next request runs, and the session's system prompt
@@ -422,6 +498,23 @@ export interface ContextSizeOptions {
 export function estimateContextSize(
   events: readonly StoredEvent[],
   options: ContextSizeOptions,
+): number {
+  return measureRequest(events, options, clearingBoundary(events, options))
+}
+
+/**
+ * The size of the request as the strategy builds it, with the results older than `clearBefore`
+ * cleared (X9; #331).
+ *
+ * Factored out of {@link estimateContextSize} so {@link clearingBoundary} can measure the same
+ * request **without** clearing: comparing that size to the soft threshold is what decides whether
+ * clearing turns on, and it has to be the size the request would have if nothing were cleared, or
+ * the decision would depend on its own outcome.
+ */
+function measureRequest(
+  events: readonly StoredEvent[],
+  options: ContextSizeOptions,
+  clearBefore: number,
 ): number {
   const baseline = lastModelRequest(events)
   const summary = latestContextSummary(events)
@@ -445,16 +538,206 @@ export function estimateContextSize(
     afterSeq,
     options.budget ?? DEFAULT_CONTEXT_TOKEN_BUDGET,
     options.tools,
+    clearBefore,
   )
   const since =
     usable && baseline !== null
       ? messageTextsAfter(events, baseline.seq, results)
       : visibleHistoryTexts(events, options.system, summary, results)
+  // The reminders ride after the history (see {@link requestReminders}); they are part of the
+  // request and so part of its size.
+  since.push(...reminderTexts(events, options))
   return estimateNextRequestTokens({
     model: options.model,
     previous: usable ? previous : null,
     since,
   })
+}
+
+/**
+ * The `seq` results older than which the next request clears, or `0` when it clears none (#331).
+ *
+ * Two conditions, in order:
+ *
+ * 1. **The gate.** Clearing turns on only once the request would be at or above
+ *    {@link DEFAULT_CLEAR_THRESHOLD} of the budget — measured with the results as stored, capped
+ *    but not cleared, so the decision is the same everywhere and does not depend on itself. Below
+ *    it a request carries its old results whole, which is the whole point of the threshold: a chat
+ *    at 30% of its budget used to lose them for nothing.
+ * 2. **The boundary.** The cut K4's rule already gives — everything older than the verbatim tail —
+ *    snapped to a step ({@link clearingCut}) so consecutive requests keep the same prefix.
+ */
+function clearingBoundary(events: readonly StoredEvent[], options: ContextSizeOptions): number {
+  const budget = options.budget ?? DEFAULT_CONTEXT_TOKEN_BUDGET
+  const threshold = options.clearThreshold ?? DEFAULT_CLEAR_THRESHOLD
+  if (measureRequest(events, options, 0) < budget * threshold) {
+    return 0
+  }
+  const summary = latestContextSummary(events)
+  const afterSeq = summary === null ? 0 : summary.covers.to_seq
+  const items = conversationItems(events, afterSeq, toolResultCap(options.tools, budget))
+  const cut = clearingCut(items, budget)
+  return cut <= 0 ? 0 : (items[cut]?.seq ?? 0)
+}
+
+/**
+ * Where clearing cuts the conversation: the first item the request keeps, snapped to a step of
+ * the budget so it holds still between requests (#331).
+ *
+ * The plain boundary is everything older than the verbatim tail (`cutAtUserBoundary`, K4). That
+ * boundary follows the tail, so a turn of new history nudges it forward — and since it sits at the
+ * front of the request, which is exactly what a provider's prompt cache keys on, each nudge
+ * invalidates the cache behind it. So the cleared span is rounded **up** to a whole
+ * {@link CLEAR_STEP_RATIO} step of the budget: the cut is the last safe position at most a step
+ * boundary's worth of tokens into the history. The grid is a property of the log's prefix, which
+ * only grows at the end, so a move of less than a step does not move the boundary — it holds for
+ * the requests in between and then jumps by a whole step. It is derived from the log and the
+ * budget alone, so a second brain on a partition computes the same one.
+ *
+ * Exported because it is the rule the two sides that must agree read: the strategy cuts here, and
+ * {@link estimateContextSize} measures the same request the same way.
+ *
+ * @param items the visible conversation, as {@link conversationItems} measured it
+ * @param budget the chat model's history budget
+ */
+export function clearingCut(items: readonly ContextCutItem[], budget: number): number {
+  const tailTokens = Math.floor(budget * RECENT_TAIL_RATIO)
+  const plain = cutAtUserBoundary(items, tailTokens)
+  if (plain <= 0) {
+    return 0
+  }
+  const step = Math.max(1, Math.floor(budget * CLEAR_STEP_RATIO))
+  const cleared = tokensBefore(items, plain)
+  // With the step a whole tail, the round-up can reach `total` but never past it: a step is no
+  // more than the tail, and the plain cut clears at most that much less than the whole history.
+  const target = Math.ceil(cleared / step) * step
+  const candidate = lastIndexAtMost(items, target)
+  const cut = Math.max(widenToSafeCut(items, candidate), plain)
+  // A cut that would clear the newest turn is not one the strategy may build; fall back to the
+  // plain boundary, which never does.
+  return cut <= 0 || cut >= items.length ? plain : cut
+}
+
+/** What the items before `index` cost together (X9's capped sizes). */
+function tokensBefore(items: readonly ContextCutItem[], index: number): number {
+  let total = 0
+  for (let position = 0; position < index && position < items.length; position += 1) {
+    total += items[position]?.tokens ?? 0
+  }
+  return total
+}
+
+/** The largest index whose tokens before it are at most `target` — `0` when even the first is over. */
+function lastIndexAtMost(items: readonly ContextCutItem[], target: number): number {
+  let total = 0
+  let index = 0
+  while (index < items.length && total + (items[index]?.tokens ?? 0) <= target) {
+    total += items[index]?.tokens ?? 0
+    index += 1
+  }
+  return index
+}
+
+/**
+ * Move a cut back to a position the strategy may build: the start of a turn, with no result left
+ * behind whose call it clears.
+ *
+ * The same two rules {@link cutAtUserBoundary} applies, here on an index the stepping chose: a
+ * tail has to begin at a `user.message`, and a call and the result that answers it may not be
+ * separated by it (#306). A candidate that is neither walks back until it is both.
+ */
+function widenToSafeCut(items: readonly ContextCutItem[], index: number): number {
+  const at = pairPositions(items)
+  let cut = Math.min(index, items.length)
+  let moved = true
+  while (moved && cut > 0) {
+    const before = cut
+    while (cut > 0 && items[cut]?.role !== 'user') {
+      cut -= 1
+    }
+    cut = Math.min(cut, splitByPair(items, at, cut))
+    moved = cut < before
+  }
+  return cut
+}
+
+/**
+ * The reminder texts a request carries besides the history (#331).
+ *
+ * The one place both the strategy and {@link estimateContextSize} build them, so the request that
+ * is measured and the request that is built carry the same blocks. See {@link requestReminders}.
+ */
+function reminderTexts(
+  events: readonly StoredEvent[],
+  options: { readonly todoNudge?: boolean },
+): readonly string[] {
+  return requestReminders(events, options).texts
+}
+
+/** The reminders a request carries: the texts to send, and the record for its span (#331). */
+interface RequestReminders {
+  /** One block per reminder, in the order they are sent after the history. */
+  readonly texts: readonly string[]
+  /** What the loop records on the request's `span.model_request_start`. */
+  readonly records: readonly RequestReminder[]
+}
+
+/**
+ * Build the reminders a request carries after its history (#331).
+ *
+ * Three things, all rebuilt from the log per request and none of them stored as a message:
+ *
+ * - **The current todo list** (`readTodoList`), when the session has a non-empty one. The list
+ *   lives only as the newest `todo_write` call's own input, so once a summary covers that call it
+ *   would exist for the model only as prose; sending it every request is what keeps the plan in
+ *   front of the model. An empty list — a model that cleared it — sends nothing.
+ * - **The stuck reminder** a streak of identical calls earns ({@link stuckReminder}, #331).
+ * - **The nudge** to write a list, when it is enabled and the session has neither a list nor a
+ *   tool call yet — the moment before a task's first step, which is when a plan is worth asking
+ *   for.
+ */
+function requestReminders(
+  events: readonly StoredEvent[],
+  options: { readonly todoNudge?: boolean },
+): RequestReminders {
+  const list = readTodoList(events)
+  const texts: string[] = []
+  const records: RequestReminder[] = []
+  if (list !== null && list.length > 0) {
+    const text = todoBlockText(list)
+    texts.push(text)
+    records.push({ kind: 'todo', tokens: estimateTokens(text) })
+  } else if (options.todoNudge === true && !hasToolCall(events)) {
+    texts.push(TODO_NUDGE)
+    records.push({ kind: 'todo', tokens: estimateTokens(TODO_NUDGE) })
+  }
+  const stuck = stuckReminder(events)
+  if (stuck !== null) {
+    texts.push(stuck.text)
+    records.push({ kind: 'stuck', tokens: estimateTokens(stuck.text) })
+  }
+  return { texts, records }
+}
+
+/** The block the model is shown of its current todo list (#331). */
+function todoBlockText(list: TodoList): string {
+  const lines = list.map(
+    (item) =>
+      `${item.status === 'done' ? '[x]' : item.status === 'in_progress' ? '[>]' : '[ ]'} ${item.content}`,
+  )
+  return [
+    'Your current todo list (keep it up to date with todo_write as you work):',
+    ...lines,
+  ].join('\n')
+}
+
+/** The one-line nudge to write a list, sent only when the off-by-default setting is on (#331). */
+const TODO_NUDGE =
+  'If this task has several steps, call todo_write first to write the list down and track it.'
+
+/** Whether the log holds any tool call at all — built-in or remote (#312). */
+function hasToolCall(events: readonly StoredEvent[]): boolean {
+  return events.some(isToolCallEvent)
 }
 
 /** The text of every conversation message after `afterSeq`, oldest first. */
@@ -773,26 +1056,21 @@ interface ToolResultPolicy {
 }
 
 /**
- * The policy one request applies, read off the log it will be built from (X9).
+ * The policy one request applies, read off the log it will be built from (X9; #331).
  *
- * "Old" is the verbatim tail of K4: the recent quarter of the chat model's budget the engine
- * keeps in full, cut at a `user.message` boundary — so a result is cleared exactly when it is
- * history the summary would cover, and a context small enough to be all tail clears nothing.
+ * The clearing boundary is decided by {@link clearingBoundary} — the soft threshold's gate and
+ * the stepped cut — and handed in, so the same decision reaches the request that is measured and
+ * the request that is built. "Old" is still the verbatim tail of K4: everything older than the
+ * recent quarter of the budget, now cleared only once the context is past the soft threshold.
  */
 function resultPolicy(
   events: readonly StoredEvent[],
   afterSeq: number,
   budget: number,
   tools: ToolRegistry | undefined,
+  clearBefore: number,
 ): ToolResultPolicy {
-  const capFor = toolResultCap(tools, budget)
-  const items = conversationItems(events, afterSeq, capFor)
-  const tailTokens = Math.floor(budget * RECENT_TAIL_RATIO)
-  const cut = cutAtUserBoundary(items, tailTokens)
-  return {
-    clearBefore: cut <= 0 ? 0 : (items[cut]?.seq ?? 0),
-    capFor,
-  }
+  return { clearBefore, capFor: toolResultCap(tools, budget) }
 }
 
 /** What one tool result may cost a request: its tool's cap, under the budget's share (X9). */
@@ -865,11 +1143,12 @@ function planToolResult(
 /** Everything the strategy builds, before it is turned into the result. */
 function planRequest(
   events: readonly StoredEvent[],
-  system: string | null,
+  options: ContextStrategyOptions,
   summary: ContextSummaryEvent | null,
   budget: number,
   tools: ToolRegistry | undefined,
 ): ContextStrategyResult {
+  const { system, tools } = options
   const systemMessages: ModelMessage[] = []
   if (system !== null && system.length > 0) {
     systemMessages.push({ role: 'system', content: system })
@@ -880,19 +1159,37 @@ function planRequest(
   // What the model is told about history it no longer sees, after the system prompt and before
   // the messages that follow it.
   const afterSeq = summary === null ? 0 : summary.covers.to_seq
-  // What this request does with the tool results it carries (X9): an old one's body is cleared,
-  // a fresh oversized one is capped. Derived from the log and the budget, so the measurement the
-  // compaction trigger takes builds the same request this does.
-  const results = resultPolicy(events, afterSeq, budget, tools)
+  // What this request does with the tool results it carries (X9; #331): an old one's body is
+  // cleared once the context is past the soft threshold, a fresh oversized one is capped.
+  // Derived from the log and the budget, so the measurement the compaction trigger takes builds
+  // the same request this does.
+  const sizeOptions: ContextSizeOptions = {
+    model: options.model.id,
+    system,
+    ...(tools === undefined ? {} : { tools }),
+    budget,
+    ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
+    ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+  }
+  const clearBefore = clearingBoundary(events, sizeOptions)
+  const results = resultPolicy(events, afterSeq, budget, tools, clearBefore)
   const built = conversationAfter(events, afterSeq, results)
 
   const trimmed = trimToBudget(systemMessages, built.messages, budget)
   const capped = capNewest(trimmed, budget)
   const truncated = truncationRecord(capped.truncated, built.truncatedResults)
+  // The reminders ride after the history: outside the trimmed turns, so the plan survives the
+  // budget cut, and outside the log, so nothing here becomes a message (#331).
+  const reminders = requestReminders(events, options)
+  const messages = [...systemMessages, ...capped.messages.map((entry) => entry.message)]
+  if (reminders.texts.length > 0) {
+    messages.push({ role: 'user', content: reminders.texts.join('\n\n') })
+  }
   return {
-    messages: [...systemMessages, ...capped.messages.map((entry) => entry.message)],
+    messages,
     ...(truncated === null ? {} : { truncated }),
     ...(built.cleared.results === 0 ? {} : { cleared: built.cleared }),
+    ...(reminders.records.length === 0 ? {} : { reminders: reminders.records }),
   }
 }
 
@@ -1038,6 +1335,46 @@ function conversationAfter(
           assistant = { seq: event.seq, text, calls: [] }
         } else {
           assistant.text += text
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
         }
         break
       }

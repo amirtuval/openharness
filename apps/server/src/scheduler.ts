@@ -121,6 +121,9 @@ export interface LocalSchedulerOptions {
   readonly resolveMode?: ModeResolver
   /** The tools a turn may offer, and the loop's decisions about them (epic #303, X4). */
   readonly tools?: TurnToolOptions
+  /** The clearing threshold and the todo nudge (#331), passed to every turn. */
+  readonly clearThreshold?: number
+  readonly todoNudge?: boolean
   /**
    * How many partitions the server's sessions are spread over; the protocol's 64 by default.
    *
@@ -182,6 +185,8 @@ export class LocalScheduler implements SessionScheduler {
           : { reasoningSupportFor: options.reasoningSupportFor }),
         ...(options.resolveMode === undefined ? {} : { resolveMode: options.resolveMode }),
         ...(options.tools === undefined ? {} : { tools: options.tools }),
+        ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
+        ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
       })
     this.#queue = new PassQueue({
       runner,

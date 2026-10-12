@@ -7,9 +7,9 @@ import { useTerminalTheme } from './theme'
 /**
  * The lines a terminal draws because tools were involved (epic #303, X2/X5/X9; issue #308).
  *
- * The web's four notices, as the terminal's plain lines: the step limit, a model that cannot use
- * tools, what a request shortened, and what it cleared. The words are the client's
- * (`stepLimitNotice`, `truncatedResultsNotice`, `clearedResultsNotice`,
+ * The web's four notices, as the terminal's plain lines: the step limit (or a stuck loop, #331),
+ * a model that cannot use tools, what a request shortened, and what it cleared. The words are
+ * the client's (`stepLimitNotice`, `stuckNotice`, `truncatedResultsNotice`, `clearedResultsNotice`,
  * `TOOLS_UNSUPPORTED_NOTICE`), so both frontends say the same thing — and a terminal has no
  * tooltip, so anything the page keeps in a `title` is in the line here.
  *

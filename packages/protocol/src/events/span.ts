@@ -135,6 +135,28 @@ export const ClearedResultsSchema = z.object({
 export type ClearedResults = z.infer<typeof ClearedResultsSchema>
 
 /**
+ * // extension: a reminder a request carried besides the history (#331).
+ *
+ * The context strategy may put a short block in a request that is not part of the conversation:
+ * the session's **current todo list** (so the plan survives a summary, which keeps the list only
+ * as prose), the **stuck reminder** a streak of identical calls earns, or the optional nudge to
+ * write a list. None of it is appended to the log as a message — it is rebuilt from the log on
+ * every request — so the span is the only record that the model was told, and `tokens` is what
+ * that block cost the request (the size accounting counts it, K2).
+ */
+export const RequestReminderSchema = z.object({
+  /**
+   * Which reminder the request carried: the todo block, or the stuck one a repeating model
+   * earns.
+   */
+  kind: z.enum(['todo', 'stuck']),
+  /** What the block cost the request, in tokens — the characters-per-token estimate (K2). */
+  tokens: z.number().int().nonnegative(),
+})
+
+export type RequestReminder = z.infer<typeof RequestReminderSchema>
+
+/**
  * // extension: why a request was made, when it is not the chat itself (epic #277, C2).
  *
  * `summary` is the one value today: a request the compaction engine made to summarize history.
@@ -242,6 +264,15 @@ export const ModelRequestStartEventSchema = z.object({
    * records, whatever came of it.
    */
   tools: z.array(ToolReferenceSchema).optional(),
+  /**
+   * // extension: the reminders this request carried besides the history (#331).
+   *
+   * The session's current todo list, and the stuck reminder a streak of identical calls earns,
+   * are rebuilt from the log per request and never stored as messages — this is the only place
+   * the log says the model was told. Absent for a request that carried none, which is every
+   * request of a session with no list and no streak.
+   */
+  reminders: z.array(RequestReminderSchema).optional(),
   /**
    * // extension: a request the compaction engine made to write a summary (epic #277, C2).
    *

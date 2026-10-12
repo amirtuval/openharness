@@ -147,6 +147,7 @@ export type {
 
 export {
   TOOL_STEPS_EXHAUSTED_NOTICE,
+  TOOL_LOOP_STUCK_NOTICE,
   TOOLS_UNSUPPORTED_NOTICE,
   clearedResultsNotice,
   formatToolInput,
@@ -154,6 +155,7 @@ export {
   modelSupportsTools,
   searchCount,
   stepLimitNotice,
+  stuckNotice,
   toolCallStatus,
   toolCallSummary,
   toolStatusLabel,

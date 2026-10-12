@@ -4,7 +4,11 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_TOOL_STEPS } from '@openharness/brain'
+import {
+  DEFAULT_CLEAR_THRESHOLD,
+  DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_TOOL_STEPS,
+} from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
@@ -94,6 +98,8 @@ describe('readServerConfig', () => {
       deltaRetentionMs: DEFAULT_DELTA_RETENTION_MS,
       compactIntervalMs: DEFAULT_COMPACT_INTERVAL_MS,
       compactionThreshold: DEFAULT_COMPACTION_THRESHOLD,
+      clearThreshold: DEFAULT_CLEAR_THRESHOLD,
+      todoNudge: false,
       logFormat: DEFAULT_LOG_FORMAT,
       tracing: DEFAULT_TRACING,
       traceSampleRate: DEFAULT_TRACE_SAMPLE_RATE,
@@ -180,6 +186,8 @@ describe('readServerConfig', () => {
       deltaRetentionMs: 120_000,
       compactIntervalMs: 60_000,
       compactionThreshold: 0.7,
+      clearThreshold: 0.5,
+      todoNudge: false,
       logFormat: 'json',
       tracing: 'cloud-trace',
       traceSampleRate: 0.5,
@@ -261,6 +269,31 @@ describe('readServerConfig', () => {
       readServerConfig(env({ OPENHARNESS_COMPACTION_THRESHOLD: '0.5' })).compactionThreshold,
     ).toBe(0.5)
     expect(readServerConfig(env({})).compactionThreshold).toBe(0.7)
+  })
+
+  it('refuses a clearing threshold outside the fraction it is, and defaults it to a half', () => {
+    // The clearing gate is a share of the chat model's budget too (#331), so the bounds are the
+    // same and a value outside them is a setting nobody meant.
+    expect(() => readServerConfig(env({ OPENHARNESS_CLEAR_THRESHOLD: '-0.1' }))).toThrow(
+      /OPENHARNESS_CLEAR_THRESHOLD/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_CLEAR_THRESHOLD: '1.5' }))).toThrow(
+      /OPENHARNESS_CLEAR_THRESHOLD/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_CLEAR_THRESHOLD: 'half' }))).toThrow(
+      /OPENHARNESS_CLEAR_THRESHOLD/,
+    )
+    expect(readServerConfig(env({ OPENHARNESS_CLEAR_THRESHOLD: '0.3' })).clearThreshold).toBe(0.3)
+    expect(readServerConfig(env({})).clearThreshold).toBe(0.5)
+  })
+
+  it('reads the todo nudge as an off-by-default flag (#331)', () => {
+    expect(readServerConfig(env({})).todoNudge).toBe(false)
+    expect(readServerConfig(env({ OPENHARNESS_TODO_NUDGE: '1' })).todoNudge).toBe(true)
+    expect(readServerConfig(env({ OPENHARNESS_TODO_NUDGE: 'true' })).todoNudge).toBe(true)
+    expect(() => readServerConfig(env({ OPENHARNESS_TODO_NUDGE: 'yes' }))).toThrow(
+      /OPENHARNESS_TODO_NUDGE/,
+    )
   })
 
   it('refuses a scheduler it does not have', () => {

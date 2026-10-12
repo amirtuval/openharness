@@ -15,17 +15,24 @@ import { z } from 'zod'
 
 import { TEST_MODEL_ID, TEST_SYSTEM } from './testing/harness'
 
-import type { ContextSizeBaseline } from './context'
+import type { ContextCutItem, ContextSizeBaseline } from './context'
 import {
   CHARS_PER_TOKEN,
+  CLEARED_TOOL_RESULT,
+  CLEAR_STEP_RATIO,
+  DEFAULT_CLEAR_THRESHOLD,
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   OMISSION_MARKER,
+  RECENT_TAIL_RATIO,
+  clearingCut,
   createContextStrategy,
+  cutAtUserBoundary,
   estimateContextSize,
   estimateNextRequestTokens,
   estimateTokens,
   promptTokensOf,
 } from './context'
+import { DEFAULT_COMPACTION_THRESHOLD } from './summarize'
 
 /** A message event, as the log stores one. */
 function userMessage(seq: number, text: string): StoredEvent {
@@ -962,7 +969,7 @@ describe('sizing a tool result in a request (epic #303, X9; #306)', () => {
     const { messages, cleared, truncated } = strategy(events, { model: MODEL, system: null })
 
     // The old body is what it cost, and the fresh one is untouched.
-    expect(toolResultTextsOf(messages)).toEqual(['result cleared, 100 tokens', 'c'.repeat(80)])
+    expect(toolResultTextsOf(messages)).toEqual([CLEARED_TOOL_RESULT(100), 'c'.repeat(80)])
     expect(cleared).toEqual({ results: 1, tokens: 100 })
     expect(truncated).toBeUndefined()
     // Both pairs are intact: each call is in an assistant message of its own.
@@ -990,7 +997,7 @@ describe('sizing a tool result in a request (epic #303, X9; #306)', () => {
         type: 'tool-result',
         toolCallId: call.id,
         toolName: 'fetch',
-        output: { type: 'error-text', value: 'result cleared, 100 tokens' },
+        output: { type: 'error-text', value: CLEARED_TOOL_RESULT(100) },
       },
     ])
   })
@@ -1038,5 +1045,240 @@ describe('sizing a tool result in a request (epic #303, X9; #306)', () => {
     const large = estimateContextSize(events, { model: MODEL.id, system: null, budget: 100_000 })
 
     expect(large - small).toBeGreaterThan(900)
+  })
+})
+
+/**
+ * The clearing threshold and the stepped boundary (#331).
+ *
+ * Clearing is gated on the soft share of the budget, and once it is on the boundary lands on a
+ * grid of the log so consecutive requests keep the same prefix. The loop's own half — the
+ * options reaching the strategy and the estimator — is in `turn.test.ts`.
+ */
+describe('clearing old results only past a soft threshold (#331)', () => {
+  /** A conversation of turns: each a user message and one assistant message. */
+  function turns(count: number, perTurn: number): ContextCutItem[] {
+    const items: ContextCutItem[] = []
+    for (let turn = 0; turn < count; turn += 1) {
+      const user = Math.round(perTurn / 3)
+      items.push({ seq: items.length + 1, role: 'user', text: 'u', tokens: user })
+      items.push({ seq: items.length + 1, role: 'assistant', text: 'a', tokens: perTurn - user })
+    }
+    return items
+  }
+
+  it('keeps the boundary still for the requests within a step', () => {
+    const items = turns(6, 60)
+    const cut = clearingCut(items, 1_000)
+    expect(cut).toBeGreaterThan(0)
+    const seq = items[cut]?.seq
+    const plainSeq = items[cutAtUserBoundary(items, 250)]?.seq
+
+    // Three more turns of the same size move the plain K4 boundary — the tail walked past them —
+    // but not the stepped one: that is the whole point of the step.
+    for (let turn = 0; turn < 3; turn += 1) {
+      items.push({ seq: items.length + 1, role: 'user', text: 'u', tokens: 20 })
+      items.push({ seq: items.length + 1, role: 'assistant', text: 'a', tokens: 40 })
+      expect(items[clearingCut(items, 1_000)]?.seq).toBe(seq)
+    }
+    expect(items[cutAtUserBoundary(items, 250)]?.seq).not.toBe(plainSeq)
+  })
+
+  it('holds the soft threshold under the compaction one', () => {
+    expect(DEFAULT_CLEAR_THRESHOLD).toBeGreaterThan(0)
+    expect(DEFAULT_CLEAR_THRESHOLD).toBeLessThan(DEFAULT_COMPACTION_THRESHOLD)
+    // A step is a whole tail: the smallest that can hold the boundary across a turn.
+    expect(CLEAR_STEP_RATIO).toBe(RECENT_TAIL_RATIO)
+  })
+
+  it('clears nothing below the soft threshold, and old results above it', () => {
+    const old = toolUse(2, 'fetch')
+    const fresh = toolUse(5, 'fetch')
+    const events = [
+      userMessage(1, 'a'.repeat(40)),
+      old,
+      toolResult(3, old, 'b'.repeat(800)),
+      userMessage(4, 'q'.repeat(1600)),
+      fresh,
+      toolResult(6, fresh, 'c'.repeat(800)),
+    ]
+    // A 2,000-token budget: the tail is 500 and the gate is 1,000. The history is about 820
+    // tokens, so at the default it clears nothing, and at 0.3 it clears the old result.
+    const atDefault = createContextStrategy({ tokenBudget: 2_000 })(events, {
+      model: MODEL,
+      system: null,
+    })
+    expect(
+      estimateContextSize(events, { model: MODEL.id, system: null, budget: 2_000 }),
+    ).toBeLessThan(1_000)
+    expect(atDefault.cleared).toBeUndefined()
+
+    const overThreshold = estimateContextSize(events, {
+      model: MODEL.id,
+      system: null,
+      budget: 2_000,
+      clearThreshold: 0.3,
+    })
+    const strategy = createContextStrategy({ tokenBudget: 2_000 })(events, {
+      model: MODEL,
+      system: null,
+      clearThreshold: 0.3,
+    })
+    expect(strategy.cleared).toEqual({ results: 1, tokens: 200 })
+    expect(toolResultTextsOf(strategy.messages)).toEqual([
+      CLEARED_TOOL_RESULT(200),
+      'c'.repeat(800),
+    ])
+    // The estimator reads the same gate the strategy does: the request it measures is the one
+    // that carries the placeholder, and the estimator counts it as such.
+    const uncleared = estimateContextSize(events, { model: MODEL.id, system: null, budget: 2_000 })
+    expect(overThreshold).toBeLessThan(uncleared)
+    expect(
+      estimateContextSize(events, {
+        model: MODEL.id,
+        system: null,
+        budget: 2_000,
+        clearThreshold: 0.3,
+      }),
+    ).toBe(overThreshold)
+  })
+
+  it('derives the gate from the log and the budget, so a second brain clears the same', () => {
+    const old = toolUse(2, 'fetch')
+    const events = [
+      userMessage(1, 'a'.repeat(40)),
+      old,
+      toolResult(3, old, 'b'.repeat(800)),
+      userMessage(4, 'q'.repeat(1600)),
+    ]
+    const first = createContextStrategy({ tokenBudget: 2_000 })(events, {
+      model: MODEL,
+      system: null,
+      clearThreshold: 0.3,
+    })
+    const second = createContextStrategy({ tokenBudget: 2_000 })(events, {
+      model: MODEL,
+      system: null,
+      clearThreshold: 0.3,
+    })
+    expect(second.cleared).toEqual(first.cleared)
+  })
+})
+
+/**
+ * The current todo list on every request (#331).
+ *
+ * The list lives only as the newest `todo_write` call's own input, so once a summary covers that
+ * call the model would see it only as prose. The strategy rebuilds it per request, after the
+ * history, and records it on the span — never as a message in the log.
+ */
+describe('the todo list on a request (#331)', () => {
+  const TODOS = [
+    { content: 'fetch the page', status: 'done' as const },
+    { content: 'summarize it', status: 'in_progress' as const },
+    { content: 'answer the question', status: 'pending' as const },
+  ]
+
+  /** A `todo_write` call and its result, at `seq` and `seq + 1`. */
+  function wrote(
+    seq: number,
+    todos: readonly { content: string; status: string }[],
+  ): StoredEvent[] {
+    const call = toolUse(seq, 'todo_write', { todos })
+    return [call, toolResult(seq + 1, call, 'ok')]
+  }
+
+  it('carries the list after the history, and records it on the span', () => {
+    const events = [userMessage(1, 'do it'), ...wrote(2, TODOS), agentMessage(4, 'On it.')]
+
+    const { messages, reminders } = createContextStrategy()(events, {
+      model: MODEL,
+      system: null,
+    })
+
+    const last = messages.at(-1)
+    expect(last?.role).toBe('user')
+    const text = typeof last?.content === 'string' ? last.content : ''
+    expect(text).toContain('Your current todo list')
+    expect(text).toContain('[x] fetch the page')
+    expect(text).toContain('[>] summarize it')
+    expect(text).toContain('[ ] answer the question')
+    expect(reminders).toEqual([{ kind: 'todo', tokens: estimateTokens(text) }])
+  })
+
+  it('carries the list after a summary covered the call that wrote it', () => {
+    const events = [
+      userMessage(1, 'do it'),
+      ...wrote(2, TODOS),
+      contextSummary(5, 'Earlier, the model wrote a plan.', 3),
+      agentMessage(6, 'Continuing.'),
+    ]
+
+    const { messages, reminders } = createContextStrategy()(events, {
+      model: MODEL,
+      system: null,
+    })
+
+    expect(reminders?.[0]?.kind).toBe('todo')
+    const text = messages
+      .map((message) => (typeof message.content === 'string' ? message.content : ''))
+      .join('\n')
+    expect(text).toContain('[>] summarize it')
+  })
+
+  it('sends nothing for an empty list, and nothing when no list was ever written', () => {
+    for (const events of [
+      [userMessage(1, 'do it'), ...wrote(2, []), agentMessage(4, 'Cleared.')],
+      [userMessage(1, 'hi'), agentMessage(2, 'Hello.')],
+    ]) {
+      const { messages, reminders } = createContextStrategy()(events, {
+        model: MODEL,
+        system: null,
+      })
+      expect(reminders).toBeUndefined()
+      const text = messages
+        .map((message) => (typeof message.content === 'string' ? message.content : ''))
+        .join('\n')
+      expect(text).not.toContain('todo list')
+    }
+  })
+
+  it('nudges only when the off-by-default setting is on, before any tool call', () => {
+    const events = [userMessage(1, 'a task with several steps'), agentMessage(2, 'Sure.')]
+
+    const off = createContextStrategy()(events, { model: MODEL, system: null })
+    expect(off.reminders).toBeUndefined()
+
+    const on = createContextStrategy()(events, { model: MODEL, system: null, todoNudge: true })
+    expect(on.reminders?.[0]?.kind).toBe('todo')
+    const text = on.messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n')
+    expect(text).toContain('todo_write')
+
+    // Once a tool has been called, no nudge: the moment for asking for a plan has passed.
+    const call = toolUse(3, 'fetch', { url: 'x' })
+    const later = [...events, call, toolResult(4, call, 'body')]
+    expect(
+      createContextStrategy()(later, { model: MODEL, system: null, todoNudge: true }).reminders,
+    ).toBeUndefined()
+  })
+
+  it('counts the block in the size estimate (K2)', () => {
+    const withList = [
+      userMessage(1, 'do it'),
+      ...wrote(2, TODOS),
+      contextSummary(5, 'Earlier, the model wrote a plan.', 3),
+      agentMessage(6, 'Continuing.'),
+    ]
+    const emptyList = [
+      userMessage(1, 'do it'),
+      ...wrote(2, []),
+      contextSummary(5, 'Earlier, the model wrote a plan.', 3),
+      agentMessage(6, 'Continuing.'),
+    ]
+    const options = { model: MODEL.id, system: null }
+    const reminders = createContextStrategy()(withList, { model: MODEL, system: null }).reminders
+    expect(estimateContextSize(withList, options) - estimateContextSize(emptyList, options)).toBe(
+      reminders?.[0]?.tokens,
+    )
   })
 })

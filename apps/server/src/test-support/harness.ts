@@ -2,6 +2,7 @@ import type { Hono } from 'hono'
 import {
   type ContextCompactionOption,
   createContextStrategy,
+  DEFAULT_CLEAR_THRESHOLD,
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_MAX_TOOL_STEPS,
   type ModelFactory,
@@ -274,6 +275,10 @@ export interface TestOptions {
    * The production default unless a test wants a turn cut short early.
    */
   readonly maxToolSteps?: number
+  /** `OPENHARNESS_CLEAR_THRESHOLD` for {@link testConfig} (#331). */
+  readonly clearThreshold?: number
+  /** `OPENHARNESS_TODO_NUDGE` for {@link testConfig} (#331). */
+  readonly todoNudge?: boolean
   /**
    * The search API `testConfig` reports (epic #303, #305) — a `brave` provider with a key and a
    * daily limit, for the tests that assert what `web_search` is offered and how the allowance
@@ -422,6 +427,9 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     // against this harness's store and registry.
     ...(turnTools === undefined ? {} : { tools: turnTools }),
     ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
+    // The clearing threshold and the todo nudge (#331), production-wired like the rest.
+    ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
+    ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
     ...(options.resolveCompaction === true
       ? {
           compaction: createContextCompactionResolver({
@@ -780,6 +788,8 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     // "the chunks are still there" assertions a race. The job's own suite turns it on.
     compactIntervalMs: options.compactIntervalMs ?? 0,
     compactionThreshold: options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
+    clearThreshold: options.clearThreshold ?? DEFAULT_CLEAR_THRESHOLD,
+    todoNudge: options.todoNudge ?? false,
     maxToolSteps: options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS,
     search: options.search ?? null,
     // Observability (#158) is off in a test by default: the readable log format, and no
