@@ -73,7 +73,8 @@ src/
                         one built-in, and the resolver seam a host implements
   agents.ts             the subagent tools and the lifecycle (epic #340, S5/S6/S7; #344): the
                         five tools a session is offered, the calls that start, steer and stop a
-                        helper, what a child owes its parent and what a rewind takes back
+                        helper (a start names the `agent.tool_use` that caused it: `tool_use_id`,
+                        #345), what a child owes its parent and what a rewind takes back
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
                         (the step's text, its calls, and the provider-opaque parts it streamed)
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
@@ -1793,7 +1794,10 @@ and runs the calls itself.
   (`countLiveDescendants` of the **root** chat — a cap on a tree, not on a level, and the count
   excludes the chat itself so its own turn eats no slot), creates the child
   (`interactive: false`, the parent and the task, the derived root and depth, no history), and
-  writes `session.task_started` with the type beside the task and a `running` status — then
+  writes `session.task_started` with the type beside the task, the **call** (`tool_use_id` — the
+  `agent.tool_use` event's own id, which the loop hands the tool as `ToolExecutionContext.toolUseId`
+  in `./tools`' `runToolStep`, so a client draws the card at that call rather than matching by
+  description, #345) and a `running` status — then
   signals the child. The handle it answers with is the `task_` id. The child is created **on the
   type's mode** when it has one (`modeId`), so it follows it live exactly as a chat does: that is
   what makes the type's tool and MCP-server override real without a second configuration.

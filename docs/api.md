@@ -198,8 +198,9 @@ on, and the task's whole life in _this_ session's log is three events:
 ```json
 // 1. it was started: the handle, what kind it is, and what it is for
 { "type": "session.task_started", "id": "sevt_…", "seq": 6, "processed_at": "…",
-  "task_id": "task_…", "kind": "subagent", "child_session_id": "sesn_…",
-  "task_type": "researcher", "description": "Research how a rewind works" }
+  "task_id": "task_…", "kind": "subagent", "tool_use_id": "sevt_…",
+  "child_session_id": "sesn_…", "task_type": "researcher",
+  "description": "Research how a rewind works" }
 // 2. what it is doing — written as it changes state, so a client draws the card from here
 { "type": "session.task_status", "id": "sevt_…", "seq": 7, "processed_at": "…",
   "task_id": "task_…", "status": "running" }
@@ -209,6 +210,11 @@ on, and the task's whole life in _this_ session's log is three events:
   "source_key": "sesn_child:3" }
 ```
 
+- **The call that started it is in the log.** `tool_use_id` is the id of the `agent.tool_use`
+  whose result was the handle, so a client draws the card at that exact call rather than
+  matching on the `description` both sides happen to share two calls wrote. It is optional: a
+  task kind nothing of this log called carries none, and so does a log stored before the field
+  existed — a reader that finds none falls back to the description.
 - **Live activity is the child's own stream.** This log says what a task is _doing_; what it is
   doing now, in detail, is the events of the session its `child_session_id` names.
 - **A notification is queued, once.** Its `processed_at` is `null` until a turn claims it — the

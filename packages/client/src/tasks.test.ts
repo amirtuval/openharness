@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { newSessionId, newTaskId } from '@openharness/protocol'
+import { newEventId, newSessionId, newTaskId } from '@openharness/protocol'
 import {
   makeAgentToolUse,
   makeSessionTaskNotification,
@@ -8,22 +8,36 @@ import {
   makeSessionTaskStatus,
   makeUserMessage,
 } from '@openharness/protocol/fixtures'
-import type { SessionId, StoredEvent, TaskId } from '@openharness/protocol'
+import type { EventId, SessionId, StoredEvent, TaskId } from '@openharness/protocol'
 
 import { isTaskToolName, taskCardStatus, tasksFromEvents } from './tasks'
 
-/** The `agent` call that starts a task, as the parent's log records it (epic #340, S5). */
-function agentCall(description: string, type: string, seq: number): StoredEvent {
-  return makeAgentToolUse('agent', { type, description, prompt: 'do it' }, { seq })
+/**
+ * The `agent` call that starts a task, as the parent's log records it (epic #340, S5).
+ *
+ * `id` is the call's own id — the event's id — which is what a start names in `tool_use_id`.
+ */
+function agentCall(description: string, type: string, seq: number, id?: EventId): StoredEvent {
+  return makeAgentToolUse(
+    'agent',
+    { type, description, prompt: 'do it' },
+    { seq, ...(id === undefined ? {} : { id }) },
+  )
 }
 
-/** A started task with a type and a description, at a known position. */
+/**
+ * A started task with a type and a description, at a known position.
+ *
+ * `toolUseId` is the call that started it (#345): omitted it is a start from a log stored before
+ * the field existed, which the fold matches by description.
+ */
 function started(
   taskId: TaskId,
   childSessionId: SessionId,
   description: string,
   seq: number,
   type = 'researcher',
+  toolUseId?: EventId,
 ): StoredEvent {
   return makeSessionTaskStarted({
     seq,
@@ -31,6 +45,7 @@ function started(
     child_session_id: childSessionId,
     task_type: type,
     description,
+    ...(toolUseId === undefined ? {} : { tool_use_id: toolUseId }),
   })
 }
 
@@ -106,6 +121,36 @@ describe('tasksFromEvents (#340, S4; #345)', () => {
     ]
 
     expect(tasksFromEvents(log)[0]?.position).toBe(5)
+  })
+
+  it('places each card at the call its tool_use_id names, even when two calls share a description', () => {
+    // One step made two calls with the same words, and both starts arrive after both calls. The
+    // description join alone would answer the newest unmatched call for the first start and the
+    // older one for the second — the cards swapped. The log's own link does not: each start
+    // names the call it came from, so each card sits where its call is.
+    const first = newEventId()
+    const second = newEventId()
+    const other = newTaskId()
+    const log = [
+      agentCall(description, 'researcher', 2, first),
+      agentCall(description, 'researcher', 3, second),
+      started(other, newSessionId(), description, 6, 'researcher', second),
+      started(taskId, child, description, 7, 'researcher', first),
+    ]
+
+    expect(tasksFromEvents(log).map((card) => [card.id, card.position])).toEqual([
+      [taskId, 2],
+      [other, 3],
+    ])
+  })
+
+  it('falls back to the start’s own position when the call its tool_use_id names is gone', () => {
+    // A trimmed replay: the link is in the event, the call is not in the events handed over, so
+    // the card takes the start's own position rather than another call's.
+    expect(
+      tasksFromEvents([started(taskId, child, description, 9, 'researcher', newEventId())])[0]
+        ?.position,
+    ).toBe(9)
   })
 
   it('is done once an idle task has delivered its result', () => {

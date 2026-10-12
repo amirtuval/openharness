@@ -282,6 +282,7 @@ const storedSamples = {
     processed_at: '2026-03-15T10:00:00Z',
     task_id: newTaskId(),
     kind: 'subagent',
+    tool_use_id: eventId(),
     child_session_id: newSessionId(),
     task_type: 'researcher',
     description: 'Research how the event log handles a rewind',

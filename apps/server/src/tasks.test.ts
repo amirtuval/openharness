@@ -4,6 +4,7 @@ import {
   API_VERSION_PREFIX,
   EVENT_TYPES,
   TASK_WAIT_TOOL_NAME,
+  newEventId,
   newTaskId,
   type AgentToolResultEvent,
   type Session,
@@ -100,9 +101,11 @@ describe('the inbox anything that runs a task writes through', () => {
     const child = await store.createSession(agent.id, { ownerId: 'user_tasks_test' })
     const { tasks } = inbox(store)
     const taskId = newTaskId()
+    const toolUseId = newEventId()
 
     await tasks.startTask(session.id, {
       taskId,
+      toolUseId,
       childSessionId: child.id,
       taskType: 'researcher',
       description: '  Research   the event log  ',
@@ -112,6 +115,8 @@ describe('the inbox anything that runs a task writes through', () => {
     expect(of(events, EVENT_TYPES.sessionTaskStarted)[0]).toMatchObject({
       task_id: taskId,
       kind: 'subagent',
+      // The call that started it, when the starter has one (#345).
+      tool_use_id: toolUseId,
       child_session_id: child.id,
       task_type: 'researcher',
       // Collapsed and trimmed: a card's line, not a paragraph with the caller's whitespace in it.

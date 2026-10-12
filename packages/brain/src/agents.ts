@@ -215,7 +215,7 @@ export function createSubagentHandlers(context: SubagentHandlerContext): Subagen
     return starts.get(taskId) ?? null
   }
   return {
-    start: async (input) => {
+    start: async (input, execution) => {
       const parent = await context.parent()
       const resolved = await runtime.types.resolve(session.owner_id, input.type, parent)
       if (!resolved.ok) {
@@ -260,6 +260,9 @@ export function createSubagentHandlers(context: SubagentHandlerContext): Subagen
           type: EVENT_TYPES.sessionTaskStarted,
           task_id: taskId,
           kind: 'subagent',
+          // The call's own id, handed over by the loop (`ToolExecutionContext.toolUseId`): the
+          // link a client places the card at, rather than a join by description (#345).
+          ...(execution.toolUseId === undefined ? {} : { tool_use_id: execution.toolUseId }),
           child_session_id: child.id,
           // The frame a notification is labelled with reads `task_type` first (#343), so this is
           // what a parent sees news from rather than a generic "task".

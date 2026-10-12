@@ -110,6 +110,10 @@ describe('a subagent through the real server', () => {
     // — the conversation has gone on past both, which is what makes it a background task (S4).
     expect(resultText(of(log, EVENT_TYPES.agentToolResult)[0])).toContain(taskId)
     expect(of(log, EVENT_TYPES.sessionTaskStarted)).toHaveLength(1)
+    // The start names the call that caused it (#345): the `agent.tool_use` event's own id.
+    expect(of(log, EVENT_TYPES.sessionTaskStarted)[0]?.tool_use_id).toBe(
+      of(log, EVENT_TYPES.agentToolUse).find((event) => event.name === AGENT_TOOL_NAME)?.id,
+    )
     expect(of(log, EVENT_TYPES.sessionTaskStatus).map((event) => event.status)[0]).toBe('running')
 
     // The child is a real session: a non-interactive child of this chat, one level deeper, and
