@@ -256,6 +256,7 @@ export type {
   TaskActivityOptions,
   TaskActivityState,
   TaskActivityWatcher,
+  TaskActivityWatchOptions,
 } from './task-activity'
 
 export { listChildren, sessionBreadcrumb } from './session-tree'

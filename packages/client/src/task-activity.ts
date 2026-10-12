@@ -81,7 +81,7 @@ export interface TaskActivityState {
   readonly cost: TotalCost | null
 }
 
-/** What a caller can say about the activity it wants (issue #345). */
+/** What a caller can say about the activity {@link taskActivityOf} derives (issue #345). */
 export interface TaskActivityOptions {
   /**
    * The price of a `provider/model` id, from the model catalog.
@@ -90,9 +90,21 @@ export interface TaskActivityOptions {
    * is the honest answer for a caller with no catalog, rather than a `0` nobody published.
    */
   readonly prices?: ModelPriceLookup
-  /** Whether the child's own log says it is paused in an `agent_wait`. */
+  /**
+   * Whether the child's own log says it is paused in an `agent_wait`.
+   *
+   * The caller's to say rather than this function's to derive: the fact is in the child's
+   * `session.status_idle`, and a caller that holds the child's transcript has read it. A
+   * follower reads it for itself — see {@link watchTaskActivity}, which takes no such option.
+   */
   readonly waiting?: boolean
-  /** Where a dropped connection or an unreadable event is reported. */
+}
+
+/** What a caller can say about the follower {@link watchTaskActivity} opens (issue #345). */
+export interface TaskActivityWatchOptions {
+  /** The price of a `provider/model` id, for the cost the snapshot reports. */
+  readonly prices?: ModelPriceLookup
+  /** Where a child that could not be read or followed is reported. */
   readonly onDebug?: DebugHook
 }
 
@@ -256,12 +268,13 @@ export interface TaskActivityWatcher {
  *
  * @param log the child's log — `client.sessions.events`, or a double in a test
  * @param sessionId the child's `sesn_` id, from {@link TaskCard.childSessionId}
- * @param options the catalog's prices, the child's waiting flag, and the debug hook
+ * @param options the catalog's prices and the debug hook; see
+ *   {@link TaskActivityWatchOptions}
  */
 export function watchTaskActivity(
   log: TaskActivityLog,
   sessionId: string,
-  options: TaskActivityOptions = {},
+  options: TaskActivityWatchOptions = {},
 ): TaskActivityWatcher {
   const transcript = createTranscript()
   const listeners = new Set<(state: TaskActivityState) => void>()
