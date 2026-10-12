@@ -237,7 +237,12 @@ export const MessageList = memo(function MessageList({
         onScroll={onScroll}
         role="log"
         aria-label="Conversation"
-        className="h-full overflow-y-auto px-4 py-6"
+        // `relative`: the transcript is the scroll pane, so the absolutely positioned thing
+        // inside it that is not in a bubble — the streaming caret's `sr-only` span
+        // ({@link StreamingCaret}) — belongs to *this* box. Positioned against the initial
+        // containing block instead it escaped this clip and stretched the document by the whole
+        // height of the reply (#316).
+        className="relative h-full overflow-y-auto px-4 py-6"
       >
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-block">
           {/* "Empty" is nothing to say **and** nothing done: a call is an entry of its own

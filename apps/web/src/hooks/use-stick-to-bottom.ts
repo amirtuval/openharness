@@ -38,8 +38,17 @@ export function useStickToBottom(dependency: string | number): StickToBottom {
     if (element === null) {
       return
     }
-    stuckRef.current = true
-    setIsStuck(true)
+    // The state is written only when it really changes — the same rule `onScroll` follows. A
+    // bare `setIsStuck(true)` on every content change is a state write *inside the commit
+    // phase* (the layout effect below), and a store that notifies once per streamed event
+    // (a fast reply, a burst of deltas) keeps a render pending on this fiber, so the redundant
+    // write is not bailed out: React counts each one as a nested update, and a 50-event burst
+    // is "Maximum update depth exceeded" (#185). The ref and the state are kept in step here
+    // so the effect's `stuckRef.current` test stays the one source of truth.
+    if (!stuckRef.current) {
+      stuckRef.current = true
+      setIsStuck(true)
+    }
     // jsdom (the tests) has no `Element.scrollTo`; assigning `scrollTop` works everywhere.
     if (typeof element.scrollTo === 'function') {
       element.scrollTo({ top: element.scrollHeight })

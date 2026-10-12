@@ -345,6 +345,16 @@
     height: 100%;
   }
 
+  /* The app shell owns the viewport, so the document never scrolls (#316). The shell itself is
+   * `h-dvh` and clipped (see `App.tsx`); this is the second half of the rule, for the corner a
+   * phone leaves open: `100%` here is the layout viewport, which a mobile browser may resolve a
+   * little shorter than the dynamic viewport height the shell is laid out at, and a shell that
+   * overhangs its parent must not become a page scrollbar. Nothing else lives in `#root` — the
+   * shell is its only child — so clipping it hides nothing. */
+  #root {
+    overflow: hidden;
+  }
+
   body {
     @apply bg-background text-foreground antialiased;
   }

@@ -208,7 +208,7 @@ export function Sidebar({
         </Button>
       </div>
 
-      <nav aria-label="Chats" className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+      <nav aria-label="Chats" className="relative min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {error === null ? null : (
           <p role="alert" className="px-2 py-1 text-xs text-destructive">
             {error}
