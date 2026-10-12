@@ -39,6 +39,7 @@ import {
   McpOAuthError,
   refreshAccessToken,
   registerClient,
+  resourceParameter,
   type OAuthClientRegistration,
   type OAuthFetch,
   type OAuthTokens,
@@ -522,9 +523,15 @@ class McpServerServiceImpl implements McpServerService {
     }
     const metadata = await discoverAuthorizationServer(this.#fetch, issuer)
     const existing = await this.#openRegistration(userId, stored)
+    // RFC 8707's `resource`: the metadata's own value when it names one on this server's
+    // origin, else the URL the user registered. It is stored **with the registration** so the
+    // code exchange and every later refresh name the same thing the authorization URL did — an
+    // authorization server serving several APIs mints a token for the resource that asked, and
+    // a chain whose steps disagree hands back one the resource server refuses.
+    const resourceUrl = resourceParameter(stored.url, resource.resource)
     const registration: OAuthClientRegistration =
       existing !== null && existing.authorization_endpoint === metadata.authorization_endpoint
-        ? existing
+        ? { ...existing, resource: resourceUrl }
         : {
             ...(await registerClient(this.#fetch, metadata, {
               redirectUri: this.#callbackUrl,
@@ -536,6 +543,7 @@ class McpServerServiceImpl implements McpServerService {
             ...(resource.scopes_supported === undefined
               ? {}
               : { scopes: resource.scopes_supported }),
+            resource: resourceUrl,
           }
     // Persisted now, so the callback needs no discovery of its own and a reconnect reuses the
     // registration rather than registering this server again.
@@ -570,7 +578,7 @@ class McpServerServiceImpl implements McpServerService {
         redirectUri: this.#callbackUrl,
         state,
         challenge: pkce.challenge,
-        resource: stored.url,
+        resource: resourceUrl,
         ...(registration.scopes === undefined ? {} : { scopes: registration.scopes }),
       }),
     }
@@ -615,10 +623,21 @@ class McpServerServiceImpl implements McpServerService {
         ...(registration.client_secret === undefined
           ? {}
           : { clientSecret: registration.client_secret }),
-        resource: stored.url,
+        resource: registration.resource ?? stored.url,
         now: this.#now,
       },
     )
+    // One INFO line per successful exchange, with the non-secret facts of the token response —
+    // the shape a reader diagnosing "the flow completed but the server still refuses us" needs
+    // (`token_type: access_token` and no `expires_in`, say, are visible here and nowhere else).
+    // Never the token, the refresh token or the client secret: only what they are *shaped* like.
+    this.#logger?.info(`MCP OAuth code exchange succeeded for ${stored.name}`, {
+      server_id: stored.id,
+      token_type: tokens.token_type,
+      scope: tokens.scope ?? null,
+      expires_in: tokens.expires_at !== undefined,
+      refresh_token: tokens.refresh_token !== undefined,
+    })
     await this.#store.update(
       pending.serverId,
       { ownerId: userId },
@@ -726,7 +745,7 @@ class McpServerServiceImpl implements McpServerService {
     ) {
       const refreshed = await this.#refreshTokens(userId, stored)
       if (refreshed !== null) {
-        const refreshedHeaders = bearerHeaders(refreshed.access_token, refreshed.token_type)
+        const refreshedHeaders = bearerHeaders(refreshed.access_token)
         outcome = await this.#checkAddressAndTools(
           stored.url,
           refreshedHeaders,
@@ -861,9 +880,9 @@ class McpServerServiceImpl implements McpServerService {
       if (refreshed === null) {
         return null
       }
-      return bearerHeaders(refreshed.access_token, refreshed.token_type)
+      return bearerHeaders(refreshed.access_token)
     }
-    return bearerHeaders(tokens.access_token, tokens.token_type)
+    return bearerHeaders(tokens.access_token)
   }
 
   /** Refresh an OAuth server's tokens and seal the new ones, or `null` on failure. */
@@ -899,7 +918,9 @@ class McpServerServiceImpl implements McpServerService {
           // RFC 8707: a refresh must name the same protected resource the token is for, or the
           // authorization server may mint one for the wrong audience (issue #314 — the flow's
           // code exchange and the authorization URL both carry `resource`; this one did not).
-          resource: stored.url,
+          // The value is the **registration's**, so a refresh names exactly what the
+          // authorization URL and the code exchange named (issue #316).
+          resource: registration.resource ?? stored.url,
           now: this.#now,
         },
       )
@@ -996,10 +1017,24 @@ function metadataOf(stored: StoredMcpServer): McpServer {
   return metadata
 }
 
-/** The `Authorization` header a bearer token rides on. */
-function bearerHeaders(accessToken: string, tokenType: string): Record<string, string> {
-  const scheme = tokenType.length === 0 ? 'Bearer' : tokenType
-  return { Authorization: `${scheme} ${accessToken}` }
+/**
+ * The `Authorization` header an OAuth access token rides on.
+ *
+ * **Always `Bearer`, whatever the token response's `token_type` said.** The MCP spec and the
+ * official SDK send exactly this, and a resource server that means "Bearer" refuses anything
+ * else as a non-Bearer scheme — Linear answers a 401 with an **empty body** for one, which is
+ * the failure that reached staging as "the MCP server answered 401, with no message". The
+ * response's `token_type` is stored (RFC 6749 requires it, and it is worth showing a reader) but
+ * it is not a scheme to echo: `bearer`, `access_token`, `JWT` and a missing field are all
+ * spellings a token endpoint really uses, and none of them is what the resource server accepts.
+ *
+ * An empty token is not sent at all: `Bearer ` with nothing after it is the same 401 as no
+ * header, and {@link OAuthTokens} is only ever built from a response that carried an
+ * `access_token` — so this is a guard against a caller that built one by hand, not a state the
+ * flow can reach.
+ */
+function bearerHeaders(accessToken: string): Record<string, string> {
+  return accessToken.length === 0 ? {} : { Authorization: `Bearer ${accessToken}` }
 }
 
 /** Whether an access token is expired or within {@link REFRESH_SKEW_MS} of expiring. */

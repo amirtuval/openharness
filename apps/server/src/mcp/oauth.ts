@@ -72,6 +72,43 @@ export interface OAuthClientRegistration {
   readonly issuer?: string
   /** The scopes the resource asked for, if it asked. */
   readonly scopes?: readonly string[]
+  /**
+   * The protected resource this registration's tokens are for, as RFC 8707's `resource`
+   * (`{@link resourceParameter}`'s answer during `connect`).
+   *
+   * Persisted **with the registration** so the authorization URL, the code exchange and every
+   * later refresh name the same value: an authorization server serving several APIs binds the
+   * token it mints to the resource that asked, and a flow whose steps disagree can be answered
+   * with a token the resource server refuses (`invalid_token`). Absent on a registration stored
+   * before the field existed, and the caller falls back to the server's own URL.
+   */
+  readonly resource?: string
+}
+
+/**
+ * The RFC 8707 `resource` parameter for one server.
+ *
+ * RFC 9728's protected-resource metadata names the resource it describes, and that is the value
+ * a token should be minted **for** — Linear answers `{"resource":"https://mcp.linear.app/mcp"}`,
+ * which is exactly the server's own URL, while another deployment's document may name the API
+ * behind a different path. It is used when it is present **and on the server's own origin**: a
+ * metadata document that names a third party's resource is either a mistake or an attempt to
+ * have this deployment mint tokens for somebody else's API, and the server's own URL is the
+ * right answer in both readings.
+ *
+ * @param serverUrl the MCP server's Streamable HTTP endpoint, as the user registered it
+ * @param advertised the metadata's own `resource`, when it carried one
+ */
+export function resourceParameter(serverUrl: string, advertised?: string): string {
+  if (advertised === undefined || advertised.length === 0) {
+    return serverUrl
+  }
+  try {
+    return new URL(advertised).origin === new URL(serverUrl).origin ? advertised : serverUrl
+  } catch {
+    // Not a URL this server can make sense of; the server's own address is the safe answer.
+    return serverUrl
+  }
 }
 
 /** The tokens a token response carried, as this server stores them (sealed). */

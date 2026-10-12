@@ -97,6 +97,16 @@ export interface StubMcpServerOptions {
     name: string,
     args: Record<string, unknown>,
   ) => CallToolResult | Promise<CallToolResult>
+  /**
+   * The `resource` this server's RFC 9728 metadata names (issue #316).
+   *
+   * The server's own URL by default, which is what a real deployment does; `null` omits the
+   * field entirely, a string overrides it, and a function is handed the server's own URL so a
+   * test can name another **path on the same origin** (`(url) => new URL('/api/v1', url).href`)
+   * without knowing the ephemeral port first — which is the case the `resource` parameter's
+   * same-origin rule is about.
+   */
+  readonly protectedResource?: string | ((serverUrl: string) => string) | null
 }
 
 /** What a `tools/call` answers with, as the SDK types it. */
@@ -129,13 +139,30 @@ export async function startStubMcpServer(
         url.pathname.startsWith('/.well-known/oauth-protected-resource')
       ) {
         response.writeHead(200, { 'content-type': 'application/json' })
+        const own = `http://127.0.0.1:${port()}/mcp`
+        const advertised =
+          options.protectedResource === null
+            ? null
+            : typeof options.protectedResource === 'function'
+              ? options.protectedResource(own)
+              : (options.protectedResource ?? own)
         response.end(
           JSON.stringify({
-            resource: `http://127.0.0.1:${port()}/mcp`,
+            ...(advertised === null ? {} : { resource: advertised }),
             authorization_servers: [options.authorizationServer],
             ...(options.scopes === undefined ? {} : { scopes_supported: options.scopes }),
           }),
         )
+        return
+      }
+      // The scheme is pinned to exactly `Bearer `, case-sensitively and with the space, the way
+      // a real resource server reads it (the MCP spec and the official SDK always send that):
+      // a request carrying `bearer <token>` — a token response's `token_type` echoed back as the
+      // scheme, which is the bug #316 is about — `Basic …`, or an empty token is refused
+      // whatever it is authenticated with. A request carrying no `Authorization` at all is
+      // neither refused nor authenticated here; that is what `requiredToken` is for.
+      if (typeof authorization === 'string' && !authorization.startsWith('Bearer ')) {
+        respondUnauthorized(response)
         return
       }
       if (requiredToken !== null && authorization !== `Bearer ${requiredToken}`) {
@@ -271,6 +298,16 @@ export interface StubAuthorizationServerOptions {
    * resource-bound MCP server (Linear's shape) ends up refusing the refreshed token.
    */
   readonly requireResource?: boolean
+  /**
+   * The `token_type` the token endpoint reports — `'Bearer'` by default, and `null` to leave
+   * the field out entirely (issue #316).
+   *
+   * A live value, whatever RFC 6749 says: `bearer` (lower case) is what several providers send,
+   * and a deployment has been seen reporting `access_token` or `JWT`. It is **not** the scheme
+   * this server authenticates with — the resource server takes `Bearer ` and nothing else — so
+   * a test that sets it here and still expects the flow to work is a test of that rule.
+   */
+  readonly tokenType?: string | null
 }
 
 /** Start a stub authorization server on loopback. */
@@ -382,7 +419,7 @@ export async function startStubAuthorizationServer(
       issuedResources.set(access, resource)
       return {
         access_token: access,
-        token_type: 'Bearer',
+        ...(options.tokenType === null ? {} : { token_type: options.tokenType ?? 'Bearer' }),
         refresh_token: `refresh-${nextToken}`,
         ...(options.expiresIn === undefined ? {} : { expires_in: options.expiresIn }),
         scope: 'mcp',
