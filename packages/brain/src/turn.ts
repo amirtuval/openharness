@@ -74,6 +74,14 @@ import {
   RESOLVED_BY_MESSAGE,
   sessionApprovedTools,
 } from './pausing'
+import {
+  childTurnStart,
+  deliverChildTurn,
+  stopOrphanedTasks,
+  withSubagentTools,
+  type SubagentRuntime,
+} from './agents'
+import { withSubagentPrompt, type SubagentParent } from './subagent'
 import type { McpListingFailure, McpToolProvider } from './mcp'
 import { combineTools, resolveMcpTools } from './mcp'
 import { pendingManualCompaction } from './manual'
@@ -96,6 +104,7 @@ import { stuckEnd } from './stuck'
 import {
   awaitingTasks,
   notificationResultText,
+  deliverableNotifications,
   pendingNotifications,
   recordedWaitDeadline,
   settleTaskWait,
@@ -510,6 +519,18 @@ export interface RunTurnOptions {
    * at all, which is a request that offers only the deployment's own tools.
    */
   readonly mcpTools?: McpToolProvider
+  /**
+   * // extension: what this deployment knows about subagents (epic #340, S5/S6; #344) — the
+   * types a parent may start, the depth and live-task limits, and how the host is signalled.
+   *
+   * Absent means the deployment has none, which is what a host that never wired a type resolver
+   * wants: the five tools are offered to nobody, so nothing can promise a helper the deployment
+   * cannot start. Present, the request boundary adds this session's tools to the offer (the
+   * parent side under the depth cap, `message_parent` to a child) and the loop does the rest —
+   * a child's turn reports its status and its result to the parent, and a session whose child's
+   * registration a rewind took back stops it.
+   */
+  readonly subagents?: SubagentRuntime
 }
 
 /**
@@ -585,6 +606,45 @@ interface PartialReply {
  * @param options the store, the model factory, the credential resolver, and the turn's knobs
  */
 export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Promise<TurnOutcome> {
+  const outcome = await runTurnInner(sessionId, options)
+  await deliverTurnToParent(sessionId, options, outcome)
+  return outcome
+}
+
+/**
+ * What a **child**'s finished turn owes its parent (epic #340, S4; #344).
+ *
+ * The wrapper rather than a call at each of the loop's endings: a turn ends in several places —
+ * idle, interrupted, an error, a pause, a wait — and what the parent has to be told is one thing
+ * about one of them, so it is asked once, of the outcome. Only a turn that **ended** is
+ * announced: a wait and a pause are the child still working (`./agents`' `childTurnDelivery`
+ * decides from the log, and this only decides whether to ask at all), and a `noop` turn never
+ * opened anything.
+ *
+ * The delivery itself is idempotent (the notification is keyed by the child's turn), so a
+ * process that dies between the turn and its announcement costs nothing: the turn the store's
+ * work scan starts for that child next delivers it, which is the `noop` guard below.
+ */
+async function deliverTurnToParent(
+  sessionId: SessionId,
+  options: RunTurnOptions,
+  outcome: TurnOutcome,
+): Promise<void> {
+  const runtime = options.subagents
+  if (runtime === undefined || !ENDED_TURNS.has(outcome.outcome)) {
+    return
+  }
+  const session = await options.store.getSessionUnscoped(sessionId)
+  if (session === null) {
+    return
+  }
+  await deliverChildTurn(options.store, session, runtime)
+}
+
+/** The outcomes that mean a turn is over rather than paused, waiting, or never opened. */
+const ENDED_TURNS: ReadonlySet<TurnOutcomeKind> = new Set(['idle', 'interrupted', 'error'])
+
+async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Promise<TurnOutcome> {
   const { store, model, resolveCredential, signal, fence } = options
   const strategy = options.contextStrategy ?? DEFAULT_CONTEXT_STRATEGY
   const retry = resolveRetryPolicy(options.retry)
@@ -685,6 +745,18 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // The notification read is the store's, not the log's: this guard is consulted on every
     // idle sweep, and the store's answer is one indexed query rather than a whole replay.
     const notified = (await store.getPendingTaskNotifications(sessionId)).length > 0
+    // A **child** whose last turn's news never reached its parent is the fourth thing an idle
+    // session can owe (epic #340, S4; #344). The delivery is idempotent — the notification is
+    // keyed by the child's turn — so a process that died between a turn's end and its
+    // announcement is repaired by the next turn on that child, and the store's work scan is
+    // what starts one (a child with an undelivered turn is work). Nothing is written to this
+    // log: the turn exists to hand the news over, and then it is a no-op like any other.
+    if (options.subagents !== undefined && session.parent_session_id !== null) {
+      const child = await store.getSessionUnscoped(sessionId)
+      if (child !== null && (await deliverChildTurn(store, child, options.subagents))) {
+        return { outcome: 'noop' }
+      }
+    }
     if (
       !compactionPending &&
       !notified &&
@@ -696,6 +768,18 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   }
 
   // ---- Start: open a turn, or take one over.
+  //
+  // Two things happen here rather than later, because both belong to a turn that really opens
+  // (a `noop` above writes neither): a **child** tells its parent it is working (S4) — the
+  // status a card follows without either side polling — and a chat whose `agent` call a
+  // `session.rewind` took back stops the helper that call started (S7; #344), because this is
+  // the first turn that can tell what the rewind covered.
+  if (options.subagents !== undefined) {
+    if (session.parent_session_id !== null) {
+      await childTurnStart(store, session)
+    }
+    await stopOrphanedTasks(store, session, options.subagents)
+  }
   if (turnState.state === 'idle') {
     await append([statusRunning()])
   } else {
@@ -936,7 +1020,13 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // appended after it (#245, M6). Computed here, before the compaction engine runs, because
     // both the engine and the trigger measure the context the strategy will build from it and
     // the two have to agree on what the prompt is.
-    const requestSystem = withModePrompt(current.system, mode?.systemPromptAddition ?? null)
+    const withMode = withModePrompt(current.system, mode?.systemPromptAddition ?? null)
+    // A **child** runs with the subagent prompt appended after whatever its own prompt is (S2):
+    // it has to be told it is a helper, that it cannot ask the user, and that its final message
+    // is the whole of what the parent receives — none of which it could read off its own
+    // conversation. A top-level chat is unchanged.
+    const requestSystem =
+      current.parent_session_id === null ? withMode : withSubagentPrompt(withMode)
     // The remote tools this boundary may offer (epic #303, X10; #312), listed once here — before
     // the user's answers are acted on, because an approved remote call has to be runnable, and
     // before the request is measured, because a remote tool's declaration is what caps its own
@@ -955,7 +1045,25 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // own flag decides, because it is fixed at creation: the request is built without the
     // question tool, the span records an offer without it, and a call to it is answered by the
     // registry as one naming a tool this step was not handed.
-    const available = withoutAskUser(combineTools(options.tools, mcp.registry), session.interactive)
+    const available = await withSubagentTools(
+      withoutAskUser(combineTools(options.tools, mcp.registry), session.interactive),
+      {
+        store,
+        session: current,
+        runtime: options.subagents,
+        // Asked when an `agent` call runs, not now: the effort in force is read off the log a
+        // few lines below, and the answer belongs to the request the call was made in.
+        parent: async (): Promise<SubagentParent> => ({
+          model: requestModel.id,
+          reasoningEffort: effortInForce(
+            await readLog(store, sessionId),
+            mode?.reasoningEffort ?? null,
+          ),
+          toolOverride: mode?.toolOverride ?? null,
+          modeId: current.mode,
+        }),
+      },
+    )
     // How big the request this boundary is about to make is (K2/K6/X9), measured with the two
     // numbers the strategy's own caps are read against: the chat model's history budget, from the
     // same resolver the engine plans with (#246) — the strategy resolves its budget from the
@@ -1048,8 +1156,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     //    before the request below, and a wait nothing has answered ends the turn.
     const openWaits = awaitingTasks(read)
     if (openWaits.length > 0) {
-      const notifications = pendingNotifications(read)
       const starts = taskStarts(read)
+      // News from a task this log no longer names is not news — a rewind took its start back
+      // (S7; #344), so a wait is not resolved by it either.
+      const notifications = deliverableNotifications(pendingNotifications(read), starts)
       // A message the user sent while the wait was open resolves it, exactly as it resolves a
       // question: the reader chose to say something rather than to wait. Only a message counts
       // — a notification for some other task is news, not the reader moving on.
@@ -1299,9 +1409,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     // bundles one, and that is what a chat on the mode runs unless a message overrides it.
     // `undefined` is "no message carried one", which is what lets the mode's effort through; an
     // explicit `null` is "the provider's default" and wins.
-    const loggedEffort = requestedReasoningEffort(read)
-    const requestedEffort =
-      loggedEffort === undefined ? (mode?.reasoningEffort ?? null) : loggedEffort
+    const requestedEffort = effortInForce(read, mode?.reasoningEffort ?? null)
     const reasoning = planReasoning(
       requestModel.id,
       credential.type,
@@ -1777,6 +1885,26 @@ function withModePrompt(system: string | null, addition: string | null): string 
     return base
   }
   return base === null ? extra : `${base}\n\n${extra}`
+}
+
+/**
+ * The reasoning effort in force for a session's next request (#252; #245, M6).
+ *
+ * One reading, used twice: the request the loop builds, and the `agent` tool's answer to "what
+ * does the parent run" — a `general-purpose` child is the parent continued, so it has to run
+ * what this returns rather than a second reading of the same log that could drift from it.
+ *
+ * An explicit effort the newest message carried wins — the reader asked for it on that message —
+ * and otherwise the mode's own applies. `undefined` from the walk is "no message carried one",
+ * which is what lets the mode's effort through; an explicit `null` is "the provider's default"
+ * and wins.
+ */
+function effortInForce(
+  events: readonly StoredEvent[],
+  modeEffort: ReasoningEffort | null,
+): ReasoningEffort | null {
+  const logged = requestedReasoningEffort(events)
+  return logged === undefined ? modeEffort : logged
 }
 
 /**

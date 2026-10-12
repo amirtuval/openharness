@@ -10,16 +10,33 @@ import { modeUnavailableError, notFoundError } from './http/errors'
  *
  * A mode lives in the database (`SessionStore`'s mode methods) and its "my default model" is the
  * user's stored preference, so both halves are here rather than in the brain: the brain asks a
- * `ModeResolver` for the resolved mode, the routes ask {@link requireUsableMode} whether a chat
- * may start or continue on one.
+ * `ModeResolver` for the resolved mode, and the routes ask {@link requireUsableMode} whether a
+ * chat may start or continue on one.
+ *
+ * **The availability rule has one implementation** ({@link usableModeModel}), because a mode's
+ * model being usable is asked in two places that answer differently: a *chat* on an unavailable
+ * mode is refused with the protocol's 422 ({@link requireUsableMode}), and a **subagent type**
+ * on one — which is a mode with a description (epic #340, S2; #342) — is an `is_error` sentence
+ * a model acts on (`subagent-types.ts`). Two readers, one rule: it is the *answer* that
+ * differs, not the decision.
  */
 
-/** What resolving a mode needs: the modes, the user's default model, and their credentials. */
-export interface ModeDeps {
-  /** The mode store and the per-user preferences, both on the session store. */
-  readonly store: Pick<SessionStore, 'getMode' | 'getPreferences'>
+/**
+ * What deciding whether a mode can be used needs: the user's stored default model — which is
+ * what "my default model" resolves to — and their credentials, which decide the provider half
+ * of the id.
+ */
+export interface ModeUsabilityDeps {
+  /** The per-user preferences, on the session store. */
+  readonly store: Pick<SessionStore, 'getPreferences'>
   /** The caller's own provider credentials: what decides whether a model can be used. */
   readonly credentials: Pick<CredentialStore, 'list'>
+}
+
+/** What resolving a mode needs: the modes themselves, and the two facts usability reads. */
+export interface ModeDeps extends ModeUsabilityDeps {
+  /** The mode store and the per-user preferences, both on the session store. */
+  readonly store: Pick<SessionStore, 'getMode' | 'getPreferences'>
 }
 
 /** The message every refusal carries: what is wrong, and what the user can do about it. */
@@ -122,6 +139,33 @@ export async function requireOwnedMode(
 }
 
 /**
+ * The model a mode resolves to for `ownerId` when that model can be used, or `null` when it
+ * cannot.
+ *
+ * **The one place a mode's usability is decided.** "My default model" with no default set, and
+ * a provider the owner has no credential for, are the two ways a mode cannot run, and every
+ * caller that has to answer the question goes through here rather than re-deriving it: the
+ * routes refuse a chat on one ({@link requireUsableMode}, the 422 `mode_unavailable_error`),
+ * and the subagent types (#342) refuse to start a type on one — a sentence rather than a
+ * thrown error, because there the reader is a model choosing what to do next.
+ */
+export async function usableModeModel(
+  deps: ModeUsabilityDeps,
+  ownerId: UserId,
+  mode: Mode,
+): Promise<string | null> {
+  const { default_model } = await deps.store.getPreferences(ownerId)
+  const model = modeModelId(mode, default_model)
+  if (
+    model === null ||
+    !(await hasCredentialForProvider(deps.credentials, ownerId, providerOf(model)))
+  ) {
+    return null
+  }
+  return model
+}
+
+/**
  * Read the mode a chat is starting or continuing on, or refuse it: 404 for one the caller does
  * not own, 422 `mode_unavailable_error` for one whose model cannot be used.
  *
@@ -139,12 +183,8 @@ export async function requireUsableMode(
   modeId: ModeId,
 ): Promise<{ readonly mode: Mode; readonly model: string }> {
   const mode = await requireOwnedMode(deps, ownerId, modeId)
-  const { default_model } = await deps.store.getPreferences(ownerId)
-  const model = modeModelId(mode, default_model)
-  if (
-    model === null ||
-    !(await hasCredentialForProvider(deps.credentials, ownerId, providerOf(model)))
-  ) {
+  const model = await usableModeModel(deps, ownerId, mode)
+  if (model === null) {
     throw modeUnavailableError(modeUnavailableMessage(mode))
   }
   return { mode, model }

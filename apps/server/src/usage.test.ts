@@ -5,6 +5,7 @@ import {
   EVENT_TYPES,
   SEARCH_PRICE_PER_CALL,
   SessionUsageSchema,
+  newTaskId,
   WEB_SEARCH_TOOL_NAME,
   type Session,
   type SessionId,
@@ -230,9 +231,55 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
       cost: null,
       unpriced_requests: 0,
       by_model: [],
+      // And nothing was delegated: a chat with no children carries zeroes there (epic #340, S8;
+      // #344), which is a different statement from an absent field — a reader shows "no
+      // helpers" rather than "unknown".
+      descendants: {
+        totals: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+        cost: null,
+        unpriced_requests: 0,
+        by_model: [],
+        searches: 0,
+      },
       // Nothing was searched either — a count, which has no unknown to report.
       searches: 0,
     })
+  })
+
+  it('sums a chat’s descendants into its totals, and reports their share (S8; #344)', async () => {
+    const { test } = usageApp()
+    const session = await createSession(test)
+    await turn(test, session.id)
+
+    // A child session that ran a request of its own — what a subagent is (S3): its tokens are
+    // its own session's, and the parent's totals grow by them.
+    const child = await test.store.createSession(null, {
+      ownerId: (await test.currentUser()).id,
+      parentSessionId: session.id,
+      parentTaskId: newTaskId(),
+      model: { id: 'anthropic/claude-sonnet-5' },
+      initial_events: [
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'do the thing' }] },
+      ],
+    })
+    await turn(test, child.id)
+
+    const parent = await sessionUsage(test, session.id)
+    const own = await sessionUsage(test, child.id)
+    // The chat's totals are the tree's: its own request and the child's, so a chat that
+    // delegates does not look cheap. The child's own route answers the same numbers, because it
+    // is a session like any other.
+    expect(parent.descendants.totals.input_tokens).toBe(own.totals.input_tokens)
+    expect(parent.descendants.by_model.map((entry) => entry.model)).toEqual([
+      'anthropic/claude-sonnet-5',
+    ])
+    expect(parent.totals.input_tokens).toBeGreaterThan(own.totals.input_tokens)
+    expect(parent.by_model.map((entry) => entry.model)).toEqual(['anthropic/claude-sonnet-5'])
   })
 
   it('sums the requests of a session and prices them with the catalog’s rates', async () => {

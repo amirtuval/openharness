@@ -336,6 +336,7 @@ export class PostgresSessionStore implements SessionStore {
       model: input.model,
       reasoning_effort: input.reasoning_effort ?? null,
       system_prompt_addition: input.system_prompt_addition ?? null,
+      subagent_description: input.subagent_description ?? null,
       tools: input.tools ?? null,
       created_at: instant(now),
       updated_at: instant(now),
@@ -415,6 +416,10 @@ export class PostgresSessionStore implements SessionStore {
           update.system_prompt_addition === undefined
             ? row.system_prompt_addition
             : update.system_prompt_addition,
+        subagent_description:
+          update.subagent_description === undefined
+            ? row.subagent_description
+            : update.subagent_description,
         tools: update.tools === undefined ? row.tools : update.tools,
         updated_at: instant(now),
       }
@@ -854,7 +859,13 @@ export class PostgresSessionStore implements SessionStore {
                        ${EVENT_TYPES.sessionStatusRescheduled}
                      )
                 )
-                and st.payload -> 'stop_reason' ->> 'type' = 'requires_action'
+                -- A pause counts as live however it was paused: a child parked in agent_wait
+                -- (#344) is still a running task to S4/S5's vocabulary, and the deadline is not
+                -- consulted — a wait past its deadline has not stopped being work either.
+                and st.payload -> 'stop_reason' ->> 'type' in (
+                  'requires_action',
+                  'waiting_on_tasks'
+                )
            )
          )
     `.execute(this.#db)
@@ -1467,6 +1478,52 @@ export class PostgresSessionStore implements SessionStore {
                      and (st.payload -> 'stop_reason' -> 'event_ids')
                        @> jsonb_build_array(c.payload ->> 'tool_use_id')
                 )
+           )
+           -- A **child** whose finished turn its parent was never told about (epic #340, S4;
+           -- #344). The announcement is keyed by the turn -- child_session_id:idle_seq --
+           -- so a process that died between the turn's end and the write leaves an idle child
+           -- holding news nobody has, and nothing else reaches it: the turn *did* end, so no
+           -- queued event and no open turn remains. The delivery is the brain's (a turn on the
+           -- child writes the notification and nothing else); this is what finds the child, the
+           -- same way the wait above finds a pause nothing else would resume. Only a turn that
+           -- **ended** counts: a waiting_on_tasks pause is one the child is still working through,
+           -- and that case is above.
+           or (
+             s.parent_session_id is not null
+             and s.parent_task_id is not null
+             and exists (
+               select 1
+                 from events st
+                where st.session_id = s.id
+                  and st.type = ${EVENT_TYPES.sessionStatusIdle}
+                  and st.seq = (
+                    select max(e3.seq)
+                      from events e3
+                     where e3.session_id = s.id
+                       and e3.type in (
+                         ${EVENT_TYPES.sessionStatusRunning},
+                         ${EVENT_TYPES.sessionStatusIdle},
+                         ${EVENT_TYPES.sessionStatusRescheduled}
+                       )
+                  )
+                  and st.payload -> 'stop_reason' ->> 'type' = 'end_turn'
+             )
+             and not exists (
+               select 1
+                 from events n
+                where n.session_id = s.parent_session_id
+                  and n.type = ${EVENT_TYPES.sessionTaskNotification}
+                  and n.payload ->> 'source_key' = s.id || ':' || (
+                    select max(e4.seq)::text
+                      from events e4
+                     where e4.session_id = s.id
+                       and e4.type in (
+                         ${EVENT_TYPES.sessionStatusRunning},
+                         ${EVENT_TYPES.sessionStatusIdle},
+                         ${EVENT_TYPES.sessionStatusRescheduled}
+                       )
+                  )
+             )
            )
          )
        order by s.created_at asc, s.id asc

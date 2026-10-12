@@ -7,6 +7,7 @@ import {
   MAX_MODES_PER_USER,
   MODE_DEFAULT_MODEL,
   MODE_NAME_MAX_LENGTH,
+  MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH,
   ModeModelSchema,
   ModeReferenceSchema,
   ModeSchema,
@@ -22,6 +23,7 @@ const mode = {
   model: 'anthropic/claude-sonnet-5',
   reasoning_effort: 'high',
   system_prompt_addition: 'Think step by step.',
+  subagent_description: null,
   tools: null,
   created_at: '2026-03-15T10:00:00Z',
   updated_at: '2026-03-15T10:00:00Z',
@@ -118,6 +120,52 @@ describe('mode request schemas', () => {
       reasoning_effort: 'low',
       system_prompt_addition: 'Be terse.',
     })
+  })
+
+  it('carries the subagent description a mode may set (#342)', () => {
+    const description = 'Reviews a diff for correctness bugs and reports what it found.'
+    expect(
+      ModeSchema.parse({ ...mode, subagent_description: description }).subagent_description,
+    ).toBe(description)
+    expect(
+      CreateModeRequestSchema.parse({
+        name: 'reviewer',
+        model: 'x/y',
+        subagent_description: description,
+      }),
+    ).toEqual({ name: 'reviewer', model: 'x/y', subagent_description: description })
+    expect(UpdateModeRequestSchema.parse({ subagent_description: description })).toEqual({
+      subagent_description: description,
+    })
+    // `null` is a mode that is not a subagent type, which is what a mode without the field is.
+    expect(UpdateModeRequestSchema.parse({ subagent_description: null })).toEqual({
+      subagent_description: null,
+    })
+    expect(
+      ModeSchema.parse({ ...mode, subagent_description: null }).subagent_description,
+    ).toBeNull()
+  })
+
+  it('refuses a subagent description that is empty or longer than the cap', () => {
+    expect(ModeSchema.safeParse({ ...mode, subagent_description: '' }).success).toBe(false)
+    expect(
+      CreateModeRequestSchema.safeParse({ name: 'A', model: 'x/y', subagent_description: '' })
+        .success,
+    ).toBe(false)
+    expect(UpdateModeRequestSchema.safeParse({ subagent_description: '' }).success).toBe(false)
+    expect(
+      ModeSchema.safeParse({
+        ...mode,
+        subagent_description: 'x'.repeat(MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH),
+      }).success,
+    ).toBe(true)
+    expect(
+      ModeSchema.safeParse({
+        ...mode,
+        subagent_description: 'x'.repeat(MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH + 1),
+      }).success,
+    ).toBe(false)
+    expect(MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH).toBe(500)
   })
 
   it('carries the tool override a mode may set (#307)', () => {

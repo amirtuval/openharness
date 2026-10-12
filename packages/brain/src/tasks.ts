@@ -82,6 +82,26 @@ export function taskStarts(
 }
 
 /**
+ * The news this log should still deliver: the pending notifications whose task the log names.
+ *
+ * One refinement over {@link pendingNotifications}, and it is the rewind's (S7; #344): a task
+ * whose `session.task_started` a `session.rewind` took back is no longer a task of this chat —
+ * the reader said that work did not happen — so a notification from it is **dropped** rather
+ * than framed and handed to the model. A notification whose start the log never held is the
+ * same case as far as a reader can tell, and is dropped with it: a task nothing started is not
+ * a task.
+ *
+ * The map is {@link taskStarts}'s rather than a second walk, because the callers that need this
+ * (a wait's notifications and the model's own frame) have it already.
+ */
+export function deliverableNotifications(
+  notifications: readonly SessionTaskNotificationEvent[],
+  starts: ReadonlyMap<TaskId, SessionTaskStartedEvent>,
+): readonly SessionTaskNotificationEvent[] {
+  return notifications.filter((notification) => starts.has(notification.task_id))
+}
+
+/**
  * What each task is doing, by its id: the newest `session.task_status` of it.
  *
  * A task the log holds no status for reads as `running`, which is what its `session.task_started`

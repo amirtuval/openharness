@@ -1,7 +1,11 @@
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
 import type { ToolRegistry } from '@openharness/hands'
 import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
   ASK_USER_TOOL_NAME,
+  MESSAGE_PARENT_TOOL_NAME,
   TASK_WAIT_TOOL_NAME,
   WEB_SEARCH_TOOL_NAME,
 } from '@openharness/protocol'
@@ -47,7 +51,11 @@ function turnTools(
 ): { names: string[]; turn: ReturnType<typeof createTurnTools>; store: InMemorySessionStore } {
   const store = options.store ?? new InMemorySessionStore()
   const turn = createTurnTools({
-    config: { maxToolSteps: options.maxToolSteps ?? 50 },
+    config: {
+      maxToolSteps: options.maxToolSteps ?? 50,
+      maxAgentDepth: 3,
+      maxLiveTasks: 10,
+    },
     kind: options.kind ?? 'provider',
     ...(options.registry === undefined ? {} : { tools: options.registry }),
     store,
@@ -57,9 +65,21 @@ function turnTools(
 }
 
 describe('createTurnRegistry and createTurnTools', () => {
-  it('offers the built-ins and ask_user to every deployment', () => {
+  it('offers the built-ins, ask_user and the subagent tools to every deployment', () => {
     const { names, turn } = turnTools({})
-    expect(names).toEqual([ASK_USER_TOOL_NAME, WEB_FETCH_TOOL_NAME, 'todo_write'])
+    // The five of #344 sit between `ask_user` and the built-ins: a deployment offers them
+    // unless its owner turns one off, and a host that wires no subagent resolver still lists
+    // them (the loop is what withholds them from a session).
+    expect(names).toEqual([
+      ASK_USER_TOOL_NAME,
+      AGENT_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
+      TASK_WAIT_TOOL_NAME,
+      AGENT_STOP_TOOL_NAME,
+      MESSAGE_PARENT_TOOL_NAME,
+      WEB_FETCH_TOOL_NAME,
+      'todo_write',
+    ])
     expect(turn.maxToolSteps).toBe(50)
     // The gate is wired to the registry, so a model that cannot call tools is offered none.
     expect(turn.toolSupportFor).toBeTypeOf('function')
@@ -70,14 +90,18 @@ describe('createTurnRegistry and createTurnTools', () => {
   })
 
   it('adds the test tools for the mock model, after ask_user and ahead of the built-ins', () => {
-    // The `echo` tool, and — since #343 — the two background-task hooks: a task the mock model
-    // can start, and the wait a model can end a turn on. They ride with the mock model rather
-    // than with a deployment, because the tool a real chat waits with is #344's.
+    // The `echo` tool and — since #343 — the task the mock model can start. They ride with the
+    // mock model rather than with a deployment; the wait a chat ends a turn on is #344's, and is
+    // registered for everybody.
     expect(turnTools({ kind: 'mock' }).names).toEqual([
       ASK_USER_TOOL_NAME,
       TEST_TOOL_NAME,
       TEST_TASK_TOOL_NAME,
+      AGENT_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
       TASK_WAIT_TOOL_NAME,
+      AGENT_STOP_TOOL_NAME,
+      MESSAGE_PARENT_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
     ])
@@ -100,7 +124,6 @@ describe('createTurnRegistry and createTurnTools', () => {
       [ASK_USER_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TOOL_NAME]: { enabled: false, permission: 'deny' },
       [TEST_TASK_TOOL_NAME]: { enabled: true, permission: 'allow' },
-      [TASK_WAIT_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [WEB_SEARCH_TOOL_NAME]: { enabled: true, permission: 'allow' },
     })
     // A user who has saved nothing gets each tool's own declaration: offered, and allowed.
@@ -108,7 +131,6 @@ describe('createTurnRegistry and createTurnTools', () => {
       [ASK_USER_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TASK_TOOL_NAME]: { enabled: true, permission: 'allow' },
-      [TASK_WAIT_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [WEB_SEARCH_TOOL_NAME]: { enabled: true, permission: 'allow' },
     })
   })
@@ -136,6 +158,13 @@ describe('createTurnRegistry and createTurnTools', () => {
     const built = createTurnRegistry({ kind: 'provider' })
     expect(built.tools.map((tool) => tool.name)).toEqual([
       ASK_USER_TOOL_NAME,
+      // The subagent tools every deployment registers (epic #340, S5; #344), ahead of the
+      // built-ins: a chat is offered them unless its owner turns one off.
+      AGENT_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
+      TASK_WAIT_TOOL_NAME,
+      AGENT_STOP_TOOL_NAME,
+      MESSAGE_PARENT_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
     ])
@@ -143,7 +172,6 @@ describe('createTurnRegistry and createTurnTools', () => {
       ASK_USER_TOOL_NAME,
       TEST_TOOL_NAME,
       TEST_TASK_TOOL_NAME,
-      TASK_WAIT_TOOL_NAME,
     ])
   })
 

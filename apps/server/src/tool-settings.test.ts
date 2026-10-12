@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { WEB_FETCH_TOOL_NAME, createToolRegistry, textResult } from '@openharness/hands'
 import type { ToolDefinition } from '@openharness/hands'
 import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
   API_VERSION_PREFIX,
   ASK_USER_TOOL_NAME,
   EVENT_TYPES,
+  MESSAGE_PARENT_TOOL_NAME,
+  TASK_WAIT_TOOL_NAME,
   ListToolSettingsResponseSchema,
   ModeSchema,
   SessionSchema,
@@ -485,10 +490,16 @@ describe('the built-in tools under the settings (#305 × #307; #335)', () => {
       replies: [{ text: ['ok'] }],
     })
 
-    // `web_search` is listed although nothing registers it (#335): it is a provider's own tool,
-    // and the settings are where a user's choice about it lives.
+    // The five subagent tools are registered by every deployment since #344 (a settings screen
+    // lists them, and a mode can override one), `web_search` is listed although nothing registers
+    // it (#335), and the two built-ins come last.
     expect((await getTools(test)).map((entry) => entry.name)).toEqual([
       ASK_USER_TOOL_NAME,
+      AGENT_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
+      TASK_WAIT_TOOL_NAME,
+      AGENT_STOP_TOOL_NAME,
+      MESSAGE_PARENT_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
       WEB_SEARCH_TOOL_NAME,
@@ -502,6 +513,11 @@ describe('the built-in tools under the settings (#305 × #307; #335)', () => {
 
     expect((await spans(test, session.id))[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_MESSAGE_TOOL_NAME, source: 'builtin' },
+      { name: TASK_WAIT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_STOP_TOOL_NAME, source: 'builtin' },
+      { name: MESSAGE_PARENT_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
       { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
@@ -531,6 +547,11 @@ describe('the built-in tools under the settings (#305 × #307; #335)', () => {
     // for a provider-executed tool.
     expect((await spans(test, session.id))[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_MESSAGE_TOOL_NAME, source: 'builtin' },
+      { name: TASK_WAIT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_STOP_TOOL_NAME, source: 'builtin' },
+      { name: MESSAGE_PARENT_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
     ])
   })
@@ -584,6 +605,11 @@ describe('the built-in tools under the settings (#305 × #307; #335)', () => {
     // provider's search tool is not attached — the settings and the offer meeting in one place.
     expect((await spans(test, session.id))[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_MESSAGE_TOOL_NAME, source: 'builtin' },
+      { name: TASK_WAIT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_STOP_TOOL_NAME, source: 'builtin' },
+      { name: MESSAGE_PARENT_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
     ])

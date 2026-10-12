@@ -316,6 +316,45 @@ export function runSessionStoreConformance(
         )
         expect(mode.reasoning_effort).toBeNull()
         expect(mode.system_prompt_addition).toBeNull()
+        expect(mode.subagent_description).toBeNull()
+      })
+
+      it('carries the subagent description a mode may set, and null when it sets none (#342)', async () => {
+        const { store } = await setup()
+        const description = 'Reviews a diff for correctness bugs and reports what it found.'
+        const typed = await store.createMode(
+          modeInput('reviewer', { subagent_description: description }),
+          OWNER_A,
+        )
+        expect(typed.subagent_description).toBe(description)
+        expectExact(ModeSchema, typed, 'a mode that is a subagent type')
+        expect(await store.getMode(typed.id, { ownerId: OWNER_A })).toEqual(typed)
+        // A mode with no description is not a subagent type, which is what `null` says — the
+        // state every mode stored before the field existed is in.
+        const plain = await store.createMode(
+          { name: 'plain', model: 'openai/gpt-4.1-mini' },
+          OWNER_A,
+        )
+        expect(plain.subagent_description).toBeNull()
+        // An update that omits it keeps it; one that sends `null` clears it; one that sends a
+        // description sets it — the same merge every nullable mode field follows.
+        expect(
+          (await store.updateMode(typed.id, { name: 'renamed' }, { ownerId: OWNER_A }))
+            ?.subagent_description,
+        ).toBe(description)
+        expect(
+          (await store.updateMode(typed.id, { subagent_description: null }, { ownerId: OWNER_A }))
+            ?.subagent_description,
+        ).toBeNull()
+        expect(
+          (
+            await store.updateMode(
+              plain.id,
+              { subagent_description: 'Searches the web and reports sources.' },
+              { ownerId: OWNER_A },
+            )
+          )?.subagent_description,
+        ).toBe('Searches the web and reports sources.')
       })
 
       it('accepts the default-model sentinel as the model', async () => {
@@ -2690,7 +2729,7 @@ export function runSessionStoreConformance(
       })
 
       it('counts the descendants whose turn is not finished, and nothing else (S6)', async () => {
-        const { store } = await setup()
+        const { store, clock } = await setup()
         const { agent, session: root } = await seed(store)
         const childOf = (parent: Session) =>
           store.createSession(agent.id, { ownerId: OWNER_A, parentSessionId: parent.id })
@@ -2698,6 +2737,7 @@ export function runSessionStoreConformance(
         const waiting = await childOf(root)
         const running = await childOf(root)
         const paused = await childOf(root)
+        const onTasks = await childOf(root)
         const finished = await childOf(root)
         const idle = await childOf(root)
         const grandchild = await childOf(running)
@@ -2709,24 +2749,78 @@ export function runSessionStoreConformance(
         const call = newEventId()
         await append(store, paused.id, [statusRunning(), toolUse(call, 'ask_user')])
         await append(store, paused.id, [statusPausedFor([call])])
+        // A child parked in `agent_wait` is a **third** kind of work (epic #340, S4/S5; #344):
+        // its turn ended, but the task it is waiting for is still running, so the cap must
+        // count it or a chat could park ten helpers and start ten more.
+        await append(store, onTasks.id, [statusRunning()])
+        await append(store, onTasks.id, [statusWaitingFor([newTaskId()], clock.now() + 60_000)])
         await append(store, finished.id, [statusRunning(), statusIdle()])
         await append(store, grandchild.id, [userMessage('nested work')])
         // `idle` was created and never given anything: there is no work to count.
 
-        expect(await store.countLiveDescendants(root.id)).toBe(4)
+        expect(await store.countLiveDescendants(root.id)).toBe(5)
         // The tree's own root is not a descendant of itself, and a subtree count starts where
         // it is asked to.
         expect(await store.countLiveDescendants(running.id)).toBe(1)
         expect(await store.countLiveDescendants(idle.id)).toBe(0)
 
         // A turn that ends takes its session out of the count — while its own child's queued
-        // work keeps that one in it — and the paused one stays in until its turn ends: a child
-        // parked in `agent_wait` is still a running task.
+        // work keeps that one in it — and the two paused ones stay in until their turns end:
+        // a child parked in `agent_wait` is still a running task.
         await append(store, running.id, [statusIdle()])
-        expect(await store.countLiveDescendants(root.id)).toBe(3)
+        expect(await store.countLiveDescendants(root.id)).toBe(4)
         expect(await store.countLiveDescendants(grandchild.id)).toBe(0)
         const error = await thrownBy(() => store.countLiveDescendants(unknownSessionId()))
         expectErrorIdentity(error, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+      })
+
+      it('finds a child whose finished turn its parent was never told about (S4; #344)', async () => {
+        const { store } = await setup()
+        const { agent, session: root } = await seed(store)
+        const taskId = newTaskId()
+        const child = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+          parentTaskId: taskId,
+          initial_events: [
+            { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'do the thing' }] },
+          ],
+        })
+        const promptId = (await store.listEventsUnscoped(child.id)).data[0]?.id
+        if (promptId === undefined) {
+          throw new Error('the child was created without its prompt')
+        }
+        // A child that has not run is work because its prompt is queued, as any session is.
+        expect(await store.findSessionsNeedingWork([partitionOf(child.id)])).toEqual([child.id])
+
+        // Its turn runs and ends: the prompt is claimed by the request that answers it, so
+        // nothing is queued and no turn is open — and the child is work all the same, because
+        // its parent has not been told how the turn went.
+        await append(store, child.id, [statusRunning(), statusIdleFor([promptId])])
+        expect(await store.findSessionsNeedingWork([partitionOf(child.id)])).toEqual([child.id])
+
+        // The announcement is keyed by the turn: once the parent has it, the child has no work
+        // left, and nothing about it is stranded.
+        const idle = (await store.listEventsUnscoped(child.id)).data.at(-1)
+        await store.appendTaskNotification(root.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${child.id}:${idle?.seq}`,
+        })
+        expect(await store.findSessionsNeedingWork([partitionOf(child.id)])).toEqual([])
+
+        // A turn that **paused** owes no announcement: a child parked in `agent_wait` is still
+        // working, and it is the deadline above — not this rule — that reaches it. Its own
+        // deadline is a long way off here, so it is reported by neither.
+        const waiting = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+          parentTaskId: newTaskId(),
+        })
+        await append(store, waiting.id, [statusRunning()])
+        await append(store, waiting.id, [statusWaitingFor([newTaskId()], Date.now() + 600_000)])
+        expect(await store.findSessionsNeedingWork([partitionOf(waiting.id)])).toEqual([])
       })
 
       it('deletes a session’s descendants with it (S7)', async () => {
