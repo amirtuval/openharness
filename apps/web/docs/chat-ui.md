@@ -21,7 +21,7 @@ in the shell — #91, below).
 is the state, so opening a session after a reload is the same code path as opening it the
 first time.
 
-Two details worth knowing when reading it:
+Three details worth knowing when reading it:
 
 - **The stream starts from `lastSeq`.** History is folded first, then the stream is opened
   with `afterSeq: transcript.getState().lastSeq`. That is the difference between "no gaps and
@@ -32,6 +32,18 @@ Two details worth knowing when reading it:
   the stream delivers the same event a moment later and the transcript's `seq` rule drops it.
   Waiting for the stream would leave a visible gap between pressing Enter and seeing your own
   message.
+- **The transcript's updates are transitions.** The store notifies once per folded event and
+  the hook asks React to re-render for each one; `startTransition` is what makes that safe.
+  The stream hands over a whole network read's worth of events in one turn of the event loop —
+  a resumed connection's backlog, a big tool result and the turn it ends, a fast provider's
+  deltas — and `useSyncExternalStore`, which this was, answers every notification with a
+  synchronous update. A long enough burst was then a run of synchronous commits with more
+  already pending, React counted them as nested updates and threw #185 ("Maximum update depth
+  exceeded") **from inside `transcript.apply` in the stream loop**, which caught it and
+  reported a failed _request_: a chat showed "Request failed" with React's own minified
+  #185 as its message, its turn half-folded. A transition is the right lane for streamed text
+  — only the newest state matters and React coalesces what arrives before it renders — and the
+  reader's own typing stays urgent. `use-session-burst.test.tsx` is the burst as a test.
 
 ## The title that arrives without a reload (#35)
 
