@@ -24,6 +24,7 @@ import { useSession } from '../../hooks/use-session'
 import type { ModelsView } from '../../hooks/use-models'
 import { usePreferences } from '../../hooks/use-preferences'
 import { parseComposerInput } from '../../lib/commands'
+import { readTodoPanelCollapsed, writeTodoPanelCollapsed } from '../../lib/todo-panel'
 import { formatCostTotal, shortId, sessionLabel, unpricedExplanation } from '../../lib/format'
 import { providerOf, type ModelNameLookup } from '../../lib/models'
 import { modeNameOf } from '../../lib/modes'
@@ -226,11 +227,26 @@ export function ChatView({
   // session to that message. Cleared when the box is emptied (an edit the reader took back) and
   // after a send.
   const [editing, setEditing] = useState<{ readonly seq: number } | null>(null)
-  // The reader has pressed Stop on this turn (U10). Nothing in the log says a request was
-  // interrupted *by the reader* — the log says the turn ended — so the screen remembers the one
+  // The reader has pressed Stop on this turn (U10). Nothing in the log says a request was  // interrupted *by the reader* — the log says the turn ended — so the screen remembers the one
   // action that can only have come from here, and drops it the moment a new message is sent:
   // "Interrupted" belongs to the turn it stopped, not to the chat.
   const [interrupted, setInterrupted] = useState(false)
+  // The task list's fold (#314). The reader's own choice for this chat, read once from
+  // `localStorage` — the screen is keyed by session, so "once" is "once per chat" — and `null`
+  // while they have not chosen, which is what lets the two placements default differently: the
+  // row above the composer starts folded when the list is long, the side panel does not
+  // (`TodoPanel`'s own rule). Nothing is written until the reader toggles it, so a chat nobody
+  // folded keeps no state at all. See `lib/todo-panel.ts` for the key and the storage rules.
+  const [todosChoice, setTodosChoice] = useState<boolean | null>(() =>
+    readTodoPanelCollapsed(sessionId),
+  )
+  const toggleTodos = useCallback(
+    (collapsed: boolean): void => {
+      setTodosChoice(collapsed)
+      writeTodoPanelCollapsed(sessionId, collapsed)
+    },
+    [sessionId],
+  )
 
   // A chat opens with the cursor in the box: whether it was picked from the sidebar or just
   // created from New chat, the next thing the user does is type.
@@ -499,35 +515,52 @@ export function ChatView({
         </div>
       ) : null}
 
-      <MessageList
-        messages={messages}
-        summaries={summaries}
-        toolCalls={toolCalls}
-        truncation={truncation}
-        compaction={manualCompaction}
-        stepLimit={stepLimit}
-        toolsUnsupported={toolsUnsupported}
-        truncatedResults={truncatedResultsNoticeText}
-        clearedResults={clearedResultsNoticeText}
-        confirmations={confirmations}
-        answering={answering}
-        onRespond={answerPending}
-        loading={loadingHistory}
-        nameOf={nameOf}
-        costOf={costOf}
-        working={statusRow}
-        onEdit={editFromTranscript}
-        editDisabled={!idle}
-        replacingFrom={editing?.seq}
-      />
+      {/* The transcript and, on a wide screen, its task list beside it (#314): the chat column
+          has room for both from `xl` up, and the panel scrolls on its own so a long run does not
+          shorten the conversation. Below that breakpoint the panel is drawn above the composer
+          instead — one instance per breakpoint, which is the same CSS switch the shell's sidebar
+          uses. */}
+      <div className="flex min-h-0 flex-1">
+        <MessageList
+          messages={messages}
+          summaries={summaries}
+          toolCalls={toolCalls}
+          truncation={truncation}
+          compaction={manualCompaction}
+          stepLimit={stepLimit}
+          toolsUnsupported={toolsUnsupported}
+          truncatedResults={truncatedResultsNoticeText}
+          clearedResults={clearedResultsNoticeText}
+          confirmations={confirmations}
+          answering={answering}
+          onRespond={answerPending}
+          loading={loadingHistory}
+          nameOf={nameOf}
+          costOf={costOf}
+          working={statusRow}
+          onEdit={editFromTranscript}
+          editDisabled={!idle}
+          replacingFrom={editing?.seq}
+        />
+        {todos === null ? null : (
+          <TodoPanel todos={todos} collapsed={todosChoice} onToggle={toggleTodos} variant="side" />
+        )}
+      </div>
 
       <div className="border-t px-4 py-3">
         <div className="mx-auto w-full max-w-3xl space-y-2">
-          {/* The chat's task list (epic #303, X5; #305; #308), pinned above the composer while the
-              model has one: it is chrome about the work, not part of the conversation, so it must
-              not scroll away with the transcript — and it is `null` (never an empty list) once no
-              `todo_write` call has taken effect. */}
-          {todos === null ? null : <TodoPanel todos={todos} />}
+          {/* The chat's task list (epic #303, X5; #305; #308) below `xl`, above the composer: it
+              is chrome about the work, not part of the conversation, so it must not scroll away
+              with the transcript — and it is `null` (never an empty list) once no `todo_write`
+              call has taken effect. */}
+          {todos === null ? null : (
+            <TodoPanel
+              todos={todos}
+              collapsed={todosChoice}
+              onToggle={toggleTodos}
+              variant="bottom"
+            />
+          )}
           {/* Sending a message is allowed while calls wait — and it declines them all (epic
               #303, X6; #310), so the box says so before the reader presses Enter rather than
               after. The prompts above stay usable; this is only the other way out. */}
