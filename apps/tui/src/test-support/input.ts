@@ -55,6 +55,9 @@ const KEYS = {
   right: '\u001B[C',
   home: '\u001B[H',
   end: '\u001B[F',
+  /** PgUp / PgDn: the `~`-terminated cursor sequences. */
+  pageUp: '\u001B[5~',
+  pageDown: '\u001B[6~',
   delete: '\u001B[3~',
   backspace: '\u007F',
   tab: '\t',
