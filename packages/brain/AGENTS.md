@@ -64,6 +64,9 @@ src/
                         answers them, and what each answer means (#309)
   stuck.ts              stuck detection (#331): the identical run of newest calls in a turn,
                         the one-time reminder it earns, and the eight-call failing end
+  subagent.ts           subagents (epic #340, S2; #342): the system prompt every child runs
+                        with and its version, and the vocabulary of a subagent type — the
+                        one built-in, and the resolver seam a host implements
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
                         (the step's text, its calls, and the provider-opaque parts it streamed)
   azure-fetch.ts        the Azure endpoint's base URL, and the safeFetch guard a model call goes through
@@ -124,6 +127,8 @@ emits what that reaches.
 | `nativeSearchFor(modelId, credentialType)`, `searchFamilyOf(modelId, credentialType)`, `modelSearches(modelId)`, `webSearchOffered(modelId, credentialType, settings?)`, `searchWasRejected(error)`, `SEARCH_FAMILIES`, `SearchFamily`, `SEARCH_MODEL_PATTERNS`, `MAX_SEARCHES_PER_REQUEST`, `NativeSearchTool`, `NATIVE_TOOL_DECLARATIONS`, `NativeToolDeclaration` | provider-native web search (epic #303, X14; #335): the model families whose provider has a search tool this build attaches (Anthropic, OpenAI, xAI — and an Anthropic model on Vertex), the tool a request is offered keyed by `web_search`, the per-request bound (each family's generations as a first generation plus everything later, #335's retest), whether a model id can search when only the id is known, the settings policy over it (a `deny` or an off switch withholds it, a stored `ask` reads as `allow`), the declaration a host adds to its settings listing, and the narrow reading of a provider's 4xx refusal that costs the one retry without the tool |
 | `TurnOutcome`, `TurnOutcomeKind`                                                                                                                                                                                                                                                                                                                                     | `{ outcome: 'idle' \                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 'noop' \                     | 'interrupted' \                                                                                                                                 | 'error' }` |
 | `ResolvedMode`, `ModeResolver`                                                                                                                                                                                                                                                                                                                                       | a mode as the host resolved it — id, name, model, effort, prompt addition, and the tool override it imposes (#245, M6; #307) — and where a request's mode comes from                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `SubagentTypeResolver`, `SubagentTypeSummary`, `SubagentParent`, `ResolvedSubagentType`, `SubagentTypeResolution`, `GENERAL_PURPOSE_TYPE`, `GENERAL_PURPOSE_DESCRIPTION`                                                                                                                                                                                             | the subagent types a parent model may start (epic #340, S2; #342): the seam a host implements — the types to offer, and what one of them starts, answered as a **result** rather than a throw because the refusals are sentences a model acts on — the parent chat a type is resolved for, the configuration a chosen type resolves to (model, effort, prompt addition, the override it imposes and the tool/MCP-server set in force), and the one built-in type with the words it is offered in                                                                                                                                                                             |
+| `SUBAGENT_SYSTEM_PROMPT`, `SUBAGENT_SYSTEM_PROMPT_VERSION`, `withSubagentPrompt(system)`                                                                                                                                                                                                                                                                             | what every child's system prompt says (epic #340, S2; #342) — that it is a subagent of another chat, that it cannot ask the user, that its final message is the whole of what the parent receives, and that it may send interim notes with `message_parent` — the version that names a change to it, and the one call that appends it after a child's own prompt                                                                                                                                                                                                                                                                                                             |
 | `ContextStrategy`, `ContextStrategyOptions`, `ContextStrategyResult`                                                                                                                                                                                                                                                                                                 | `(events, { model, system, tools?, clearThreshold?, todoNudge?, opaqueTarget? }) => { messages, truncated?, cleared?, reminders? }` — the messages, what the strategy had to cap to fit (epic #277, K6), the tool results it capped and cleared (epic #303, X9; #306), and the reminders it carried beside the history (the todo list and the stuck one, #331). `tools` is the registry whose declarations carry the per-result cap; `clearThreshold` and `todoNudge` are the per-request settings of #331, and `opaqueTarget` is the family and model the request goes to — the gate a step's provider-opaque parts must pass to be replayed (X13; #334)                    |
 | `createContextStrategy(config?)`, `ContextStrategyConfig`                                                                                                                                                                                                                                                                                                            | the default strategy: the conversation, summarized where the log says so (#277 K1), trimmed to a token budget resolved per model, with an oversized newest item capped (K6), a tool result capped to its tool's declaration (X9) and an old one cleared (X9)                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `DEFAULT_CONTEXT_STRATEGY`, `DEFAULT_CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`                                                                                                                                                                                                                                                                                        | its defaults                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -1507,6 +1512,42 @@ asks it once per request with the mode the session's projection names.
   model. Refusing an _unavailable_ mode is the server's rule, checked where a chat starts or
   continues, not the loop's.
 
+### Subagents (epic #340, S2; issue #342)
+
+A chat can start another chat to do a piece of work for it, and `./subagent` is this package's
+half of that: the system prompt a **child** runs with, and the vocabulary of what a parent may
+start. The parent's tools themselves (`agent`, `agent_message`, `agent_wait`, `agent_stop`) and
+the child's `message_parent` are #344's; the session tree (`parent_session_id`, `depth`) is
+A1's (#341).
+
+- **A type is a mode with a description.** The kinds of helper a parent may start are the user's
+  own modes that carry a `subagent_description` (`@openharness/protocol`), plus one built-in
+  every deployment has — `general-purpose`, which is nothing but the parent's current model,
+  effort and tool set in a fresh context. So a type resolves exactly as a chat on that mode
+  does, and a user retunes what their helpers do by editing the mode they already have. That
+  resolution needs the host's database, its credentials and its tool registry, which is why the
+  _implementation_ is the server's (`apps/server/src/subagent-types.ts`).
+- **What is here is the prompt.** `SUBAGENT_SYSTEM_PROMPT` is the addition every child's system
+  prompt carries, in one constant and one place, versioned by `SUBAGENT_SYSTEM_PROMPT_VERSION`
+  exactly as the summary prompt is (K7): it says that the model is a subagent working for
+  another chat, that it **cannot ask the user** so it must not stop to, that its **final message
+  is the whole of what the parent receives** so it has to stand on its own, and that it may send
+  interim notes with `message_parent`. Every one of those is something a model cannot learn from
+  its own conversation — it reads as an ordinary chat otherwise — and the version names a change
+  to them for a reader comparing two runs. `withSubagentPrompt(system)` appends it the way a
+  mode's addition is appended: after the child's own prompt, never in place of it, so a child
+  that follows a mode carries both.
+- **`SubagentTypeResolver` is the seam, and nothing in the loop reads it yet.** It is the same
+  "the host resolves, the caller applies" shape as `ModeResolver`: a host answers what types
+  exist and what one of them starts, asked per call so a mode edited between two starts applies
+  to the second. Its answer is a **result**, not a throw — `{ ok: true, type }` or
+  `{ ok: false, message }` — because both refusals (a name that is not a type, a mode whose
+  model cannot be used) land in the parent's tool as an `is_error` the model acts on: it picks
+  another type or does the work itself. There is deliberately **no `RunTurnOptions` field** for
+  it: the `agent` tool (#344) is the only reader, so the field would be one no turn consults.
+  Whoever builds that tool is handed the resolver, the way `main.ts` hands the loop its own
+  resolvers.
+
 ## Chunks, ids and supersession (D9)
 
 A streamed reply is stored as it streams (issue #46). The brain mints the `sevt_` id the
@@ -1551,6 +1592,12 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   when the session has none), a mode the resolver no longer knows falling back to the session's
   own model with no mode on the span, no resolver injected behaving the same, and a chat without
   a mode never asking.
+- `subagent.test.ts` — the subagent vocabulary on its own (#342): that the child's system prompt
+  says each of S2's four facts — it is a subagent of another chat, it cannot ask the user, its
+  final message is what the parent receives, and `message_parent` is how it sends a note — that
+  the version constant names `subagent-v1`, and that `withSubagentPrompt` appends the addition
+  after the child's own prompt (after a blank line) and is the whole prompt when there is none.
+  What a _type_ resolves to is the server's (`apps/server/src/subagent-types.test.ts`).
 - `per-request-model.test.ts` — the per-request model (U3): a queued message that switched
   the session's model is what the first request runs (and its provider is whose credential is
   resolved), a steering message carrying a switch — across providers — is the model of the

@@ -528,9 +528,9 @@ if (target === null) {
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
       // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
       // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql`,
-      // `0027_tool_settings.sql`, `0030_mcp_oauth_state_client.sql` and
-      // `0031_mcp_tool_policies.sql` one or more
-      // `add column if not exists` (#150, #203, #282, #307, #311, #312), and
+      // `0027_tool_settings.sql`, `0030_mcp_oauth_state_client.sql`,
+      // `0031_mcp_tool_policies.sql` and `0033_mode_subagent_description.sql` one or more
+      // `add column if not exists` (#150, #203, #282, #307, #311, #312, #342), and
       // `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
       // `0027_tool_settings.sql`, `0028_paused_confirmation_work.sql` and
       // `0029_mcp_servers.sql` build an index or a table (#247, #305, #307, #309, #311): a
@@ -560,6 +560,10 @@ if (target === null) {
       // #312's file adds the remote tool policies to the settings table `0027` created, and is
       // numbered after #311's pair for the same reason they follow `0028`.
       expect(files).toContain('0031_mcp_tool_policies.sql')
+      // #342's file adds the subagent description to the `modes` table `0024` created, and is
+      // numbered after the tools stack that preceded it (0032 is A1's session tree, the branch
+      // this one was cut from).
+      expect(files).toContain('0033_mode_subagent_description.sql')
       expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
         files.indexOf('0027_tool_settings.sql'),
       )
@@ -574,6 +578,9 @@ if (target === null) {
       )
       expect(files.indexOf('0030_mcp_oauth_state_client.sql')).toBeLessThan(
         files.indexOf('0031_mcp_tool_policies.sql'),
+      )
+      expect(files.indexOf('0031_mcp_tool_policies.sql')).toBeLessThan(
+        files.indexOf('0033_mode_subagent_description.sql'),
       )
       expect(await migrate(db)).toEqual(files)
 
@@ -605,6 +612,21 @@ if (target === null) {
       expect(await store.listLiveInstances(30_000)).toEqual(['after-a-re-run'])
       await store.removeInstance('after-a-re-run')
       expect(await store.listLiveInstances(30_000)).toEqual([])
+
+      // `0033`'s column is exercised after the re-run too: a mode stores the subagent
+      // description it was created with, and reads it back (#342).
+      const described = await store.createMode(
+        {
+          name: 'reviewer',
+          model: 'anthropic/claude-sonnet-5',
+          subagent_description: 'Reviews a diff for correctness bugs.',
+        },
+        OWNER_A,
+      )
+      expect(described.subagent_description).toBe('Reviews a diff for correctness bugs.')
+      expect((await store.getMode(described.id, { ownerId: OWNER_A }))?.subagent_description).toBe(
+        'Reviews a diff for correctness bugs.',
+      )
 
       // `0020`'s column is exercised after the re-run too: a rewind records its range and its
       // kind, and a replay still reads the session the way a rewind means it to (#238).

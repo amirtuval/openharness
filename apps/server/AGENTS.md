@@ -586,10 +586,12 @@ CRUD, and the store's mode methods (`@openharness/session`) hold the rows.
   no default set — with the protocol's 422 `mode_unavailable_error` and a message naming the
   mode and what to do. It is called on `POST /v1/sessions` and on `POST …/events` (against the
   mode the batch leaves the session on), **before** anything is stored: a mode's model is never
-  silently swapped for another. Every availability decision goes through one function,
-  `hasCredentialForProvider`, which maps the provider half of a model id to "does the caller
-  have a credential for it" — the named-credential work (#260) changes only that function,
-  because a named credential's `name` is the provider half.
+  silently swapped for another. The decision itself is one function, `usableModeModel`, which
+  the subagent types ask too (#342) — a chat's refusal is a 422 and a type's is a sentence the
+  model acts on, but the question is answered in one place; `hasCredentialForProvider` is the
+  half of it that maps the provider half of a model id to "does the caller have a credential
+  for it" — the named-credential work (#260) changes only that function, because a named
+  credential's `name` is the provider half.
 - **The mode a chat follows** is the session's `mode` column, projected from the log in the
   append's transaction (a `user.message` sets it, `mode: null` or a plain `model` detaches),
   and cleared by `deleteMode` — which lands the chats that followed the mode on the model they
@@ -598,7 +600,62 @@ CRUD, and the store's mode methods (`@openharness/session`) hold the rows.
 - **The route-level shape check.** A mode's `model` is validated by the protocol's
   `ModeModelSchema` (a `provider/model` id or the sentinel) at the mode routes; a mode id is a
   `mode_` ULID, so a malformed one in a path is the 400 every bad id gets, and in a body it is
-  the protocol's own 400.
+  the protocol's own 400. A `subagent_description` is checked the same way — one to 500
+  characters or `null` (#342), with the routes storing it exactly as the body spells it and
+  nothing to validate about its content.
+- **A mode's description is what makes it a subagent type** (#342): see
+  [Subagent types](#subagent-types-epic-340-s2-issue-342) below. The mode routes need no code
+  for it — `CreateModeRequestSchema`/`UpdateModeRequestSchema` carry the field and the store
+  writes it — which is the point: a type is a mode, and the modes screen is where a user
+  describes one.
+
+## Subagent types (epic #340, decision S2; issue #342)
+
+The parent model chooses **what kind of helper** to start, and a kind is a mode with a
+description: `subagent-types.ts` is the server's whole half of that, and it is the seam the
+`agent` tool (#344) closes over. The vocabulary and the child's system prompt live in
+`@openharness/brain` (`subagent.ts`), so the resolver's answer is typed by the package that
+documents what a subagent is; everything needing a database, a credential or a tool registry is
+here.
+
+- **A type resolves exactly as a chat does.** A mode type goes through `usableModeModel` —
+  `requireUsableMode`'s rule, one implementation in `modes.ts` — and gets the mode's resolved
+  model (its own, or "my default model" resolved to the owner's default), its
+  `reasoning_effort`, its `system_prompt_addition` and its `tools` override. Its **tool set**
+  comes from `effectiveTools` and `listMcpServersInForce` — the two functions the tool loop
+  itself reads — so "the tools this type's child has" and "the tools a request on that mode
+  offers" are one computation and cannot drift. Nothing is re-derived and nothing is cached:
+  both calls read the store, so a mode edited between two starts applies to the second, which
+  is the live-follow a mode is for (#245, M6).
+- **`general-purpose` is the parent, continued.** It has no row anywhere: the resolver answers
+  it with the `SubagentParent` the caller supplies — the model and effort the parent's current
+  request runs (a parent on a mode runs the mode's resolved model, not the session's stored
+  one) and the tool override that mode imposes, which is the parent's effective tool set in the
+  one spelling an override has. Always first in the list, so the tool always has a type to
+  name.
+- **The list is what the model chooses from.** `list()` answers `general-purpose` first, then
+  every one of the owner's modes that carries a description, oldest first. A mode with no
+  description is a preset, not a type, and is left out; another user's modes are not read at
+  all (A4). A type whose model cannot be used is **still listed** — the choice is where
+  usability decides — and a **provider-native** `web_search` appears in a type's tool set where
+  the settings leave it on, exactly as it does for a chat (#335).
+- **Every refusal is an answer, never a throw** (`SubagentTypeResolution`): an unknown name is
+  answered with the sentence _and the list of types that are available_, and an unusable mode
+  with one naming the type and saying a different type or the parent's own work is what to do.
+  The reader is a **model**, so the sentences are written for it — which is why a mode's
+  unavailability has two wordings: `modeUnavailableMessage` tells a _user_ to edit the mode,
+  and this one tells a _model_ what it can do instead.
+- **It carries both halves of the tool answer**, and deliberately: `toolOverride` is the patch
+  the type imposes (the mode's own `tools`, or the parent's for `general-purpose`) for a caller
+  that creates the child **on the mode** so it follows it live, and `tools`/`mcpServers` are
+  that patch **applied** to the owner's settings — the set the child really has — for a caller
+  that builds the child's turn options itself. Policies are in neither: a policy is the user's
+  (E6).
+- **A child is never offered `ask_user`** (epic #340, S1; #343) — a subagent cannot ask the
+  user, and its system prompt says so (`@openharness/brain`'s `SUBAGENT_SYSTEM_PROMPT`). That
+  is applied where the **child's** turn is built, not here: `ask_user` is in a type's tool set
+  because that is the set a chat on the type resolves to, and a deployment whose chat has it
+  has one that a child must not.
 
 ## Tools and their settings (epic #303; #304; the built-ins: #305; the per-user settings: #307; pausing: #309)
 
@@ -1821,6 +1878,7 @@ before the instance stops serving it (#151).
 | `createTurnRegistry`, `createTurnTools`, `TurnRegistryOptions`, `TurnToolsOptions`, `TurnToolOptions`                                                                                                                                                                                                                                                                               | the registry a process runs with — `ask_user` and the built-ins of #305 for every process, and the test `echo` tool under `OPENHARNESS_TEST_MODEL=mock` (the provider-native `web_search` is no tool of ours, so nothing is registered for it, #335) — and the tools a turn is handed: that registry, the settings resolver (#307), the support gate and the step budget                                   |
 | `askUserTool`, `assertConfirmations`, `rememberAlwaysApprovals`, `withAlwaysApprovals`, `isConfirmation`, `PausingDeps`, `RememberDeps`, `AlwaysApproval`                                                                                                                                                                                                                           | the pause's server half (epic #303, X6; #309; the remote pair: #312): the `ask_user` tool every deployment registers, the checks a `user.tool_confirmation` passes (a call of this session is waiting — built-in or remote — the answers fit its questions, the extensions make sense for it), and the stored policy an `always` approval writes (a built-in's `enabled`+`policy`, a remote tool's policy) |
 | `effectiveTools`, `toolSettingEntries`, `toolDecisions`, `createToolSettingsResolver`, `listToolSettings`, `ToolSettingsDeps`                                                                                                                                                                                                                                                       | the per-user tool settings (epic #303, X4; #307; the remote half: #312): the effective answer, as the wire's entries, as the brain's decisions, the resolver `runTurn` is handed, and the listing a route makes (a mode's override and the owner's in-force MCP servers included)                                                                                                                          |
+| `createSubagentTypeResolver`, `SubagentTypeDeps`                                                                                                                                                                                                                                                                                                                                    | the subagent types (epic #340, S2; #342): the resolver the parent's `agent` tool (#344) asks for the types on offer — `general-purpose` first, then every one of the owner's modes with a description — and for the configuration a chosen one starts with, as `@openharness/brain`'s `SubagentTypeResolver`                                                                                               |
 | `createMcpToolProvider`, `McpToolProviderOptions`, `DEFAULT_MCP_TOOL_CACHE_TTL_MS`, `DEFAULT_MCP_LISTING_TIMEOUT_MS`                                                                                                                                                                                                                                                                | the remote tools a request may offer (#312): the listing — the in-force servers, their tools as `createMcpTool` definitions, a short cache keyed per user and server, and a failure per server that could not be listed — as the brain's `McpToolProvider`                                                                                                                                                 |
 | `createTestToolRegistry`, `testEchoTool`, `TEST_TOOL_NAME`, `TEST_TOOL_DESCRIPTION`                                                                                                                                                                                                                                                                                                 | the test `echo` tool, and the registry that holds it alone — test-only, behind the mock model                                                                                                                                                                                                                                                                                                              |
 | `createToolSupportResolver`                                                                                                                                                                                                                                                                                                                                                         | the per-model tool gate: whether a model can call tools, read from models.dev's `tool_call` (epic #303, X2)                                                                                                                                                                                                                                                                                                |
@@ -1909,7 +1967,10 @@ src/
   model-id.ts           the provider/model shape check the routes share (U1/U3)
   context-compaction.ts the per-owner compaction resolver: each session owner's preferences
                          over the server's threshold and the registry's budgets (#277 C3; #282)
-  modes.ts              modes resolved for a request, and refused when unusable (#245, M6)
+  modes.ts              modes resolved for a request, and refused when unusable (#245, M6) —
+                          the one usability rule a chat and a subagent type both ask
+  subagent-types.ts     the subagent types: which the parent model is offered, and what one
+                          starts (epic #340, S2; #342)
   model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers
   tools.ts              the tools a turn may offer (epic #303; the built-ins are #305): the
@@ -2018,6 +2079,21 @@ parallel with each other.
   session's, the 422 for a chat on a mode whose key is gone (on create and on continue, with
   nothing stored) and for "my default model" with no default, a plain model switch detaching,
   a deleted mode leaving the chat on the last model, and a chat with no mode running its own.
+- `subagent-types.test.ts` — the subagent types (#342), the resolver called directly over the
+  app's own store and credential store (no route serves it yet; #344's tool is its caller): the
+  round trip of `subagent_description` through the mode routes — create, read, list, the update
+  that sets it, the `null` that clears it, the rename that keeps it — and the 400s an empty and
+  an over-long one get, storing nothing. Then the resolver: `general-purpose` first and the
+  described modes oldest first, a mode with no description and another user's modes absent, a
+  deployment that registers no tools offering only the built-in and resolving it to an empty
+  tool set; `general-purpose` resolving to the parent's own model, effort and tool set (and the
+  parent's mode override carried through and applied); a mode type resolving to exactly what a
+  chat on it runs — model, effort, prompt addition, override, and the tool set with the override
+  applied — and "my default model" following the owner's default; an unknown name answered with
+  the types that are available, a mode with no description and another user's mode treated the
+  same way, and a mode whose model cannot be used refused with a sentence naming the type and
+  what to do while staying in the list; and an edit made between two starts applying to the
+  second (the rename moving the lookup, the new model, effort, description and tool set).
 - `preferences.test.ts` — `GET`/`PUT /v1/me/preferences` (U1): the null default, the round
   trip, the free-text id allowance, the 400s for a malformed `default_model` and a body
   without one, and isolation between two users.

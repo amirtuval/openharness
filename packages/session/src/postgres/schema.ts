@@ -71,6 +71,12 @@ export interface ModesTable {
   reasoning_effort: string | null
   system_prompt_addition: string | null
   /**
+   * What the mode is good for when it is offered to a parent model as a subagent type, or
+   * `null` for a mode that is not one (`0033_mode_subagent_description.sql`; epic #340, S2;
+   * #342).
+   */
+  subagent_description: string | null
+  /**
    * Which built-in tools a chat on this mode has on or off, or `null` for no override
    * (`0027_tool_settings.sql`; epic #303, X4; #307). `jsonb`, so its shape is the writer's —
    * the protocol's `ModeToolOverrideSchema` is the only spelling of it.
@@ -531,6 +537,9 @@ export function modeFromRow(row: ModeRow): Mode {
     model: row.model,
     reasoning_effort: row.reasoning_effort as Mode['reasoning_effort'],
     system_prompt_addition: row.system_prompt_addition,
+    // A `null` column is a mode that is not a subagent type, which is what the protocol's
+    // `null` means — never an invented description (#342).
+    subagent_description: row.subagent_description,
     // A `null` column is a mode with no override, so it reads as the protocol's `null` — never
     // an invented `{ builtin: {} }`, which would say the mode decided the tool set is empty.
     tools: row.tools === null ? null : { ...row.tools },

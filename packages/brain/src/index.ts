@@ -24,6 +24,9 @@ import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
  *   older history is summarized so the chat fits its model's window (epic #277, C2; #279).
  * - **{@link PROVIDER_REASONING}** (`./reasoning`) — how `low | medium | high` is asked for from
  *   each provider, and what the log asked the next request to run with (#252).
+ * - **{@link SubagentTypeResolver}** (`./subagent`) — the subagent types a parent model may
+ *   start, the one built-in among them, and the system prompt every child runs with (epic #340,
+ *   S2; #342).
  * - **{@link ModelFactory}** (`./model`) — how a `provider/model` id becomes a model to stream,
  *   made with the {@link ModelCredential} the request runs under.
  * - **{@link ResolveCredential}** (`./model`) — where that credential comes from: the session
@@ -64,6 +67,7 @@ export * from './reasoning'
 export * from './redact'
 export * from './retry'
 export * from './stuck'
+export * from './subagent'
 export * from './manual'
 export * from './tools'
 export * from './summarize'
