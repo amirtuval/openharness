@@ -97,6 +97,7 @@ import {
   decodeSeqPage,
   effectiveSessionConfig,
   pageSize,
+  sessionTree,
   usageWindowOf,
 } from './inputs'
 import type {
@@ -398,8 +399,20 @@ export class InMemorySessionStore implements SessionStore {
     const config = effectiveSessionConfig(agent, options)
     const now = this.#clock()
     const at = timestampAt(now)
+    const id = newSessionId(now)
+    // Where it sits in the tree (epic #340, S3): the parent, when there is one, has to be the
+    // caller's own — somebody else's session is the "not found" an id nothing names gets (A4).
+    const parent =
+      options.parentSessionId === undefined
+        ? null
+        : (this.#sessions.get(options.parentSessionId)?.session ?? null)
+    const tree = sessionTree(
+      id,
+      options,
+      parent !== null && matchesOwner(parent, options) ? parent : null,
+    )
     const session: Session = {
-      id: newSessionId(now),
+      id,
       type: 'session',
       owner_id: options.ownerId,
       status: 'idle',
@@ -417,6 +430,8 @@ export class InMemorySessionStore implements SessionStore {
               model: { id: agent.model.id },
               system: agent.system,
             },
+      interactive: options.interactive ?? true,
+      ...tree,
       created_at: at,
       updated_at: at,
     }
@@ -441,15 +456,48 @@ export class InMemorySessionStore implements SessionStore {
     return resolved(record === undefined ? null : clone(record.session))
   }
 
+  listDescendants(sessionId: SessionId, options: OwnerScope): Promise<SessionId[]> {
+    const record = this.#sessions.get(sessionId)
+    // Somebody else's session is not this caller's to walk, and neither is an id nothing has:
+    // an empty list either way, exactly as `listSessions` answers for both (A4).
+    if (record === undefined || !matchesOwner(record.session, options)) {
+      return resolved([])
+    }
+    return resolved(this.#descendantsOf(sessionId))
+  }
+
+  countLiveDescendants(sessionId: SessionId): Promise<number> {
+    if (!this.#sessions.has(sessionId)) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    return resolved(
+      this.#descendantsOf(sessionId).filter((id) => {
+        const record = this.#sessions.get(id)
+        return record !== undefined && this.#isLive(record)
+      }).length,
+    )
+  }
+
   listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse> {
     const cursor = options.page === undefined ? null : decodeKeyPage(options.page)
     const wanted = options.agentId
+    const parent = options.parentSessionId
     const sessions = [...this.#sessions.values()]
       .map((record) => record.session)
       .filter((session) => matchesOwner(session, options))
       // The `agentId` filter narrows to sessions created with that agent; a model-first
       // session has no agent and no agent id to match (issue #93).
       .filter((session) => wanted === undefined || session.agent?.id === wanted)
+      // The parent filter is the tree's (epic #340, S3): `null` asks for the top-level chats
+      // — the default `GET /v1/sessions` answers — and a session id for its children. An
+      // omitted field filters by parent not at all.
+      .filter(
+        (session) =>
+          parent === undefined ||
+          (parent === null
+            ? session.parent_session_id === null
+            : session.parent_session_id === parent),
+      )
     // Newest first: the list order is `(created_at, id)` descending, which is the order the
     // cursors seek into.
     sessions.sort((left, right) => compareKeys(right, left))
@@ -476,6 +524,21 @@ export class InMemorySessionStore implements SessionStore {
     if (record === undefined || !matchesOwner(record.session, options)) {
       return resolved(false)
     }
+    // A child belongs to its parent, so deleting one deletes its whole subtree (epic #340,
+    // S7). The tree is read before anything goes, and every session in it is removed here —
+    // one synchronous pass, so the state is gone before any listener's microtask runs.
+    for (const target of [sessionId, ...this.#descendantsOf(sessionId)]) {
+      this.#removeSession(target)
+    }
+    return resolved(true)
+  }
+
+  /** Remove one session's whole log, and end what is subscribed to it. */
+  #removeSession(sessionId: SessionId): void {
+    const record = this.#sessions.get(sessionId)
+    if (record === undefined) {
+      return
+    }
     // The second deletion in this store, beside compaction: the whole log goes, so the state
     // a reader could reach goes with it — the events, the ids they held, their claims and
     // their supersessions — and nothing is left to find. `nextSeq` goes with the record; a
@@ -499,7 +562,6 @@ export class InMemorySessionStore implements SessionStore {
         queueMicrotask(() => void listener(event))
       }
     }
-    return resolved(true)
   }
 
   // ------------------------------------------------------------- preferences
@@ -1111,13 +1173,7 @@ export class InMemorySessionStore implements SessionStore {
   /** Whether a session has work waiting: a pending user event, or an open turn. */
   #needsWork(record: SessionRecord): boolean {
     const ranges = this.#supersessions.get(record.session.id)
-    const pending = record.events.some(
-      (entry) =>
-        isUserEvent(entry.event) &&
-        !this.#claims.has(entry.event.id) &&
-        !isSuperseded(entry.event, ranges),
-    )
-    if (pending || turnStateOf(record).state !== 'idle') {
+    if (this.#hasPendingUserEvent(record) || turnStateOf(record).state !== 'idle') {
       return true
     }
     // A pause whose answer has landed (#309): the last turn ended `requires_action`, and a
@@ -1126,6 +1182,68 @@ export class InMemorySessionStore implements SessionStore {
     // nothing else would find it; without this the chat stays stuck until the next message.
     const events = record.events.map((entry) => entry.event)
     return answersPause(events, ranges)
+  }
+
+  /**
+   * Whether a user event is waiting for a turn: nothing has claimed it and no `session.rewind`
+   * covered it (#238). A message a rewind replaced will never be answered, so it is not work.
+   */
+  #hasPendingUserEvent(record: SessionRecord): boolean {
+    const ranges = this.#supersessions.get(record.session.id)
+    return record.events.some(
+      (entry) =>
+        isUserEvent(entry.event) &&
+        !this.#claims.has(entry.event.id) &&
+        !isSuperseded(entry.event, ranges),
+    )
+  }
+
+  /**
+   * Whether a session's turn is **not finished** — the reading
+   * {@link SessionStore.countLiveDescendants} counts (epic #340, S6).
+   *
+   * A session is live while a turn is open (nothing closed it), while a user event waits for a
+   * turn that has not started, or while the last turn ended paused on the user (#309). The
+   * paused case is deliberate: a child parked in `agent_wait` (#344) is still a running task
+   * to S4/S5's vocabulary, and a cap that could not see one would not be a cap — a chat could
+   * park ten children and start ten more. A descendant whose turn finished with nothing
+   * waiting is not live, even though it is still there to be continued.
+   */
+  #isLive(record: SessionRecord): boolean {
+    if (turnStateOf(record).state !== 'idle') {
+      return true
+    }
+    const events = record.events.map((entry) => entry.event)
+    return pauseOf(events) !== null || this.#hasPendingUserEvent(record)
+  }
+
+  /**
+   * Every session below `sessionId` in the tree, oldest first, level by level — the walk
+   * {@link SessionStore.listDescendants} answers with. `seen` keeps a malformed tree (a cycle
+   * no write can produce but a hand-edited store could hold) from looping forever.
+   */
+  #descendantsOf(sessionId: SessionId): SessionId[] {
+    const found: SessionId[] = []
+    const seen = new Set<SessionId>([sessionId])
+    let frontier: SessionId[] = [sessionId]
+    while (frontier.length > 0) {
+      const parents = new Set(frontier)
+      const children = [...this.#sessions.values()]
+        .map((record) => record.session)
+        .filter(
+          (session) =>
+            session.parent_session_id !== null &&
+            parents.has(session.parent_session_id) &&
+            !seen.has(session.id),
+        )
+        .sort(compareKeys)
+      for (const child of children) {
+        seen.add(child.id)
+      }
+      found.push(...children.map((child) => child.id))
+      frontier = children.map((child) => child.id)
+    }
+    return found
   }
 
   /**
@@ -1505,21 +1623,41 @@ function answersPause(
   events: readonly StoredEvent[],
   ranges: readonly SupersessionRecord[] | undefined,
 ): boolean {
-  const lastStatus = findLastStatusEvent(events)
-  if (
-    lastStatus === null ||
-    lastStatus.type !== EVENT_TYPES.sessionStatusIdle ||
-    lastStatus.stop_reason.type !== 'requires_action'
-  ) {
+  const pause = pauseOf(events)
+  if (pause === null) {
     return false
   }
-  const waiting = new Set(lastStatus.stop_reason.event_ids)
+  const waiting = new Set(pause.event_ids)
   return events.some(
     (event) =>
       event.type === EVENT_TYPES.userToolConfirmation &&
       waiting.has(event.tool_use_id) &&
       !isSuperseded(event, ranges),
   )
+}
+
+/**
+ * The pause a log is waiting on (#309): its last status event is a `session.status_idle`
+ * carrying a `requires_action` stop reason, whose `event_ids` name the calls it waits on —
+ * or `null` when the log's last turn ended any other way.
+ *
+ * A paused session is **idle** — the pause holds no lease and no concurrency slot — but it is
+ * not finished: an answer continues it. That is why the liveness reading behind
+ * {@link InMemorySessionStore.countLiveDescendants} counts one as live (epic #340, S6), and
+ * why {@link answersPause} starts here.
+ */
+function pauseOf(
+  events: readonly StoredEvent[],
+): { readonly event_ids: readonly EventId[] } | null {
+  const lastStatus = findLastStatusEvent(events)
+  if (
+    lastStatus === null ||
+    lastStatus.type !== EVENT_TYPES.sessionStatusIdle ||
+    lastStatus.stop_reason.type !== 'requires_action'
+  ) {
+    return null
+  }
+  return lastStatus.stop_reason
 }
 
 /** The last status event in a log, or `null` when the log has none. */

@@ -6,6 +6,7 @@ import {
   newModeId,
   newProviderCredentialId,
   newSessionId,
+  newTaskId,
 } from '../ids'
 import { SUMMARY_MODEL_SAME_AS_CHAT } from '../index'
 import { DEFAULT_MCP_TOOL_PERMISSION, mcpToolOfferedName } from '../tools'
@@ -133,11 +134,15 @@ export function makeSessionAgent(overrides: Partial<SessionAgent> = {}): Session
 /**
  * A `session` resource, `idle` with no title and no metadata unless overridden.
  *
+ * The default is a top-level interactive chat: `interactive: true`, no parent, its own id as
+ * its root, and `depth: 0` (#340, S1/S3).
+ *
  * @param overrides fields to replace on the default session
  */
 export function makeSession(overrides: Partial<Session> = {}): Session {
+  const id = overrides.id ?? newSessionId()
   const session: Session = {
-    id: newSessionId(),
+    id,
     type: 'session',
     owner_id: makeUser().id,
     status: 'idle',
@@ -147,10 +152,35 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     system: 'You are a concise technical assistant.',
     mode: null,
     agent: makeSessionAgent(),
+    interactive: true,
+    parent_session_id: null,
+    parent_task_id: null,
+    // A top-level chat is its own root; a caller making a child replaces all four tree fields.
+    root_session_id: id,
+    depth: 0,
     created_at: fixtureTimestamp(),
     updated_at: fixtureTimestamp(),
   }
   return { ...session, ...overrides }
+}
+
+/**
+ * A child session — one a chat started (#340, S3): it belongs to `parent`, shares its root,
+ * sits one level deeper, and is `interactive: false` because a child's model cannot ask the
+ * user anything (S1). Its `parent_task_id` is a fresh `task_` id unless one is given.
+ *
+ * @param parent the session this one belongs to
+ * @param overrides fields to replace on the derived child
+ */
+export function makeChildSession(parent: Session, overrides: Partial<Session> = {}): Session {
+  return makeSession({
+    parent_session_id: parent.id,
+    parent_task_id: newTaskId(),
+    root_session_id: parent.root_session_id,
+    depth: parent.depth + 1,
+    interactive: false,
+    ...overrides,
+  })
 }
 
 /**

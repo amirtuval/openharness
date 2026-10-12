@@ -83,6 +83,7 @@ import {
   decodeSeqPage,
   effectiveSessionConfig,
   pageSize,
+  sessionTree,
   usageWindowOf,
 } from '../inputs'
 import type {
@@ -475,6 +476,29 @@ export class PostgresSessionStore implements SessionStore {
         agent === undefined ? null : { model: { id: agent.model_id }, system: agent.system },
         options,
       )
+      // Where it sits in the tree (epic #340, S3): the parent, when there is one, is read
+      // owner-scoped inside this transaction, so a session cannot be hung off one the caller
+      // cannot see — the same "not found" an id nothing has gets (A4).
+      const parent =
+        options.parentSessionId === undefined
+          ? undefined
+          : await trx
+              .selectFrom('sessions')
+              .selectAll()
+              .where('id', '=', options.parentSessionId)
+              .where('owner_id', '=', options.ownerId)
+              .executeTakeFirst()
+      const tree = sessionTree(
+        id,
+        options,
+        parent === undefined
+          ? null
+          : {
+              id: parent.id as SessionId,
+              root_session_id: parent.root_session_id as SessionId,
+              depth: parent.depth,
+            },
+      )
       const row: SessionRow = {
         id,
         owner_id: options.ownerId,
@@ -491,6 +515,8 @@ export class PostgresSessionStore implements SessionStore {
         agent_name: agent?.name ?? null,
         agent_model_id: agent?.model_id ?? null,
         agent_system: agent?.system ?? null,
+        interactive: options.interactive ?? true,
+        ...tree,
         created_at: instant(now),
         updated_at: instant(now),
       }
@@ -553,22 +579,66 @@ export class PostgresSessionStore implements SessionStore {
       if (session === undefined || !ownsRow(session, options)) {
         return false
       }
+      // A child belongs to its parent, so the whole subtree goes (epic #340, S7). The ids are
+      // collected first — a recursive walk over `parent_session_id` — and then locked in id
+      // order, which is what serializes the delete against an append to any of them and keeps
+      // two concurrent cascades from deadlocking on each other.
+      const subtree = await this.#descendantIds(trx, sessionId)
+      const ids = [sessionId, ...subtree]
+      await trx
+        .selectFrom('sessions')
+        .select('id')
+        .where('id', 'in', ids)
+        .orderBy('id', 'asc')
+        .forUpdate()
+        .execute()
       // Every table with a session column, in one transaction. The events would cascade from
       // `sessions`, but are named anyway so the delete says what it removes; `event_claims`
       // and `event_supersessions` carry no foreign key on purpose (see `0007_event_claims.sql`),
       // so nothing else would ever remove their rows.
-      await trx.deleteFrom('events').where('session_id', '=', sessionId).execute()
-      await trx.deleteFrom('event_claims').where('session_id', '=', sessionId).execute()
-      await trx.deleteFrom('event_supersessions').where('session_id', '=', sessionId).execute()
-      await trx.deleteFrom('sessions').where('id', '=', sessionId).execute()
-      // Announced on the session's own channel, inside the transaction: Postgres delivers the
-      // notification when this commits, so a subscriber hears that the session is gone only
-      // once it really is — whichever store, or process, deleted it.
-      await sql`select pg_notify(${sessionChannel(sessionId)}, ${encodeSessionDeletedNotification(
-        sessionId,
-      )})`.execute(trx)
+      await trx.deleteFrom('events').where('session_id', 'in', ids).execute()
+      await trx.deleteFrom('event_claims').where('session_id', 'in', ids).execute()
+      await trx.deleteFrom('event_supersessions').where('session_id', 'in', ids).execute()
+      await trx.deleteFrom('sessions').where('id', 'in', ids).execute()
+      // Announced on each session's own channel, inside the transaction: Postgres delivers the
+      // notifications when this commits, so a subscriber hears that the session is gone only
+      // once it really is — whichever store, or process, deleted it. One announcement per
+      // session, so a stream following a child ends the same way one following the parent does.
+      const payloads = ids.map((id) => encodeSessionDeletedNotification(id))
+      await sql`select pg_notify(channel, payload)
+                  from unnest(${ids.map((id) => sessionChannel(id))}::text[], ${payloads}::text[])
+                    as announcement(channel, payload)`.execute(trx)
       return true
     })
+  }
+
+  /**
+   * The ids below `sessionId` in the tree, oldest first: one recursive walk over
+   * `parent_session_id` that a caller runs inside its transaction.
+   *
+   * The order is `(created_at, id)` ascending within each level and level by level from the
+   * named session down — the order {@link SessionStore.listDescendants} promises — so a walk
+   * does not depend on how a planner happens to visit the recursion. A `depth` bound keeps a
+   * malformed tree (a cycle no write can produce but a hand-edited table could hold) from
+   * recursing forever.
+   */
+  async #descendantIds(
+    db: Kysely<PostgresSchema> | Transaction<PostgresSchema>,
+    sessionId: SessionId,
+  ): Promise<SessionId[]> {
+    const found = await sql<{ id: string }>`
+      with recursive subtree as (
+        select id, created_at, 0 as level from sessions where id = ${sessionId}
+        union all
+        select s.id, s.created_at, t.level + 1
+          from sessions s join subtree t on s.parent_session_id = t.id
+         where t.level < ${MAX_DESCENDANT_DEPTH}
+      )
+      select id from subtree
+       where id <> ${sessionId}
+       order by level asc, created_at asc, id asc
+    `.execute(db)
+    return found.rows.map((row) => row.id as SessionId)
   }
 
   // ------------------------------------------------------------- preferences
@@ -678,6 +748,15 @@ export class PostgresSessionStore implements SessionStore {
     if (options.agentId !== undefined) {
       query = query.where('agent_id', '=', options.agentId)
     }
+    // The parent filter is the tree's (epic #340, S3): `null` asks for the top-level chats —
+    // the default `GET /v1/sessions` answers — and a session id for its children. Inside the
+    // owner scope like every other narrowing, so another user's id is an empty page.
+    if (options.parentSessionId !== undefined) {
+      query =
+        options.parentSessionId === null
+          ? query.where('parent_session_id', 'is', null)
+          : query.where('parent_session_id', '=', options.parentSessionId)
+    }
     if (cursor !== null) {
       query = query.where(keyset(cursor, 'desc'))
     }
@@ -694,6 +773,92 @@ export class PostgresSessionStore implements SessionStore {
       data,
       next_page: rows.length > limit ? encodeKeyCursor(lastOf(data)) : null,
     }
+  }
+
+  async listDescendants(sessionId: SessionId, options: OwnerScope): Promise<SessionId[]> {
+    // The scoped read is the ownership check: somebody else's session, and an id nothing has,
+    // are the empty list a `listSessions` page with no rows is (A4).
+    const session = await this.#db
+      .selectFrom('sessions')
+      .select('id')
+      .where('id', '=', sessionId)
+      .where('owner_id', '=', options.ownerId)
+      .executeTakeFirst()
+    if (session === undefined) {
+      return []
+    }
+    return this.#descendantIds(this.#db, sessionId)
+  }
+
+  async countLiveDescendants(sessionId: SessionId): Promise<number> {
+    if ((await readSession(this.#db, sessionId)) === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    // One query rather than a walk with a read per descendant — the same reason the usage
+    // read is a method of its own. "Live" is derived from the log alone, so it means the same
+    // thing here and in the fake: an unclaimed user event waiting for a turn, an open turn
+    // (the last status event is not `session.status_idle`), or a last turn that ended paused
+    // on the user (#309) — a child parked in `agent_wait` (#344) is still a running task
+    // (epic #340, S6). The predicates are the ones `findSessionsNeedingWork` uses, one
+    // session-scoped walk over instead of a partition scan.
+    const found = await sql<{ count: number }>`
+      with recursive subtree as (
+        select id, 0 as level from sessions where id = ${sessionId}
+        union all
+        select s.id, t.level + 1
+          from sessions s join subtree t on s.parent_session_id = t.id
+         where t.level < ${MAX_DESCENDANT_DEPTH}
+      )
+      select count(*)::int as count
+        from sessions s
+       where s.id in (select id from subtree where id <> ${sessionId})
+         and (
+           exists (
+             select 1
+               from events e
+              where e.session_id = s.id
+                and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+                and not exists (select 1 from event_claims c where c.event_id = e.id)
+                -- A message a rewind replaced (#238) is not work: it will never be answered.
+                and not exists (
+                  select 1 from event_supersessions x
+                   where x.session_id = e.session_id
+                     and x.kind = ${REWIND_KIND}
+                     and e.seq between x.from_seq and x.to_seq
+                )
+           )
+           or coalesce((
+             select e2.type
+               from events e2
+              where e2.session_id = s.id
+                and e2.type in (
+                  ${EVENT_TYPES.sessionStatusRunning},
+                  ${EVENT_TYPES.sessionStatusIdle},
+                  ${EVENT_TYPES.sessionStatusRescheduled}
+                )
+              order by e2.seq desc
+              limit 1
+           ), ${EVENT_TYPES.sessionStatusIdle}) <> ${EVENT_TYPES.sessionStatusIdle}
+           or exists (
+             select 1
+               from events st
+              where st.session_id = s.id
+                and st.type = ${EVENT_TYPES.sessionStatusIdle}
+                and st.seq = (
+                  select max(e3.seq)
+                    from events e3
+                   where e3.session_id = s.id
+                     and e3.type in (
+                       ${EVENT_TYPES.sessionStatusRunning},
+                       ${EVENT_TYPES.sessionStatusIdle},
+                       ${EVENT_TYPES.sessionStatusRescheduled}
+                     )
+                )
+                and st.payload -> 'stop_reason' ->> 'type' = 'requires_action'
+           )
+         )
+    `.execute(this.#db)
+    return found.rows[0]?.count ?? 0
   }
 
   // ----------------------------------------------------------------- events
@@ -2109,6 +2274,17 @@ function suppliedIdsOf(events: readonly AppendableEvent[]): EventId[] {
 
 /** Postgres's SQLSTATE for a unique-constraint violation. */
 const UNIQUE_VIOLATION = '23505'
+
+/**
+ * How deep the recursive walk over `parent_session_id` may go before it stops.
+ *
+ * A tree the store built is finite and shallow — S6's own nesting limit defaults to 3 — so
+ * this is not a limit on a real tree: it is what makes the walk provably terminate on a table
+ * somebody hand-edited into a cycle, which SQL has no cheap way to detect (and a `with
+ * recursive` that loops would hang the connection rather than fail). It is deliberately far
+ * above any tree a caller would build.
+ */
+const MAX_DESCENDANT_DEPTH = 64
 
 /**
  * The constraints a duplicate event id can be reported under: the primary key on `events.id`

@@ -21,6 +21,7 @@ import type {
   StoredEvent,
   StoredEventType,
   StreamEvent,
+  TaskId,
   Timestamp,
   UpdateAgentRequest,
   UpdateModeRequest,
@@ -311,12 +312,24 @@ export interface SessionStore {
    * — the same projection {@link SessionStore.appendEvents} describes. The session is `idle`
    * with no status events.
    *
+   * Since epic #340 a session may be created **as a child of another** (S3): pass
+   * `options.parentSessionId`, and the created session takes the parent's owner, gets no
+   * history of its own, and carries the tree the store derives — `root_session_id` from the
+   * parent's root, `depth` one deeper, `parent_task_id` from `options.parentTaskId`. What the
+   * child runs is still whatever `agentId`/`options` say, exactly as for a top-level chat.
+   * `options.interactive` (default `true`) says whether a person is on the other end (S1);
+   * a child is normally created `interactive: false`.
+   *
    * @param agentId the agent whose configuration the session snapshots, or `null` for a
    *   model-first session — one created from `options.model` alone
    * @throws AgentNotFoundError when `agentId` names no agent, or one owned by somebody else —
    *   the same answer either way, so the error does not leak that the agent exists
+   * @throws SessionNotFoundError when `options.parentSessionId` names no session, or one owned
+   *   by somebody else — the same answer either way, so a child cannot be hung off a session
+   *   the caller cannot see (A4)
    * @throws RangeError when there is no agent and no `options.model` either — the protocol
-   *   requires one of the two, and the store refuses to invent a configuration
+   *   requires one of the two, and the store refuses to invent a configuration — or when
+   *   `options.parentTaskId` names a task with no `options.parentSessionId` beside it
    */
   createSession(agentId: AgentId | null, options: CreateSessionOptions): Promise<Session>
 
@@ -349,9 +362,51 @@ export interface SessionStore {
    * **Owner-scoped, and the owner is required** (epic #65, A4): only that owner's sessions
    * come back, and the `agentId` filter narrows inside them.
    *
+   * `parentSessionId` narrows by the tree (epic #340, S3): a session id answers that session's
+   * children, `null` answers only top-level chats, and an omitted field filters by parent not
+   * at all. The filter is applied **inside** the owner scope like every other narrowing, so
+   * another user's parent id is an empty page rather than an error.
+   *
    * `page` and `next_page` are the protocol's opaque keyset cursor, passed through untouched.
    */
   listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse>
+
+  /**
+   * The descendants of a session — its children, their children, and so on — oldest first, as
+   * ids (epic #340, S3/S7).
+   *
+   * This exists for the two things that have to act on a whole subtree: **deleting** a session
+   * deletes its descendants (S7), and the server stops each descendant's turn before the rows
+   * go; and a caller applying S6's cap asks how much of a tree is live
+   * ({@link SessionStore.countLiveDescendants}). The order is `(created_at, id)` ascending
+   * within each level and level by level from the named session down, so a caller that stops
+   * what it is handed does so parents before children.
+   *
+   * **Owner-scoped**: another user's session, or an id nothing has, answers an empty list,
+   * exactly as {@link SessionStore.listSessions} answers `data: []` for both.
+   */
+  listDescendants(sessionId: SessionId, options: OwnerScope): Promise<SessionId[]>
+
+  /**
+   * How many of a session's descendants are **live** (epic #340, S6): the number a caller
+   * compares against `OPENHARNESS_MAX_LIVE_TASKS` before it starts another subagent.
+   *
+   * A descendant is live while its turn is not finished — a turn is open (running, or one
+   * nothing closed), a user event is waiting for a turn that has not started, or the last turn
+   * ended paused on the user (`requires_action`, #309). That last case is what keeps a child
+   * parked in `agent_wait` (#344) inside the cap: to the task vocabulary of S4/S5 it is still
+   * running, and a chat that could park ten children and start ten more would not be capped at
+   * all. A descendant whose turn has finished and which has nothing waiting is not live, even
+   * though it is still there to be continued.
+   *
+   * The count is over the subtree of the named session **excluding it**, so passing a
+   * top-level chat counts its whole tree, which is the S6 reading ("per root chat"). It is
+   * unscoped like the other reads the brain makes for a session rather than for a user.
+   *
+   * @throws SessionNotFoundError when the session does not exist — a caller with a real
+   *   session never sees it, and an id that names nothing is a bug rather than a count of zero
+   */
+  countLiveDescendants(sessionId: SessionId): Promise<number>
 
   /**
    * Change a session's title, and return the session as it is afterwards — or `null` when no
@@ -384,6 +439,11 @@ export interface SessionStore {
    * else — exactly the same answer either way, so nothing leaks, just as
    * {@link SessionStore.getSession} answers `null` for both.
    *
+   * A session's **descendants go with it** (epic #340, S7): a child belongs to its parent, so
+   * one transaction removes the session, its whole log, and every session below it in the
+   * tree, each announced to its own subscribers as {@link SessionStore.listDescendants}
+   * describes. Nothing is left pointing at a session that is gone.
+   *
    * This is the deliberate second exception to "events are never deleted", beside
    * {@link SessionStore.compact} (epic #116 U5, issue #111), and unlike compaction it is
    * **irreversible**: one transaction removes the session's row and every row keyed by the
@@ -397,7 +457,8 @@ export interface SessionStore {
    * held is free again for a later append.
    *
    * The deletion is announced to the session's subscribers: each one receives a final
-   * `session.deleted` `StreamEvent` naming the session, and the subscription ends with it —
+   * `session.deleted` `StreamEvent` naming the session (one per session when the delete
+   * cascaded to descendants, #340 S7), and the subscription ends with it —
    * see {@link SessionStore.subscribe}.
    *
    * @returns `true` when the caller's own session was deleted, `false` otherwise
@@ -1021,6 +1082,32 @@ export interface CreateSessionOptions {
   /** The `user.id` the session belongs to (epic #65, A4); required — nothing is unowned. */
   readonly ownerId: UserId
   /**
+   * Whether a person is on the other end (epic #340, S1); omitted, `true` — a chat someone is
+   * typing into. `false` is a session whose model cannot stop to ask anything: the brain never
+   * offers it `ask_user` and answers an `ask` call at once instead of pausing. Written once
+   * and never changed.
+   */
+  readonly interactive?: boolean
+  /**
+   * The session this one belongs to (epic #340, S3), or omitted for a top-level chat. A child
+   * is a real session that happens to have a parent: it takes **the parent's owner** and no
+   * history, and its tree fields are derived here rather than passed —
+   * `root_session_id` is the parent's root (its own id when the parent is a top-level chat)
+   * and `depth` is one more than the parent's, so no caller can write a tree that does not add
+   * up. Its first `user.message` is the prompt its parent wrote.
+   *
+   * A caller enforcing S6's nesting limit does so **before** calling this: the store writes
+   * the tree it is given, and a limit that lived here would be a deployment's policy in a
+   * contract.
+   */
+  readonly parentSessionId?: SessionId
+  /**
+   * The `task_` id the parent started this session for (epic #340, S3/S4; #343), or `null`
+   * for a child no task names. Only meaningful with {@link CreateSessionOptions.parentSessionId}:
+   * a task id without a parent is a caller error and is refused.
+   */
+  readonly parentTaskId?: TaskId | null
+  /**
    * The effective model the session runs (issue #93): the request's inline model, or a
    * per-session override of the agent's. Omitted, the agent's model is copied; without an
    * agent there is nothing to copy and a missing `model` is a `RangeError`.
@@ -1086,6 +1173,14 @@ export interface ListSessionsOptions extends OwnerScope {
   readonly page?: string
   /** Return only sessions created with this agent. The protocol's `agent_id` filter. */
   readonly agentId?: AgentId
+  /**
+   * Which parent's children to list (epic #340, S3): a session id answers that session's
+   * children, and `null` answers only top-level chats — every session whose
+   * `parent_session_id` is `null`, which is what `GET /v1/sessions` returns by default now
+   * that a chat can start one. Omitting the field does not filter by parent at all, which is
+   * how a caller lists a tree whole.
+   */
+  readonly parentSessionId?: SessionId | null
 }
 
 /** Query of {@link SessionStore.listEvents}: owner-scoped. */

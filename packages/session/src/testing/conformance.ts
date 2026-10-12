@@ -13,6 +13,7 @@ import {
   isStoredEvent,
   newEventId,
   newMcpServerId,
+  newTaskId,
   partitionOf,
   SUMMARY_MODEL_SAME_AS_CHAT,
   type Agent,
@@ -2350,6 +2351,319 @@ export function runSessionStoreConformance(
           session_id: session.id,
         })
         expect(received.filter(isStoredEvent)).toHaveLength(1)
+      })
+    })
+
+    // --------------------------------------------------------- the session tree
+
+    describe('the session tree and non-interactive sessions (epic #340, S1/S3/S7)', () => {
+      it('creates an interactive top-level chat unless told otherwise (S1)', async () => {
+        const { store } = await setup()
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+
+        const plain = await store.createSession(agent.id, { ownerId: OWNER_A })
+        // A chat someone is typing into, and its own root: the tree fields are on every
+        // session, not only on children (S3).
+        expect(plain).toMatchObject({
+          interactive: true,
+          parent_session_id: null,
+          parent_task_id: null,
+          root_session_id: plain.id,
+          depth: 0,
+        })
+        expectExact(SessionSchema, plain, 'a top-level chat')
+
+        const nonInteractive = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          interactive: false,
+        })
+        expect(nonInteractive.interactive).toBe(false)
+        expectExact(SessionSchema, nonInteractive, 'a non-interactive session')
+        // It is otherwise a session like any other: the flag is not a second kind of log.
+        expect(await store.getSession(nonInteractive.id, { ownerId: OWNER_A })).toEqual(
+          nonInteractive,
+        )
+      })
+
+      it('hangs a child off its parent: the parent’s root, one level deeper, the task it names (S3)', async () => {
+        const { store } = await setup()
+        const { agent, session: root } = await seed(store)
+        const task = newTaskId()
+
+        const child = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+          parentTaskId: task,
+        })
+        expect(child).toMatchObject({
+          interactive: true,
+          parent_session_id: root.id,
+          parent_task_id: task,
+          root_session_id: root.id,
+          depth: 1,
+        })
+        expectExact(SessionSchema, child, 'a child session')
+
+        const grandchild = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: child.id,
+        })
+        // The whole tree shares one root, and a task id is optional: a child no task names is
+        // still a child.
+        expect(grandchild).toMatchObject({
+          parent_session_id: child.id,
+          parent_task_id: null,
+          root_session_id: root.id,
+          depth: 2,
+        })
+
+        // A child inherits no history: its first message is the prompt its parent wrote, and
+        // there is nothing in its log until then (S3).
+        expect((await store.listEvents(child.id, { ownerId: OWNER_A })).data).toEqual([])
+        // The parent's own log is untouched by having a child.
+        expect((await store.listEvents(root.id, { ownerId: OWNER_A })).data).toEqual([])
+      })
+
+      it('refuses a parent the caller does not own, and an id nothing has', async () => {
+        const { store } = await setup()
+        const { session: root } = await seed(store)
+
+        // Hanging a child off somebody else's session would leak that it exists, so it is the
+        // "not found" an id nothing names gets (A4) — and nothing is created. The body is
+        // model-first on purpose: the point is the parent's owner, not an agent's.
+        const stolen = await thrownBy(() =>
+          store.createSession(null, {
+            ownerId: OWNER_B,
+            model: { id: 'openai/gpt-4.1-mini' },
+            parentSessionId: root.id,
+          }),
+        )
+        expectErrorIdentity(stolen, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+        const unknown = await thrownBy(() =>
+          store.createSession(null, {
+            ownerId: OWNER_A,
+            model: { id: 'openai/gpt-4.1-mini' },
+            parentSessionId: unknownSessionId(),
+          }),
+        )
+        expectErrorIdentity(unknown, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+        expect((await store.listSessions({ ownerId: OWNER_B })).data).toEqual([])
+        expect((await store.listSessions({ ownerId: OWNER_A })).data.map((s) => s.id)).toEqual([
+          root.id,
+        ])
+      })
+
+      it('refuses a task id with no parent session beside it', async () => {
+        const { store } = await setup()
+        const agent = await store.createAgent(agentInput(), OWNER_A)
+        // A task is what a parent started this session for: without a parent there is nothing
+        // it could name, so it is a caller error rather than a field to store.
+        const error = await thrownBy(() =>
+          store.createSession(agent.id, { ownerId: OWNER_A, parentTaskId: newTaskId() }),
+        )
+        expect(error).toBeInstanceOf(RangeError)
+      })
+
+      it('lists top-level chats by default and one session’s children on request (S3)', async () => {
+        const { store, clock } = await setup()
+        const { agent, session: root } = await seed(store)
+        // The clock advances between them, as everywhere else: two ids minted in one
+        // millisecond carry random suffixes, so an order that did not move the clock would be
+        // asserting the tie-break rather than newest first.
+        clock.advance(SECOND)
+        const first = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+        })
+        clock.advance(SECOND)
+        const second = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+        })
+        clock.advance(SECOND)
+        const grandchild = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: first.id,
+        })
+
+        // The default `GET /v1/sessions` reading: a child is not a chat of its own.
+        expect(
+          (await store.listSessions({ ownerId: OWNER_A, parentSessionId: null })).data.map(
+            (session) => session.id,
+          ),
+        ).toEqual([root.id])
+        // Its children, newest first like every other list.
+        expect(
+          (await store.listSessions({ ownerId: OWNER_A, parentSessionId: root.id })).data.map(
+            (session) => session.id,
+          ),
+        ).toEqual([second.id, first.id])
+        expect(
+          (await store.listSessions({ ownerId: OWNER_A, parentSessionId: first.id })).data.map(
+            (session) => session.id,
+          ),
+        ).toEqual([grandchild.id])
+        // Omitting the field filters by parent not at all, which is how a caller asks for a
+        // whole owner's sessions.
+        expect((await store.listSessions({ ownerId: OWNER_A })).data).toHaveLength(4)
+        // The filter is inside the owner scope: another user's parent id is an empty page,
+        // never somebody else's children (A4).
+        expect(
+          (await store.listSessions({ ownerId: OWNER_B, parentSessionId: root.id })).data,
+        ).toEqual([])
+      })
+
+      it('walks a session’s descendants level by level, owner-scoped (S7)', async () => {
+        const { store, clock } = await setup()
+        const { agent, session: root } = await seed(store)
+        clock.advance(SECOND)
+        const first = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+        })
+        clock.advance(SECOND)
+        const second = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+        })
+        clock.advance(SECOND)
+        const grandchild = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: first.id,
+        })
+
+        // Children before grandchildren, oldest first within a level.
+        expect(await store.listDescendants(root.id, { ownerId: OWNER_A })).toEqual([
+          first.id,
+          second.id,
+          grandchild.id,
+        ])
+        // The walk starts wherever it is asked to: a child's subtree is its own.
+        expect(await store.listDescendants(first.id, { ownerId: OWNER_A })).toEqual([grandchild.id])
+        expect(await store.listDescendants(grandchild.id, { ownerId: OWNER_A })).toEqual([])
+        // Somebody else's session, and an id nothing has, are the empty list a list read
+        // answers for both (A4).
+        expect(await store.listDescendants(root.id, { ownerId: OWNER_B })).toEqual([])
+        expect(await store.listDescendants(unknownSessionId(), { ownerId: OWNER_A })).toEqual([])
+      })
+
+      it('counts the descendants whose turn is not finished, and nothing else (S6)', async () => {
+        const { store } = await setup()
+        const { agent, session: root } = await seed(store)
+        const childOf = (parent: Session) =>
+          store.createSession(agent.id, { ownerId: OWNER_A, parentSessionId: parent.id })
+
+        const waiting = await childOf(root)
+        const running = await childOf(root)
+        const paused = await childOf(root)
+        const finished = await childOf(root)
+        const idle = await childOf(root)
+        const grandchild = await childOf(running)
+
+        // A message queued for a turn that has not started yet is live — that is what makes
+        // the cap hold for children started in one step.
+        await append(store, waiting.id, [userMessage('work')])
+        await append(store, running.id, [statusRunning()])
+        const call = newEventId()
+        await append(store, paused.id, [statusRunning(), toolUse(call, 'ask_user')])
+        await append(store, paused.id, [statusPausedFor([call])])
+        await append(store, finished.id, [statusRunning(), statusIdle()])
+        await append(store, grandchild.id, [userMessage('nested work')])
+        // `idle` was created and never given anything: there is no work to count.
+
+        expect(await store.countLiveDescendants(root.id)).toBe(4)
+        // The tree's own root is not a descendant of itself, and a subtree count starts where
+        // it is asked to.
+        expect(await store.countLiveDescendants(running.id)).toBe(1)
+        expect(await store.countLiveDescendants(idle.id)).toBe(0)
+
+        // A turn that ends takes its session out of the count — while its own child's queued
+        // work keeps that one in it — and the paused one stays in until its turn ends: a child
+        // parked in `agent_wait` is still a running task.
+        await append(store, running.id, [statusIdle()])
+        expect(await store.countLiveDescendants(root.id)).toBe(3)
+        expect(await store.countLiveDescendants(grandchild.id)).toBe(0)
+        const error = await thrownBy(() => store.countLiveDescendants(unknownSessionId()))
+        expectErrorIdentity(error, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+      })
+
+      it('deletes a session’s descendants with it (S7)', async () => {
+        const { store } = await setup()
+        const { agent, session: root } = await seed(store)
+        const child = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+        })
+        const grandchild = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: child.id,
+        })
+        const other = await store.createSession(agent.id, { ownerId: OWNER_A })
+        await append(store, grandchild.id, [userMessage('the deepest work')])
+
+        expect(await store.deleteSession(root.id, { ownerId: OWNER_A })).toBe(true)
+        for (const gone of [root, child, grandchild]) {
+          expect(await store.getSession(gone.id, { ownerId: OWNER_A })).toBeNull()
+          const error = await thrownBy(() => store.listEvents(gone.id, { ownerId: OWNER_A }))
+          expectErrorIdentity(error, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+        }
+        // A session outside the subtree is untouched, log included.
+        expect((await store.getSession(other.id, { ownerId: OWNER_A }))?.id).toBe(other.id)
+        expect(await store.listDescendants(other.id, { ownerId: OWNER_A })).toEqual([])
+      })
+
+      it('deleting a middle session takes its subtree and leaves its parent (S7)', async () => {
+        const { store } = await setup()
+        const { agent, session: root } = await seed(store)
+        const child = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+        })
+        const grandchild = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: child.id,
+        })
+
+        expect(await store.deleteSession(child.id, { ownerId: OWNER_A })).toBe(true)
+        expect(await store.getSession(grandchild.id, { ownerId: OWNER_A })).toBeNull()
+        expect((await store.getSession(root.id, { ownerId: OWNER_A }))?.id).toBe(root.id)
+        expect(await store.listDescendants(root.id, { ownerId: OWNER_A })).toEqual([])
+      })
+
+      it('ends every descendant’s subscription with its own session.deleted (S7)', async () => {
+        const { store } = await setup()
+        const { agent, session: root } = await seed(store)
+        const child = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+        })
+        const grandchild = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: child.id,
+        })
+
+        const received = new Map<SessionId, StreamEvent[]>()
+        for (const session of [root, child, grandchild]) {
+          received.set(session.id, [])
+          const id = session.id
+          await store.subscribe(id, (event) => {
+            received.get(id)?.push(event)
+          })
+        }
+
+        expect(await store.deleteSession(root.id, { ownerId: OWNER_A })).toBe(true)
+        await waitFor(
+          () => [...received.values()].every((events) => events.length === 1),
+          'a final session.deleted for each session of the subtree',
+        )
+        await settle()
+        // One announcement per session, naming that session — a stream following a child ends
+        // the way one following the parent does, rather than going quiet.
+        for (const session of [root, child, grandchild]) {
+          expect(received.get(session.id)).toEqual([
+            { type: EVENT_TYPES.sessionDeleted, session_id: session.id },
+          ])
+        }
       })
     })
 
