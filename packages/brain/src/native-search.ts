@@ -26,12 +26,19 @@ import type { ToolSettings } from './tools'
  * dropping the tool and retrying once (`./turn`), while a model it wrongly excludes simply has
  * no search.
  *
+ * **The rules are written forward-compatible** (issue #335): each family names the first
+ * generation that has the tool and then accepts every later one, so a model id nobody had seen
+ * when this was written — `gpt-6-astra`, `claude-fable-5-1`, `grok-10` — searches without the
+ * table being edited. The alternative, an allowlist of ids as they ship, is what made a model the
+ * provider had just released answer "no web search": a false positive is a retry, and a false
+ * negative is a feature nobody can use.
+ *
  * | credential / provider    | native tool                                  | models            |
  * | ------------------------ | -------------------------------------------- | ----------------- |
- * | `anthropic`              | `webSearch_20260318` (`_20260209`, `_20250305`) | `claude-3.5` and newer |
- * | a Vertex Claude model    | `webSearch_20250305` only                    | `claude-*`        |
- * | `openai` (Responses)     | `webSearch`                                  | `gpt-4o`, `gpt-4.1`, `gpt-5`, `o*`, `chatgpt-4o` |
- * | `xai` (Responses)        | `webSearch`                                  | `grok-3`, `grok-4` |
+ * | `anthropic`              | `webSearch_20260318` (`_20260209`, `_20250305`) | `claude-3.5` and newer, and every `claude-<family>-<N ≥ 4>` |
+ * | a Vertex Claude model    | `webSearch_20250305` only                    | the same `claude-*` ids |
+ * | `openai` (Responses)     | `webSearch`                                  | `gpt-4o`, `gpt-4.1`, every `gpt-<N ≥ 5>` (hyphen optional, any digits), the `o`-series from `o1` on, and `chatgpt-4o` |
+ * | `xai` (Responses)        | `webSearch`                                  | every `grok-<N ≥ 3>`, multi-digit included |
  * | anything else            | none                                         | —                 |
  *
  * **Google is deliberately not in the table.** Its grounding comes with terms this build cannot
@@ -55,16 +62,28 @@ export const SEARCH_FAMILIES = ['anthropic', 'openai', 'xai'] as const
 export type SearchFamily = (typeof SEARCH_FAMILIES)[number]
 
 /**
- * The model ids of each family that may search, as a prefix rule.
+ * The model ids of each family that may search, as a **prefix** rule that keeps working for
+ * generations nobody has seen yet.
  *
- * Written down rather than read from models.dev, which does not record it. A family's list is
- * the generations that have the tool: Anthropic's from Claude 3.5 on, OpenAI's from `gpt-4o`
- * on (the Responses API is what carries the tool), and xAI's from `grok-3` on.
+ * Written down rather than read from models.dev, which does not record it. Each row names the
+ * generation the tool arrived in and then accepts everything after it, so a released-tomorrow
+ * model is not a "no web search" answer:
+ *
+ * - **Anthropic** — Claude 3.5 on (`3-[5-9]`), plus every `claude-<family>-<N ≥ 4>` for **any**
+ *   family name, not just `opus`/`sonnet`/`haiku`: the family half is a name the provider invents
+ *   (`claude-fable-5-1` is one), so an allowlist of families is the same mistake as an allowlist
+ *   of versions. A model before 3.5 — `claude-3-opus-…`, `claude-2.1` — does not match.
+ * - **OpenAI** — `gpt-4o` and `gpt-4.1` (the Responses API is what carries the tool), then every
+ *   `gpt-N` with **N ≥ 5** however many digits it has, with or without the hyphen and whatever
+ *   suffix follows (`gpt-5`, `gpt-5.1-codex`, `gpt-6-astra`, `gpt6-astra`, `gpt-10`), the
+ *   `o`-series from `o1` on (ever later `o<N>`), and `chatgpt-4o`. A 4.x that is not `4o`/`4.1`
+ *   (`gpt-4`, `gpt-4-turbo`, `gpt-4-0613`) and anything from the 3.x line are left out.
+ * - **xAI** — `grok-3` on, multi-digit included (`grok-3-mini`, `grok-4`, `grok-10`).
  */
 const SEARCH_MODEL_PATTERNS: Readonly<Record<SearchFamily, RegExp>> = {
-  anthropic: /^claude-(3-[5-9]|(opus|sonnet|haiku)-[4-9])/,
-  openai: /^(gpt-4o|gpt-4\.1|gpt-5|o[134]|chatgpt-4o)/,
-  xai: /^grok-[3-9]/,
+  anthropic: /^claude-(3-[5-9]|[a-z][a-z0-9]*-(?:[4-9]|\d{2,}))/,
+  openai: /^(?:(?:chat)?gpt-?(?:4o|4\.1|[5-9]|\d{2,})|o(?:[1-9]|\d{2,}))/,
+  xai: /^grok-(?:[3-9]|\d{2,})/,
 }
 
 /**

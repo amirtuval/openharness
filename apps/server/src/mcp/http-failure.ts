@@ -8,9 +8,12 @@ import { MCP_LAST_ERROR_MAX_LENGTH } from '@openharness/protocol'
  * The SDK's own failure is a thin wrapper — `Streamable HTTP error: Error POSTing to endpoint:
  * <body>` — and the one thing it does **not** carry is the status as a field: a Linear 401 with
  * an empty body reads as a sentence that stops at a colon, which tells a reader nothing. Two
- * things here fix that: a fetch wrapper that remembers the last response's status, status text
- * and a bounded body snippet, and a formatter that turns the observed fact and an optional
- * thrown error into one bounded, secret-free sentence **naming the status**.
+ * things here fix that: a fetch wrapper that remembers the last response's status, status text,
+ * a bounded body snippet, the `WWW-Authenticate` header's own `error`/`error_description` and
+ * whether the request carried an `Authorization` header at all (issue #316), and a formatter
+ * that turns the observed fact and an optional thrown error into one bounded, secret-free
+ * sentence **naming the status**. No header **value** is ever kept: the challenge's two
+ * parameters are read out of it and the rest is dropped.
  *
  * The snippet is read off a **clone** of the response, so the body the SDK is about to read is
  * untouched — and only for a response that is not `ok`, because a 2xx body is the SDK's to
@@ -23,6 +26,25 @@ export interface McpHttpObservation {
   readonly statusText: string
   /** A short, scrubbed body excerpt, or `''` when the response carried none. */
   readonly body: string
+  /**
+   * The `error` parameter of the response's `WWW-Authenticate` header (`invalid_token`,
+   * `insufficient_scope`), when it carried one.
+   *
+   * RFC 6750's machine-readable reason, and the one thing an **empty-bodied** 401 says: a
+   * resource server has nothing to put in a body and puts it here instead. Never the header
+   * itself, and never a token — only these two parameters are read out of it.
+   */
+  readonly authError?: string
+  /** The `error_description` parameter beside it, when the header carried one. */
+  readonly authDescription?: string
+  /**
+   * Whether the request that produced this response carried an `Authorization` header at all.
+   *
+   * A 401 from a request with no credential and a 401 from one with a rejected credential read
+   * the same from the status alone, and they are different faults: the first is this deployment
+   * never sending what it holds, the second is the server refusing it.
+   */
+  readonly hadAuthorization: boolean
 }
 
 /** How long an excerpt of a failing response is kept. */
@@ -42,7 +64,8 @@ export interface RecordingMcpFetch {
  * A successful response is passed through untouched and unread — its body belongs to the SDK,
  * and for an MCP endpoint that body may be an event stream. A failure is cloned and a bounded
  * excerpt read, because the status alone is often not enough (an OAuth resource server's 401 is
- * empty; another server's names the missing scope).
+ * empty; another server's names the missing scope) — and the `WWW-Authenticate` header and
+ * whether the request carried an `Authorization` header are read beside it, for the same reason.
  *
  * @param base the guarded fetch the MCP client and the OAuth flow were built with
  */
@@ -51,15 +74,68 @@ export function recordingMcpFetch(base: McpFetch): RecordingMcpFetch {
   const fetch: McpFetch = async (url, init) => {
     const response = await base(url, init)
     if (!response.ok) {
+      const params = authErrorParams(response.headers.get('www-authenticate'))
       last = {
         status: response.status,
         statusText: response.statusText,
         body: await readSnippet(response),
+        ...(params.error === undefined ? {} : { authError: params.error }),
+        ...(params.description === undefined ? {} : { authDescription: params.description }),
+        hadAuthorization: carriesAuthorization(init?.headers),
       }
     }
     return response
   }
   return { fetch, lastFailure: () => last }
+}
+
+/**
+ * Whether a request's headers already carry an `Authorization` header, in any of the shapes a
+ * `fetch` call may be handed one (`Headers`, a record, a pair list) — the SDK's transport passes
+ * a `Headers` object, and a caller that built the init itself passes a record.
+ */
+function carriesAuthorization(headers: HeadersInit | undefined): boolean {
+  if (headers === undefined) {
+    return false
+  }
+  if (headers instanceof Headers) {
+    return headers.has('authorization')
+  }
+  if (Array.isArray(headers)) {
+    return headers.some(([name]) => name.toLowerCase() === 'authorization')
+  }
+  return Object.keys(headers).some((name) => name.toLowerCase() === 'authorization')
+}
+
+/**
+ * The `error` and `error_description` parameters of a `WWW-Authenticate` header.
+ *
+ * A deliberately small reader: the header is a challenge (`Bearer realm="…", error="…"`), and
+ * the two parameters this module reports are the ones with a meaning for a caller. Everything
+ * else — the scheme, `realm`, `resource_metadata`, `scope` — is skipped rather than guessed at,
+ * and a header carrying neither parameter answers nothing at all.
+ */
+function authErrorParams(header: string | null): { error?: string; description?: string } {
+  if (header === null) {
+    return {}
+  }
+  const params = new Map<string, string>()
+  const pattern = /([A-Za-z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^,\s]+))/g
+  for (const match of header.matchAll(pattern)) {
+    const name = match[1]
+    if (name === undefined) {
+      continue
+    }
+    // A quoted value may escape a quote with a backslash; an unquoted one ends at the comma.
+    const value = (match[2] ?? match[3] ?? '').replace(/\\(.)/g, '$1')
+    params.set(name.toLowerCase(), value)
+  }
+  const error = params.get('error')
+  const description = params.get('error_description')
+  return {
+    ...(error === undefined ? {} : { error }),
+    ...(description === undefined ? {} : { description }),
+  }
 }
 
 /** A bounded excerpt of a failing response's body, read off a clone. Never throws. */
@@ -97,12 +173,21 @@ export function httpStatusOf(error: unknown): number | undefined {
 }
 
 /**
- * The one sentence a failed MCP request is reported with (epic #303, X10; issue #314).
+ * The one sentence a failed MCP request is reported with (epic #303, X10; issues #314, #316).
  *
- * The **status and a body excerpt lead it** when either is known — `The MCP server answered 401
- * (Unauthorized): {"error":"invalid_token"}` — because that is what makes a Linear failure
- * diagnosable; the thrown error's own message is the fallback, and it is the whole answer when
- * the request never got a response (a DNS failure, a refused connection, a guard refusal).
+ * The **status leads it** when one is known, and what can be said about that answer is appended
+ * in the order of how much it tells a reader:
+ *
+ * - the `WWW-Authenticate` header's own reason, in parentheses — `the MCP server answered 401
+ *   (invalid_token: the token expired)` — which is what a resource server sends instead of a
+ *   body, so it is often the only thing there is;
+ * - a bounded excerpt of the body, after a colon, for a server that does say something;
+ * - `, with no message` when the response carried neither, and
+ * - `— the request carried no Authorization header` for a **401 on a request that sent none**,
+ *   which is a different fault from a credential the server refused.
+ *
+ * The thrown error's own message is the fallback, and it is the whole answer when the request
+ * never got a response (a DNS failure, a refused connection, a guard refusal).
  *
  * Every value this server sent — a header value, a bearer token — is scrubbed out first, so an
  * error page that quotes the request cannot turn into a stored secret, and the whole is bounded
@@ -120,10 +205,23 @@ export function describeMcpFailure(
 ): string {
   const status = observed?.status ?? httpStatusOf(error)
   if (status !== undefined) {
-    const statusText = observed !== null && observed.status === status ? observed.statusText : ''
-    const detail = observed !== null && observed.status === status ? observed.body : ''
-    const head = `the MCP server answered ${status}${statusText.length === 0 ? '' : ` ${statusText}`}`
-    const base = detail.length === 0 ? `${head}, with no message` : `${head}: ${detail}`
+    const same = observed !== null && observed.status === status
+    const statusText = same ? observed.statusText : ''
+    const detail = same ? observed.body : ''
+    const reason = same ? authReason(observed) : ''
+    const head =
+      `the MCP server answered ${status}${statusText.length === 0 ? '' : ` ${statusText}`}` + reason
+    let base: string
+    if (detail.length === 0 && reason.length === 0) {
+      base = `${head}, with no message`
+    } else {
+      base = detail.length === 0 ? head : `${head}: ${detail}`
+    }
+    // A 401 with no Authorization header is this deployment never sending its credential — not
+    // the server refusing one — and the status alone cannot tell the two apart.
+    if (status === 401 && same && !observed.hadAuthorization) {
+      base += ' — the request carried no Authorization header'
+    }
     return bound(scrub(base, secrets))
   }
   const message = messageOf(error)
@@ -136,6 +234,18 @@ export function describeMcpFailure(
   // refused before it was sent — so the reason is introduced rather than left bare: `fetch
   // failed` on its own does not tell a reader which server it was about.
   return bound(`no response from the MCP server: ${trimmed}`)
+}
+
+/** The `(error: description)` an observation's `WWW-Authenticate` header named, or `''`. */
+function authReason(observed: McpHttpObservation): string {
+  const error = observed.authError
+  if (error === undefined || error.length === 0) {
+    return ''
+  }
+  const description = observed.authDescription
+  const inner =
+    description === undefined || description.length === 0 ? error : `${error}: ${description}`
+  return ` (${inner})`
 }
 
 /** An error's message, or `null` when there is nothing readable. */

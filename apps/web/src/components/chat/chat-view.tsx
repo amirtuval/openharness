@@ -515,146 +515,159 @@ export function ChatView({
         </div>
       ) : null}
 
-      {/* The transcript and, on a wide screen, its task list beside it (#314): the chat column
-          has room for both from `xl` up, and the panel scrolls on its own so a long run does not
-          shorten the conversation. Below that breakpoint the panel is drawn above the composer
-          instead — one instance per breakpoint, which is the same CSS switch the shell's sidebar
-          uses. */}
+      {/* The transcript and the composer are **one column**, and from `xl` up the task list is a
+          full-height column beside them (#314; the axis: #316). The composer block — the notices,
+          the banners, the box — lives inside that column rather than spanning the view, so the
+          transcript and the composer are centred on the same `max-w-3xl` axis: with the panel
+          drawn as a sibling of the transcript only, the composer was centred on the whole view
+          while the conversation was centred on the narrower left column, and the two read as
+          misaligned. Below `xl` there is no room for a column, so the panel is drawn above the
+          composer instead — one instance per breakpoint, which is the same CSS switch the shell's
+          sidebar uses. With no task list the single column fills the row exactly as the
+          transcript did before the panel existed. */}
       <div className="flex min-h-0 flex-1">
-        <MessageList
-          messages={messages}
-          summaries={summaries}
-          toolCalls={toolCalls}
-          truncation={truncation}
-          compaction={manualCompaction}
-          stepLimit={stepLimit}
-          toolsUnsupported={toolsUnsupported}
-          truncatedResults={truncatedResultsNoticeText}
-          clearedResults={clearedResultsNoticeText}
-          confirmations={confirmations}
-          answering={answering}
-          onRespond={answerPending}
-          loading={loadingHistory}
-          nameOf={nameOf}
-          costOf={costOf}
-          working={statusRow}
-          onEdit={editFromTranscript}
-          editDisabled={!idle}
-          replacingFrom={editing?.seq}
-        />
+        <div data-slot="chat-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <MessageList
+            messages={messages}
+            summaries={summaries}
+            toolCalls={toolCalls}
+            truncation={truncation}
+            compaction={manualCompaction}
+            stepLimit={stepLimit}
+            toolsUnsupported={toolsUnsupported}
+            truncatedResults={truncatedResultsNoticeText}
+            clearedResults={clearedResultsNoticeText}
+            confirmations={confirmations}
+            answering={answering}
+            onRespond={answerPending}
+            loading={loadingHistory}
+            nameOf={nameOf}
+            costOf={costOf}
+            working={statusRow}
+            onEdit={editFromTranscript}
+            editDisabled={!idle}
+            replacingFrom={editing?.seq}
+          />
+          <div className="border-t px-4 py-3">
+            <div data-slot="composer-column" className="mx-auto w-full max-w-3xl space-y-2">
+              {/* The chat's task list (epic #303, X5; #305; #308) below `xl`, above the composer:
+                  it is chrome about the work, not part of the conversation, so it must not scroll
+                  away with the transcript — and it is `null` (never an empty list) once no
+                  `todo_write` call has taken effect. */}
+              {todos === null ? null : (
+                <TodoPanel
+                  todos={todos}
+                  collapsed={todosChoice}
+                  onToggle={toggleTodos}
+                  variant="bottom"
+                />
+              )}
+              {/* Sending a message is allowed while calls wait — and it declines them all (epic
+                  #303, X6; #310), so the box says so before the reader presses Enter rather than
+                  after. The prompts above stay usable; this is only the other way out. */}
+              {declineNotice === null ? null : (
+                <p
+                  data-slot="pending-notice"
+                  className="rounded-lg border border-dashed px-2.5 py-1.5 text-xs text-muted-foreground"
+                >
+                  {declineNotice}
+                </p>
+              )}
+              {deleteError === null ? null : (
+                <ErrorBanner
+                  title="Could not delete the chat"
+                  message={deleteError}
+                  onDismiss={() => setDeleteError(null)}
+                />
+              )}
+              {/* A step-limit error is drawn by the tool notices below the transcript — it is a
+                  notice ("send a message to carry on"), not a failure — so the red banner is
+                  skipped for exactly that error type rather than saying it twice. An MCP failure
+                  gets the same treatment, with a Reconnect action (epic #303, X10; #313). */}
+              {mcpNotice === null ? null : (
+                <McpNotice
+                  failure={mcpNotice}
+                  onDismiss={() => setDismissedMcp(mcpNotice.message)}
+                />
+              )}
+              {lastError === null || stepLimit !== null || mcpFailure !== null ? null : (
+                <ErrorBanner
+                  title={
+                    lastError.retryStatus === 'retrying'
+                      ? `${lastError.type} · retrying`
+                      : lastError.type
+                  }
+                  message={lastError.message}
+                  // The one error in the log the reader can fix themselves: the session's owner
+                  // has no key for the model's provider (epic #65, A5), so the turn ended and no
+                  // retry will help until one is saved. The fix opens **here** (X5): leaving the
+                  // chat for Settings, saving, and finding the way back was the whole detour this
+                  // issue removes. The provider is the one the failed model names.
+                  action={
+                    lastError.type === 'missing_provider_credential' ? (
+                      <Button
+                        type="button"
+                        variant="link"
+                        size="xs"
+                        className="h-auto p-0 text-destructive"
+                        onClick={() => setAddingProvider(targetFor(providerOf(sessionModel)))}
+                      >
+                        Add a provider key
+                      </Button>
+                    ) : undefined
+                  }
+                />
+              )}
+              {requestError === null ? null : (
+                <ErrorBanner
+                  title="Request failed"
+                  message={requestError}
+                  onDismiss={dismissError}
+                />
+              )}
+              <Composer
+                running={status === 'running'}
+                onSend={sendFromComposer}
+                onStop={stop}
+                inputRef={inputRef}
+                value={draft}
+                onValueChange={changeDraft}
+                edit={editing === null ? undefined : { blocked: editBlocked, onCancel: cancelEdit }}
+                modelSelector={
+                  <ModelPicker
+                    variant="compact"
+                    placement="above"
+                    models={catalog.models}
+                    providers={catalog.providers}
+                    modes={modes.modes}
+                    selectedModeId={currentModeId}
+                    onSelectMode={(mode) => {
+                      // Picking a mode clears a pending plain model: the chat follows one or the
+                      // other, never both (#245, M6).
+                      setPendingMode(mode)
+                      setChosen(null)
+                    }}
+                    value={chosen ?? sessionModel}
+                    onChange={(modelId) => {
+                      // A plain model detaches the chat from any mode, so a pending mode goes with
+                      // the pick.
+                      setChosen(modelId)
+                      setPendingMode(null)
+                    }}
+                    refreshing={catalog.refreshing}
+                    onRefresh={catalog.refresh}
+                    // From the picker the provider is the reader's to choose, so the dialog opens
+                    // on the tiles rather than on a form.
+                    onAddProvider={() => setAddingProvider(null)}
+                  />
+                }
+              />
+            </div>
+          </div>
+        </div>
         {todos === null ? null : (
           <TodoPanel todos={todos} collapsed={todosChoice} onToggle={toggleTodos} variant="side" />
         )}
-      </div>
-
-      <div className="border-t px-4 py-3">
-        <div className="mx-auto w-full max-w-3xl space-y-2">
-          {/* The chat's task list (epic #303, X5; #305; #308) below `xl`, above the composer: it
-              is chrome about the work, not part of the conversation, so it must not scroll away
-              with the transcript — and it is `null` (never an empty list) once no `todo_write`
-              call has taken effect. */}
-          {todos === null ? null : (
-            <TodoPanel
-              todos={todos}
-              collapsed={todosChoice}
-              onToggle={toggleTodos}
-              variant="bottom"
-            />
-          )}
-          {/* Sending a message is allowed while calls wait — and it declines them all (epic
-              #303, X6; #310), so the box says so before the reader presses Enter rather than
-              after. The prompts above stay usable; this is only the other way out. */}
-          {declineNotice === null ? null : (
-            <p
-              data-slot="pending-notice"
-              className="rounded-lg border border-dashed px-2.5 py-1.5 text-xs text-muted-foreground"
-            >
-              {declineNotice}
-            </p>
-          )}
-          {deleteError === null ? null : (
-            <ErrorBanner
-              title="Could not delete the chat"
-              message={deleteError}
-              onDismiss={() => setDeleteError(null)}
-            />
-          )}
-          {/* A step-limit error is drawn by the tool notices below the transcript — it is a
-              notice ("send a message to carry on"), not a failure — so the red banner is skipped
-              for exactly that error type rather than saying it twice. An MCP failure gets the
-              same treatment, with a Reconnect action (epic #303, X10; #313). */}
-          {mcpNotice === null ? null : (
-            <McpNotice failure={mcpNotice} onDismiss={() => setDismissedMcp(mcpNotice.message)} />
-          )}
-          {lastError === null || stepLimit !== null || mcpFailure !== null ? null : (
-            <ErrorBanner
-              title={
-                lastError.retryStatus === 'retrying'
-                  ? `${lastError.type} · retrying`
-                  : lastError.type
-              }
-              message={lastError.message}
-              // The one error in the log the reader can fix themselves: the session's owner
-              // has no key for the model's provider (epic #65, A5), so the turn ended and no
-              // retry will help until one is saved. The fix opens **here** (X5): leaving the
-              // chat for Settings, saving, and finding the way back was the whole detour this
-              // issue removes. The provider is the one the failed model names.
-              action={
-                lastError.type === 'missing_provider_credential' ? (
-                  <Button
-                    type="button"
-                    variant="link"
-                    size="xs"
-                    className="h-auto p-0 text-destructive"
-                    onClick={() => setAddingProvider(targetFor(providerOf(sessionModel)))}
-                  >
-                    Add a provider key
-                  </Button>
-                ) : undefined
-              }
-            />
-          )}
-          {requestError === null ? null : (
-            <ErrorBanner title="Request failed" message={requestError} onDismiss={dismissError} />
-          )}
-          <Composer
-            running={status === 'running'}
-            onSend={sendFromComposer}
-            onStop={stop}
-            inputRef={inputRef}
-            value={draft}
-            onValueChange={changeDraft}
-            edit={editing === null ? undefined : { blocked: editBlocked, onCancel: cancelEdit }}
-            modelSelector={
-              <ModelPicker
-                variant="compact"
-                placement="above"
-                models={catalog.models}
-                providers={catalog.providers}
-                modes={modes.modes}
-                selectedModeId={currentModeId}
-                onSelectMode={(mode) => {
-                  // Picking a mode clears a pending plain model: the chat follows one or the
-                  // other, never both (#245, M6).
-                  setPendingMode(mode)
-                  setChosen(null)
-                }}
-                value={chosen ?? sessionModel}
-                onChange={(modelId) => {
-                  // A plain model detaches the chat from any mode, so a pending mode goes with
-                  // the pick.
-                  setChosen(modelId)
-                  setPendingMode(null)
-                }}
-                refreshing={catalog.refreshing}
-                onRefresh={catalog.refresh}
-                // From the picker the provider is the reader's to choose, so the dialog opens
-                // on the tiles rather than on a form.
-                onAddProvider={() => setAddingProvider(null)}
-              />
-            }
-          />
-        </div>
       </div>
 
       <AddProviderDialog

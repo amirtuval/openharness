@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest'
+import type { McpFetch } from '@openharness/hands'
 import { API_VERSION_PREFIX, type McpServer } from '@openharness/protocol'
 import { InMemoryMcpServerStore } from '@openharness/session'
 import { createTestClock, type TestClock } from '@openharness/session/testing'
@@ -6,6 +7,7 @@ import { createVault, envKeyProvider, type Vault } from '@openharness/vault'
 
 import { createMcpFetch } from './mcp/fetch'
 import { createMcpServerService, type McpServerService } from './mcp/service'
+import { createMcpToolProvider } from './mcp/tools'
 import {
   simulateAuthorization,
   startStubAuthorizationServer,
@@ -50,6 +52,8 @@ interface Scenario {
   readonly clock: TestClock
   readonly mcp: StubMcpServer
   readonly authorization: StubAuthorizationServer
+  /** The guarded fetch the service and the tool loop were built with (epic #303, X10). */
+  readonly fetch: McpFetch
 }
 
 /** Build the app, the stubs and a resolver over one store, all on one controllable clock. */
@@ -63,6 +67,10 @@ async function makeScenario(
     resourceBound?: boolean
     /** Refuse with an empty body, as `mcp.linear.app` does (issue #314). */
     emptyRefusalBody?: boolean
+    /** The `token_type` the token endpoint reports; `null` leaves the field out (issue #316). */
+    tokenType?: string | null
+    /** The `resource` the protected-resource metadata names; `null` omits it (issue #316). */
+    protectedResource?: string | ((serverUrl: string) => string) | null
   } = {},
 ): Promise<Scenario> {
   const clock = createTestClock(Date.UTC(2026, 2, 15, 10, 0, 0))
@@ -70,6 +78,7 @@ async function makeScenario(
     registration: options.registration ?? true,
     ...(options.expiresIn === undefined ? {} : { expiresIn: options.expiresIn }),
     ...(options.requireResource === true ? { requireResource: true } : {}),
+    ...(options.tokenType === undefined ? {} : { tokenType: options.tokenType }),
     scopes: ['mcp'],
   })
   const mcp = await startStubMcpServer({
@@ -79,6 +88,9 @@ async function makeScenario(
       ? { issuedResourceOf: (token: string) => authorization.resourceOf(token) }
       : {}),
     ...(options.emptyRefusalBody === true ? { emptyRefusalBody: true } : {}),
+    ...(options.protectedResource === undefined
+      ? {}
+      : { protectedResource: options.protectedResource }),
   })
   stubs.push(authorization, mcp)
   const store = new InMemoryMcpServerStore({ now: clock.now })
@@ -89,7 +101,7 @@ async function makeScenario(
     mcpServers: { store, fetch, callbackUrl: CALLBACK, now },
   })
   const service = createMcpServerService({ store, vault, fetch, callbackUrl: CALLBACK, now })
-  return { test, service, store, vault, clock, mcp, authorization }
+  return { test, service, store, vault, clock, mcp, authorization, fetch }
 }
 
 /** Create an `oauth` server as the default caller. */
@@ -381,6 +393,124 @@ describe('MCP OAuth: disconnect', () => {
     expect(
       await scenario.service.resolve((await scenario.test.currentUser()).id, created.id),
     ).toBeNull()
+  })
+})
+
+describe('MCP: the request always authenticates with `Bearer` (issue #316)', () => {
+  /**
+   * The token responses a deployment can really be handed: `Bearer` as the spec spells it,
+   * `bearer` as several providers do, `access_token` and `JWT` as a couple of others have, and a
+   * response that leaves `token_type` out altogether. **None of them is the scheme the resource
+   * server takes** — that is always `Bearer ` — and echoing one back is the staging failure the
+   * issue is about: Linear answers such a request a 401 with an empty body, which the maintainer
+   * saw as "the MCP server answered 401, with no message".
+   */
+  const TOKEN_TYPES: readonly (string | null)[] = ['Bearer', 'bearer', 'access_token', 'JWT', null]
+
+  it.each(TOKEN_TYPES)(
+    'sends `Bearer <token>` when the token response says %s',
+    async (tokenType) => {
+      const scenario = await makeScenario({ tokenType })
+      const created = await createOAuthServer(scenario)
+
+      // The connection check the callback runs — `MCP connection check failed for linear` in the
+      // staging logs — goes through the real guarded fetch (`createMcpFetch` →
+      // `recordingMcpFetch` → `openMcpClient`, whose transport carries the headers).
+      const { response } = await completeFlow(scenario, created.id)
+      expect(response.status).toBe(302)
+      const after = await scenario.test.request(`${BASE}/${created.id}`)
+      expect((await after.json()) as McpServer).toMatchObject({ status: 'connected' })
+      expect(scenario.mcp.authorizations).toContain('Bearer access-1')
+      // And nothing else was ever sent: no `bearer …`, no bare token, nothing.
+      expect(scenario.mcp.authorizations.every((header) => header.startsWith('Bearer '))).toBe(true)
+
+      // The tool loop's listing (#312) travels the same path with the same headers.
+      const provider = createMcpToolProvider({
+        service: scenario.service,
+        fetch: scenario.fetch,
+      })
+      const listed = await provider((await scenario.test.currentUser()).id, null)
+      expect(listed.failures).toEqual([])
+      expect(listed.tools.map((entry) => entry.toolName)).toEqual(['search', 'ping'])
+      expect(scenario.mcp.authorizations.at(-1)).toBe('Bearer access-1')
+    },
+  )
+
+  it('sends `Bearer <token>` on a refresh too, with an odd token_type', async () => {
+    // The refresh path builds its headers from the token response the token endpoint just sent,
+    // so it is the second place an odd `token_type` could become a scheme — and the second place
+    // it would be refused. A token that expires within the skew is refreshed by any resolution.
+    const scenario = await makeScenario({ tokenType: 'bearer', expiresIn: 1 })
+    const created = await createOAuthServer(scenario)
+    await completeFlow(scenario, created.id)
+
+    const issuedBefore = scenario.authorization.issuedTokens.length
+    const resolved = await scenario.service.resolve(
+      (await scenario.test.currentUser()).id,
+      created.id,
+    )
+    const fresh = scenario.authorization.issuedTokens.slice(issuedBefore)
+    expect(fresh.length).toBeGreaterThan(0)
+    expect(resolved?.headers.Authorization).toBe(`Bearer ${fresh[fresh.length - 1] ?? ''}`)
+  })
+})
+
+describe('MCP: the RFC 8707 resource comes from the metadata (issue #316)', () => {
+  it('names the metadata’s own resource on the URL, the exchange and the refresh', async () => {
+    // Linear's document says `"resource":"https://mcp.linear.app/mcp"` — the server's own URL —
+    // but the field is the authority when it is there, and it may name a different path on the
+    // same origin (the API behind the MCP endpoint). Every step of the flow must name the same
+    // value, or an authorization server serving several APIs mints a token for the wrong one.
+    const scenario = await makeScenario({
+      expiresIn: 1,
+      protectedResource: (url) => new URL('/api/v1', url).href,
+    })
+    const advertised = new URL('/api/v1', scenario.mcp.url).href
+    const created = await createOAuthServer(scenario)
+
+    const started = await post(scenario.test, `${BASE}/${created.id}/connect`)
+    const { authorization_url } = (await started.json()) as { authorization_url: string }
+    expect(new URL(authorization_url).searchParams.get('resource')).toBe(advertised)
+
+    const { code, state } = await simulateAuthorization(authorization_url)
+    expect((await scenario.test.request(callbackUrl(code, state))).status).toBe(302)
+    // The code exchange named it too — the token endpoint records what each token was issued for.
+    expect(scenario.authorization.resourceOf('access-1')).toBe(advertised)
+
+    // And so does a refresh, from the registration `connect` persisted: the short-lived token is
+    // already expiring, so resolving asks for a new one.
+    const issuedBefore = scenario.authorization.issuedTokens.length
+    const resolved = await scenario.service.resolve(
+      (await scenario.test.currentUser()).id,
+      created.id,
+    )
+    expect(resolved).not.toBeNull()
+    const fresh = scenario.authorization.issuedTokens.slice(issuedBefore)
+    expect(fresh.length).toBeGreaterThan(0)
+    expect(scenario.authorization.resourceOf(fresh[fresh.length - 1] ?? '')).toBe(advertised)
+  })
+
+  it.each([
+    ['another origin', 'https://api.example.com/mcp'],
+    ['no resource at all', null],
+  ])('falls back to the server’s own URL for %s', async (_name, protectedResource) => {
+    // A document that names somebody else's API (a mistake, or an attempt to have this
+    // deployment mint tokens for it) is not followed, and neither is a document with no
+    // `resource`: the URL the user registered is the answer in both readings.
+    const scenario = await makeScenario({
+      expiresIn: 1,
+      protectedResource,
+    })
+    const created = await createOAuthServer(scenario)
+    const started = await post(scenario.test, `${BASE}/${created.id}/connect`)
+    const { authorization_url } = (await started.json()) as { authorization_url: string }
+    expect(new URL(authorization_url).searchParams.get('resource')).toBe(scenario.mcp.url)
+    const { code, state } = await simulateAuthorization(authorization_url)
+    expect((await scenario.test.request(callbackUrl(code, state))).status).toBe(302)
+    expect(scenario.authorization.resourceOf('access-1')).toBe(scenario.mcp.url)
+    // The flow still works: the resource the server really wants is the one that was named.
+    const after = await scenario.test.request(`${BASE}/${created.id}`)
+    expect((await after.json()) as McpServer).toMatchObject({ status: 'connected' })
   })
 })
 
