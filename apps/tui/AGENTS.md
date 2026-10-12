@@ -515,6 +515,8 @@ install, because there is nothing here for npm to replace.
 | Tab                     | complete the highlighted command into the buffer (#207)                                                     |
 | Esc                     | close the menu, keeping the text (#207)                                                                     |
 | Ctrl+L                  | clear the screen; the session stays (#206)                                                                  |
+| Ctrl+T                  | fold or unfold the task list above the prompt; a list past five items starts folded (#308)                  |
+| Ctrl+O                  | show every tool call's full input and a capped result, or the compact line again (#308)                     |
 | Ctrl+R                  | reconnect the MCP server a failed turn named (#303, X10; #313)                                              |
 | Ctrl+C                  | interrupt the running turn; pressed again when idle, leave                                                  |
 
@@ -695,24 +697,60 @@ The terminal's half of the tool UI, all of it from the transcript's `toolCalls`,
 newest request's `truncatedToolResults` / `clearedToolResults`, with the words from
 `@openharness/client`'s `src/tools.ts` — so `oh` and the web app say the same thing.
 
-- **`components/tool-call.tsx` is one call's line**, drawn where its event sits among the
+- **`components/tool-call.tsx` is one call in two lines**, drawn where its event sits among the
   messages (`TranscriptView` renders the client's `transcriptEntries(messages, summaries,
-toolCalls)`): the status mark, the tool's name, the shared `toolCallSummary` and the status
+toolCalls)`) and shaped the way Claude Code draws one. The **first line** is the call: the
+  status mark, the tool's name, the shared `toolCallSummary` (the URL, the query) and the status
   words, with a remote MCP call marked `(mcp: <server>)` (#312) — a terminal has no hover to hide
-  the server behind, and two servers' `search` differ by exactly that. **A terminal has no
-  disclosure control**, so what the page hides behind the line is drawn here as it is worth
-  drawing: the status, the first line of a failed or interrupted result — the whole input and
-  result would flood the scrollback, and the log holds them — and, for a provider-executed
-  search, one line per page it found (`call.sources`): the title in bold with the URL beside it,
-  and the cited passage indented under it (#335). A terminal has no link to open, so the URL _is_
-  the source a reader copies, and a step of five pages is five short lines — what the reader
-  asked for by searching.
+  the server behind, and two servers' `search` differ by exactly that. The **second line** is
+  what came back, indented and introduced by `⎿`, from `callResultLine`: a fetch's size
+  (`fetched 12 KB`), a search's page count (`5 results`), a denial (`denied: …`), the first line
+  of a failure, a task list's own count, or how many lines the result had. It is a **summary and
+  never the result** — the whole input and result would flood the scrollback, and the log holds
+  them — which is what **Ctrl+O** is for: it opens each call's input pretty-printed
+  (`formatToolInput`) and the head of its result, capped at `DETAIL_RESULT_MAX_LINES` with
+  `… N more lines` saying what was left out. **The toggle reaches the live area only**: what
+  `<Static>` has already written keeps the compact line it was drawn with, because Ink's
+  scrollback is write-once (#208, X2) — so the useful way to use it is to turn it on and then
+  watch the turn, and a reader who wants a settled call's input has the log.
+- **A provider-executed search keeps its pages** (#335): one line per `call.sources` entry under
+  the result line — the title in bold with the URL beside it, and the cited passage indented
+  under that. A terminal has no link to open, so the URL _is_ the source a reader copies, and a
+  step of five pages is five short lines — what the reader asked for by searching.
 - **A call that is still running or waiting stays in the live area** (`isLiveEntry`), because its
-  status and the reason under it change as the turn goes on — and a settled block is written once
-  and never redrawn (#208, X2), so a committed running call would say "running" for ever.
-- **`components/todo-panel.tsx` is the chat's task list**, under the transcript with the notices
-  (a terminal has no pinned chrome), one line per item with a distinct mark per state (`☐`,
-  `◐`, `☑` — glyphs, so they read under `NO_COLOR`) and "1 of 3 done" in the header.
+  status and the result line under it change as the turn goes on — and a settled block is written
+  once and never redrawn (#208, X2), so a committed running call would say "running" for ever.
+  A settled call is therefore the common case in the scrollback, and it is there in full: its
+  line, its `⎿` line, and a search's sources.
+- **`components/todo-panel.tsx` is the chat's task list, and it is pinned** (#308 — the
+  maintainer's "I expected the todos to be permanent on the bottom"). Whenever the chat has a
+  list it is drawn in the **live area just above the prompt** — while a turn runs, while the chat
+  is idle, and after a resume (`oh -c` / `oh -s`) — rather than travelling up the scrollback with
+  the transcript the way a message does. It is the one region Ink redraws every frame, so the
+  list can be rewritten in place as the model rewrites it, and it can never be scrolled away
+  from. One line per item with a distinct mark per state (`☐`, `◐`, `☑` — glyphs, so they read
+  under `NO_COLOR`) and the header `Tasks · 1 of 3 done` (or `Tasks · cleared`).
+  - **A right-hand column is not feasible here.** Ink lays the frame out over its whole
+    terminal width and `<Static>` — the scrollback, which is where settled messages really live —
+    is a single full-width stream written once and never re-flowed (see "How a message is drawn"
+    and #208/#298). A panel beside the transcript would have to be part of the live frame, which
+    would redraw the history above it on every delta; and it would have to narrow the transcript
+    to the remaining columns, which would re-wrap every settled line — and a terminal cannot
+    rewrite what it has already printed. So "pinned" means the bottom of the live area, which is
+    the same statement the web's slide-over makes with a region a browser can scroll.
+  - **It folds.** **Ctrl+T** folds it to the header plus the item in progress on one line, and
+    unfolds it again; a list longer than `TODO_AUTO_FOLD_THRESHOLD` (five) starts folded, so a
+    model working through ten steps does not own the screen. The choice is remembered **per chat
+    for the process lifetime** (`chat/todo-fold.ts`, keyed by session id — never written to
+    disk: the list itself is in the log, and a fold is a view of it), and a chat nothing was
+    chosen for follows the threshold as the list grows.
+  - **A long unfolded list is windowed, not flooded**: the item in progress and its neighbours
+    are drawn and the rest is counted (`+K more` above and below), within
+    `todoItemRows(stdout.rows)` (three to eight item lines) — so the list can never push the
+    prompt off a 24-row terminal. The window is placed so the item in progress is always visible.
+  - The panel closes with one dim **hint line** (`LIVE_AREA_HINT`) naming **Ctrl+T** and
+    **Ctrl+O**, because a terminal has no menu to find them in; both keys are also in `/help`
+    (`CHAT_KEYS` in `chat/commands.ts`) and in the key table above.
 - **`components/tool-notices.tsx`** draws the step-limit notice — which replaces the generic turn
   error for that one type, because it is a notice rather than a failure — "this model can't use
   tools", and what a request shortened or cleared.
@@ -812,17 +850,19 @@ tokens`. **←/→ cycles the permission** on the highlighted row: on a tool's r
 The bottom of the screen is its own section (#233): one blank line under the transcript, then a
 **dim full-width rule** (`InputRule`), then the status line, then the prompt — and the command
 menu, the flow in the prompt slot and the hidden key input all render under the rule with it.
+The **task list** is the one thing drawn above the rule and below the transcript (#308): it is
+pinned there, in the live area, whenever the chat has one — see "The tools, in the transcript".
 The rule is drawn from column 0 in the `chrome` colour and dim, like the transcript's own rules,
 and stops one column short of the terminal because the transcript reserves that column for its
 streaming cursor (`CURSOR_COLUMNS`) — and it is the plain `─` under `NO_COLOR`, because a rule
-is a character rather than a surface.
-
-The blank line above it is drawn by the section and only when it is not already there: a user's
+The blank line above the section is drawn by it and only when it is not already there: a user's
 message ends in a blank line of its own (its band does), a notice never does, and an empty
-transcript at the start of a session has nothing to be set off from. The whole rhythm — reply →
-blank → metadata → blank → rule → status → prompt — is held still by a frame test in
-`src/app.test.tsx`, because whether the blanks each piece draws add up to one or two is a fact
-about the screen and not about any one component.
+transcript at the start of a session has nothing to be set off from. A **task list** (#308) is
+not a blank line's business: the section owes one before whichever of the two comes first, and
+the list itself is drawn with no separator above it — the notices above it are contiguous lines,
+and so is it. The whole rhythm — reply → blank → metadata → blank → list? → rule → status →
+prompt — is held still by a frame test in `src/app.test.tsx`, because whether the blanks each
+piece draws add up to one or two is a fact about the screen and not about any one component.
 
 ### What the status line says
 
@@ -920,6 +960,8 @@ src/
                          commands), and the prompt slot's first flow
     commands.ts          the slash-command registry, `parseChatInput`, the "did you mean",
                          the keys `/help` and `oh --help` both list (#207)
+    todo-fold.ts         whether a chat's task list is folded, per chat for the process
+                         lifetime (Ctrl+T; #308)
     target.ts            which session to open, and the model/agent-selection rules
     ctrl-c.ts            the Ctrl+C rules (interrupt / arm / exit)
   markdown/
@@ -946,9 +988,10 @@ src/
                          summarized" mark and the summary under it, #280), truncation-notice
                          ("your message was too long for this model and was shortened", #280)
                          and compaction-notice (what a manual `/compact` came to, #283),
-                         tool-call (a call's compact line and the reason a failed one owes,
-                         X5; #308), todo-panel (the chat's task list as a compact block,
-                         X5; #305; #308), tool-notices (the step limit, a model that
+                         tool-call (a call's line and the one result line under it, and the
+                         detail view Ctrl+O opens, X5; #308), todo-panel (the chat's task
+                         list, pinned above the prompt: the header, the marks, the fold, the
+                         window and the hint line, X5; #305; #308), tool-notices (the step limit, a model that
                          cannot use tools, and what a request shortened or cleared,
                          X2/X5/X9; #308), pending-prompt (the approvals and questions
                          waiting on the reader, as one keyboard-driven list, X6; #310)
@@ -1117,10 +1160,11 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/summary-divider.test.tsx`         | the divider's lines (#280): the label with the reason, the model and the passes, the rule drawn to the transcript's width, the summary wrapped under it (and its line breaks kept), a narrow terminal truncating rather than overflowing, `NO_COLOR`, an empty summary, and the two lines the component draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `src/components/truncation-notice.test.tsx`       | the sentence and its count (#280), never a negative one, and the line the component draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/compaction-notice.test.tsx`       | what a manual `/compact` came to (#283): the brain's sentence for `nothing_to_summarize` and `failed`, the shared fallbacks, and nothing drawn for a summary or a pending ask                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `src/components/tool-call.test.tsx`               | one call's line (#303, X5; #308): the mark, the tool, the summary and the status, "waiting for you" and the MCP marker with its server (#312), the reason line a failure owes (and only its first line), the page lines a provider-executed search draws from its `sources` (#335), the line reading without colour, and the truncation a narrow terminal gets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `src/components/todo-panel.test.tsx`              | the task list (#303, X5; #305; #308): `todoLines`' header, marks and states, a cleared list drawn as cleared, the truncation, and the block a frame draws                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/components/tool-call.test.tsx`               | one call as the terminal draws it (#303, X5; #308): the head line — the mark, the tool, the summary and the status — "waiting for you" and the MCP marker with its server (#312), the `⎿` result line per case (`callResultLine`: a fetch's size, a search's page count, a denial, a failure's first line, a task list's count, the line count of anything else), the page lines a provider-executed search draws from its `sources` (#335), the detail view Ctrl+O opens — the whole input and the capped result — reading without colour, and the truncation a narrow terminal gets                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/components/todo-panel.test.tsx`              | the task list, pinned (#303, X5; #305; #308): `todoLines`' header, marks and states, a cleared list drawn as cleared, the folded one-line form (with and without an item in progress), the window a long list gets with its `+K more` counts, the item lines a terminal height allows, the hint line, the truncation, and the two frames the component draws (`TodoPanel` folded and not)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/components/tool-notices.test.tsx`            | the four tool notices (#303, X2/X5/X9; #308): nothing when there is nothing to say, the step limit in the amber, the two result lines in chrome, and the words keeping without colour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `src/components/transcript-view-tools.test.tsx`   | a call in the transcript (#303, X5; #308): drawn between the messages with one blank line around it, kept live while it runs and settled once it does not, and a failed call's reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/chat/live-area.test.tsx`                     | the live area under the transcript, through the whole app (#308): a resumed chat's task list drawn while idle and while a turn runs, the panel above the rule rather than in the scrollback, Ctrl+T folding and unfolding and the choice kept for the chat, the auto-fold past five items, the window of a twelve-item list with its `+4 more`, a settled call's `⎿` line in the committed output, and Ctrl+O opening a live call's full input and closing it again                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/components/pending-prompt.test.tsx`          | the pending list (#303, X6; #310): `pendingRows` and the lines it draws — an approval's four choices and its deny-with-a-message row, a question's options with the mark that says what is chosen, the write-in and the text row, the Submit hint naming what is still missing, the bulk rows, and the truncation a narrow terminal gets — then the component at the keyboard: Enter sends an approval (and ↓ moves to the next one), Esc declines the row's call, space and Enter choose and toggle, Tab crosses to the next question, a text row opens the slot's entry, the message row hands the keyboard back, nothing is read when it is not the list's, and a remote call's heading naming its server (#312)                                                                                                                                                                                                                                                                        |
 | `src/components/text-entry.test.tsx`              | the one-line entry (#303, #310): what is typed is echoed and settled on Enter, it starts from what was said before so an answer can be corrected, Esc and Ctrl+C settle nothing, an empty line is a real answer, and a pasted several-line string stays on one line                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/chat/pausing.test.tsx`                       | the pause end to end in `oh` (#303, X6; #310): a **reloaded** paused chat drawing its questions with the keys that answer them, the answers taken with arrows/Tab/Enter and sent as one confirmation, Esc's decline, the keyboard staying with the list until "write a message instead" hands it back, a message sent that way declining what waited, and a free-text question answered through the prompt slot's entry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |     |

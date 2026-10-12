@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   EVENT_TYPES,
+  TODO_WRITE_TOOL_NAME,
+  readTodoList,
   type AgentMessageEvent,
   type ModelRequestEndEvent,
   type ModelRequestStartEvent,
@@ -25,6 +27,9 @@ import {
   MOCK_SLOW_MARKER,
   MOCK_SLOW_TOTAL_MS,
   MOCK_TERMINAL_MARKER,
+  MOCK_TODO_DEFAULT_COUNT,
+  MOCK_TODO_MARKER,
+  MOCK_TODO_MAX_COUNT,
   MOCK_TOOL_MARKER,
   chunkText,
   createMockModelFactory,
@@ -154,6 +159,38 @@ describe('the echo', () => {
     // offered no tools has no call in its log, and the turn ends idle behind it.
     expect(replies(history)).toEqual([])
     expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+  })
+
+  it('writes a task list for __todos__, and answers with it (#305)', async () => {
+    const { history } = await runTurn(`${MOCK_TODO_MARKER} 6`, { tools: true })
+
+    // The call is `todo_write`, and the list a client draws is its own input — the newest
+    // successful call is the state, which is what makes the terminal's pinned panel (#308) and
+    // a reloaded chat agree about it.
+    const call = history.find((event) => event.type === EVENT_TYPES.agentToolUse)
+    expect(call).toMatchObject({
+      name: TODO_WRITE_TOOL_NAME,
+      evaluated_permission: 'allow',
+    })
+    const todos = readTodoList(history)
+    expect(todos).toHaveLength(6)
+    expect(todos?.[0]).toEqual({ content: 'step 1', status: 'done' })
+    expect(todos?.[1]).toEqual({ content: 'step 2', status: 'in_progress' })
+    expect(todos?.[5]).toEqual({ content: 'step 6', status: 'pending' })
+    // The turn carries on: the second request is answered, and what it is answered to is the
+    // list itself — the brain attaches the chat's task list to every request once it has one
+    // (#331), and the mock echoes whatever it is shown.
+    expect(history.filter((event) => event.type === EVENT_TYPES.modelRequestStart)).toHaveLength(2)
+    expect(replies(history).join('\n')).toContain('[x] step 1')
+    expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+  })
+
+  it('answers a bare __todos__ with the default list, and never an unbounded one', async () => {
+    const { history } = await runTurn(MOCK_TODO_MARKER, { tools: true })
+    expect(readTodoList(history)).toHaveLength(MOCK_TODO_DEFAULT_COUNT)
+
+    const { history: silly } = await runTurn(`${MOCK_TODO_MARKER} 100000`, { tools: true })
+    expect(readTodoList(silly)).toHaveLength(MOCK_TODO_MAX_COUNT)
   })
 
   it('reports fixed usage, so a test can assert the exact numbers', async () => {

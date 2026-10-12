@@ -634,9 +634,11 @@ every deployment gets and the checks a `user.tool_confirmation` passes before it
   a `__tool__ …` prompt and answers what it said back (`mock-model.ts`), so a test can assert the
   call, the result, the second request and the reply without a provider. A `__ask__ …` prompt
   calls `ask_user` with the questions `MOCK_ASK_INPUT` names, which is what drives a whole pause
-  end to end — and the mock answers a prompt with what a tool said only while the **last**
-  message of the prompt is that tool's result, so a later message in the same chat is a message
-  like any other.
+  end to end — and a `__todos__ …` prompt calls `todo_write`, which is a task list in the log
+  (§305: the newest successful call is the list a client draws, and the terminal's is pinned
+  above the prompt, #308). The mock answers a prompt with what a tool said only while the
+  **last** message of the prompt is that tool's result, so a later message in the same chat is a
+  message like any other.
 - **Which models may call tools comes from the same registry** as the context budget and the
   reasoning gate, through one more resolver: `catalog/tool-support.ts` answers models.dev's
   `tool_call` for the id a request runs, `false` meaning the request is offered nothing. The
@@ -1578,14 +1580,15 @@ and no network. It is an AI SDK `MockLanguageModelV4`, streamed through the same
 path a real provider goes through, and it lives in `mock-model.ts`; `resolveModelFactory` is
 the only thing that constructs it, and it only does so when the variable says `mock`:
 
-| last user message    | what happens                                                                   |
-| -------------------- | ------------------------------------------------------------------------------ |
-| anything else        | echoed back in 4 chunks, 25 ms apart                                           |
-| `__slow__`           | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests    |
-| `__hold__`           | one chunk, then nothing: the request stays open until it is aborted            |
-| `__fail_retryable__` | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo    |
-| `__fail_terminal__`  | HTTP 400 (`model_request_failed_error`) on every attempt                       |
-| `__ask__`            | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309) |
+| last user message    | what happens                                                                                                                                                         |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| anything else        | echoed back in 4 chunks, 25 ms apart                                                                                                                                 |
+| `__slow__`           | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests                                                                                          |
+| `__hold__`           | one chunk, then nothing: the request stays open until it is aborted                                                                                                  |
+| `__fail_retryable__` | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo                                                                                          |
+| `__fail_terminal__`  | HTTP 400 (`model_request_failed_error`) on every attempt                                                                                                             |
+| `__ask__`            | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309)                                                                                       |
+| `__todos__ [n]`      | calls `todo_write` with `n` items (three when it is not said), so a chat's task list can be driven through the whole server (#305; the terminal's pinned list, #308) |
 
 A marker matches the _start_ of the message, so `__slow__ tell me something` still streams
 slowly. Usage is fixed (`MOCK_MODEL_USAGE`: 42 input, 17 output, no cache) so a test can assert
@@ -2325,7 +2328,10 @@ session` remembered for the chat and `remember: always` written to the user's se
   answers what the tool said; without them the call is stored nowhere and the turn ends idle.
   `__ask__` (epic #303, #309) calls `ask_user` with `MOCK_ASK_INPUT`, and a prompt is answered
   with what a tool said only while its last message is that tool's result — which is what makes
-  two tool turns in one chat work.
+  two tool turns in one chat work. `__todos__` (#305; the terminal's pinned list: #308) calls
+  `todo_write` with the list `todoInputOf` builds — three items by default, as many as the
+  prompt's `n` asks for, capped at fifty and deterministic in state per position, so a test can
+  assert a frame without a fixture of its own.
 - `catalog/reasoning-support.test.ts` (#252) — the reasoning gate on its own: a reasoning model's
   levels narrowed to ours, a model whose own levels leave out one of ours, a non-reasoning
   model, a reasoning model with a token-budget knob, and an effort vocabulary sharing nothing
