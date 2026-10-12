@@ -13,8 +13,8 @@ import type { AppendableEvent, CompactOptions, TaskNotificationInput } from './s
  * What both stores do with the events they store, in one place.
  *
  * The in-memory store and the Postgres store share these rules so they cannot drift: which
- * event types are **queued** — the user's, and since #343 a background task's notification —
- * what a `supersedes` range has to look like before it is recorded (a reply's chunks, or the
+ * events are queued — {@link isQueuedEventType}, the user's own and since #343 a background
+ * task's notification — what a `supersedes` range has to look like before it is recorded (a reply's chunks, or the
  * tail a `session.rewind` restarts from, #238), which events such a range covers when replay
  * skips them or {@link SessionStore.compact} deletes them, and how a compaction cutoff is
  * read. Everything else about storing is each implementation's own; this is only the part the
@@ -23,27 +23,14 @@ import type { AppendableEvent, CompactOptions, TaskNotificationInput } from './s
  * (The keyset cursors and argument checks the stores also share live in `inputs.ts`.)
  */
 
-/** Whether an event type is one the user writes. */
+/**
+ * Whether an event type is one the **user** writes, as opposed to one a task's notification is.
+ *
+ * Both are queued ({@link isQueuedEventType}); the split is what keeps the two pending reads
+ * apart, so a caller that wants "what the user said" cannot silently be handed a task's news.
+ */
 export function isUserEventType(type: string): boolean {
   return type === EVENT_TYPES.userMessage || type === EVENT_TYPES.userInterrupt
-}
-
-/**
- * Whether an event type is **queued**: stored unprocessed and claimed by a turn.
- *
- * Queued is "the log holds something the brain has not been told yet", and it is what decides
- * three things in both stores: that the event is stored with `processed_at` left `null` (its
- * timestamp is derived from the claim that takes it on read), that a `consumes` list may name
- * it, and that it is part of what a session "needs work" for.
- *
- * Two families are queued. The user's own events — `user.message`, `user.interrupt` — and,
- * since epic #340 S4 (#343), `session.task_notification`: a background task's news is
- * addressed to the parent **model**, exactly as a message is, so it is claimed the same way
- * and delivered exactly once. Everything else a session stores is written by a server or a
- * brain that already knows what it did.
- */
-export function isQueuedEventType(type: string): boolean {
-  return isUserEventType(type) || type === EVENT_TYPES.sessionTaskNotification
 }
 
 /** The event types that can carry a claim on queued events, and so change what is pending. */

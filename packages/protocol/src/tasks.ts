@@ -134,14 +134,45 @@ export const TaskWaitInputSchema = z.object({
 export type TaskWaitInput = z.infer<typeof TaskWaitInputSchema>
 
 /**
+ * What is wrong with an `agent_wait` call's arguments, or `[]` when they are a wait.
+ *
+ * The check the brain answers a malformed call with, so a wait on arguments nobody can honour
+ * is a result the model learns from rather than a turn that pauses on it — the rule
+ * `ask_user`'s questions follow (`askUserInputProblems`). Written against the call's raw
+ * arguments, which is what the log holds.
+ */
+export function taskWaitInputProblems(value: unknown): string[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return ['the arguments must be an object: an optional `task_ids` list and an optional `timeout_s`']
+  }
+  const problems: string[] = []
+  const { task_ids: taskIds, timeout_s: timeout } = value as {
+    readonly task_ids?: unknown
+    readonly timeout_s?: unknown
+  }
+  if (taskIds !== undefined) {
+    if (!Array.isArray(taskIds) || !taskIds.every((id) => TaskIdSchema.safeParse(id).success)) {
+      problems.push('`task_ids` must be a list of `task_` ids')
+    }
+  }
+  if (timeout !== undefined && (typeof timeout !== 'number' || !Number.isFinite(timeout))) {
+    problems.push('`timeout_s` must be a number of seconds')
+  }
+  return problems
+}
+
+/**
  * Parse an `agent_wait` call's arguments, or `null` when they are not a wait.
  *
  * The one reading the brain and the tool's own input schema share, so "what does this call ask
- * for?" has one answer. A call whose arguments the schema refuses is not a wait: the model is
+ * for?" has one answer. A call {@link taskWaitInputProblems} refuses is not a wait: the model is
  * told what was wrong with it and asks again, rather than the turn pausing on something nobody
  * can honour (the rule `ask_user`'s questions follow).
  */
 export function parseTaskWaitInput(value: unknown): TaskWaitInput | null {
+  if (taskWaitInputProblems(value).length > 0) {
+    return null
+  }
   const parsed = TaskWaitInputSchema.safeParse(value)
   return parsed.success ? parsed.data : null
 }

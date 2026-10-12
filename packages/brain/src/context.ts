@@ -31,6 +31,7 @@ import { lastModelRequest } from './log'
 import { opaqueReplayParts } from './opaque'
 import type { OpaqueMessagePart, OpaqueReplayedPart, OpaqueTarget } from './opaque'
 import { stuckReminder } from './stuck'
+import { notificationText, taskStarts } from './tasks'
 
 /**
  * Turning the session log into the messages a model request is made with — and measuring how
@@ -995,6 +996,8 @@ export function conversationItems(
   cap: ToolResultCap,
 ): ContextCutItem[] {
   const calls = toolCallsOf(events)
+  const starts = taskStarts(events)
+  const consumed = consumedNotifications(events)
   const items: ContextCutItem[] = []
   for (const event of events) {
     if (event.seq <= afterSeq) {
@@ -1007,6 +1010,15 @@ export function conversationItems(
     if (event.type === EVENT_TYPES.userMessage || event.type === EVENT_TYPES.agentMessage) {
       role = event.type === EVENT_TYPES.userMessage ? 'user' : 'assistant'
       text = textOf(event.content)
+    } else if (event.type === EVENT_TYPES.sessionTaskNotification) {
+      // A task's news is an item of the conversation like a message (#343), framed the same way
+      // the request carries it — unless a wait was resolved by it, in which case the call's
+      // result is what holds it and this item would be the same text twice.
+      if (consumed.has(event.id)) {
+        continue
+      }
+      role = 'user'
+      text = notificationText(event, starts.get(event.task_id))
     } else if (isToolCallEvent(event)) {
       role = 'assistant'
       text = toolCallText(toolCallOfferedName(event), toolCallInput(event))
@@ -1309,6 +1321,8 @@ function conversationAfter(
 ): BuiltConversation {
   const messages: ConversationMessage[] = []
   const toolNames = toolNamesOf(events)
+  // The tasks the log says were started, by id: what a notification is framed with (#343).
+  const starts = taskStarts(events)
   // The provider-executed calls the log holds, by id (#335): neither they nor their answers
   // belong in a request — the step's opaque content carries them — so both are skipped below.
   const provider = providerCallIds(events)
@@ -1318,6 +1332,11 @@ function conversationAfter(
   // provider refuses an assistant turn whose calls are not answered by the very next message, so
   // a pending call is left out rather than sent as a call nothing answers.
   const answered = answeredCalls(events)
+  // The notifications a **wait** was resolved by, by their event ids (epic #340, S5; #343): the
+  // result that answers the call *is* what they said, so they are not also a message of their
+  // own. Sending both would tell the model the same thing twice, once as a result and once as
+  // steering.
+  const consumed = consumedNotifications(events)
   let assistant: AssistantTurn | null = null
   // Where the current turn's answers belong: right after the assistant message, or the end of
   // the list while no turn with calls has been closed. See the note above about interleaving.
@@ -1377,6 +1396,21 @@ function conversationAfter(
         if (text.length > 0) {
           messages.push({ message: { role: 'user', content: text }, seq: event.seq })
         }
+        break
+      }
+      case EVENT_TYPES.sessionTaskNotification: {
+        // A background task's news reaches the model as a **user** message, framed (epic #340,
+        // S4; #343): it is addressed to the model, and the frame says which task it came from
+        // and that its text is data rather than an instruction. One a wait was resolved by is
+        // left out — the call's own result carries it.
+        if (consumed.has(event.id)) {
+          break
+        }
+        closeAssistant()
+        messages.push({
+          message: { role: 'user', content: notificationText(event, starts.get(event.task_id)) },
+          seq: event.seq,
+        })
         break
       }
       case EVENT_TYPES.agentMessage: {
@@ -1490,6 +1524,24 @@ function answeredCalls(events: readonly StoredEvent[]): Set<string> {
     }
   }
   return answered
+}
+
+/**
+ * The notifications a task wait was resolved by, by event ids (epic #340, S5; #343).
+ *
+ * A wait's result names the notifications it answered in its `consumes`, so the log itself says
+ * which of them are the result rather than a message of their own.
+ */
+function consumedNotifications(events: readonly StoredEvent[]): ReadonlySet<EventId> {
+  const consumed = new Set<EventId>()
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.agentToolResult && event.consumes !== undefined) {
+      for (const id of event.consumes) {
+        consumed.add(id)
+      }
+    }
+  }
+  return consumed
 }
 
 /** The provider-executed calls the log holds, by id (epic #303, X14; #335). */

@@ -33,6 +33,7 @@ import {
   malformedQuestion,
   waitsForUser,
 } from './pausing'
+import { awaitingTasks, malformedTaskWait, waitsForTasks } from './tasks'
 
 /**
  * The loop's half of tools: what a request offers, what the settings in force say about a call,
@@ -332,11 +333,15 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
       const decision = decisions[index] ?? { permission: 'deny' as const, waiting: false }
       const input = inputs[index] ?? {}
       if (decision.waiting) {
-        // The call is the user's to answer (#309): nothing runs, and no result is written — the
-        // turn ends `requires_action` and the next turn answers it from the confirmation. The
-        // one exception is a question nothing could answer: the model is told what was wrong
-        // with it and asks again, rather than the turn pausing on a call no client can render.
-        const problem = malformedQuestion({ name: call.name, input })
+        // The call is the user's to answer (#309) or a background task's to resolve (#340, S5):
+        // nothing runs, and no result is written — the turn ends `requires_action` or
+        // `waiting_on_tasks`, and the turn that follows answers it. The one exception is a call
+        // nothing could honour — an `ask_user` question or an `agent_wait` whose arguments the
+        // protocol refuses — where the model is told what was wrong with it and asks again,
+        // rather than the turn pausing on something no client or no clock could resolve.
+        const problem =
+          malformedQuestion({ name: call.name, input }) ??
+          malformedTaskWait({ name: call.name, input })
         return problem === null ? null : errorResult(problem)
       }
       if (runs(registry, call.name, decision.permission)) {
@@ -417,6 +422,12 @@ export function lostExecutions(events: readonly StoredEvent[]): ToolCallEvent[] 
       .filter((call) => !confirmations.has(call.id))
       .map((call) => call.id),
   )
+  // A wait for a background task is open rather than lost (S5; #343): nothing has run, and
+  // `runTurn` settles it — with the notifications that answered it, its deadline, or a message
+  // — before any request is built.
+  for (const call of awaitingTasks(events)) {
+    waiting.add(call.id)
+  }
   return pendingToolUse(events).filter((call) => !waiting.has(call.id))
 }
 
@@ -487,6 +498,13 @@ function decisionFor(
   const permission = settings?.[name]?.permission ?? tool?.permission ?? 'deny'
   if (permission === 'deny') {
     return { permission, waiting: false }
+  }
+  if (waitsForTasks(tool !== undefined, name)) {
+    // A call to the wait tool always pauses the turn, whatever the policy says about the tool
+    // (a `deny` above is the user's own decision and outranks it): there is nothing to run, and
+    // the call is recorded `ask` exactly as a question is, so a reader of the log sees a pause
+    // in both cases and `./tasks` tells the two apart by the tool's name (#340, S5; #343).
+    return { permission: 'ask', waiting: true }
   }
   if (waitsForUser(permission, tool !== undefined, name)) {
     const remembered = name !== ASK_USER_TOOL_NAME && approved.has(name)

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { isQueuedEventType } from '@openharness/protocol'
 import type {
   Agent,
   McpAuthType,
@@ -26,7 +27,7 @@ import type { ColumnType, Selectable } from 'kysely'
 
 import { timestampAt } from '../clock'
 import type { SealedProviderCredential, SealedSecret } from '../credentials'
-import { isQueuedEventType } from '../events'
+
 import { deepFreeze } from '../freeze'
 import type { AppendableEvent, ModelRequestUsage, PartitionSignal, ToolUseRecord } from '../store'
 

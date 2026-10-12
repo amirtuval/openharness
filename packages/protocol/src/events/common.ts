@@ -210,6 +210,29 @@ export const EVENT_TYPES = {
   sessionDeleted: 'session.deleted',
 } as const
 
+/**
+ * Whether an event type is **queued**: stored unprocessed, and claimed by a turn.
+ *
+ * Queued is "the log holds something the brain has not been told yet", and every side of the
+ * log asks it: a store decides by it whether an event's `processed_at` is left `null` (its
+ * timestamp is then derived from the claim that takes it) and whether a `consumes` list may
+ * name it; the brain asks it to tell the log as a request sees it (a queued event not yet
+ * claimed is not part of the prompt) and to decide what a turn still owes an answer to.
+ *
+ * Two families are queued. The user's own events — `user.message` and `user.interrupt` — and,
+ * since epic #340 S4 (#343), `session.task_notification`: a background task's news is addressed
+ * to the parent **model**, exactly as a message is, so it is claimed the same way and delivered
+ * exactly once. Everything else a session stores is written by a server or a brain that already
+ * knows what it did.
+ */
+export function isQueuedEventType(type: string): boolean {
+  return (
+    type === EVENT_TYPES.userMessage ||
+    type === EVENT_TYPES.userInterrupt ||
+    type === EVENT_TYPES.sessionTaskNotification
+  )
+}
+
 /** An event type string, stored or stream-only. */
 export type EventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]
 

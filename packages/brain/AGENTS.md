@@ -62,6 +62,10 @@ src/
                         waiting for an answer, read off the log (epic #277, K8; #283)
   pausing.ts            the pause: the calls the user has to answer, the one confirmation that
                         answers them, and what each answer means (#309)
+  tasks.ts              background tasks as the loop reads them (#343): the news a task has for
+                        the parent model and the frame it reaches it in, the `agent_wait` calls a
+                        turn is waiting on, and what one resolves to — a notification, the
+                        deadline, or a message
   stuck.ts              stuck detection (#331): the identical run of newest calls in a turn,
                         the one-time reminder it earns, and the eight-call failing end
   model.ts              ModelFactory, credentials, and streaming one request through the AI SDK
@@ -112,6 +116,8 @@ emits what that reaches.
 | `runToolStep(options)`, `ToolStepOptions`                                                                                                                                                                                                                                                                                                                            | one step's tool calls (epic #303, X2; #307): the permission read off the request's settings, the calls stored, run concurrently through the registry and answered in call order                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `repairLostExecutions(events, append)`, `lostExecutions(events)`, `pendingToolUse(events)`                                                                                                                                                                                                                                                                           | the crash rule (X3): the calls the log holds with no answer **and no user waiting on them**, and the `execution lost` results a brain that inherited them writes — never running them again                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `awaitingUser(events)`, `answeredWaiting(events)`, `confirmationsByCall(events)`, `sessionApprovedTools(events)`, `waitsForUser(permission, registered, name)`, `malformedQuestion(call)`                                                                                                                                                                            | the pause, read off the log (epic #303, X6; #309): the calls with no result that wait on the user, the ones the user has answered, the newest confirmation per call, the tools this chat has been told to allow, whether a call is one the user must answer, and what is wrong with an `ask_user` call's questions                                                                                                                                                                                                                                                                                                                                                           |
+| `pendingNotifications(events)`, `taskStarts(events)`, `taskStatuses(events)`, `notificationText(notification, started)`, `notificationResultText(notifications, starts)`, `awaitingTasks(events)`, `waitsForTasks(registered, name)`, `malformedTaskWait(call)`, `taskWaitOf(call)`, `recordedWaitDeadline(events, call)`, `settleTaskWait(options)`, `stillRunning(taskIds, statuses)`, `taskWaitTimedOut(running)`, `TaskWaitRequest`, `TaskWaitOutcome`, `TaskWaitDecisionOptions` | background tasks, read off the log (epic #340, S4/S5; #343): the queued notifications nobody has been told, the tasks a log names and what each is doing, the framed user-role text one reaches a request as (a task's output is **data, not instructions**), the unanswered `agent_wait` calls and what they asked for, the deadline the log recorded, and what one wait resolves to — the notifications that answer it, the message that ended it, its deadline, or nothing yet |
+| `TaskWaitState` | what a `waiting` turn waits for — the tasks and the instant its deadline falls on — so a host can arm a timer from {@link TurnOutcome.waiting} (#343) |
 | `answerConfirmations(options)`, `confirmationOutcome(call, confirmation, recovered)`, `resolveWaiting(options)`, `denied(message)`, `executionLost(name)`, `RESOLVED_BY_MESSAGE`                                                                                                                                                                                     | what answers a paused call: the turn's one append for the calls the user answered (running an approved tool, writing the denial, or writing the answers), the resolution of a single confirmation, the results a message or an interrupt leaves, and the two sentences those are written with                                                                                                                                                                                                                                                                                                                                                                                |
 | `asToolInput(value)`                                                                                                                                                                                                                                                                                                                                                 | a model's arguments as the JSON object the log stores: anything JSON cannot carry is dropped, and a value that is not an object becomes `{}`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `asJsonObject(value)`                                                                                                                                                                                                                                                                                                                                                | the same walker without the `{}` fallback: a provider's opaque metadata as the JSON object the log stores, or `undefined` when it is not one (X13; #334)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -326,6 +332,30 @@ PAUSE — a call whose decision is "the user has to answer this" (epic #303, X6;
   idle, and nothing is held open — no timer, no lease, no open request. That is what makes it
   survive a restart (a resumed brain reads the same log and keeps waiting) and what makes the
   `requires_action` stop reason the whole of what a client needs to draw the question.
+
+TASK WAIT — the model asked to wait for background tasks (epic #340, S5; #343)
+  a `session.task_notification` answers it (the news for its tasks, or any news at all when the
+  wait named none)
+    ..................................... agent.tool_result { the framed notification text,
+                                           consumes: those notifications }, then loop from 1:
+                                           the result owes a request, and the notification is
+                                           not also folded in as steering
+  the deadline has passed ................ agent.tool_result { the timeout notice, naming the
+                                           tasks the log still says are running }
+  a user.message (or an interrupt) ....... agent.tool_result × N { is_error: true,
+                                           "The user sent a message instead." }, then the
+                                           message is handled (or INTERRUPT)
+  nothing has answered it, and no message arrived
+    ..................................... session.status_idle
+                                           { stop_reason: { type: waiting_on_tasks, task_ids,
+                                                            deadline } }
+    ..................................... return waiting (the outcome carries the deadline for
+                                           the host's timer)
+
+  A wait is the same kind of pause as `requires_action` and about a different thing: the call is
+  in the log, the session is idle, and nothing is held open — no lease, no slot, no timer that
+  outlives the process. It resumes on a notification, on its deadline (the host's timer, or
+  `findSessionsNeedingWork` for a session nothing else will reach), or on the reader moving on.
 
 MISSING CREDENTIAL — the owner has no stored key for the model's provider (epic #65, A5)
   ........................................... session.error
@@ -948,6 +978,60 @@ this: …`), and an `ask_user` call has its answers written as its result — va
   whose last turn ended `requires_action` and which holds a `user.tool_confirmation` naming one
   of the calls it waits on is found by recovery, so a confirmation appended by an instance that
   died before its turn started is picked up instead of stranding the chat.
+
+### Background tasks and the inbox (epic #340, S4/S5; issue #343)
+
+A background task is work a session starts and does not wait for: starting one returns at once
+(the tool's result is a handle), the conversation goes on, and what the task produces reaches
+the parent model as a **notification** rather than as a tool result. `./tasks` is the whole of
+the loop's half, and it is deliberately generic — a subagent is the first kind, and a sandboxed
+`bash` will be the second — so nothing here knows what a task *is*.
+
+The mechanism is the #309 pause, read twice over. A notification is a **queued** event exactly
+as a `user.message` is, and it is delivered by the three roads a session can be in:
+
+- **running** — the request's `span.model_request_start` claims it, and the request is built
+  with it, exactly as steering is. A notification that arrives mid-stream belongs to the *next*
+  request, because the claim is the append and `contextView` leaves an unclaimed queued event
+  out of what the request answers.
+- **idle** — the store's work scan reports the session (a pending notification is work) and the
+  turn that starts claims it and answers it. This is the road a crash cannot break: the news is
+  in the log, so recovery finds it even when the signal that announced it was lost.
+- **waiting** — the call's `agent.tool_result` **is** the news, and carries `consumes` over the
+  notification ids, so the request that follows is not handed the same text a second time.
+
+What the model is told is a framed **user**-role message — `[background task <what> ·
+<task_id> · <kind>]`, then the text. The frame is the safety story: a task's output is another
+session's, and that session may have read anything (a web page, an MCP server's answer), so the
+text is **data, not instructions** and the model is told so in the frame ((X11), extended by
+#343 — see [`docs/threat-model.md`](../../docs/threat-model.md)).
+
+A **wait** is `agent_wait` (S5), and the brain recognises it by name exactly as it recognises
+`ask_user`: `./tasks`' `waitsForTasks` is the whole test, `decisionFor` records the call `ask`
+like a question (a `deny` still refuses it — the user's decision about a tool outranks a pause),
+and nothing runs it. Its arguments are the protocol's (`TaskWaitInputSchema`: optional
+`task_ids`, optional `timeout_s`), so the bound is applied in one place (`taskWaitTimeoutMs`: ten
+minutes by default, an hour at most), and a call whose arguments the protocol refuses is answered
+with the problem rather than pausing the turn on it — the rule a malformed `ask_user` question
+follows.
+
+Two reads the loop makes at every request boundary decide a wait, and both are the log's:
+`awaitingTasks` (which calls are still open) and `settleTaskWait` (what each one resolves to).
+The order is S5's: a message or an interrupt ends it, a notification answers it, its deadline
+ends it as timed out, and otherwise it is still open — in which case the turn writes the pause
+and returns `waiting`, carrying the deadline out in `TurnOutcome.waiting` so the host can arm a
+timer. A turn never makes a request while one of its calls has no answer (a provider refuses
+that), so every open wait is settled before the request below is built, and a wait that is still
+open ends the turn — writing the results of the ones that *were* answered first.
+
+Three corners are deliberate. A wait naming no tasks takes the first news of any task ("tell me
+when anything I started finishes"). A wait whose own tasks are quiet but whose session has
+**other** news is resolved by that news too — S4's roadmap is that a notification reaches the
+parent however the parent is in, and a paused turn cannot carry one as steering; the alternative
+is news sitting in the log until the deadline, which is the failure this exists to prevent.
+And `recordedWaitDeadline` reads the deadline the pause wrote, so a brain that inherits a waiting
+session waits out exactly the timer the dead one had left — falling back to the call's own
+arguments only when the turn died before it could write the pause at all.
 
 ### The seams the rest of the epic plugs into
 
@@ -1759,6 +1843,23 @@ lost`.
   dropping the tool for one retry (and `search_rejected` recorded on the refused span) with a
   failure that is not about the tool left to the ordinary paths, and the crash rule leaving a
   provider-executed call alone.
+- `tasks.test.ts` — background tasks and the inbox (#343), in two layers. The pure half asks
+  what the log says: which notifications nobody has been told, what each task is doing, the frame
+  one reaches the model in, which calls are waits (and that a wait is not a question and not a
+  lost execution), and `settleTaskWait`'s order — a message over a notification, its own tasks
+  over another's, a wait that named none taking any, the recorded deadline, the timeout, and the
+  deadline a call asks for itself. The loop's half drives `runTurn` against a real store: the news
+  folded into a running turn's *next* request as steering (and not into the one in flight), an
+  idle session woken by one, several delivered at once in `seq` order, the request a dead turn had
+  already claimed the news for re-run without telling the model twice, and a task's start and
+  statuses staying out of the conversation. The wait half is the pause and each of its four
+  endings: the turn ending `waiting_on_tasks` with the deadline it will keep, going back to
+  waiting when nothing has answered it, resumed by a notification that becomes the call's result
+  (and is claimed by it), by the deadline (naming the tasks still running), by a user message and
+  by an interrupt, a crash that never wrote the pause recovered from the call's own arguments, a
+  wait that named no tasks, a malformed wait answered instead of paused on, and a wait the user
+  turned off refused rather than paused. One more asserts the log's own interleaving cannot put a
+  notification between a call and its result in a request.
 - `src/testing/harness.ts` builds the session and reads the log back; `src/testing/mock-model.ts`
   scripts what each model request answers with — text **and tool calls**, whose arguments travel
   as JSON text the way a provider sends them — records the prompts, and can act mid-stream

@@ -41,6 +41,7 @@ import {
   type UserTheme,
   type UserToolSettings,
   UserThemeSchema,
+  isQueuedEventType,
 } from '@openharness/protocol'
 import {
   Kysely,
@@ -68,7 +69,6 @@ import {
   carriesConsumes,
   cutoffOf,
   isEventSeq,
-  isQueuedEventType,
   isUserEventType,
   REWIND_KIND,
   taskNotificationEvent,
