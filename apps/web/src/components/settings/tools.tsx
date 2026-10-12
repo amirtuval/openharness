@@ -10,7 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui
 import { Label } from '../ui/label'
 
 /**
- * Settings → Tools (epic #303, X4; #307; the screen is #308; the remote half, #312).
+ * Settings → Tools (epic #303, X4; #307; the screen is #308; the remote half, #312; #313).
  *
  * Which of the build's tools a chat may use, and the permission each call is evaluated under —
  * the reader's own choices, stored on the server (`GET`/`PUT /v1/me/tools`) so the web app and
@@ -30,12 +30,15 @@ import { Label } from '../ui/label'
  * A write is per tool: the server merges, so flipping one row never rewrites the others, and the
  * answer it returns (the effective list) replaces what the card shows.
  *
- * **The remote MCP tools are listed, grouped by the server they belong to** (#312). They are not
- * editable here yet: a remote tool has no on/off of its own — a whole server is on or off, and
- * a mode patches that — so the full remote half of this screen is #313. What this card owes a
- * reader until then is that the entries are *shown* — a tool that silently vanished from the
- * list would read as one that does not exist — which is why they get their own groups and their
- * own read-only rows rather than being passed through a control that would write the wrong map.
+ * **This card lists the build's own tools and nothing else** (#313). A remote MCP tool belongs
+ * to a server — a whole server is on or off, its tools have no on/off of their own, and the
+ * permission a call runs under is set per server — so its rows live in Settings → MCP servers,
+ * where the server and every one of its tools are one screen. Listing them here as well made
+ * this card as long as the servers' tool lists put together, and none of the rows could be
+ * honestly edited: a switch would write a `builtin` setting the server never applies, and a
+ * select would put a permission in the wrong map. The card **says where they are** rather than
+ * dropping them silently, because a tool that vanishes from a list reads as one that does not
+ * exist.
  */
 export function ToolsCard() {
   const client = useClient()
@@ -51,7 +54,7 @@ export function ToolsCard() {
   }
 
   const builtin = tools?.data.filter((entry) => entry.source !== 'mcp') ?? []
-  const servers = mcpServerGroups(tools?.data ?? [])
+  const remoteCount = (tools?.data.length ?? 0) - builtin.length
 
   return (
     <Card>
@@ -89,28 +92,14 @@ export function ToolsCard() {
           </ul>
         )}
 
-        {servers.map((group) => (
-          <section
-            key={group.server}
-            data-slot="mcp-server-group"
-            data-server={group.server}
-            className="space-y-3"
-          >
-            <div>
-              <h4 className="text-sm font-medium">MCP · {group.server}</h4>
-              <p className="text-xs text-muted-foreground">
-                This server&rsquo;s tools are on while the server is, and each call asks you first
-                unless you say otherwise. Set a permission, or the server&rsquo;s state, under{' '}
-                <span className="font-medium">MCP servers</span> below.
-              </p>
-            </div>
-            <ul className="space-y-3">
-              {group.entries.map((entry) => (
-                <McpToolRow key={entry.name} entry={entry} />
-              ))}
-            </ul>
-          </section>
-        ))}
+        {remoteCount === 0 ? null : (
+          <p className="text-xs text-muted-foreground" data-slot="tools-mcp-hint">
+            {remoteCount === 1
+              ? 'One tool comes from an MCP server.'
+              : `${remoteCount} tools come from MCP servers.`}{' '}
+            Tools from MCP servers are set below, per server.
+          </p>
+        )}
 
         {saving ? (
           <p role="status" className="text-xs text-muted-foreground">
@@ -119,83 +108,6 @@ export function ToolsCard() {
         ) : null}
       </CardContent>
     </Card>
-  )
-}
-
-/** One server's remote tools, in the order the list reported them. */
-interface McpServerGroup {
-  readonly server: string
-  readonly entries: readonly ToolSettingEntry[]
-}
-
-/**
- * The remote entries, grouped by server in first-appearance order.
- *
- * A remote entry that names no server — a stored policy for a tool nothing offers — is grouped
- * under a heading of its own rather than dropped, the same "listed rather than hidden" rule the
- * unavailable built-in tools follow.
- */
-function mcpServerGroups(entries: readonly ToolSettingEntry[]): readonly McpServerGroup[] {
-  const groups = new Map<string, ToolSettingEntry[]>()
-  for (const entry of entries) {
-    if (entry.source !== 'mcp') {
-      continue
-    }
-    const server = entry.mcp_server ?? 'Remote tools'
-    const group = groups.get(server)
-    if (group === undefined) {
-      groups.set(server, [entry])
-    } else {
-      group.push(entry)
-    }
-  }
-  return [...groups].map(([server, groupEntries]) => ({ server, entries: groupEntries }))
-}
-
-/**
- * One remote tool's row: what it is called, and the permission a call to it is evaluated under.
- *
- * Read-only by design (#313 owns the editing): the offered name and the server group already say
- * which server a tool belongs to, and there is no per-tool on/off to draw, so a control here
- * would offer a choice the API has nowhere to put for an on/off and put a permission in the
- * wrong map for a select.
- */
-function McpToolRow({ entry }: { entry: ToolSettingEntry }) {
-  return (
-    <li
-      data-slot="tool-row"
-      data-tool={entry.name}
-      data-source="mcp"
-      data-available={entry.available}
-      className="flex flex-col gap-2 rounded-lg border px-3 py-2"
-    >
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-sm">{entry.name}</span>
-        <Badge variant="outline" className="text-2xs">
-          MCP
-        </Badge>
-        {entry.available ? null : (
-          <Badge variant="secondary" className="text-2xs" data-slot="tool-unavailable">
-            not available
-          </Badge>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-muted-foreground" data-slot="tool-policy">
-          When called: {entry.policy}
-          {entry.default_policy === null
-            ? ''
-            : entry.policy === entry.default_policy
-              ? ' (default)'
-              : ` (default ${entry.default_policy})`}
-        </span>
-        {entry.available ? null : (
-          <span className="text-xs text-muted-foreground">
-            Its server is not connected, so a chat never offers it.
-          </span>
-        )}
-      </div>
-    </li>
   )
 }
 
@@ -219,11 +131,6 @@ function ToolRow({
     >
       <div className="flex items-center gap-2">
         <span className="font-mono text-sm">{entry.name}</span>
-        {entry.source === 'mcp' ? (
-          <Badge variant="outline" className="text-2xs">
-            MCP
-          </Badge>
-        ) : null}
         {unavailable ? (
           <Badge variant="secondary" className="text-2xs" data-slot="tool-unavailable">
             not available

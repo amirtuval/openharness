@@ -186,6 +186,7 @@ export {
   mcpServerById,
   mcpServerByName,
   mcpServerFromError,
+  mcpServerPolicyBody,
   mcpServerTools,
   mcpStatusDetail,
   mcpStatusLabel,
@@ -193,6 +194,8 @@ export {
   mcpTestOutcome,
   mcpToolEntriesByServer,
   mcpToolPolicyBody,
+  mcpToolPolicyState,
+  mcpToolPolicyStateLabel,
   toolPolicyLabel,
   waitForMcpConnection,
 } from './mcp'
@@ -202,6 +205,7 @@ export type {
   McpServerTone,
   McpServerTool,
   McpTestOutcome,
+  McpToolPolicyState,
   WaitForMcpConnectionOptions,
 } from './mcp'
 

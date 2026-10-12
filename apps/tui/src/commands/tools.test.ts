@@ -74,6 +74,64 @@ describe('formatTools (#308)', () => {
   it('says so when nothing is registered', () => {
     expect(formatTools([])).toEqual(['No tools are registered on this server.'])
   })
+
+  it('leaves the remote MCP tools out, and says how many and where (#313)', () => {
+    const lines = formatTools([
+      {
+        name: 'web_fetch',
+        source: 'builtin',
+        enabled: true,
+        policy: 'allow',
+        default_policy: 'allow',
+        available: true,
+      },
+      {
+        name: 'notes__search',
+        source: 'mcp',
+        enabled: true,
+        policy: 'ask',
+        default_policy: 'ask',
+        available: true,
+        mcp_server: 'notes',
+      },
+      {
+        name: 'notes__read',
+        source: 'mcp',
+        enabled: true,
+        policy: 'ask',
+        default_policy: 'ask',
+        available: true,
+        mcp_server: 'notes',
+      },
+    ])
+
+    // The tool's own line, and nothing from the server but the line that says so.
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain('web_fetch')
+    expect(lines.join('\n')).not.toContain('notes__search')
+    expect(lines[1]).toBe(
+      '2 tools come from MCP servers; their permissions are set per server with `/mcp`.',
+    )
+  })
+
+  it('counts a single remote tool in the singular', () => {
+    const lines = formatTools([
+      {
+        name: 'notes__search',
+        source: 'mcp',
+        enabled: true,
+        policy: 'ask',
+        default_policy: 'ask',
+        available: true,
+        mcp_server: 'notes',
+      },
+    ])
+
+    expect(lines).toEqual([
+      'No tools are registered on this server.',
+      '1 tool comes from MCP servers; their permissions are set per server with `/mcp`.',
+    ])
+  })
 })
 
 describe('runTools (#308)', () => {
@@ -84,6 +142,17 @@ describe('runTools (#308)', () => {
     expect(await runTools(fake, io, {})).toBe(0)
     expect(out.join('\n')).toContain('web_fetch')
     expect(out.join('\n')).toContain('todo_write')
+  })
+
+  it('leaves a remote MCP tool out of the listing, and says where it is set (#313)', async () => {
+    const fake = createFakeClient({ mcpTools: [{ server: 'notes', name: 'search' }] })
+    const { io, out } = recorder()
+
+    expect(await runTools(fake, io, {})).toBe(0)
+    expect(out).toContain(
+      '1 tool comes from MCP servers; their permissions are set per server with `/mcp`.',
+    )
+    expect(out.join('\n')).not.toContain('notes__search')
   })
 
   it('turns one tool off without disturbing the others, and reports it', async () => {

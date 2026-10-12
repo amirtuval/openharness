@@ -13,6 +13,7 @@ import {
   mcpServerById,
   mcpServerByName,
   mcpServerFromError,
+  mcpServerPolicyBody,
   mcpServerTools,
   mcpStatusDetail,
   mcpStatusLabel,
@@ -20,9 +21,12 @@ import {
   mcpTestOutcome,
   mcpToolEntriesByServer,
   mcpToolPolicyBody,
+  mcpToolPolicyState,
+  mcpToolPolicyStateLabel,
   toolPolicyLabel,
   waitForMcpConnection,
 } from './mcp'
+import type { McpServerTool } from './mcp'
 
 describe('the MCP vocabulary', () => {
   it('names every auth type a form offers, in order', () => {
@@ -187,6 +191,45 @@ describe('mcpToolPolicyBody', () => {
     expect(mcpToolPolicyBody('notes__search', 'allow')).toEqual({
       mcp: { notes__search: 'allow' },
     })
+  })
+})
+
+describe('mcpServerTools’ batch half (#313)', () => {
+  /** One server's tools, as `mcpServerTools` joins them. */
+  const tools = (policies: readonly ('allow' | 'ask' | 'deny')[]): McpServerTool[] =>
+    policies.map((policy, position) => ({
+      offeredName: `notes__tool${position}`,
+      name: `tool${position}`,
+      description: null,
+      definitionTokens: null,
+      policy,
+      listed: true,
+    }))
+
+  it('writes every tool of the server in one `mcp` map', () => {
+    expect(mcpServerPolicyBody(tools(['ask', 'allow', 'deny']), 'deny')).toEqual({
+      mcp: { notes__tool0: 'deny', notes__tool1: 'deny', notes__tool2: 'deny' },
+    })
+  })
+
+  it('answers null for a server with nothing to set', () => {
+    expect(mcpServerPolicyBody([], 'allow')).toBeNull()
+  })
+
+  it('reads a permission every tool shares as uniform', () => {
+    expect(mcpToolPolicyState(tools(['ask', 'ask']))).toEqual({ kind: 'uniform', policy: 'ask' })
+    expect(mcpToolPolicyState(tools(['ask']))).toEqual({ kind: 'uniform', policy: 'ask' })
+  })
+
+  it('reads tools that disagree as mixed, and no tools as no state', () => {
+    expect(mcpToolPolicyState(tools(['ask', 'deny']))).toEqual({ kind: 'mixed' })
+    expect(mcpToolPolicyState([])).toBeNull()
+  })
+
+  it('names the two states the way a control shows them', () => {
+    expect(mcpToolPolicyStateLabel({ kind: 'uniform', policy: 'ask' })).toBe('Ask (all)')
+    expect(mcpToolPolicyStateLabel({ kind: 'uniform', policy: 'allow' })).toBe('Allow (all)')
+    expect(mcpToolPolicyStateLabel({ kind: 'mixed' })).toBe('Mixed')
   })
 })
 

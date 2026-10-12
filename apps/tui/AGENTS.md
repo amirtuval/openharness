@@ -33,27 +33,27 @@ repo.
 
 ## The `oh` command
 
-| command                                 | what it does                                                                           |
-| --------------------------------------- | -------------------------------------------------------------------------------------- |
-| `oh`                                    | start a new chat on the default model                                                  |
-| `oh -s <id>` / `--session <id>`         | resume a session, showing its history                                                  |
-| `oh -c` / `--continue`                  | resume the most recent session                                                         |
-| `oh sessions`                           | list every session: id, title, status, updated                                         |
-| `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips)                               |
-| `oh agents`                             | list the saved agents (optional presets): id, name                                     |
-| `oh modes`                              | list your modes and what each resolves to (#245, M6)                                   |
-| `oh providers`                          | list the stored model-provider keys: provider, last 4                                  |
-| `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden           |
-| `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                                        |
-| `oh default-model [provider/model]`     | print or set the model a new chat starts on                                            |
-| `oh settings [flags]`                   | print or set the context (compaction) settings (#282)                                  |
-| `oh tools [name] [flags]`               | list which tools your chats may use, or set one (#303 X4; #307; #308)                  |
-| `oh mcp`                                | your remote MCP servers: add, edit, connect, reconnect, test, delete (#303, X10; #313) |
-| `oh login`                              | sign in through the browser (the device flow)                                          |
-| `oh logout`                             | revoke the session on the server, forget the token                                     |
-| `oh whoami`                             | print the signed-in email and server                                                   |
-| `oh update`                             | install the newest published version now                                               |
-| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                                                         |
+| command                                 | what it does                                                                               |
+| --------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `oh`                                    | start a new chat on the default model                                                      |
+| `oh -s <id>` / `--session <id>`         | resume a session, showing its history                                                      |
+| `oh -c` / `--continue`                  | resume the most recent session                                                             |
+| `oh sessions`                           | list every session: id, title, status, updated                                             |
+| `oh sessions delete <id>`               | delete a chat and everything in it (asks; `--yes` skips)                                   |
+| `oh agents`                             | list the saved agents (optional presets): id, name                                         |
+| `oh modes`                              | list your modes and what each resolves to (#245, M6)                                       |
+| `oh providers`                          | list the stored model-provider keys: provider, last 4                                      |
+| `oh providers add [name]`               | connect a provider or a named credential — answer its fields, secrets hidden               |
+| `oh providers remove <provider>`        | forget a key (asks; `--yes` skips the question)                                            |
+| `oh default-model [provider/model]`     | print or set the model a new chat starts on                                                |
+| `oh settings [flags]`                   | print or set the context (compaction) settings (#282)                                      |
+| `oh tools [name] [flags]`               | list which of the build's tools your chats may use, or set one (#303 X4; #307; #308; #313) |
+| `oh mcp`                                | your remote MCP servers: add, edit, connect, reconnect, test, delete (#303, X10; #313)     |
+| `oh login`                              | sign in through the browser (the device flow)                                              |
+| `oh logout`                             | revoke the session on the server, forget the token                                         |
+| `oh whoami`                             | print the signed-in email and server                                                       |
+| `oh update`                             | install the newest published version now                                                   |
+| `oh -v` / `--version`, `oh -h`/`--help` | print and stop                                                                             |
 
 Global flags: `--server <url>`, `--debug`; `oh login` also takes `--no-browser`, and
 `oh sessions delete` / `oh providers remove` take `--yes`. The chat flags are `-s`/`-c`,
@@ -721,12 +721,20 @@ toolCalls)`): the status mark, the tool's name, the shared `toolCallSummary` and
   other, so it is counted here too (#335): a count and never a price, the same statement the
   usage routes make.
 
-`oh tools [name] [--on|--off] [--policy <allow|ask|deny>]` (epic #303, X4; #307) is the
+`oh tools [name] [--on|--off] [--policy <allow|ask|deny>]` (epic #303, X4; #307; #313) is the
 terminal's Tools settings, the counterpart of the web app's Settings → Tools: with no name it
-prints every tool with its on/off, its permission (and the default it agrees with) and `not
-available on this server` for one this deployment does not register; with a name and a flag it
-merges that one change over the stored setting (`PUT /v1/me/tools`), reading the entry first so
-the half the flags did not name is kept. A name nothing registers is a message and exit `1`.
+prints **this build's own** tools with their on/off, their permission (and the default it agrees
+with) and `not available on this server` for one this deployment does not register; with a name
+and a flag it merges that one change over the stored setting (`PUT /v1/me/tools`), reading the
+entry first so the half the flags did not name is kept. A name nothing registers is a message and
+exit `1`.
+
+**A remote MCP tool is not in the listing** (#313): mixing a server's tools with the build's own
+made the list as long as every server's tool list put together, and put two different kinds of
+setting behind one heading. `formatTools` closes with one line saying how many were left out and
+where they are — `2 tools come from MCP servers; their permissions are set per server with
+`/mcp`.` — so a remote tool that is missing here is named as one that is set elsewhere rather
+than lost. They are set on `/mcp`'s tools face, where a server's tools are the screen.
 
 A **remote MCP tool** (`source: 'mcp'`, offered as `<server>__<tool>`) is set differently, and
 the difference is the point (#314): `--policy` writes the `mcp` map — where a remote tool's
@@ -764,10 +772,16 @@ what a keyboard drives:
 
 - **A server's row is what a reader needs to decide**: its name, its auth type, its status (+
   `· off` when it is), and under it the status detail — the last error, what its tools cost, or
-  that no check has run. The tools face lists each one as `<server>__<tool> · <permission> ·
-~N tokens`, and **←/→ cycles the permission** in place: it is the one thing a reader chooses
-  about a remote tool (a server is on or off; a tool's permission is theirs), and the write goes
-  to `PUT /v1/me/tools`'s `mcp` map under the offered name.
+  that no check has run. The tools face draws the server's tools **taken together first** —
+  `all tools · Ask (all)`, or `Mixed` when they differ (`mcpToolPolicyState` /
+  `mcpToolPolicyStateLabel`) — and then each tool as `<server>__<tool> · <permission> · ~N
+tokens`. **←/→ cycles the permission** on the highlighted row: on a tool's row it is that
+  tool's (the one thing a reader chooses about a remote tool — a server is on or off, and a
+  tool's permission is theirs), and **on the all-tools row it is every one of them, in one
+  write** (#313) — `mcpServerPolicyBody` builds the single `PUT /v1/me/tools` naming them all in
+  the `mcp` map, so a reader who wants "ask me about all of these" presses one key rather than
+  walking a dozen rows. A mixed set starts the walk at `allow`, and the row then reads the
+  permission the write really left behind.
 - **The form is one prompt per field, and there is no auth-type list** (#314): the **URL**
   comes first (with a line saying the server is probed on save), then an optional **name** whose
   placeholder is the one the server would derive from that URL, then one optional **custom
@@ -940,8 +954,9 @@ src/
                          waiting on the reader, as one keyboard-driven list, X6; #310)
                          and text-entry (the one-line field a pending row's free text
                          goes through, #310), and mcp-servers (the remote MCP servers: the
-                         list with a key per verb, the form, and the per-tool permissions,
-                         X10; #313)
+                         list with a key per verb, the form, and the tools face — one
+                         permission per tool, and the all-tools row that sets every one of
+                         them at once, X10; #313)
   update/
     index.ts             the auto-update: the notice, and the decision to check
     decide.ts            the off switches (env / config / CI), the hourly throttle, the claim
@@ -956,7 +971,7 @@ src/
   commands/preferences.ts  `oh default-model`
   commands/settings.ts   `oh settings` — the context settings, printed and set (#282)
   commands/tools.ts      `oh tools` — which tools a chat may use, listed and set
-                         (#303 X4; #307; #308)
+                         (#303 X4; #307; #308; #313)
   commands/mcp.tsx       `oh mcp` — the remote MCP servers: the screen in a terminal, the
                          listing without one (#303, X10; #313)
   commands/io.ts         what a print-and-stop command writes, how it fails, and the
@@ -1109,9 +1124,9 @@ denial, cancellation, revoke failures); `src/index.test.ts` drives `run()` all t
 | `src/components/pending-prompt.test.tsx`          | the pending list (#303, X6; #310): `pendingRows` and the lines it draws — an approval's four choices and its deny-with-a-message row, a question's options with the mark that says what is chosen, the write-in and the text row, the Submit hint naming what is still missing, the bulk rows, and the truncation a narrow terminal gets — then the component at the keyboard: Enter sends an approval (and ↓ moves to the next one), Esc declines the row's call, space and Enter choose and toggle, Tab crosses to the next question, a text row opens the slot's entry, the message row hands the keyboard back, nothing is read when it is not the list's, and a remote call's heading naming its server (#312)                                                                                                                                                                                                                                                                        |
 | `src/components/text-entry.test.tsx`              | the one-line entry (#303, #310): what is typed is echoed and settled on Enter, it starts from what was said before so an answer can be corrected, Esc and Ctrl+C settle nothing, an empty line is a real answer, and a pasted several-line string stays on one line                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/chat/pausing.test.tsx`                       | the pause end to end in `oh` (#303, X6; #310): a **reloaded** paused chat drawing its questions with the keys that answer them, the answers taken with arrows/Tab/Enter and sent as one confirmation, Esc's decline, the keyboard staying with the list until "write a message instead" hands it back, a message sent that way declining what waited, and a free-text question answered through the prompt slot's entry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |     |
-| `src/commands/tools.test.ts`                      | `oh tools` (#303 X4; #307; #308): `formatTools`' columns and its "not available" case, a plain read, one tool turned off without touching the others, a permission-only change, a name nothing registers, and the remote MCP half (#314) — a remote tool's `--policy` written to the `mcp` map (and not a stray `builtin` row), `--on`/`--off` refused with a pointer at `/mcp`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `src/commands/tools.test.ts`                      | `oh tools` (#303 X4; #307; #308; #313): `formatTools`' columns and its "not available" case, **the remote MCP entries left out and the line that says how many and where** (singular and plural), a plain read, one tool turned off without touching the others, a permission-only change, a name nothing registers, and the remote MCP half (#314) — a remote tool's `--policy` written to the `mcp` map (and not a stray `builtin` row), `--on`/`--off` refused with a pointer at `/mcp`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `src/mcp/form.test.ts`                            | the MCP server form (#303, X10; #313; #314): the URL-first field order with no auth prompt, the optional name (and the name a URL derives), the optional header pair with the protocol's own URL/name rules, and the body the answers become — a create with and without a name or a map, an edit that omits the map to keep what is sealed, and a map an edit was given                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `src/commands/mcp.test.tsx`                       | `oh mcp` (#303, X10; #313; #314): `formatMcpServers`' three lines per server and its empty state, an edit that opens on the values it holds (so Enter keeps the URL and the name), and the screen at the keyboard — the rows and their status detail, the on/off key, Test reporting a failure, the delete's `y/N` (a no first), Connect opening the page and reporting the wait's outcome, the tools face and a permission written by ←/→, a registration through the form, the inline refusals held on their prompt, and Esc / Ctrl+C leaving                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `src/commands/mcp.test.tsx`                       | `oh mcp` (#303, X10; #313; #314): `formatMcpServers`' three lines per server and its empty state, an edit that opens on the values it holds (so Enter keeps the URL and the name), and the screen at the keyboard — the rows and their status detail, the on/off key, Test reporting a failure, the delete's `y/N` (a no first), Connect opening the page and reporting the wait's outcome, the tools face with a permission written by ←/→ on one row (and `Mixed` appearing when the tools part company) **and the all-tools row setting every tool of the server in one `PUT`**, a registration through the form, the inline refusals held on their prompt, and Esc / Ctrl+C leaving                                                                                                                                                                                                                                                                                                    |
 | `src/browser.test.ts`                             | the skip rules and the per-platform command, with an injected spawn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/commands/auth.test.ts`                       | `oh login` / `logout` / `whoami` against the fake's scripted device flow, mid-poll cancellation included, and `offerSignIn` — the chat's offer, and the answers it takes as yes (#210)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `src/commands/preferences.test.ts`                | `oh default-model`: print, set, replace, the failures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |

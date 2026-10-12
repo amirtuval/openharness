@@ -1,5 +1,6 @@
 import {
   MCP_CONNECTED_PARAM,
+  TOOL_POLICIES,
   estimatedTokensLabel,
   mcpAuthLabel,
   mcpConnectedServerId,
@@ -9,6 +10,8 @@ import {
   mcpStatusLabel,
   mcpStatusTone,
   mcpTestOutcome,
+  mcpToolPolicyState,
+  mcpToolPolicyStateLabel,
   toolPolicyLabel,
 } from '@openharness/client'
 import type { McpServerTool, McpTestOutcome } from '@openharness/client'
@@ -44,6 +47,13 @@ import { McpServerDialog } from './mcp-server-dialog'
  * A permission is written where every other tool setting is (`PUT /v1/me/tools`'s `mcp` map,
  * keyed by the model-facing `<server>__<tool>` name), because a remote tool has no on/off of its
  * own: a whole server is on or off, and a mode patches that by id (`mode-form-dialog.tsx`).
+ *
+ * **A server's tools can also be set all at once** (#313): the row carries the state they are in
+ * together ("All tools: Ask (all)", or "Mixed" when they differ) and three buttons — Allow all,
+ * Ask for all, Deny all — that send **one** `PUT` naming every one of that server's tools. It is
+ * drawn outside the tools disclosure, because a reader who wants "ask me about all of these"
+ * should not have to open a dozen rows to say it, and it waits on the same `saving` the per-tool
+ * select does, so the two controls cannot both be in flight.
  *
  * **A web OAuth flow lands back here.** The callback redirects the browser to
  * `?mcp_connected=<id>#/settings`, and this card is what confirms it — naming the server — and
@@ -203,34 +213,47 @@ export function McpServersCard() {
           </p>
         ) : (
           <ul className="space-y-3" data-slot="mcp-server-list">
-            {servers.servers.map((server) => (
-              <McpServerRow
-                key={server.id}
-                server={server}
-                tools={mcpServerTools(server, tools.tools?.data ?? [])}
-                busy={servers.busy || tools.saving}
-                confirming={confirming === server.id}
-                test={tests[server.id] ?? null}
-                onConfirming={(next) => {
-                  setFailure(null)
-                  setConfirming(next ? server.id : null)
-                }}
-                onTest={() => void runTest(server)}
-                onConnect={() => void connect(server)}
-                onDisconnect={() => void run(servers.disconnect(server.id))}
-                onEdit={() => openEdit(server)}
-                onToggle={(enabled) => void run(servers.update(server.id, { enabled }))}
-                onRemove={() => void run(servers.remove(server.id))}
-                onPolicy={(tool, policy) => {
-                  setFailure(null)
-                  void tools.savePolicy(tool.offeredName, policy).then((result) => {
-                    if (!result.ok) {
-                      setFailure(result.message)
-                    }
-                  })
-                }}
-              />
-            ))}
+            {servers.servers.map((server) => {
+              const serverTools = mcpServerTools(server, tools.tools?.data ?? [])
+              return (
+                <McpServerRow
+                  key={server.id}
+                  server={server}
+                  tools={serverTools}
+                  busy={servers.busy || tools.saving}
+                  confirming={confirming === server.id}
+                  test={tests[server.id] ?? null}
+                  onConfirming={(next) => {
+                    setFailure(null)
+                    setConfirming(next ? server.id : null)
+                  }}
+                  onTest={() => void runTest(server)}
+                  onConnect={() => void connect(server)}
+                  onDisconnect={() => void run(servers.disconnect(server.id))}
+                  onEdit={() => openEdit(server)}
+                  onToggle={(enabled) => void run(servers.update(server.id, { enabled }))}
+                  onRemove={() => void run(servers.remove(server.id))}
+                  onPolicy={(tool, policy) => {
+                    setFailure(null)
+                    void tools.savePolicy(tool.offeredName, policy).then((result) => {
+                      if (!result.ok) {
+                        setFailure(result.message)
+                      }
+                    })
+                  }}
+                  onBulkPolicy={(policy) => {
+                    setFailure(null)
+                    // One write for the whole server, and the same answer path as a single
+                    // tool's: the server's list replaces what the rows and the state line read.
+                    void tools.saveServerPolicy(serverTools, policy).then((result) => {
+                      if (!result.ok) {
+                        setFailure(result.message)
+                      }
+                    })
+                  }}
+                />
+              )
+            })}
           </ul>
         )}
 
@@ -267,6 +290,7 @@ function McpServerRow({
   onToggle,
   onRemove,
   onPolicy,
+  onBulkPolicy,
 }: {
   server: McpServer
   tools: readonly McpServerTool[]
@@ -282,6 +306,8 @@ function McpServerRow({
   onToggle: (enabled: boolean) => void
   onRemove: () => void
   onPolicy: (tool: McpServerTool, policy: ToolPermission) => void
+  /** Set every one of this server's tools to one permission, in one write (#313). */
+  onBulkPolicy: (policy: ToolPermission) => void
 }) {
   const tone = mcpStatusTone(server.status)
   const oauth = server.auth === 'oauth'
@@ -441,7 +467,13 @@ function McpServerRow({
         </div>
       )}
 
-      <ServerTools server={server} tools={tools} busy={busy} onPolicy={onPolicy} />
+      <ServerTools
+        server={server}
+        tools={tools}
+        busy={busy}
+        onPolicy={onPolicy}
+        onBulkPolicy={onBulkPolicy}
+      />
     </li>
   )
 }
@@ -454,86 +486,129 @@ function McpServerRow({
  * schema. A tool the last check did not list (a stored permission for a tool the server no
  * longer offers) is shown beside them, marked, rather than dropped: it is the reader's own
  * choice, and it comes back with the tool.
+ *
+ * **Above it, and outside the disclosure, sits the batch control** (#313): the state the server's
+ * tools are in together, and the three buttons that set them all at once. It is drawn whether or
+ * not the list is open — a reader who wants "every tool on this server asks me first" should not
+ * have to expand a dozen rows to say so — and it is one write rather than one per row.
  */
 function ServerTools({
   server,
   tools,
   busy,
   onPolicy,
+  onBulkPolicy,
 }: {
   server: McpServer
   tools: readonly McpServerTool[]
   busy: boolean
   onPolicy: (tool: McpServerTool, policy: ToolPermission) => void
+  onBulkPolicy: (policy: ToolPermission) => void
 }) {
   const total = server.tools.length
+  const state = mcpToolPolicyState(tools)
   return (
-    <Collapsible>
-      <CollapsibleTrigger
-        data-slot="mcp-tools-trigger"
-        className="flex items-center gap-1 rounded-sm text-xs text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-      >
-        <ChevronRight
-          aria-hidden="true"
-          className="size-3.5 shrink-0 transition-transform [[data-state=open]_&]:rotate-90"
-        />
-        {total === 0
-          ? 'No tools listed yet'
-          : `${total === 1 ? '1 tool' : `${total} tools`} · ${estimatedTokensLabel(server.definition_tokens)}`}
-      </CollapsibleTrigger>
-      <CollapsibleContent className="pt-2">
-        {tools.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            Test the server to list its tools and price their definitions.
-          </p>
-        ) : (
-          <ul className="space-y-1.5" data-slot="mcp-tools">
-            {tools.map((tool) => (
-              <li
-                key={tool.offeredName}
-                data-slot="mcp-tool-row"
-                data-tool={tool.offeredName}
-                data-listed={tool.listed}
-                className="flex flex-wrap items-center gap-2"
-              >
-                <span
-                  className="min-w-0 flex-1 truncate font-mono text-xs"
-                  title={tool.offeredName}
+    <>
+      {state === null ? null : (
+        <div
+          className="flex flex-wrap items-center gap-2"
+          data-slot="mcp-tools-batch"
+          data-state={state.kind}
+        >
+          <span className="text-xs text-muted-foreground" data-slot="mcp-tools-batch-state">
+            {total === 1 ? 'The tool' : 'All tools'}: {mcpToolPolicyStateLabel(state)}
+          </span>
+          {TOOL_POLICIES.map((policy) => (
+            <Button
+              key={policy}
+              type="button"
+              variant="outline"
+              size="sm"
+              // Named for its server: a page of servers carries one of these groups each, and
+              // three buttons all called "Allow all" are not addressable by a screen reader.
+              aria-label={`Set every tool on ${server.name} to ${toolPolicyLabel(policy)}`}
+              disabled={busy}
+              onClick={() => onBulkPolicy(policy)}
+            >
+              {BULK_POLICY_LABELS[policy]}
+            </Button>
+          ))}
+        </div>
+      )}
+      <Collapsible>
+        <CollapsibleTrigger
+          data-slot="mcp-tools-trigger"
+          className="flex items-center gap-1 rounded-sm text-xs text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        >
+          <ChevronRight
+            aria-hidden="true"
+            className="size-3.5 shrink-0 transition-transform [[data-state=open]_&]:rotate-90"
+          />
+          {total === 0
+            ? 'No tools listed yet'
+            : `${total === 1 ? '1 tool' : `${total} tools`} · ${estimatedTokensLabel(server.definition_tokens)}`}
+        </CollapsibleTrigger>
+        <CollapsibleContent className="pt-2">
+          {tools.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              Test the server to list its tools and price their definitions.
+            </p>
+          ) : (
+            <ul className="space-y-1.5" data-slot="mcp-tools">
+              {tools.map((tool) => (
+                <li
+                  key={tool.offeredName}
+                  data-slot="mcp-tool-row"
+                  data-tool={tool.offeredName}
+                  data-listed={tool.listed}
+                  className="flex flex-wrap items-center gap-2"
                 >
-                  {tool.offeredName}
-                </span>
-                {tool.listed ? (
-                  <span className="text-2xs text-muted-foreground" data-slot="mcp-tool-cost">
-                    {tool.definitionTokens === null
-                      ? ''
-                      : estimatedTokensLabel(tool.definitionTokens)}
+                  <span
+                    className="min-w-0 flex-1 truncate font-mono text-xs"
+                    title={tool.offeredName}
+                  >
+                    {tool.offeredName}
                   </span>
-                ) : (
-                  <Badge variant="secondary" className="text-2xs">
-                    not listed
-                  </Badge>
-                )}
-                <select
-                  aria-label={`${tool.offeredName} when called`}
-                  data-slot="mcp-tool-policy"
-                  className="h-8 rounded-md border bg-transparent px-2 text-xs"
-                  value={tool.policy}
-                  disabled={busy}
-                  onChange={(event) => onPolicy(tool, event.target.value as ToolPermission)}
-                >
-                  {(['allow', 'ask', 'deny'] as const).map((policy) => (
-                    <option key={policy} value={policy}>
-                      {toolPolicyLabel(policy)}
-                    </option>
-                  ))}
-                </select>
-              </li>
-            ))}
-          </ul>
-        )}
-      </CollapsibleContent>
-    </Collapsible>
+                  {tool.listed ? (
+                    <span className="text-2xs text-muted-foreground" data-slot="mcp-tool-cost">
+                      {tool.definitionTokens === null
+                        ? ''
+                        : estimatedTokensLabel(tool.definitionTokens)}
+                    </span>
+                  ) : (
+                    <Badge variant="secondary" className="text-2xs">
+                      not listed
+                    </Badge>
+                  )}
+                  <select
+                    aria-label={`${tool.offeredName} when called`}
+                    data-slot="mcp-tool-policy"
+                    className="h-8 rounded-md border bg-transparent px-2 text-xs"
+                    value={tool.policy}
+                    disabled={busy}
+                    onChange={(event) => onPolicy(tool, event.target.value as ToolPermission)}
+                  >
+                    {TOOL_POLICIES.map((policy) => (
+                      <option key={policy} value={policy}>
+                        {toolPolicyLabel(policy)}
+                      </option>
+                    ))}
+                  </select>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
+    </>
   )
+}
+
+/** The words on the three batch buttons, which are a choice about a whole server. */
+const BULK_POLICY_LABELS: Readonly<Record<ToolPermission, string>> = {
+  allow: 'Allow all',
+  ask: 'Ask for all',
+  deny: 'Deny all',
 }
 
 /**
