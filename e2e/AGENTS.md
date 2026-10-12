@@ -354,6 +354,15 @@ chat the send creates. W1b is the same key form opened from inside an open chat,
 must not navigate. W17 covers Settings → Providers and the dialog's refusing, adding, replacing
 and deleting.
 
+W31 is the subagents pass (epic #340, S9; #346): the mock's `__agent__`, `__agent_message__` and
+`__message_parent__` markers drive a chat that starts a helper, and the scenario follows the card
+through its states — the type, the description and the status, the live line and the tokens the
+child's own stream feeds, the conversations between parent and child inline, the result folding
+in, the child opening as a chat under a breadcrumb, the sidebar nesting it, and Stop interrupting
+a child parked in `__hold__`. It also pins the two things no component test can: Settings → Tools
+lists the five subagent tools against the **real** registry (the fake registers three built-ins
+and no agent tools), and the card holds up in Light, Dim and Dark at 1280 and at 390.
+
 ### What the pass needs on the stack
 
 | variable                            | what it enables                                                                                  |

@@ -165,6 +165,26 @@ describe('the task card', () => {
     ])
   })
 
+  it('draws the newest few messages and counts the rest', () => {
+    const messages = Array.from({ length: 5 }, (_unused, index) => ({
+      from: 'parent' as const,
+      text: `steer ${index + 1}`,
+      seq: index + 1,
+    }))
+    const { container } = render(<TaskCardView card={card({ messages })} />)
+
+    // The three newest, oldest of those first, with what is behind them named rather than lost.
+    const lines = [...container.querySelectorAll('[data-slot="task-messages"] li')]
+    expect(lines.map((line) => line.textContent)).toEqual([
+      '→ researcher:steer 3',
+      '→ researcher:steer 4',
+      '→ researcher:steer 5',
+    ])
+    expect(container.querySelector('[data-slot="task-messages-more"]')?.textContent).toBe(
+      '2 earlier messages',
+    )
+  })
+
   it('offers Stop with what the task is, and answers the card it was pressed for', async () => {
     const user = userEvent.setup()
     const onStop = vi.fn()

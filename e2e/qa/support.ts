@@ -6,6 +6,7 @@ import {
   test as base,
   type APIRequestContext,
   type Cookie,
+  type Locator,
   type Page,
 } from '@playwright/test'
 
@@ -421,6 +422,18 @@ export function expectNoConsoleErrors(errors: readonly string[]): void {
 /** A screenshot in the report's folder, at a fixed size so runs are comparable. */
 export async function shot(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: path.join(SHOT_DIR, `${name}.png`), animations: 'disabled' })
+}
+
+/**
+ * A screenshot of **one element**, in the same folder and under the same rules as {@link shot}.
+ *
+ * For a thing the page has grown past: the transcript sticks to the bottom and the "jump to
+ * latest" button floats over whatever is under it, so a page shot of a block halfway up is
+ * either half the block or the block with a button on top of the message below it. The page
+ * shots around it are the context; this is the evidence the block's own state needs.
+ */
+export async function shotOf(target: Locator, name: string): Promise<void> {
+  await target.screenshot({ path: path.join(SHOT_DIR, `${name}.png`), animations: 'disabled' })
 }
 
 // --- what the app does when something fails ---------------------------------------------------------

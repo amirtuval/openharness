@@ -1387,6 +1387,32 @@ that call suppressed from the tool lines), so a frontend merges it with
 ([#345](https://github.com/amirtuval/openharness/issues/345);
 `packages/client/src/transcript.ts`).
 
+**The reader's Stop on a task has no route that writes `stopped`, so the card says `done` — and
+the honest fix is a server rule, not a client lie.** `agent_stop` is a tool the _parent model_
+calls, and `session.task_status` is a session event a client may not append (`EventInputSchema` is
+user events plus a rewind), so the only thing a reader can do to a running helper is interrupt its
+child session. The brain then does what it does for every ended child turn: `childTurnDelivery`
+writes a `result` notification and `status: idle` — an _interrupted_ turn is an ended turn — and the
+card, which reads `idle` + a result as **done** (S9), says the task finished. The task really has
+stopped (its child is not running), so this is one word off rather than a false fact, and #346
+recorded it instead of inventing a client-side "the reader pressed Stop" memory: the log is the
+state, and a card that disagreed with it would disagree with a reload
+([#346](https://github.com/amirtuval/openharness/issues/346);
+`packages/brain/src/agents.ts`).
+
+**A nested list with a count is a read per row, and there is no route that answers in one.** The
+server lists a caller's **top-level** chats and answers one session's children only on
+`?parent_session_id=`, and nothing anywhere returns "which of my chats have children" — so a
+sidebar that must say "2 subagents" **before** the group is expanded has to ask each chat in turn.
+The web app bounds it to the newest `CHILD_PROBE_LIMIT` (20) chats, remembers "no children" for a
+chat it asked, and re-asks the one chat the reader is in when its task count moves, so opening a
+chat is what nests its helpers; a chat past the limit is nested when it is opened or the list is
+reloaded. The alternative — a probe per row of a list the safety cap allows to reach a thousand —
+is a page load nobody asked for. If a later issue wants the count for every row cheaply, the answer
+is a count on the session resource or a whole-tree read, not a client that asks more often
+([#346](https://github.com/amirtuval/openharness/issues/346);
+`apps/web/src/hooks/use-session-tree.ts`).
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take
@@ -1440,6 +1466,20 @@ so a drift between them fails the shared suite, with the Postgres file adding on
 store can be asked — concurrent appends, cross-store fencing, exactly-once delivery, `LISTEN`
 catch-up, idempotent migrations and the backfill
 ([#105](https://github.com/amirtuval/openharness/issues/105)).
+
+**A query the fake ignores is worse than one it refuses, because the client code that builds on it
+is silently wrong in tests and right in production.** The fake's `sessions.list` answers every
+session whatever filter it is given — it starts no child sessions, so `?parent_session_id=` is not
+part of its world (#344) — which was invisible until a frontend asked it that question: the web
+app's sidebar reads a chat's children to nest them (#346), and a fake that answered the whole list
+would have nested **every chat under every chat**, in tests that look like they exercise nesting.
+The fix belongs where the gap is (the client package's fake), but an app may not edit another
+package, so `apps/web/src/test-support/` teaches the fake the one query its own feature needs — and
+the lesson generalises: when a new read is narrower than anything the fake models, check what the
+fake answers *before* writing the component, or the component's tests will be evidence of a
+behaviour no server has
+([#346](https://github.com/amirtuval/openharness/issues/346);
+`apps/web/src/test-support/session-tree.ts`).
 
 **Coverage names the risky file, and it is usually the one on the security path.** The lowest figure
 in the repo was `provider-validation.ts` — the one cheap provider call that decides whether a key is

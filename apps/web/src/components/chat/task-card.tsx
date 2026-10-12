@@ -18,6 +18,15 @@ import { Button } from '../ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
 
 /**
+ * How many of a task's messages the card draws before it starts counting them.
+ *
+ * The newest ones are the ones worth reading, and a card is chrome about work rather than the
+ * work itself: `oh`'s card caps them at the same number (#347), and the two frontends draw the
+ * same card.
+ */
+export const TASK_MESSAGE_MAX_LINES = 3
+
+/**
  * One background task, as the card its parent's conversation draws (epic #340, decision S9;
  * issue #346).
  *
@@ -205,21 +214,31 @@ export function TaskCardView({
       )}
 
       {/* What the two of them said to each other, in the order it happened (S9): the parent's
-          `agent_message` as `→ researcher: …` and the child's note as `researcher →: …`. */}
+          `agent_message` as `→ researcher: …` and the child's note as `researcher →: …`. Only the
+          newest few are drawn ({@link TASK_MESSAGE_MAX_LINES}) — a helper steered a dozen times
+          would otherwise push a dozen lines into the conversation for every reader who never
+          asked about it — and the heading says how many are behind them. */}
       {card.messages.length === 0 ? null : (
-        <ul data-slot="task-messages" className="space-y-0.5 border-t px-3 py-1.5">
-          {card.messages.map((message) => (
-            <li
-              key={`${String(message.seq)}:${message.from}`}
-              className="flex min-w-0 gap-1.5 text-2xs"
-            >
-              <span className="shrink-0 font-mono text-muted-foreground">
-                {taskMessageLabel(message, card.type)}
-              </span>
-              <span className="min-w-0 flex-1 text-muted-foreground">{message.text}</span>
-            </li>
-          ))}
-        </ul>
+        <div data-slot="task-messages" className="border-t px-3 py-1.5">
+          {card.messages.length <= TASK_MESSAGE_MAX_LINES ? null : (
+            <p data-slot="task-messages-more" className="text-2xs text-muted-foreground/80">
+              {card.messages.length - TASK_MESSAGE_MAX_LINES} earlier messages
+            </p>
+          )}
+          <ul className="space-y-0.5">
+            {card.messages.slice(-TASK_MESSAGE_MAX_LINES).map((message) => (
+              <li
+                key={`${String(message.seq)}:${message.from}`}
+                className="flex min-w-0 gap-1.5 text-2xs"
+              >
+                <span className="shrink-0 font-mono text-muted-foreground">
+                  {taskMessageLabel(message, card.type)}
+                </span>
+                <span className="min-w-0 flex-1 text-muted-foreground">{message.text}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {/* The result folds into the card (S9): the newest turn the task finished with, behind the
