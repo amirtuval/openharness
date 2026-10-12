@@ -77,6 +77,39 @@ export function isMcpServerName(value: string): boolean {
   )
 }
 
+/** The name a server gets when the reader does not type one, so the form can be two fields. */
+export const MCP_SERVER_NAME_FALLBACK = 'mcp-server'
+
+/**
+ * A server name derived from its URL's host, or {@link MCP_SERVER_NAME_FALLBACK}.
+ *
+ * A reader should not have to name a server before it works, so `create` accepts a body with no
+ * `name` and derives one: the host, lowercased, with `www.` dropped and every character a name
+ * may not carry turned into a dash. The result always satisfies {@link isMcpServerName} — it is
+ * truncated to {@link MCP_SERVER_NAME_MAX_LENGTH}, trimmed of the dashes the substitution can
+ * leave at either end, and falls back to `mcp-server` for a host that reduces to nothing (an
+ * IPv6 literal, say). A derived name is not guaranteed unique: `create` still answers the 409 a
+ * taken name gets, and the reader renames it.
+ *
+ * @param url the server's URL, as the reader typed it
+ */
+export function mcpServerNameFromUrl(url: string): string {
+  let host: string
+  try {
+    host = new URL(url).hostname
+  } catch {
+    return MCP_SERVER_NAME_FALLBACK
+  }
+  const reduced = host
+    .toLowerCase()
+    .replace(/^www\./, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MCP_SERVER_NAME_MAX_LENGTH)
+    .replace(/-+$/, '')
+  return isMcpServerName(reduced) ? reduced : MCP_SERVER_NAME_FALLBACK
+}
+
 /** A server name: the rule {@link isMcpServerName} checks, as a schema. */
 export const McpServerNameSchema = z.string().refine(isMcpServerName, {
   error:
@@ -354,18 +387,52 @@ const mcpServerBaseFields = {
 /**
  * Body of `POST /v1/me/mcp_servers`. Response: {@link McpServerSchema} (201).
  *
- * A discriminated union on `auth`: the two secret-carrying forms each carry their own field,
- * so a body that names `auth: 'oauth'` **cannot** also carry `headers` — an unknown field is
- * stripped like every other object here, and `x-`-style ambiguity is impossible. `name` is
- * unique per user (a duplicate is a 409, as a mode's is).
+ * **The auth type is detected, not chosen.** A reader types a URL — and, optionally, a name —
+ * and the **server** probes it: an unauthenticated request the server answers `401` (or whose
+ * metadata advertises an authorization server, RFC 9728) means OAuth, and a successful
+ * initialize means `none`. So `auth` is **optional** here and a body that omits it is the
+ * normal one; a `headers` map is the one thing a caller can still say explicitly, and it
+ * **implies** `auth: 'headers'`.
+ *
+ * `auth` is still accepted, for a caller that knows better than the probe — it is what the
+ * field meant before detection existed, and the API stays backward compatible with it. When it
+ * is supplied it wins: `auth: 'headers'` requires a map, and `auth: 'oauth'` stores the server
+ * on `needs_reconnect` so the reader can run the Connect flow.
+ *
+ * `name` is optional too: a body without one is named after its URL's host
+ * ({@link mcpServerNameFromUrl}). A name — given or derived — is unique per user, and a
+ * duplicate is the 409 a mode's is.
  */
-export const CreateMcpServerRequestSchema = z.discriminatedUnion('auth', [
-  z.object({ auth: z.literal('none'), ...mcpServerBaseFields }),
-  z.object({ auth: z.literal('headers'), ...mcpServerBaseFields, headers: McpHeadersSchema }),
-  z.object({ auth: z.literal('oauth'), ...mcpServerBaseFields }),
-])
+export const CreateMcpServerRequestSchema = z
+  .object({
+    ...mcpServerBaseFields,
+    /** Omitted means "name it after the URL's host" ({@link mcpServerNameFromUrl}). */
+    name: McpServerNameSchema.optional(),
+    auth: McpAuthTypeSchema.optional(),
+    headers: McpHeadersSchema.optional(),
+  })
+  .refine((body) => body.auth === undefined || body.auth !== 'headers' || body.headers !== undefined, {
+    error:
+      "a server saved with `auth: 'headers'` needs a `headers` map; omit `auth` to let the " +
+      'server detect the authentication from the URL',
+    path: ['headers'],
+  })
+  .refine((body) => body.auth !== undefined || body.headers === undefined, {
+    error:
+      'a `headers` map is created without `auth`; it implies `auth: \'headers\'`, so the two ' +
+      'must not be sent together',
+    path: ['auth'],
+  })
 
 export type CreateMcpServerRequest = z.infer<typeof CreateMcpServerRequestSchema>
+
+/** The `auth` a create body resolves to, given what the caller said and what it carries. */
+export function requestedMcpAuth(body: CreateMcpServerRequest): McpAuthType | null {
+  if (body.headers !== undefined) {
+    return 'headers'
+  }
+  return body.auth ?? null
+}
 
 /**
  * Body of `POST /v1/me/mcp_servers/{mcp_server_id}`. Response: {@link McpServerSchema}.
