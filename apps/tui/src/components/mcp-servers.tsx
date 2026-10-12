@@ -16,7 +16,7 @@ import {
   type McpServerTone,
 } from '@openharness/client'
 import type { McpServer, ToolPermission, ToolSettingEntry } from '@openharness/protocol'
-import { Box, Text, useInput } from 'ink'
+import { Box, Text, useInput, useStdout } from 'ink'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { describeError, type ErrorContext } from '../errors'
@@ -28,6 +28,7 @@ import {
   mcpServerValues,
   type McpField,
 } from '../mcp/form'
+import { listJump, ScrollingList, VIEWPORT_HINT, viewportRows } from './list-viewport'
 import { SecretInput } from './secret-input'
 
 /** The permissions a remote tool's row cycles through, in the order the key walks them. */
@@ -78,6 +79,7 @@ export function McpServersScreen({
   /** Called when the reader leaves: Esc on the list, or Ctrl+C. */
   readonly onDone: () => void
 }) {
+  const { stdout } = useStdout()
   const [servers, setServers] = useState<readonly McpServer[] | null>(null)
   const [tools, setTools] = useState<readonly ToolSettingEntry[]>([])
   const [index, setIndex] = useState(0)
@@ -337,6 +339,14 @@ export function McpServersScreen({
   const sharedPolicy = toolState?.kind === 'uniform' ? toolState.policy : null
   /** The rows the tools face draws: the all-tools row, then one per tool. */
   const toolRows = serverTools.length === 0 ? 0 : serverTools.length + 1
+  // What the two faces draw around their lists: title, error, note, "working…" and the key
+  // hint, plus — on the tools face — the all-tools row pinned above the window, and, on the
+  // list, the `y/N` line a delete asks with. A server row is two lines, so its list holds half
+  // as many of them.
+  const TOOLS_CHROME = 6
+  const SERVERS_CHROME = 7
+  const toolPage = viewportRows(stdout.rows, TOOLS_CHROME)
+  const serverPage = Math.max(1, Math.floor(viewportRows(stdout.rows, SERVERS_CHROME) / 2))
 
   /** One prompt answered: remember it, and move on — or save on the last one. */
   const answer = async (value: string): Promise<void> => {
@@ -429,6 +439,14 @@ export function McpServersScreen({
         setToolCursor(next)
         return
       }
+      // PgUp/PgDn/Home/End, over the whole tools face — the all-tools row included, so Home is
+      // the batch row and End is the server's last tool.
+      const jumped = listJump(toolCursorRef.current, toolRows, key, toolPage)
+      if (jumped !== null) {
+        toolCursorRef.current = jumped
+        setToolCursor(jumped)
+        return
+      }
       // ←/→ (and Enter, for a reader who expects it to do something) walk the three permissions
       // — the one thing a reader chooses about a remote tool. Row 0 is the server's tools taken
       // together (#313): the same keys set **every** one of them in a single write, which is what
@@ -477,6 +495,13 @@ export function McpServersScreen({
     }
     if (key.downArrow) {
       moveTo(indexRef.current + 1)
+      return
+    }
+    // A list that grew past the screen is walked a page at a time (#335): ↓ one server is fine
+    // for three of them, and hopeless for twenty.
+    const serverJump = listJump(indexRef.current, list.length, key, serverPage)
+    if (serverJump !== null) {
+      moveTo(serverJump)
       return
     }
     if (busyRef.current) return
@@ -611,27 +636,36 @@ export function McpServersScreen({
             </Text>
           ) : (
             <>
-              <Text color={toolCursor === 0 ? 'cyan' : undefined}>
-                {`${toolCursor === 0 ? '❯' : ' '} all tools · ${mcpToolPolicyStateLabel(toolState)}`}
-              </Text>
-              {serverTools.map((tool, position) => (
-                <Text
-                  key={tool.offeredName}
-                  color={position + 1 === toolCursor ? 'cyan' : undefined}
-                >
-                  {`${position + 1 === toolCursor ? '❯' : ' '} ${tool.offeredName} · ${toolPolicyLabel(tool.policy)}${
-                    tool.definitionTokens === null
-                      ? ' · not listed'
-                      : ` · ${estimatedTokensLabel(tool.definitionTokens)}`
-                  }`}
-                </Text>
-              ))}
+              {/* The all-tools row is **pinned**: it is the server's whole tool set taken
+                  together, and a server with sixty tools must not scroll it away (the reader's
+                  report of #335). The window below holds the tools themselves. */}
+              <ScrollingList
+                items={serverTools}
+                index={Math.max(toolCursor - 1, 0)}
+                selected={toolCursor > 0}
+                rows={stdout.rows}
+                chrome={TOOLS_CHROME}
+                pinned={
+                  <Text color={toolCursor === 0 ? 'cyan' : undefined}>
+                    {`${toolCursor === 0 ? '❯' : ' '} all tools · ${mcpToolPolicyStateLabel(toolState)}`}
+                  </Text>
+                }
+                renderRow={(tool, position, marker) => (
+                  <Text color={position + 1 === toolCursor ? 'cyan' : undefined}>
+                    {`${marker} ${tool.offeredName} · ${toolPolicyLabel(tool.policy)}${
+                      tool.definitionTokens === null
+                        ? ' · not listed'
+                        : ` · ${estimatedTokensLabel(tool.definitionTokens)}`
+                    }`}
+                  </Text>
+                )}
+              />
             </>
           )}
           <Text dimColor>
             {toolState === null
               ? 'Esc back to the list.'
-              : '←/→ to change a permission — on the all-tools row, every one. Esc back to the list.'}
+              : `←/→ permission (all-tools row: every one). ${VIEWPORT_HINT}. Esc back.`}
           </Text>
         </Box>
       ) : list.length === 0 ? (
@@ -639,11 +673,16 @@ export function McpServersScreen({
           No servers yet. Press n to register one — its tools join your chats once it is on.
         </Text>
       ) : (
-        <Box flexDirection="column">
-          {list.map((server, position) => (
-            <Box key={server.id} flexDirection="column">
+        <ScrollingList
+          items={list}
+          index={index}
+          rows={stdout.rows}
+          chrome={SERVERS_CHROME}
+          rowLines={2}
+          renderRow={(server, position, marker) => (
+            <Box flexDirection="column">
               <Text color={position === index ? 'cyan' : undefined}>
-                <Text>{`${position === index ? '❯' : ' '} ${server.name} · ${mcpAuthLabel(server.auth)} · `}</Text>
+                <Text>{`${marker} ${server.name} · ${mcpAuthLabel(server.auth)} · `}</Text>
                 <Text color={statusColour(mcpStatusTone(server.status))}>
                   {mcpStatusLabel(server.status)}
                 </Text>
@@ -651,8 +690,8 @@ export function McpServersScreen({
               </Text>
               <Text dimColor>{`    ${mcpStatusDetail(server)}`}</Text>
             </Box>
-          ))}
-        </Box>
+          )}
+        />
       )}
 
       {confirming && current !== undefined ? (

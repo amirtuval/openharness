@@ -127,10 +127,22 @@ export interface ScrollingListProps<T> {
   readonly items: readonly T[]
   /** The cursor's position in `items`; clamped into the list. */
   readonly index: number
+  /**
+   * Whether the row at `index` carries the marker. `false` is a list whose selection is
+   * **elsewhere** — `/mcp`'s tools face pins its "all tools" row above the window, and while
+   * that row is the cursor no row below it is selected. The window still follows `index`, so
+   * the list does not jump when the selection leaves it.
+   */
+  readonly selected?: boolean
   /** The terminal's height, from `useStdout().stdout.rows`; `undefined` uses the default. */
   readonly rows: number | undefined
   /** How many lines the screen draws around the list: a title, an error, the key hints. */
   readonly chrome?: number
+  /**
+   * How many lines one item draws — `2` for the `/mcp` server list, whose row is a name line
+   * and a status line under it. Capacity is counted in rows, so a two-line row halves it.
+   */
+  readonly rowLines?: number
   /**
    * One row's element. `marker` is the selection glyph — `❯` or a space — which **must** be
    * drawn: it is how the selected row reads with colour off, and a test holds every screen to it.
@@ -152,12 +164,15 @@ export interface ScrollingListProps<T> {
 export function ScrollingList<T>({
   items,
   index,
+  selected = true,
   rows,
   chrome = 0,
+  rowLines = 1,
   renderRow,
   pinned = null,
 }: ScrollingListProps<T>): ReactElement {
-  const window = listWindow(index, items.length, viewportRows(rows, chrome))
+  const capacity = Math.max(1, Math.floor(viewportRows(rows, chrome) / Math.max(1, rowLines)))
+  const window = listWindow(index, items.length, capacity)
   const above = moreMarker('above', window.above)
   const below = moreMarker('below', window.below)
   return (
@@ -166,7 +181,7 @@ export function ScrollingList<T>({
       {above === null ? null : <Text dimColor>{`  ${above}`}</Text>}
       {items.slice(window.first, window.first + window.count).map((item, offset) => {
         const position = window.first + offset
-        const marker = position === window.index ? SELECTED_MARKER : UNSELECTED_MARKER
+        const marker = selected && position === window.index ? SELECTED_MARKER : UNSELECTED_MARKER
         return (
           <Box key={position} flexDirection="column">
             {renderRow(item, position, marker)}
