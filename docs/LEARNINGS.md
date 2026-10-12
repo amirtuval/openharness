@@ -1476,7 +1476,7 @@ would have nested **every chat under every chat**, in tests that look like they 
 The fix belongs where the gap is (the client package's fake), but an app may not edit another
 package, so `apps/web/src/test-support/` teaches the fake the one query its own feature needs — and
 the lesson generalises: when a new read is narrower than anything the fake models, check what the
-fake answers *before* writing the component, or the component's tests will be evidence of a
+fake answers _before_ writing the component, or the component's tests will be evidence of a
 behaviour no server has
 ([#346](https://github.com/amirtuval/openharness/issues/346);
 `apps/web/src/test-support/session-tree.ts`).
