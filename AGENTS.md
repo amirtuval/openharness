@@ -30,6 +30,24 @@ implements today.
 && yarn lint && yarn format:check && yarn test` from inside your package, and
    `yarn check:deps` at the root.
 
+## Learnings
+
+[`docs/LEARNINGS.md`](./docs/LEARNINGS.md) is the living record of what building openharness
+taught us that the code does not say out loud: provider quirks, configuration traps, dead ends,
+and decisions whose reason is not visible in the source. [`AGENTS.md`](./AGENTS.md) says what the
+code does; this file says what surprised us and why things are the way they are. It is written
+for people building an agent harness, a chat-with-tools product, an MCP client, a multi-provider
+LLM app or a deployment like this one, and for contributors and agents on this repo — read it
+before you re-derive something.
+
+**Every agent, when it finishes an issue, adds any non-obvious learning to
+`docs/LEARNINGS.md` in the same PR** — in the right section, in that file's format: a bold
+one-line lesson, then two to six sentences of what happened or what is true, why it matters, and
+what was done, with issue/PR references and file paths. A learning is a surprise, a provider
+quirk, a dead end, or a decision whose reason is not visible in the code. Update or delete
+entries the change makes wrong. Do **not** add what the code or `AGENTS.md` already make obvious
+— the value of the file is exactly what you could not have read off the source.
+
 ## Commands
 
 Node 24 and Yarn 4 (corepack) are required. From the root: `yarn install --immutable`,
