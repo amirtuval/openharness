@@ -16,6 +16,7 @@ import {
   modelContextBudget,
   summaryModelFallback,
   summaryDescription,
+  truncationNotice,
 } from './compaction'
 import type { TranscriptSummary } from './transcript'
 
@@ -361,5 +362,19 @@ describe('the manual compaction’s words (#277, K8; #283)', () => {
       tone: 'error',
       text: 'The summary could not be written.',
     })
+  })
+
+  it("names the reader's message and how much of it was left out (#280; #314)", () => {
+    // The transcript only hands this a **message's** cut: a tool result's is the results notice
+    // (`truncatedResultsNotice`), and the two used to be drawn from one record (#314).
+    expect(truncationNotice({ tokensBefore: 900, tokensAfter: 300 })).toEqual({
+      text: 'Your message was too long for this model and was shortened.',
+      detail: 'About 600 tokens of it were left out of the request.',
+    })
+    // The counts are the same estimate the budget is measured in, so a record whose "before" is
+    // smaller than its "after" (a log someone wrote by hand) says nothing rather than a negative.
+    expect(truncationNotice({ tokensBefore: 10, tokensAfter: 40 }).detail).toBe(
+      'About 0 tokens of it were left out of the request.',
+    )
   })
 })

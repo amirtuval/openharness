@@ -27,6 +27,7 @@ import type {
   ToolReference,
   ToolResultEvent,
   ToolSource,
+  Truncation,
   UserMessageEvent,
   RetryStatusType,
   SessionCompactionOutcome,
@@ -476,6 +477,36 @@ export interface TranscriptTruncation {
   readonly tokensAfter: number
   /** The `seq` of the span that recorded it — the rewind test. */
   readonly recordedAt: number
+}
+
+/**
+ * The message a request's truncation record is about, or `null` (epic #277, K6; #314).
+ *
+ * The record's `seq`/`tokens_before`/`tokens_after` describe *the newest item* the request had
+ * to shorten, and since #306 that item may be a **tool result** rather than a message: a request
+ * that capped only results names the newest of them, and `results` lists every one of them
+ * (`packages/brain`'s `truncationRecord` — the protocol's `TruncationSchema` documents it). Read
+ * as a message's cut — which is what a frontend drawing "your message was too long" from this
+ * field did — one cut produced two notices that contradict each other: the results notice saying
+ * a tool's answer was shortened, and the truncation notice blaming the reader's message for it
+ * (#314).
+ *
+ * The record's two halves are what tells them apart, so that is the whole rule: a `seq` the
+ * request's own `results` list carries is a **tool result's** cut and belongs to that notice
+ * alone, and anything else is the newest message's — which is the only other thing `capNewest`
+ * caps. No wire change is needed for this, and none is made: the record already said both.
+ */
+function messageTruncation(truncated: Truncation, recordedAt: number): TranscriptTruncation | null {
+  const cappedResult = (truncated.results ?? []).some((result) => result.seq === truncated.seq)
+  if (cappedResult) {
+    return null
+  }
+  return {
+    seq: truncated.seq,
+    tokensBefore: truncated.tokens_before,
+    tokensAfter: truncated.tokens_after,
+    recordedAt,
+  }
 }
 
 /**
@@ -1032,14 +1063,7 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
           // goes (epic #277, C2/K10).
           summarizing: null,
           truncation:
-            event.truncated === undefined
-              ? null
-              : {
-                  seq: event.truncated.seq,
-                  tokensBefore: event.truncated.tokens_before,
-                  tokensAfter: event.truncated.tokens_after,
-                  recordedAt: event.seq,
-                },
+            event.truncated === undefined ? null : messageTruncation(event.truncated, event.seq),
           // What the request offered, so a call it produces can say where its tool came from
           // (epic #303, X1; #308). The record is the request's own, so reading it now is what
           // keeps a replayed session's calls as well-described as a live one's.
