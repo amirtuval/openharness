@@ -28,6 +28,7 @@ import {
   fixtureTimestamp,
   makeAgent,
   makeAgentMessage,
+  makeChildSession,
   makeContentDelta,
   makeListModelsResponse,
   makeListToolSettingsResponse,
@@ -65,6 +66,24 @@ describe('fixture builders', () => {
     expect(sampleSession.agent?.id).toBe(sampleAgent.id)
     // Model-first: a session with no agent parses too (issue #93).
     expect(SessionSchema.safeParse(makeSession({ agent: null })).success).toBe(true)
+  })
+
+  it('build a child session that belongs to its parent (#340, S3)', () => {
+    const parent = makeSession()
+    const child = makeChildSession(parent)
+    expect(SessionSchema.safeParse(child).success).toBe(true)
+    expect(child).toMatchObject({
+      parent_session_id: parent.id,
+      root_session_id: parent.root_session_id,
+      depth: 1,
+      // A child's model cannot ask the user anything (S1).
+      interactive: false,
+    })
+    expect(child.parent_task_id).not.toBeNull()
+    // A grandchild hangs off the child and shares the same root.
+    const grandchild = makeChildSession(child)
+    expect(grandchild).toMatchObject({ parent_session_id: child.id, depth: 2 })
+    expect(grandchild.root_session_id).toBe(parent.root_session_id)
   })
 
   it('build every stored event type so that it parses against its schema', () => {

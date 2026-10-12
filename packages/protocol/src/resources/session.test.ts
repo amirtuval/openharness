@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { newAgentId, newModeId, newSessionId } from '../ids'
+import { newAgentId, newModeId, newSessionId, newTaskId } from '../ids'
 import { encodeKeyCursor } from '../pagination'
 import {
   CreateSessionRequestSchema,
@@ -11,8 +11,10 @@ import {
   SessionStatusSchema,
 } from './session'
 
+const sessionId = newSessionId()
+
 const session = {
-  id: newSessionId(),
+  id: sessionId,
   type: 'session',
   owner_id: 'Qm3xT7bR9kL2nV5wZ8yA4cD6fG1hJ0pS',
   status: 'idle',
@@ -27,6 +29,11 @@ const session = {
     model: { id: 'anthropic/claude-sonnet-5' },
     system: 'Be concise.',
   },
+  interactive: true,
+  parent_session_id: null,
+  parent_task_id: null,
+  root_session_id: sessionId,
+  depth: 0,
   created_at: '2026-03-15T10:00:00Z',
   updated_at: '2026-03-15T10:00:00Z',
 }
@@ -83,6 +90,59 @@ describe('SessionSchema', () => {
 
   it('accepts an untitled session with empty metadata', () => {
     expect(SessionSchema.parse({ ...session, title: null, metadata: {} }).title).toBeNull()
+  })
+
+  it('carries the tree and interactivity the server set, always present (#340)', () => {
+    // S1/S3: both are fixed at creation and the server always writes them, so a response that
+    // omits one fails this schema rather than passing as a chat of unknown shape.
+    expect(SessionSchema.parse(session)).toMatchObject({
+      interactive: true,
+      parent_session_id: null,
+      parent_task_id: null,
+      root_session_id: session.id,
+      depth: 0,
+    })
+    for (const field of [
+      'interactive',
+      'parent_session_id',
+      'parent_task_id',
+      'root_session_id',
+      'depth',
+    ] as const) {
+      const { [field]: _dropped, ...partial } = session
+      expect(SessionSchema.safeParse(partial).success, `session without ${field}`).toBe(false)
+    }
+  })
+
+  it('accepts a child session: a parent, a task, the parent’s root and a deeper level', () => {
+    const child = SessionSchema.parse({
+      ...session,
+      interactive: false,
+      parent_session_id: session.id,
+      parent_task_id: newTaskId(),
+      depth: 2,
+    })
+    expect(child).toMatchObject({
+      interactive: false,
+      parent_session_id: session.id,
+      root_session_id: session.id,
+      depth: 2,
+    })
+  })
+
+  it('rejects a tree field of the wrong kind or shape', () => {
+    expect(SessionSchema.safeParse({ ...session, interactive: 'yes' }).success).toBe(false)
+    expect(SessionSchema.safeParse({ ...session, parent_session_id: '' }).success).toBe(false)
+    // A parent is a session and a task is a task: neither takes the other's id.
+    expect(SessionSchema.safeParse({ ...session, parent_session_id: newTaskId() }).success).toBe(
+      false,
+    )
+    expect(SessionSchema.safeParse({ ...session, parent_task_id: newSessionId() }).success).toBe(
+      false,
+    )
+    expect(SessionSchema.safeParse({ ...session, root_session_id: null }).success).toBe(false)
+    expect(SessionSchema.safeParse({ ...session, depth: -1 }).success).toBe(false)
+    expect(SessionSchema.safeParse({ ...session, depth: 1.5 }).success).toBe(false)
   })
 
   it('requires the owner the server assigned, like agents', () => {
@@ -184,6 +244,34 @@ describe('CreateSessionRequestSchema', () => {
     expect(parsed).not.toHaveProperty('owner_id')
   })
 
+  it('takes interactive, and leaves it out when the caller said nothing (#340, S1)', () => {
+    expect(
+      CreateSessionRequestSchema.parse({ agent: newAgentId(), interactive: false }),
+    ).toMatchObject({ interactive: false })
+    // Omitted, the field is absent from what the route sees, so the default is the server's
+    // to apply — and it is `true`.
+    expect(CreateSessionRequestSchema.parse({ agent: newAgentId() })).not.toHaveProperty(
+      'interactive',
+    )
+    expect(
+      CreateSessionRequestSchema.safeParse({ agent: newAgentId(), interactive: 'yes' }).success,
+    ).toBe(false)
+  })
+
+  it('never takes the tree fields from a request: only the server creates children (#340, S3)', () => {
+    const parsed = CreateSessionRequestSchema.parse({
+      agent: newAgentId(),
+      parent_session_id: session.id,
+      parent_task_id: newTaskId(),
+      root_session_id: session.id,
+      depth: 1,
+    })
+    expect(parsed).not.toHaveProperty('parent_session_id')
+    expect(parsed).not.toHaveProperty('parent_task_id')
+    expect(parsed).not.toHaveProperty('root_session_id')
+    expect(parsed).not.toHaveProperty('depth')
+  })
+
   it('rejects more initial events than Anthropic allows', () => {
     expect(MAX_INITIAL_EVENTS).toBe(50)
     expect(
@@ -214,6 +302,17 @@ describe('session list schemas', () => {
       }),
     ).toEqual({ limit: 10, page: encodeKeyCursor(session), agent_id: session.agent.id })
     expect(ListSessionsQuerySchema.safeParse({ agent_id: 'agent_nope' }).success).toBe(false)
+  })
+
+  it('takes a parent_session_id filter, and nothing with the wrong id kind (#340, S3)', () => {
+    expect(ListSessionsQuerySchema.parse({ parent_session_id: session.id })).toEqual({
+      parent_session_id: session.id,
+    })
+    // Omitted, the field is absent: "the top-level chats" is the route's own default.
+    expect(ListSessionsQuerySchema.parse({})).toEqual({})
+    expect(ListSessionsQuerySchema.safeParse({ parent_session_id: newTaskId() }).success).toBe(
+      false,
+    )
   })
 
   it('parses the envelope', () => {
