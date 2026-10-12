@@ -1434,10 +1434,21 @@ not supported (K3).
 **Every `SKILL.md` under the path is a candidate** — one folder each, its files read
 recursively, its frontmatter parsed (K1) — and each carries its **problems** rather than failing
 the preview: `invalid-frontmatter`, `name-mismatch` (the frontmatter's `name` is not the
-folder's), `reserved-name` (a built-in command's), `duplicate-name` (two folders of one name)
+folder's), `reserved-name` (a built-in command's), `duplicate-name` (two candidates of one name)
 and `over-limit` (one of the limits below). `name_taken` is separate and says the caller already
-has a skill by that name. A `SKILL.md` at the **repository's root** is not a candidate: a
-skill's name is its folder's, and the root has no name — point `path` at the folder instead.
+has a skill by that name.
+
+**A `SKILL.md` at the repository's own root is a candidate**, because a single-skill repository
+puts one there. A skill's name is its folder's (K1) and the root is not a folder, so the
+repository itself is read as the folder: the candidate's `folder` is `""` and its **name is the
+repository's** — the last segment of the repo URL's path with a trailing `.git` dropped, so
+`https://github.com/acme/release-notes.git` is named `release-notes`. The frontmatter has to
+agree with that name like any other, and a mismatch is the usual `name-mismatch`. A `SKILL.md`
+sitting directly under a named `path` keeps **that folder's** own name. A root skill's files are
+the **whole tree under the root**, except that a folder below it holding a `SKILL.md` is a
+candidate of its own and its subtree is that candidate's, not the root's — so a repository whose
+root holds the skill and one subfolder holds another offers two candidates with no duplicated
+files. (A **nested** candidate keeps the ordinary rule: its files are its parent folder's too.)
 
 **The import re-clones and refuses a ref that has moved**: the ref must still resolve to the
 `commit_sha` the preview answered, or the answer is the `409` `conflict_error` telling the

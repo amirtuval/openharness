@@ -18,7 +18,9 @@ import { PACKAGE_NAME as PROTOCOL_PACKAGE_NAME } from '@openharness/protocol'
  * `cloneRepository` (epic #349, K3) is the one other thing that reaches a URL a user supplied:
  * a shallow, in-memory `isomorphic-git` clone whose HTTP client is {@link safeFetch}, so a
  * skill can be imported from a public repository without a `git` binary, a subprocess or a
- * byte on the host's disk. {@link parseGitUrl} is the reading of the URL itself.
+ * byte on the host's disk. {@link parseGitUrl} is the reading of the URL itself, and
+ * {@link repositoryName} the one name it implies — what a `SKILL.md` at a repository's root is
+ * called.
  *
  * `openMcpClient` and `createMcpTool` (epic #303, X10; #312) are the other half: a Streamable
  * HTTP client for a remote MCP server, over the official `@modelcontextprotocol/sdk`, and the
@@ -120,6 +122,7 @@ export {
   GitUrlError,
   isGitUrlError,
   parseGitUrl,
+  repositoryName,
   type GitSourceLocation,
   type GitUrlErrorCode,
 } from './git-url'

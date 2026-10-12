@@ -1087,6 +1087,23 @@ disagree.** `SkillStore` lists a snapshot's files in code-point path order (`'SK
 `reference/…` first, so an import that sorted that way showed one order in the preview and another
 after the import succeeded ([#351](https://github.com/amirtuval/openharness/issues/351)).
 
+**A repository's root is a candidate, so the repository's _name_ has to be a skill name — and some
+repositories can never have one.** "A skill's name is its folder's" has no folder to read at a
+repository's root, so a `SKILL.md` sitting there is named for the repository instead: the last
+segment of its URL path with a trailing `.git` dropped (`packages/hands/src/git-url.ts`'s
+`repositoryName`, read off the `url` `parseGitUrl` answered so a browse URL's `/tree/…` half can
+never leak in). Two consequences are easy to miss. A root `SKILL.md` whose frontmatter disagrees
+with that name is an ordinary `name-mismatch`; and a repository called for a built-in command
+(`skills`, `compact`, …) or with an uppercase or underscored name can only ever answer
+`reserved-name`/`invalid-frontmatter` at its root — such a repository is still importable by naming
+its folder, which is what `path` is for, so the root rule is an addition rather than the only way
+in. The rule that is the root's **alone** is which files it takes: the whole tree under the root,
+minus the subtree of every folder below it that holds a `SKILL.md`, because that folder is a
+candidate of its own and its files are its own. Without that exclusion the shape single-skill
+repositories actually have — a `SKILL.md` at the root beside a `skills/` directory — would store
+every other skill's files twice, or blow the K4 limits doing it
+([#364](https://github.com/amirtuval/openharness/pull/364)).
+
 ## The HTTP layer
 
 **A route whose path parameter may hold slashes is written `:path{.+}`, not `*` — Hono 4 does not

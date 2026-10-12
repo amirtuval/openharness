@@ -3,6 +3,7 @@ import {
   isGitCloneError,
   isGitUrlError,
   parseGitUrl,
+  repositoryName,
   type ClonedFile,
   type ClonedRepository,
   type CloneRepositoryOptions,
@@ -215,7 +216,7 @@ export function createSkillImportService(options: SkillImportOptions): SkillImpo
 
     const location = readStoredSource(skill.source)
     const repository = await readRepository(location)
-    const found = discover(repository.files, location.path)
+    const found = discover(repository.files, location.path, location.name)
     const candidate = found.find((entry) => entry.name === skill.name)
     if (candidate === undefined) {
       throw new SkillImportFailureError(
@@ -235,7 +236,7 @@ export function createSkillImportService(options: SkillImportOptions): SkillImpo
     async preview(ownerId, source) {
       const location = readSource(source)
       const repository = await readRepository(location)
-      const found = discover(repository.files, location.path)
+      const found = discover(repository.files, location.path, location.name)
       const taken = new Set((await options.skills.list({ ownerId })).map((skill) => skill.name))
 
       return {
@@ -267,7 +268,7 @@ export function createSkillImportService(options: SkillImportOptions): SkillImpo
       // has moved since the preview is a conflict rather than a silent upgrade.
       requireCommit(repository.commit_sha, request.commit_sha)
 
-      const found = discover(repository.files, location.path)
+      const found = discover(repository.files, location.path, location.name)
       const byName = new Map(found.map((candidate) => [candidate.name, candidate]))
       const seen = new Set<string>()
       const picked = request.names.map((name) => {
@@ -350,7 +351,7 @@ export function createSkillImportService(options: SkillImportOptions): SkillImpo
       const repository = await readRepository(location)
       requireCommit(repository.commit_sha, commitSha)
 
-      const found = discover(repository.files, location.path)
+      const found = discover(repository.files, location.path, location.name)
       const candidate = found.find((entry) => entry.name === skill.name)
       if (candidate === undefined) {
         throw new SkillImportFailureError(
@@ -381,6 +382,15 @@ interface SkillLocation {
   readonly url: string
   readonly ref: string | null
   readonly path: string | null
+  /**
+   * The repository's name — the last segment of its URL's path, minus a trailing `.git`
+   * (`@openharness/hands`' `repositoryName`).
+   *
+   * It is the one thing here that is not a field of the clone: a `SKILL.md` at the repository's
+   * own root is a candidate (K3), and since a skill's name is its folder's (K1) and the root is
+   * not a folder, the repository's name is what its frontmatter has to agree with.
+   */
+  readonly name: string
 }
 
 /**
@@ -409,12 +419,22 @@ function readSource(source: SkillImportSource): SkillLocation {
     url: parsed.url,
     ref: emptyToNull(source.ref) ?? parsed.ref,
     path: normalizePath(emptyToNull(source.path) ?? parsed.path),
+    // The name comes from the **repository** URL, never from what the user typed: a browse
+    // URL's `/tree/…` half is not part of the repository.
+    name: repositoryName(parsed.url),
   }
 }
 
 /** A stored skill's source as a location; an import always recorded all three (K3). */
 function readStoredSource(source: SkillSource): SkillLocation {
-  return { url: source.url, ref: source.ref, path: source.path }
+  return {
+    url: source.url,
+    ref: source.ref,
+    path: source.path,
+    // Re-derived from the URL the import stored, so a root skill keeps the name it was checked
+    // against however long ago it was imported.
+    name: repositoryName(source.url),
+  }
 }
 
 /**
@@ -469,9 +489,15 @@ function normalizePath(value: string | null): string | null {
 
 /** One folder holding a `SKILL.md`, as the discovery built it. */
 interface DiscoveredCandidate {
-  /** The folder's path from the repository's root. */
+  /**
+   * The folder's path from the repository's root; `''` when the candidate *is* the repository's
+   * root — a `SKILL.md` sitting there, whose name is the repository's.
+   */
   readonly folder: string
-  /** The folder's name — the candidate's identity, and the name the frontmatter has to agree with. */
+  /**
+   * The folder's name — the candidate's identity, and the name the frontmatter has to agree
+   * with. The repository's name for the root candidate, the folder's own otherwise.
+   */
   readonly name: string
   /** `SKILL.md` exactly as the repository holds it. */
   readonly skillMd: string
@@ -488,6 +514,19 @@ interface DiscoveredCandidate {
 }
 
 /**
+ * One place a `SKILL.md` was found: the file, the folder that holds it, and the name it is
+ * checked against.
+ */
+interface SkillFolder {
+  /** The `SKILL.md`'s path from the repository's root — the sort key. */
+  readonly path: string
+  /** The folder holding it, from the repository's root; `''` for the repository's own root. */
+  readonly folder: string
+  /** The name a skill from this folder takes: the folder's, or the repository's at the root. */
+  readonly name: string
+}
+
+/**
  * Every folder holding a `SKILL.md` under `path` (K3), each with its files and its problems.
  *
  * The path is a **prefix**, not a folder to descend into: asking for `skills` finds
@@ -496,47 +535,71 @@ interface DiscoveredCandidate {
  * everything under it, recursively — a skill's reference material lives in subfolders — so a
  * nested skill's files are also its parent's, which is what the folders really hold.
  *
+ * **The repository's own root is a candidate when a `SKILL.md` sits there** — the shape a
+ * single-skill repository has. A candidate is a folder (K1: a skill's name is its folder's) and
+ * the root is not one, so the repository itself is read as the folder: the root candidate's
+ * `folder` is `''` and its name is the repository's, which is what the frontmatter has to agree
+ * with. A `SKILL.md` directly under a named `path` is the same candidate one level down and
+ * keeps that folder's own name.
+ *
+ * A root skill's files are the **whole tree under the root** — the repository is what the skill
+ * is, rather than a folder holding it — with one exclusion: a folder below it that holds a
+ * `SKILL.md` is a candidate of its own, and its whole subtree belongs to that candidate and not
+ * to the root. Without the exclusion a repository's root skill would store every other skill's
+ * files beside its own. The exclusion is the root's alone; a **nested** candidate keeps the rule
+ * above, so its own nested candidates' files are still its own.
+ *
  * @throws SkillImportFailureError when the path is not in the repository, or holds no `SKILL.md`
  */
-function discover(files: readonly ClonedFile[], path: string | null): DiscoveredCandidate[] {
+function discover(
+  files: readonly ClonedFile[],
+  path: string | null,
+  repository: string,
+): DiscoveredCandidate[] {
   const prefix = path === null ? '' : `${path}/`
   if (path !== null && !files.some((file) => file.path === path || file.path.startsWith(prefix))) {
     throw new SkillImportFailureError('path_not_found', path)
   }
 
-  // A candidate is a **folder** holding a `SKILL.md` (K1: a skill's name is its folder's). A
-  // `SKILL.md` at the repository's own root is therefore not a candidate — the root has no
-  // name to check the frontmatter against — and a single-skill repository is imported by
-  // naming its folder, which is what `path` is for.
-  const skillMds = files
-    .filter((file) => file.path.startsWith(prefix) && file.path.endsWith(`/${SKILL_MD_FILENAME}`))
-    .map((file) => ({ path: file.path, folder: file.path.slice(0, -SKILL_MD_FILENAME.length - 1) }))
-    .sort((left, right) => comparePaths(left.path, right.path))
+  const skillMds: SkillFolder[] = []
+  // The repository's own root, when a `SKILL.md` sits there. `path !== null` means the scan
+  // starts below the root, so only a whole-repository scan can find this one.
+  if (path === null && files.some((file) => file.path === SKILL_MD_FILENAME)) {
+    skillMds.push({ path: SKILL_MD_FILENAME, folder: '', name: repository })
+  }
+  for (const file of files) {
+    if (!file.path.startsWith(prefix) || !file.path.endsWith(`/${SKILL_MD_FILENAME}`)) {
+      continue
+    }
+    const folder = file.path.slice(0, -SKILL_MD_FILENAME.length - 1)
+    skillMds.push({ path: file.path, folder, name: lastSegment(folder) })
+  }
+  skillMds.sort((left, right) => comparePaths(left.path, right.path))
   if (skillMds.length === 0) {
     throw new SkillImportFailureError('no_skills_found', path ?? 'the repository root')
   }
 
+  // Every folder below the root that is a candidate of its own — what a root skill does not
+  // take as its files (above).
+  const nested = skillMds.map((found) => found.folder).filter((folder) => folder !== '')
+
   const names = new Map<string, number>()
   for (const found of skillMds) {
-    const name = lastSegment(found.folder)
-    names.set(name, (names.get(name) ?? 0) + 1)
+    names.set(found.name, (names.get(found.name) ?? 0) + 1)
   }
 
   return skillMds.map((found) => {
-    const folderPrefix = `${found.folder}/`
     const own = files
-      .filter((file) => file.path === found.folder || file.path.startsWith(folderPrefix))
-      .map((file) => ({
-        path: file.path === found.folder ? '' : file.path.slice(folderPrefix.length),
-        content: decode(file.content),
-      }))
+      .filter((file) => (found.folder === '' ? true : isWithin(file.path, found.folder)))
+      .filter((file) => found.folder !== '' || !nested.some((other) => isWithin(file.path, other)))
+      .map((file) => ({ path: relativeTo(found.folder, file.path), content: decode(file.content) }))
       .sort((left, right) => comparePaths(left.path, right.path))
 
     const skillMd = own.find((file) => file.path === SKILL_MD_FILENAME)?.content ?? ''
     const frontmatter = parseFrontmatter(skillMd)
     const problems: SkillProblem[] = []
 
-    const name = lastSegment(found.folder)
+    const name = found.name
     if (problems.length === 0 && frontmatter === null) {
       problems.push(
         problem(
@@ -583,7 +646,7 @@ function discover(files: readonly ClonedFile[], path: string | null): Discovered
       problems.push(
         problem(
           'duplicate-name',
-          `More than one folder under the path is named ${JSON.stringify(name)}.`,
+          `More than one candidate under the path is named ${JSON.stringify(name)}.`,
         ),
       )
     }
@@ -767,6 +830,22 @@ export class StaleSkillCommitError extends Error {
 function lastSegment(path: string): string {
   const at = path.lastIndexOf('/')
   return at === -1 ? path : path.slice(at + 1)
+}
+
+/** Whether a file at `path` is inside `folder` — the folder itself, or something under it. */
+function isWithin(path: string, folder: string): boolean {
+  return path === folder || path.startsWith(`${folder}/`)
+}
+
+/**
+ * A file's path as the folder holding it spells it: `SKILL.md` for `release-notes/SKILL.md`
+ * under `release-notes`, and the path itself under the repository's own root (`''`).
+ */
+function relativeTo(folder: string, path: string): string {
+  if (folder === '') {
+    return path
+  }
+  return path === folder ? '' : path.slice(folder.length + 1)
 }
 
 /**

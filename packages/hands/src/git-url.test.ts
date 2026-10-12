@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { isGitUrlError, parseGitUrl, type GitUrlError } from './git-url'
+import { isGitUrlError, parseGitUrl, repositoryName, type GitUrlError } from './git-url'
 
 /**
  * Reading an import's URL (epic #349, K3).
@@ -143,5 +143,35 @@ describe('parseGitUrl', () => {
   it('refuses a URL that names no repository', () => {
     expect(read('https://github.com')).toBe('refused:no_repository')
     expect(read('https://github.com/')).toBe('refused:no_repository')
+  })
+})
+
+/**
+ * The repository's name (epic #349, K3): the last segment of its path, minus a `.git`. It is
+ * what a `SKILL.md` at a repository's own root is named for, since a skill's name is its
+ * folder's and a root is not a folder.
+ */
+describe('repositoryName', () => {
+  it('is the last path segment, with a trailing `.git` dropped', () => {
+    expect(repositoryName('https://github.com/acme/release-notes.git')).toBe('release-notes')
+    expect(repositoryName('https://github.com/acme/release-notes')).toBe('release-notes')
+    expect(repositoryName('https://gitlab.com/group/sub/project')).toBe('project')
+    expect(repositoryName('https://git.example.com:8443/team/repo.git')).toBe('repo')
+  })
+
+  it('reads the repository, not the `/tree/…` half a browse URL carries', () => {
+    // A caller passes the `url` `parseGitUrl` answered with, which is the repository alone —
+    // so a browse URL's ref and path can never become the name.
+    expect(
+      repositoryName(parseGitUrl('https://github.com/acme/release-notes/tree/main/x').url),
+    ).toBe('release-notes')
+    expect(repositoryName(parseGitUrl('https://gitlab.com/g/p/-/tree/v1/skills').url)).toBe('p')
+  })
+
+  it('decodes a segment and leaves a name that only ends in `.git` alone', () => {
+    expect(repositoryName('https://github.com/acme/my%20repo')).toBe('my repo')
+    // Only the suffix is dropped, and only at the end.
+    expect(repositoryName('https://github.com/acme/gitignore')).toBe('gitignore')
+    expect(repositoryName('https://github.com/acme/.git-less')).toBe('.git-less')
   })
 })

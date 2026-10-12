@@ -443,7 +443,12 @@ export type SkillProblem = z.infer<typeof SkillProblemSchema>
 export const SkillImportCandidateSchema = z.object({
   /** The folder's name (K1) — the key an import picks this candidate by. */
   name: z.string(),
-  /** The folder's path in the repository, from the repository's root, forward-slashed. */
+  /**
+   * The folder's path in the repository, from the repository's root, forward-slashed.
+   *
+   * `""` is the repository's own root: a `SKILL.md` sitting there is a candidate like any other,
+   * named (its `name`) for the repository rather than for a folder that does not exist.
+   */
   folder: z.string(),
   /** The frontmatter's `description` (K1), or `null` when the frontmatter did not parse. */
   description: z.string().nullable(),

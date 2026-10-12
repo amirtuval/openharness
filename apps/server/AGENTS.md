@@ -1083,9 +1083,17 @@ allowPrivateUrls?, maxBytes?, timeoutMs? })` — `clone` defaults to the package
   `reserved-name`, `duplicate-name`, `over-limit` — and `name_taken` as a separate field), so one
   repository may offer a good skill and a broken one at once. The discovery checks the limits of
   K4 itself (`SKILL_MD_MAX_BYTES`, `SKILL_FILE_MAX_BYTES`, `SKILL_MAX_BYTES`, `MAX_SKILL_FILES`)
-  because the store does not — those are the import's refusals, with the reason a user reads. A
-  `SKILL.md` at the **repository's root** is not a candidate: a skill's name is its folder's and
-  the root has no name, so a single-skill repository is imported by naming its folder.
+  because the store does not — those are the import's refusals, with the reason a user reads.
+- **A `SKILL.md` at the repository's own root is a candidate**, and its name is the
+  **repository's**: a skill's name is its folder's (K1) and the root is not one, so the
+  repository is read as the folder — the candidate's `folder` is `''` and its name is the URL
+  path's last segment minus a trailing `.git` (`@openharness/hands`' `repositoryName`, read off
+  the `url` `parseGitUrl` answered so a browse URL's `/tree/…` half can never become the name),
+  which is what a single-skill repository is called. A mismatch there is the usual
+  `name-mismatch`. A `SKILL.md` directly under a named `path` keeps that folder's own name. A
+  **root** skill's files are the whole tree under the root **minus** the subtree of every folder
+  below it that holds a `SKILL.md` — those are candidates of their own, and their files are
+  theirs; a nested candidate keeps the ordinary rule, its files being its parent folder's too.
 - **Nothing is stored on a refusal.** All the checks run before the first `create`: a name no
   candidate has — or one picked twice — is a 400 (`InvalidSkillSelectionError`), a candidate
   that cannot be imported is
@@ -2438,10 +2446,17 @@ session` remembered for the chat and `remember: always` written to the user's se
   with the problems of each — no frontmatter, a name that is not the folder's, a built-in
   command's name, a `SKILL.md` over 20 KB, and two folders of one name — the nested collection
   found and the good skill's whole `SKILL.md`, file listing and sizes answered; `name_taken` for
-  a name the caller already has; a folder named as the `path` read as one candidate; a path that
-  is not there and a path holding no `SKILL.md` refused with the protocol's own sentence; an
-  import storing the snapshot whole (frontmatter, source, files and sizes, read back through the
-  single-skill and file reads); a ref that moved since the preview a 409 that stores nothing; an
+  a name the caller already has; a folder named as the `path` read as one candidate; a `SKILL.md`
+  directly under a named `path` read as that folder's candidate (its nested `SKILL.md` still a
+  candidate of its own and still a file of it); a `SKILL.md` at the repository's **root** read as
+  a candidate whose `folder` is `''` and whose name is the repository's (the `.git` spelling of
+  the same URL naming the same skill), its files the whole tree minus the subfolder that is a
+  candidate of its own, the frontmatter of a root `SKILL.md` disagreeing with the repository's
+  name a `name-mismatch`, and the root skill importing, storing and refreshing like any other; a
+  path that is not there and a path holding no `SKILL.md` refused with the protocol's own
+  sentence; an import storing the snapshot whole (frontmatter, source, files and sizes, read back
+  through the single-skill and file reads); a ref that moved since the preview a 409 that stores
+  nothing; an
   unknown name a 400 and a candidate that cannot be imported a 422 that stores **none** of the
   batch; a name the caller already has a 409 that stores none of it; an explicit `ref`/`path`
   beating the URL's; a table of the six clone failures each answered with its own sentence; a

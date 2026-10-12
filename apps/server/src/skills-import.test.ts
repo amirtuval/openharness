@@ -74,6 +74,19 @@ const REPOSITORY: Record<string, string> = {
   'skills/huge/SKILL.md': `---\nname: huge\ndescription: d\n---\n\n${'x'.repeat(SKILL_MD_MAX_BYTES)}\n`,
 }
 
+/**
+ * A single-skill repository: `SKILL.md` at the root, which is the shape such repositories have,
+ * with one nested collection beside it. The collection is a candidate of its own, so the root
+ * skill must not take its files.
+ */
+const SINGLE_SKILL_REPOSITORY: Record<string, string> = {
+  'SKILL.md': '---\nname: release-notes\ndescription: One skill at the root.\n---\n\nRoot body.\n',
+  'README.md': '# release-notes\n',
+  'reference/tone.md': 'Be terse.\n',
+  'other/SKILL.md': '---\nname: other\ndescription: A nested one.\n---\n\nOther.\n',
+  'other/notes.md': 'Not the root skill’s file.\n',
+}
+
 const fixtures: GitFixture[] = []
 
 afterEach(async () => {
@@ -243,6 +256,97 @@ describe.skipIf(!GIT)('skill import (epic #349, K3)', () => {
     const test = appWith(repo.url)
     const { body } = await preview(test, { ...SOURCE, path: 'skills/release-notes' })
     expect(body.candidates.map((entry) => entry.name)).toEqual(['release-notes'])
+  })
+
+  it('reads a SKILL.md directly under a named path as that folder’s candidate', async () => {
+    const repo = await fixture({
+      'collection/SKILL.md': '---\nname: collection\ndescription: d\n---\n\nb\n',
+      'collection/nested/SKILL.md': '---\nname: nested\ndescription: d\n---\n\nb\n',
+    })
+    const test = appWith(repo.url)
+    const { body } = await preview(test, {
+      url: 'https://github.com/example/skills',
+      path: 'collection',
+    })
+    // A `SKILL.md` at the root of a named `path` keeps that folder's own name — the repository's
+    // name is only for the repository's own root, which a `path` says not to read.
+    expect(candidate(body, 'collection').folder).toBe('collection')
+    // And a nested candidate's files are still its parent's, the rule for a non-root folder.
+    expect(candidate(body, 'collection').files.map((file) => file.path)).toEqual([
+      SKILL_MD_FILENAME,
+      'nested/SKILL.md',
+    ])
+    expect(candidate(body, 'nested').folder).toBe('collection/nested')
+  })
+
+  it('reads a SKILL.md at the repository’s root as a candidate named for the repository', async () => {
+    const repo = await fixture(SINGLE_SKILL_REPOSITORY)
+    const test = appWith(repo.url)
+
+    // Nothing named a `path`, so a `SKILL.md` at the repository's own root is a candidate: its
+    // folder is the root and its name is the repository's (`parseGitUrl` keeps the browse half
+    // out of the URL the name is read from).
+    const { body } = await preview(test, {
+      url: 'https://github.com/example/release-notes/tree/main',
+    })
+    expect(body.path).toBeNull()
+    expect(body.candidates.map((entry) => entry.name)).toEqual(['release-notes', 'other'])
+
+    const root = candidate(body, 'release-notes')
+    expect(root.folder).toBe('')
+    expect(root.problems).toEqual([])
+    expect(root.description).toBe('One skill at the root.')
+    // The whole tree under the root, minus the folder that is a candidate of its own: another
+    // skill's files are that skill's, and the root does not take them.
+    expect(root.files.map((file) => file.path)).toEqual([
+      'README.md',
+      SKILL_MD_FILENAME,
+      'reference/tone.md',
+    ])
+    expect(candidate(body, 'other').files.map((file) => file.path)).toEqual([
+      SKILL_MD_FILENAME,
+      'notes.md',
+    ])
+
+    // The `.git` spelling of the same repository names the same skill.
+    const dotted = await preview(test, { url: 'https://github.com/example/release-notes.git' })
+    expect(dotted.body.candidates.map((entry) => entry.name)).toEqual(['release-notes', 'other'])
+
+    // And it imports and stores like any other candidate, with the root as its source path.
+    const stored = await importSkills(test, {
+      url: 'https://github.com/example/release-notes',
+      commit_sha: body.commit_sha,
+      names: ['release-notes'],
+    })
+    expect(stored.status).toBe(201)
+    const skill = SkillSchema.parse((stored.body.data ?? [])[0])
+    expect(skill.name).toBe('release-notes')
+    expect(skill.source).toEqual({
+      url: 'https://github.com/example/release-notes',
+      ref: null,
+      path: null,
+      commit_sha: body.commit_sha,
+    })
+    expect(skill.files.map((file) => file.path)).toEqual([
+      'README.md',
+      SKILL_MD_FILENAME,
+      'reference/tone.md',
+    ])
+  })
+
+  it('names a root SKILL.md for the repository, and reads a mismatch as one', async () => {
+    const repo = await fixture({
+      'SKILL.md': '---\nname: other-name\ndescription: d\n---\n\nbody\n',
+    })
+    const test = appWith(repo.url)
+    const { body } = await preview(test, { url: 'https://github.com/example/release-notes' })
+    expect(body.candidates).toHaveLength(1)
+    expect(body.candidates[0]?.name).toBe('release-notes')
+    expect(body.candidates[0]?.folder).toBe('')
+    // The frontmatter has to agree with the repository's name, and says which two names disagreed.
+    expect(body.candidates[0]?.problems.map((problem) => problem.code)).toEqual(['name-mismatch'])
+    expect(body.candidates[0]?.problems[0]?.message).toContain('"other-name"')
+    expect(body.candidates[0]?.problems[0]?.message).toContain('"release-notes"')
   })
 
   it('refuses a path that is not there, and a path with no skill under it', async () => {
@@ -474,6 +578,26 @@ describe.skipIf(!GIT)('skill refresh (epic #349, K5)', () => {
     const skill = SkillSchema.parse((stored.body.data ?? [])[0])
     return { test, repo, skill }
   }
+
+  it('refreshes a root skill, whose name comes from the repository URL', async () => {
+    // A refresh finds the candidate by the skill's name, which for a root skill is the
+    // repository's — re-derived from the URL the import stored, not from anything the file said.
+    const repo = await fixture(SINGLE_SKILL_REPOSITORY)
+    const test = appWith(repo.url)
+    const { body } = await preview(test, { url: 'https://github.com/example/release-notes' })
+    const stored = await importSkills(test, {
+      url: 'https://github.com/example/release-notes',
+      commit_sha: body.commit_sha,
+      names: ['release-notes'],
+    })
+    const skill = SkillSchema.parse((stored.body.data ?? [])[0])
+
+    const previewed = await postJson(test, `${SKILLS}/${skill.id}/refresh/preview`, {})
+    expect(previewed.status).toBe(200)
+    const answer = (await previewed.json()) as RefreshSkillPreviewResponse
+    expect(answer.changed).toBe(false)
+    expect(answer.problems).toEqual([])
+  })
 
   it('says an unchanged skill is unchanged', async () => {
     const { test, skill } = await imported()

@@ -170,6 +170,27 @@ export function parseGitUrl(input: string): GitSourceLocation {
   return { url: `${parsed.origin}/${segments.join('/')}`, ref: null, path: null }
 }
 
+/** What a clone URL may carry after the repository's own name. */
+const GIT_SUFFIX = '.git'
+
+/**
+ * The name of the repository a URL names: the last segment of its path, with a trailing `.git`
+ * removed — `https://github.com/acme/release-notes.git` → `release-notes`.
+ *
+ * A skill's name is its folder's (K1), and a repository's **root** is not a folder; so a
+ * `SKILL.md` sitting at the root of a single-skill repository is named for the repository
+ * instead (epic #349, K3). This is the one place that name is read, and what it reads has to
+ * agree with what {@link parseGitUrl} clones: a browse URL's `/tree/…` half is not part of the
+ * repository, so callers pass the `url` that function answered rather than what the user typed.
+ *
+ * @param url a repository URL, as {@link parseGitUrl} answers with it
+ */
+export function repositoryName(url: string): string {
+  const segments = new URL(url).pathname.split('/').filter((segment) => segment.length > 0)
+  const last = decodeSegment(segments[segments.length - 1] ?? '')
+  return last.endsWith(GIT_SUFFIX) ? last.slice(0, -GIT_SUFFIX.length) : last
+}
+
 /**
  * One URL segment, percent-decoded — a branch or folder name may hold a space or a `%`
  * (`release%20notes`).
