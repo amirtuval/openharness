@@ -106,7 +106,7 @@ the only way an event is ever removed together with its session.
 | `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit                                                         |
 | `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`                                               |
 | `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                                                            |
-| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode                                                                        |
+| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode; a `subagent_description` makes it a subagent type                     |
 | `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                                                             |
 | `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                                                             |
 | `POST`   | `/v1/me/modes/{mode_id}`                        | update a mode; omitted fields keep their value, `null` clears one                                                                         |
@@ -1114,7 +1114,8 @@ caller holds at most `MAX_MODES_PER_USER` (20) of them; both refusals are the pr
 `my-default-model`, which resolves to the caller's stored `default_model` at request time — so
 a mode on it follows a changed default, and one with no default set is unavailable. `PUT`-style
 merging is a `POST /v1/me/modes/{mode_id}` update: omitted fields keep their stored value and
-`null` clears a nullable one (`reasoning_effort`, `system_prompt_addition`, `tools`).
+`null` clears a nullable one (`reasoning_effort`, `system_prompt_addition`,
+`subagent_description`, `tools`).
 
 **A chat follows a mode or a plain model.** `Session.mode` is the mode a chat follows, or
 `null`; `POST /v1/sessions` takes a `mode` (the server stores the model it resolves to on the
@@ -1149,6 +1150,20 @@ It decides **which** tools and **which MCP servers** a chat has, never what a ca
   server neither fails nor rewrites the modes that named it — the entry just matches nothing.
   The servers in force for a request are resolved as _the user's `enabled`, overridden by the
   mode_, per request.
+
+**A mode with a description is a subagent type.** `Mode.subagent_description` (epic #340, S2;
+#342) is one short sentence — at most 500 characters — saying what the mode is **good for**, or
+`null` for a mode that is not a type; the two are different statements, and an empty string is
+refused rather than read as the `null`. A parent model starting a helper picks _what kind of
+helper_, and a kind is a mode with a description: the type resolves **exactly as a chat on that
+mode does** — its model ("my default model" included), its effort, its prompt addition and its
+tool and MCP-server override — so a user retunes what their helpers do by editing the mode they
+already have, and a mode edited between two starts applies to the second. Policies stay the
+user's: a mode never sets what a call to a tool may do. Beside the modes there is one built-in
+type, `general-purpose`, always offered: the parent's own model, effort and tool set in a fresh
+context. The `agent` tool the parent calls, and the `message_parent` tool a child answers with,
+are the subagents epic's own (#344); a mode whose model cannot be used is refused when a type is
+started, the same rule a chat on that mode is refused by.
 
 **Every request records what it ran under.** `span.model_request_start.mode` is `{ id, name }`
 — the mode the request ran under and the name it had then — beside the `model` and

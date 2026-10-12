@@ -530,8 +530,9 @@ if (target === null) {
       // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
       // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql`,
       // `0027_tool_settings.sql`, `0030_mcp_oauth_state_client.sql`,
-      // `0031_mcp_tool_policies.sql` and `0032_session_tree.sql` one or more
-      // `add column if not exists` (#150, #203, #282, #307, #311, #312, #340), and
+      // `0031_mcp_tool_policies.sql`, `0032_session_tree.sql` and
+      // `0033_mode_subagent_description.sql` one or more
+      // `add column if not exists` (#150, #203, #282, #307, #311, #312, #340, #342), and
       // `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
       // `0027_tool_settings.sql`, `0028_paused_confirmation_work.sql` and
       // `0029_mcp_servers.sql` build an index or a table (#247, #305, #307, #309, #311): a
@@ -561,13 +562,17 @@ if (target === null) {
       // #312's file adds the remote tool policies to the settings table `0027` created, and is
       // numbered after #311's pair for the same reason they follow `0028`.
       expect(files).toContain('0031_mcp_tool_policies.sql')
-      // #340's file adds the session tree to `sessions`, and is numbered after the tools
-      // stack's tip for the same reason — the numbers have to be unique and ordered.
+      // #340's file adds the session tree to `sessions` (A1, #341), and #342's adds the
+      // subagent description to the `modes` table `0024` created — both numbered after the
+      // tools stack's tip for the same reason: the numbers have to be unique and ordered.
       expect(files).toContain('0032_session_tree.sql')
-      // `0034_task_notifications.sql` builds the two indexes a background task's notification
-      // needs (#343): the partial one the pending read and the work scan use, and the unique one
-      // that makes an append idempotent on its `source_key`. Both are exercised below, after the
-      // re-run — a unique index that a re-run dropped would let the second append through.
+      // `0033_mode_subagent_description.sql` adds the subagent description to the `modes`
+      // table `0024` created, and `0034_task_notifications.sql` builds the two indexes a
+      // background task's notification needs (#343): the partial one the pending read and the
+      // work scan use, and the unique one that makes an append idempotent on its `source_key`.
+      // Both are exercised below, after the re-run — a unique index that a re-run dropped would
+      // let the second append through.
+      expect(files).toContain('0033_mode_subagent_description.sql')
       expect(files).toContain('0034_task_notifications.sql')
       expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
         files.indexOf('0027_tool_settings.sql'),
@@ -588,6 +593,9 @@ if (target === null) {
         files.indexOf('0032_session_tree.sql'),
       )
       expect(files.indexOf('0032_session_tree.sql')).toBeLessThan(
+        files.indexOf('0033_mode_subagent_description.sql'),
+      )
+      expect(files.indexOf('0033_mode_subagent_description.sql')).toBeLessThan(
         files.indexOf('0034_task_notifications.sql'),
       )
       expect(await migrate(db)).toEqual(files)
@@ -620,6 +628,21 @@ if (target === null) {
       expect(await store.listLiveInstances(30_000)).toEqual(['after-a-re-run'])
       await store.removeInstance('after-a-re-run')
       expect(await store.listLiveInstances(30_000)).toEqual([])
+
+      // `0033`'s column is exercised after the re-run too: a mode stores the subagent
+      // description it was created with, and reads it back (#342).
+      const described = await store.createMode(
+        {
+          name: 'reviewer',
+          model: 'anthropic/claude-sonnet-5',
+          subagent_description: 'Reviews a diff for correctness bugs.',
+        },
+        OWNER_A,
+      )
+      expect(described.subagent_description).toBe('Reviews a diff for correctness bugs.')
+      expect((await store.getMode(described.id, { ownerId: OWNER_A }))?.subagent_description).toBe(
+        'Reviews a diff for correctness bugs.',
+      )
 
       // `0020`'s column is exercised after the re-run too: a rewind records its range and its
       // kind, and a replay still reads the session the way a rewind means it to (#238).

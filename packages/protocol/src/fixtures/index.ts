@@ -284,6 +284,10 @@ export function makeProviderCredential(
  * A mode (#245, M6): a `deep` preset on `anthropic/claude-sonnet-5` at a `high` effort, with
  * a one-line system-prompt addition.
  *
+ * It carries no `subagent_description`, so the default is a mode that is **not** a subagent
+ * type (#340, S2; #342) — the state every mode was in before the field existed. Pass one to
+ * build a mode that is offered to a parent model as a type.
+ *
  * @param overrides fields to replace on the default mode
  */
 export function makeMode(overrides: Partial<Mode> = {}): Mode {
@@ -295,6 +299,7 @@ export function makeMode(overrides: Partial<Mode> = {}): Mode {
     model: 'anthropic/claude-sonnet-5',
     reasoning_effort: 'high',
     system_prompt_addition: 'Think step by step before answering.',
+    subagent_description: null,
     tools: null,
     created_at: fixtureTimestamp(),
     updated_at: fixtureTimestamp(),

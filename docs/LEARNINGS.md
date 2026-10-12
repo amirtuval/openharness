@@ -1127,6 +1127,40 @@ different decision from allowing their own `web_fetch`, and two servers' `search
 else on the line" ([#313](https://github.com/amirtuval/openharness/issues/313),
 [#327](https://github.com/amirtuval/openharness/pull/327)).
 
+## Subagents (epic #340)
+
+**A required-but-nullable field on a resource reaches packages the issue does not name, because
+the _fakes_ build the resource too.** `ModeSchema` gained `subagent_description` the way `tools`
+and `system_prompt_addition` were added — `.nullable()`, never omitted, so "absent" has exactly
+one spelling and a consumer never has to normalise `string | null | undefined`
+(`packages/protocol/src/resources/mode.ts`, [#342](https://github.com/amirtuval/openharness/issues/342)).
+The cost is not visible from the protocol package: `packages/client`'s in-memory server builds
+every mode with `ModeSchema.parse({ … })`, so its create **throws a ZodError at runtime** the
+moment the field exists and the client's tests go red — a package the issue never mentions
+(`packages/client/src/testing/index.ts`). Making the field `.optional()` instead would have
+avoided a two-line edit and bought a weaker type everywhere; the two-line edit is the better
+trade, but budget for it: a schema change is never only the schema.
+
+**A shared seam's types belong with the package that owns the concept, even when nothing in that
+package calls it.** `SubagentTypeResolver` lives in `@openharness/brain` beside `ModeResolver`,
+yet no `RunTurnOptions` field wires it into `runTurn`: the only caller is the parent's `agent`
+tool ([#344](https://github.com/amirtuval/openharness/issues/344)), which the server builds and
+closes over the resolver (`packages/brain/src/subagent.ts`,
+`apps/server/src/subagent-types.ts`). Declaring an option no turn reads would be worse than
+declaring none — it invites a host to wire something that does nothing — so the seam is the
+_types_ in the brain and the _implementation_ in the server, which is also where the database,
+the credentials and the tool registry it needs live.
+
+**A refusal a model reads is a result, not an exception — and one rule can need two wordings.**
+Two things can stop a subagent type from starting: a name that is not a type, and a mode whose
+model cannot be used. Both are answered as `{ ok: false, message }` rather than thrown, because
+the reader is the parent **model**: it acts on the sentence by picking another type or doing the
+work itself, and an exception would only be caught and turned into that sentence one frame up
+(`@openharness/brain`'s `SubagentTypeResolution`). The second refusal is the same decision a chat
+on that mode gets — so `usableModeModel` is one function both callers share — but the wording
+differs by reader: a chat's 422 tells the _user_ to edit the mode, and a type's message tells the
+_model_ what it can do instead (`apps/server/src/modes.ts`).
+
 ## Frontends: the web app and the TUI
 
 **A 401 is the only "am I signed in?" signal, and it replaces the whole screen — with exactly two

@@ -316,6 +316,45 @@ export function runSessionStoreConformance(
         )
         expect(mode.reasoning_effort).toBeNull()
         expect(mode.system_prompt_addition).toBeNull()
+        expect(mode.subagent_description).toBeNull()
+      })
+
+      it('carries the subagent description a mode may set, and null when it sets none (#342)', async () => {
+        const { store } = await setup()
+        const description = 'Reviews a diff for correctness bugs and reports what it found.'
+        const typed = await store.createMode(
+          modeInput('reviewer', { subagent_description: description }),
+          OWNER_A,
+        )
+        expect(typed.subagent_description).toBe(description)
+        expectExact(ModeSchema, typed, 'a mode that is a subagent type')
+        expect(await store.getMode(typed.id, { ownerId: OWNER_A })).toEqual(typed)
+        // A mode with no description is not a subagent type, which is what `null` says — the
+        // state every mode stored before the field existed is in.
+        const plain = await store.createMode(
+          { name: 'plain', model: 'openai/gpt-4.1-mini' },
+          OWNER_A,
+        )
+        expect(plain.subagent_description).toBeNull()
+        // An update that omits it keeps it; one that sends `null` clears it; one that sends a
+        // description sets it — the same merge every nullable mode field follows.
+        expect(
+          (await store.updateMode(typed.id, { name: 'renamed' }, { ownerId: OWNER_A }))
+            ?.subagent_description,
+        ).toBe(description)
+        expect(
+          (await store.updateMode(typed.id, { subagent_description: null }, { ownerId: OWNER_A }))
+            ?.subagent_description,
+        ).toBeNull()
+        expect(
+          (
+            await store.updateMode(
+              plain.id,
+              { subagent_description: 'Searches the web and reports sources.' },
+              { ownerId: OWNER_A },
+            )
+          )?.subagent_description,
+        ).toBe('Searches the web and reports sources.')
       })
 
       it('accepts the default-model sentinel as the model', async () => {

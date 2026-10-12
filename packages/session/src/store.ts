@@ -46,7 +46,9 @@ export type { UserPreferences } from '@openharness/protocol'
 
 /**
  * A user's mode (epic #245, M6): a named preset of a model, a reasoning effort, a
- * system-prompt addition and an optional override of which built-in tools are on (#307).
+ * system-prompt addition, an optional override of which built-in tools are on (#307) and an
+ * optional **subagent description** — what the mode is good for when it is offered to a
+ * parent model as a subagent type (#340, S2; #342).
  *
  * The protocol defines it; it is re-exported here because it is the vocabulary of the mode
  * methods below ({@link SessionStore.createMode}, `getMode`, `listModes`, `updateMode`,
@@ -223,7 +225,8 @@ export interface SessionStore {
    * current instant (epic #245, M6).
    *
    * A mode is a user's own named preset — a model, a reasoning effort, a system-prompt
-   * addition and an optional tool override behind a stable name (#307) — so it is created
+   * addition, an optional tool override and an optional subagent description behind a stable
+   * name (#307; #342) — so it is created
    * like the other per-user resources: the
    * owner comes from the caller (the server passes the authenticated user), never from the
    * request, and it is stored as the mode's `owner_id`, which never changes.

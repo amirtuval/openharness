@@ -336,6 +336,7 @@ export class PostgresSessionStore implements SessionStore {
       model: input.model,
       reasoning_effort: input.reasoning_effort ?? null,
       system_prompt_addition: input.system_prompt_addition ?? null,
+      subagent_description: input.subagent_description ?? null,
       tools: input.tools ?? null,
       created_at: instant(now),
       updated_at: instant(now),
@@ -415,6 +416,10 @@ export class PostgresSessionStore implements SessionStore {
           update.system_prompt_addition === undefined
             ? row.system_prompt_addition
             : update.system_prompt_addition,
+        subagent_description:
+          update.subagent_description === undefined
+            ? row.subagent_description
+            : update.subagent_description,
         tools: update.tools === undefined ? row.tools : update.tools,
         updated_at: instant(now),
       }

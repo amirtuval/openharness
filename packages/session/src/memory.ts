@@ -316,6 +316,7 @@ export class InMemorySessionStore implements SessionStore {
       model: input.model,
       reasoning_effort: input.reasoning_effort ?? null,
       system_prompt_addition: input.system_prompt_addition ?? null,
+      subagent_description: input.subagent_description ?? null,
       tools: input.tools ?? null,
       created_at: at,
       updated_at: at,
@@ -361,6 +362,10 @@ export class InMemorySessionStore implements SessionStore {
         update.system_prompt_addition === undefined
           ? mode.system_prompt_addition
           : update.system_prompt_addition,
+      subagent_description:
+        update.subagent_description === undefined
+          ? mode.subagent_description
+          : update.subagent_description,
       tools: update.tools === undefined ? mode.tools : update.tools,
       updated_at: timestampAt(this.#clock()),
     }

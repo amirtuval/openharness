@@ -103,6 +103,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0031 the per-tool policies a user has for remote MCP tools (#312),
                         0032 the session tree, and whether a person is on the other end (#340,
                           #341),
+                        0033 the subagent description that makes a mode a subagent type
+                          (epic #340, S2; #342),
                         0034 the two indexes behind background-task notifications: the pending
                           read and the unique `(session, source_key)` that makes the append
                           idempotent (#343)
@@ -602,7 +604,12 @@ conformance suite fires `MAX_MODES_PER_USER + 5` creates at once and asserts it.
 store is serial by construction and needs nothing. `deleteMode` is the one cross-table write: in the same transaction as
 the delete it clears the column on every session that followed the mode, which is what lands
 those chats on the model they last ran rather than orphaning them (a mode is never a foreign
-key on a session, so deleting one can never delete a chat).
+key on a session, so deleting one can never delete a chat). A mode also carries a
+**`subagent_description`** — one bounded sentence, or `null` for a mode that is not a type
+(epic #340, S2; #342) — which the store writes and returns like any other nullable field: what
+a description _means_ (which modes a parent model is offered, and what starting one runs) is
+the server's and the brain's, and the store stores what it is given, as it does for every other
+bound the protocol owns.
 
 **Errors.** `SessionNotFoundError` (every session-scoped method except `getSession`,
 `getSessionUnscoped` and `updateSession`, which answer `null`),
@@ -727,8 +734,10 @@ version; this is the shape of it.
 `model jsonb`/`system` the session runs, the `mode` a chat follows (#245, M6), and the nullable
 agent snapshot columns beside them — `agent_id`, `agent_name`, `agent_model_id`, `agent_system`,
 all NULL together for a model-first session; #93), `modes` (a user's named presets: `name`
-unique per `owner_id`, the `model`, the effort, the prompt addition and the `tools jsonb` a
-mode's tool override holds — NULL for a mode that says nothing about tools (#307); #245, M6),
+unique per `owner_id`, the `model`, the effort, the prompt addition, the `tools jsonb` a
+mode's tool override holds — NULL for a mode that says nothing about tools (#307) — and the
+`subagent_description` that makes a mode a **subagent type** — NULL for a mode that is not one
+(epic #340, S2; #342); #245, M6),
 `events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
 (session_id, seq)`, an index on `(session_id, seq)`, a partial index for queued user
@@ -1169,6 +1178,10 @@ dependency table.
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,
   a span's resolved `model`, and a `purpose: 'summary'` span projecting nothing (epic #277, C2).
+  A mode's `subagent_description` (#342) is there beside them: the round trip of a description
+  through both stores, that a mode created without one reads `null` rather than an invented
+  string, and the merge an update follows — omitted keeps it, `null` clears it, a new one
+  replaces it.
   The per-user tool settings (epic #303, X4; #307) are there too: no choices for a user who has
   saved none, the round trip of a map of `{ enabled, policy }`, replace-in-place on a second
   put, two users kept apart, and deep-frozen answers; and a mode's tool override — both halves
