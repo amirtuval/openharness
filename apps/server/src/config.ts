@@ -125,16 +125,6 @@ export const ENV_VARS = {
   gcpProjectId: 'GOOGLE_CLOUD_PROJECT',
 } as const
 
-/** The search API `web_search` is served by: whose adapter, whose key, and what a user gets. */
-export interface SearchConfig {
-  /** The provider the adapter is built for; `brave` is the one this build has. */
-  readonly provider: SearchProviderName
-  /** The operator's key for that provider. Never stored, never logged, never in a result. */
-  readonly apiKey: string
-  /** How many searches one user gets per day; see {@link DEFAULT_SEARCH_DAILY_LIMIT}. */
-  readonly dailyLimit: number
-}
-
 /** A social provider's configured OAuth client. */
 export interface ProviderCredentialsConfig {
   readonly clientId: string
@@ -601,56 +591,6 @@ function requireString(env: NodeJS.ProcessEnv, name: string): string {
   }
   return value
 }
-
-/**
- * The search API this deployment offers `web_search` through (epic #303, #305), or `null`.
- *
- * `OPENHARNESS_SEARCH_API_KEY` is what turns the tool on: with no key there is no provider to
- * call, so no tool is registered and the model is offered none. A **provider named without a
- * key** is a boot failure rather than a silent no-search — the operator asked for search and
- * gave no way to authenticate — and a provider name outside
- * {@link SUPPORTED_SEARCH_PROVIDERS} is refused too, because a name this build has no adapter
- * for could not be served. Naming no provider with a key set means `brave`, the one this build
- * has an adapter for.
- */
-export function readSearch(env: NodeJS.ProcessEnv): SearchConfig | null {
-  const apiKey = readString(env, ENV_VARS.searchApiKey)
-  const providerName = readChoice(
-    env,
-    ENV_VARS.searchProvider,
-    SUPPORTED_SEARCH_PROVIDERS,
-    BRAVE_SEARCH_PROVIDER,
-  )
-  if (apiKey === undefined) {
-    if (readString(env, ENV_VARS.searchProvider) !== undefined) {
-      throw new Error(
-        `${ENV_VARS.searchProvider} is set but ${ENV_VARS.searchApiKey} is not: web_search ` +
-          'needs the operator key, and a deployment with no key offers no search tool at all. ' +
-          'Set both, or neither.',
-      )
-    }
-    return null
-  }
-  return {
-    provider: providerName,
-    apiKey,
-    // Zero is meaningful: the tool stays registered and every call answers with the limit
-    // notice, which is how a deployment turns search off without dropping its key's
-    // configuration.
-    dailyLimit: readInteger(env, ENV_VARS.searchDailyLimit, DEFAULT_SEARCH_DAILY_LIMIT, { min: 0 }),
-  }
-}
-
-/**
- * `OPENHARNESS_SEARCH_DAILY_LIMIT`'s default: 50 searches per user per day.
- *
- * A research-shaped day of chat is a handful of searches — the model reaches for one when it
- * needs a fact it does not have, not for every turn — so fifty covers heavy honest use while
- * bounding what one account can spend of the operator's plan. It is per **user** and per day,
- * so a second user cannot exhaust a first one's, and the whole deployment's worst case is
- * `users × 50` rather than "as many as the model asks for".
- */
-export const DEFAULT_SEARCH_DAILY_LIMIT = 50
 
 /**
  * A variable's value as an integer, or `fallback` when it is unset.

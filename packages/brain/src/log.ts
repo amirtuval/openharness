@@ -1,8 +1,6 @@
 import type { SessionStore } from '@openharness/session'
 import { EVENT_TYPES, isToolCallEvent, MAX_PAGE_LIMIT } from '@openharness/protocol'
 import type {
-  AgentToolResultEvent,
-  AgentToolUseEvent,
   EventId,
   ModelRequestPurpose,
   ModelUsage,
