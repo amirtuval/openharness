@@ -93,11 +93,11 @@ turn's own bookkeeping — a request start claiming the messages it folds in, a 
 idle claiming the interrupts that stopped something. Background tasks added a fourth kind of
 queued event (`session.task_notification`: a task's news, addressed to the parent **model**
 exactly as a message is) and, with it, the first claim site that is not turn bookkeeping at all:
-an `agent.tool_result`. A **wait** for background tasks is resolved *by* the notifications that
+an `agent.tool_result`. A **wait** for background tasks is resolved _by_ the notifications that
 answer it, so the result **is** what they said — and if it did not claim them, the parent's next
 request would be handed the same news a second time as steering, once as a result and once as a
 message. The lesson generalises: a claim belongs on the event that ends the work the consumed
-event was for, and when a result *is* the answer, the result is that event
+event was for, and when a result _is_ the answer, the result is that event
 ([#343](https://github.com/amirtuval/openharness/issues/343),
 [`packages/protocol/src/events/agent.ts`](../packages/protocol/src/events/agent.ts)).
 
@@ -321,7 +321,7 @@ serialization hides it.** A task wait's deadline lives in the payload as ISO tex
 <= $1`. Kysely binds a JavaScript `Date` with no type OID, so Postgres resolved
 `text <= unknown` as `text <= text` — and node-postgres serializes a `Date` with a **space**
 (`2026-03-15 10:00:05+00`) where `toISOString()` uses a `T`. `'T'` sorts after `' '`, so every
-deadline read as *greater* than now and no wait ever looked expired: "a wait past its deadline is
+deadline read as _greater_ than now and no wait ever looked expired: "a wait past its deadline is
 resumed" failed against Postgres while the same rule passed in the in-memory store, which is
 what pointed at the SQL rather than at the rule. The fix is an explicit cast on both sides
 (`…::timestamptz <= $1::timestamptz`); the lesson is that a comparison against a `jsonb` field
@@ -886,7 +886,6 @@ for them — and the answer's sentence names the reason rather than the tool, si
 every `ask` call and a user's fix is to set the policy to `allow`
 ([#341](https://github.com/amirtuval/openharness/issues/341),
 [`packages/brain/src/tools.ts`](../packages/brain/src/tools.ts)).
-
 
 ## Provider-opaque content and reasoning
 

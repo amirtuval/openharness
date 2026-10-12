@@ -193,7 +193,7 @@ actually used.
 
 A session can start work it does not wait for — a **background task** (epic #340, S4; #343).
 Starting one returns at once (the starting tool's result is a handle), the conversation goes
-on, and the task's whole life in *this* session's log is three events:
+on, and the task's whole life in _this_ session's log is three events:
 
 ```json
 // 1. it was started: the handle, what kind it is, and what it is for
@@ -209,7 +209,7 @@ on, and the task's whole life in *this* session's log is three events:
   "source_key": "sesn_child:3" }
 ```
 
-- **Live activity is the child's own stream.** This log says what a task is *doing*; what it is
+- **Live activity is the child's own stream.** This log says what a task is _doing_; what it is
   doing now, in detail, is the events of the session its `child_session_id` names.
 - **A notification is queued, once.** Its `processed_at` is `null` until a turn claims it — the
   `consumes` list of the event that answers it, exactly as for a `user.message` — and
@@ -224,11 +224,11 @@ on, and the task's whole life in *this* session's log is three events:
   [`threat-model.md`](./threat-model.md).
 - **A turn can wait for one.** A call to `agent_wait { "task_ids": [ … ], "timeout_s": 30 }`
   ends the turn with `stop_reason: { "type": "waiting_on_tasks", "task_ids": [ … ],
-  "deadline": "…" }` — the same kind of pause as `requires_action`, holding no lease and no
+"deadline": "…" }` — the same kind of pause as `requires_action`, holding no lease and no
   slot. The wait resumes on the first notification for one of its tasks (which becomes the
   call's `agent.tool_result`), on its deadline (the result says the wait timed out and which
   tasks are still running), or on a `user.message`, which resolves it with `The user sent a
-  message instead.` `timeout_s` defaults to 600 and is capped at 3600.
+message instead.` `timeout_s` defaults to 600 and is capped at 3600.
 
 It may carry a `reasoning_effort` (`"low"`, `"medium"` or `"high"`) the same way: the effort
 the session runs at from that message on, until another message changes it or clears it with
