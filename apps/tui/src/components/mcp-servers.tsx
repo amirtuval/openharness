@@ -1,11 +1,14 @@
 import {
   estimatedTokensLabel,
   mcpAuthLabel,
-  mcpTestOutcome,
+  mcpServerPolicyBody,
   mcpServerTools,
+  mcpTestOutcome,
   mcpStatusDetail,
   mcpStatusLabel,
   mcpStatusTone,
+  mcpToolPolicyState,
+  mcpToolPolicyStateLabel,
   toolPolicyLabel,
   waitForMcpConnection,
   type Client,
@@ -43,10 +46,14 @@ const POLICY_ORDER: readonly ToolPermission[] = ['allow', 'ask', 'deny']
  *   opens its tools;
  * - **the form** — one prompt per field, the shape `/providers` uses, with the header value
  *   masked and a `headers` server asked for one pair;
- * - **the tools** — the server's tools, each with the permission a call is evaluated under
- *   (←/→ cycles allow/ask/deny) and what its definition costs. That is the whole of what a
- *   reader chooses about a remote tool: a server is on or off, and a tool's permission is
- *   theirs, written to `PUT /v1/me/tools`'s `mcp` map under the offered name.
+ * - **the tools** — a first row for the server's tools **taken together** (`all tools · Ask
+ *   (all)`, or `Mixed` when they differ), then one row per tool with the permission a call is
+ *   evaluated under and what its definition costs. ←/→ cycles allow/ask/deny on the highlighted
+ *   row; on the all-tools row the same key sets **every** one of them, in **one** `PUT` naming
+ *   them all, which is the batch #313 asks for — a reader who wants "ask me about all of these"
+ *   should not have to walk a dozen rows. That is the whole of what a reader chooses about a
+ *   remote tool: a server is on or off, and a tool's permission is theirs, written to
+ *   `PUT /v1/me/tools`'s `mcp` map under the offered name.
  *
  * The words are `@openharness/client`'s (`mcpStatusLabel`, `mcpStatusDetail`, `mcpAuthLabel`,
  * `estimatedTokensLabel`, `toolPolicyLabel`), so the page and the terminal say the same things.
@@ -257,15 +264,31 @@ export function McpServersScreen({
     [client, context, openUrl],
   )
 
-  /** Write one remote tool's permission, and keep the settings list in step with the answer. */
-  const writePolicy = useCallback(
-    async (tool: McpServerTool, policy: ToolPermission): Promise<void> => {
+  /**
+   * Write one permission for the tools given, and keep the settings list in step with the answer.
+   *
+   * One tool is the per-row key's call and a whole server's is the all-tools row's, and both go
+   * through the client's own body builders (`mcpServerPolicyBody`) — so a batch is **one** `PUT`
+   * naming every tool of the server, never one write per row, and neither path can put a
+   * permission in the wrong map.
+   */
+  const writePolicies = useCallback(
+    async (
+      targets: readonly McpServerTool[],
+      policy: ToolPermission,
+      done: string,
+    ): Promise<void> => {
+      const body = mcpServerPolicyBody(targets, policy)
+      if (body === null) {
+        return
+      }
       busyRef.current = true
       setBusy(true)
       setError(null)
       try {
-        const saved = await client.tools.put({ mcp: { [tool.offeredName]: policy } })
+        const saved = await client.tools.put(body)
         setTools(saved.data)
+        setNote(done)
       } catch (failure) {
         setError(describeError(failure, context).message)
       } finally {
@@ -308,6 +331,12 @@ export function McpServersScreen({
 
   const serverTools: readonly McpServerTool[] =
     current === undefined ? [] : mcpServerTools(current, tools)
+  /** What the server's tools say together: `Ask (all)`, `Mixed`, or nothing to say (#313). */
+  const toolState = mcpToolPolicyState(serverTools)
+  /** The permission every one of them shares, or `null` when they differ or there are none. */
+  const sharedPolicy = toolState?.kind === 'uniform' ? toolState.policy : null
+  /** The rows the tools face draws: the all-tools row, then one per tool. */
+  const toolRows = serverTools.length === 0 ? 0 : serverTools.length + 1
 
   /** One prompt answered: remember it, and move on — or save on the last one. */
   const answer = async (value: string): Promise<void> => {
@@ -395,20 +424,38 @@ export function McpServersScreen({
         return
       }
       if (key.downArrow) {
-        const next = Math.min(toolCursorRef.current + 1, Math.max(serverTools.length - 1, 0))
+        const next = Math.min(toolCursorRef.current + 1, Math.max(toolRows - 1, 0))
         toolCursorRef.current = next
         setToolCursor(next)
         return
       }
-      // ←/→ (and Enter, for a reader who expects it to do something) walk the three
-      // permissions — the one thing a reader chooses about a remote tool.
+      // ←/→ (and Enter, for a reader who expects it to do something) walk the three permissions
+      // — the one thing a reader chooses about a remote tool. Row 0 is the server's tools taken
+      // together (#313): the same keys set **every** one of them in a single write, which is what
+      // a reader who wants "all of these ask me first" is owed without a key per tool.
       if (key.leftArrow || key.rightArrow || key.return) {
-        const tool = serverTools[toolCursorRef.current]
-        if (tool === undefined || busyRef.current) return
-        const at = POLICY_ORDER.indexOf(tool.policy)
+        if (busyRef.current || serverTools.length === 0) return
+        const cursor = toolCursorRef.current
         const delta = key.leftArrow ? -1 : 1
+        // A mixed set starts the walk at `allow`, the first of the three (−1 + 1): the row then
+        // reads the permission the write really left behind, so a second press is never a
+        // surprise.
+        const from = cursor === 0 ? sharedPolicy : (serverTools[cursor - 1]?.policy ?? null)
+        const at = from === null ? -1 : POLICY_ORDER.indexOf(from)
         const next = POLICY_ORDER[(at + delta + POLICY_ORDER.length) % POLICY_ORDER.length] ?? 'ask'
-        void writePolicy(tool, next)
+        if (cursor === 0) {
+          const count = serverTools.length
+          void writePolicies(
+            serverTools,
+            next,
+            `all ${count === 1 ? 'tool' : `${count} tools`} set to ${toolPolicyLabel(next)}.`,
+          )
+          return
+        }
+        const tool = serverTools[cursor - 1]
+        if (tool !== undefined) {
+          void writePolicies([tool], next, `${tool.offeredName}: ${toolPolicyLabel(next)}.`)
+        }
       }
       return
     }
@@ -558,22 +605,34 @@ export function McpServersScreen({
         <Text dimColor>reading your MCP servers…</Text>
       ) : face === 'tools' ? (
         <Box flexDirection="column">
-          {serverTools.length === 0 ? (
+          {serverTools.length === 0 || toolState === null ? (
             <Text dimColor>
               No tools listed. Test the server to list them and price their definitions.
             </Text>
           ) : (
-            serverTools.map((tool, position) => (
-              <Text key={tool.offeredName} color={position === toolCursor ? 'cyan' : undefined}>
-                {`${position === toolCursor ? '❯' : ' '} ${tool.offeredName} · ${toolPolicyLabel(tool.policy)}${
-                  tool.definitionTokens === null
-                    ? ' · not listed'
-                    : ` · ${estimatedTokensLabel(tool.definitionTokens)}`
-                }`}
+            <>
+              <Text color={toolCursor === 0 ? 'cyan' : undefined}>
+                {`${toolCursor === 0 ? '❯' : ' '} all tools · ${mcpToolPolicyStateLabel(toolState)}`}
               </Text>
-            ))
+              {serverTools.map((tool, position) => (
+                <Text
+                  key={tool.offeredName}
+                  color={position + 1 === toolCursor ? 'cyan' : undefined}
+                >
+                  {`${position + 1 === toolCursor ? '❯' : ' '} ${tool.offeredName} · ${toolPolicyLabel(tool.policy)}${
+                    tool.definitionTokens === null
+                      ? ' · not listed'
+                      : ` · ${estimatedTokensLabel(tool.definitionTokens)}`
+                  }`}
+                </Text>
+              ))}
+            </>
           )}
-          <Text dimColor>←/→ to change the permission, Esc back to the list.</Text>
+          <Text dimColor>
+            {toolState === null
+              ? 'Esc back to the list.'
+              : '←/→ to change a permission — on the all-tools row, every one. Esc back to the list.'}
+          </Text>
         </Box>
       ) : list.length === 0 ? (
         <Text dimColor>

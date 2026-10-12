@@ -1,6 +1,6 @@
 import { makeMcpServer } from '@openharness/protocol/fixtures'
 import { render } from 'ink-testing-library'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { McpServersApp, formatMcpServers } from './mcp'
 import { createFakeClient } from '@openharness/client/testing'
@@ -148,15 +148,51 @@ describe('the servers screen', () => {
 
     typeText(app, 'p')
     await waitForFrame(app, 'notes · tools')
+    // The all-tools row comes first (#313), so the cursor starts on it and ↓ reaches a tool.
+    await waitForFrame(app, 'all tools · Ask (all)')
     await waitForFrame(app, 'notes__search · Ask · ~41 tokens')
 
+    pressKey(app, 'down')
     pressKey(app, 'right')
     await waitFor(async () => {
       const { data } = await fake.tools.list()
       return data.find((entry) => entry.name === 'notes__search')?.policy === 'deny'
     })
     await waitForFrame(app, 'notes__search · Deny')
+    // One tool moved: the other still follows its own declaration, and the two now differ.
+    expect(
+      (await fake.tools.list()).data.find((entry) => entry.name === 'notes__read')?.policy,
+    ).toBe('ask')
+    await waitForFrame(app, 'all tools · Mixed')
 
+    pressKey(app, 'escape')
+    await waitForFrame(app, 'MCP servers')
+  })
+
+  it('sets every tool of a server at once, in one write (#313)', async () => {
+    const { app, fake } = renderMcp({ mcpServers: [NOTES] })
+    await waitForScreen(app, 'MCP servers')
+
+    typeText(app, 'p')
+    await waitForFrame(app, 'all tools · Ask (all)')
+
+    // From `Ask (all)`, → is the next of the three: deny, and **every** tool of the server with
+    // it, in one request.
+    const put = vi.spyOn(fake.tools, 'put')
+    pressKey(app, 'right')
+    await waitFor(async () => {
+      const { data } = await fake.tools.list()
+      return data.every((entry) => entry.source !== 'mcp' || entry.policy === 'deny')
+    })
+    expect(put).toHaveBeenCalledTimes(1)
+    expect(put.mock.calls[0]?.[0]).toEqual({ mcp: { notes__search: 'deny', notes__read: 'deny' } })
+
+    await waitForFrame(app, 'all 2 tools set to Deny.')
+    await waitForFrame(app, 'all tools · Deny (all)')
+    await waitForFrame(app, 'notes__search · Deny')
+    await waitForFrame(app, 'notes__read · Deny')
+
+    put.mockRestore()
     pressKey(app, 'escape')
     await waitForFrame(app, 'MCP servers')
   })

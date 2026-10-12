@@ -6,7 +6,7 @@ import { reportFailure, type CommandIo } from './io'
 
 /**
  * `oh tools [name] [--on|--off] [--policy <allow|ask|deny>]` (epic #303, X4; #307; the screen is
- * #308) — the terminal's Tools settings.
+ * #308; #313) — the terminal's Tools settings.
  *
  * Without an argument it prints the deployment's tools and what the reader has chosen: whether
  * each is on, the permission a call is evaluated under, and whether this server registers it at
@@ -17,12 +17,13 @@ import { reportFailure, type CommandIo } from './io'
  * beside it: it is never offered to a model whatever the switch says, and a reader who wonders
  * why their search does nothing has the answer on this line.
  *
- * A **remote MCP tool** (`source: 'mcp'`) is the one shape whose settings are not a built-in's:
- * `--policy` writes the `mcp` map under the offered name — the map a remote tool's permission
- * really lives in — and `--on`/`--off` is refused, because whether a remote tool is in play is
- * its server's `enabled`, which is `/mcp`'s to change. Writing `builtin` for one would store a
- * choice the server lists as an unavailable tool and never applies to the call (epic #303, #307;
- * fixed in #314).
+ * **The listing is this build's own tools and nothing else** (#313). A remote MCP tool belongs to
+ * a server — no on/off of its own, and a permission set per server on `/mcp`'s tools face — so
+ * mixing them in made this list as long as every server's tool list put together and put two
+ * different kinds of setting under one heading. The last line says where they are, because a tool
+ * that vanished from a list reads as one that does not exist. A **name** still reaches a remote
+ * tool's permission (`--policy`, the map a remote tool's permission really lives in); `--on`/
+ * `--off` is refused for one, because whether a remote tool is in play is its server's `enabled`.
  */
 export async function runTools(client: Client, io: CommandIo, patch: ToolsPatch): Promise<number> {
   try {
@@ -91,11 +92,27 @@ export async function runTools(client: Client, io: CommandIo, patch: ToolsPatch)
  * Exported for the test that holds the words still: the on/off word, the permission, the note
  * that it is the tool's own default, and the "not available" case are the whole of what a reader
  * learns here.
+ *
+ * A **remote MCP entry is not printed** (#313): its permission is set per server on `/mcp`, and a
+ * list that mixed a dozen of them with this build's own tools is what the reader reported. A line
+ * saying how many were left out and where they are is printed in their place, so a remote tool
+ * that is missing here is named as one that is set elsewhere rather than lost.
  */
 export function formatTools(entries: readonly ToolSettingEntry[]): string[] {
-  if (entries.length === 0) {
-    return ['No tools are registered on this server.']
+  const builtin = entries.filter((entry) => entry.source !== 'mcp')
+  const remote = entries.length - builtin.length
+  const lines =
+    builtin.length === 0 ? ['No tools are registered on this server.'] : builtinLines(builtin)
+  if (remote > 0) {
+    lines.push(
+      `${remote === 1 ? '1 tool comes' : `${remote} tools come`} from MCP servers; their permissions are set per server with \`/mcp\`.`,
+    )
   }
+  return lines
+}
+
+/** One line per built-in tool, its name column padded to the widest of them. */
+function builtinLines(entries: readonly ToolSettingEntry[]): string[] {
   const width = Math.max(...entries.map((entry) => entry.name.length))
   return entries.map((entry) => {
     const state = entry.enabled ? 'on ' : 'off'
