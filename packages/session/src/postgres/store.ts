@@ -1118,6 +1118,44 @@ export class PostgresSessionStore implements SessionStore {
               order by e2.seq desc
               limit 1
            ), ${EVENT_TYPES.sessionStatusIdle}) <> ${EVENT_TYPES.sessionStatusIdle}
+           -- A pause whose answer has landed (#309): the last turn ended requires_action
+           -- and a user.tool_confirmation names one of the calls it waits on. The server
+           -- writes a confirmation processed — it is not a queued user event, and the session
+           -- is idle — so an instance that died before its turn began (or never heard the
+           -- signal) would leave the answer with nothing to pick it up; this is what finds it.
+           or exists (
+             select 1
+               from events st
+              where st.session_id = s.id
+                and st.type = ${EVENT_TYPES.sessionStatusIdle}
+                and st.seq = (
+                  select max(e3.seq)
+                    from events e3
+                   where e3.session_id = s.id
+                     and e3.type in (
+                       ${EVENT_TYPES.sessionStatusRunning},
+                       ${EVENT_TYPES.sessionStatusIdle},
+                       ${EVENT_TYPES.sessionStatusRescheduled}
+                     )
+                )
+                and st.payload -> 'stop_reason' ->> 'type' = 'requires_action'
+                and exists (
+                  select 1
+                    from events c
+                   where c.session_id = s.id
+                     and c.type = ${EVENT_TYPES.userToolConfirmation}
+                     -- A confirmation a rewind replaced (#238) is not an answer.
+                     and not exists (
+                       select 1
+                         from event_supersessions x
+                        where x.session_id = c.session_id
+                          and x.kind = ${REWIND_KIND}
+                          and c.seq between x.from_seq and x.to_seq
+                     )
+                     and (st.payload -> 'stop_reason' -> 'event_ids')
+                       @> jsonb_build_array(c.payload ->> 'tool_use_id')
+                )
+           )
          )
        order by s.created_at asc, s.id asc
     `.execute(this.#db)

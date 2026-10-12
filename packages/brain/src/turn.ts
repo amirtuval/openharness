@@ -49,6 +49,14 @@ import {
   usageByModel,
   withRequestUsage,
 } from './log'
+import {
+  answerConfirmations,
+  answeredWaiting as answeredWaitingCalls,
+  awaitingUser,
+  confirmationsByCall,
+  resolveWaiting,
+  sessionApprovedTools,
+} from './pausing'
 import { pendingManualCompaction } from './manual'
 import type { ModelFactory, ResolveCredential } from './model'
 import {
@@ -65,8 +73,8 @@ import { redactSecrets } from './redact'
 import type { ToolSecretResolver, ToolSettingsResolver, ToolSupportFor } from './tools'
 import {
   DEFAULT_MAX_TOOL_STEPS,
+  lostExecutions,
   offeredTools,
-  pendingToolUse,
   repairLostExecutions,
   runToolStep,
   toolSet,
@@ -96,7 +104,7 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  * replay skips them and compaction can delete them later without changing what any reader sees.
  *
  * ```
- * no turn to run, nothing queued ................................ return noop
+ * no turn to run, nothing queued and nothing answered (X6) ..... return noop
  *
  * START (an inherited turn, `getTurnState` is not idle)
  *   an open span ................ span.model_request_end { error: brain_lost,
@@ -108,8 +116,11 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  *
  * LOOP (per model request)
  *   1. an aborted signal, or a queued user.interrupt ....... INTERRUPT
+ *   1b. a call the user has answered (#309) ................ answer it — run it, deny it, or
+ *      write the answers — then carry on from 1 with its result
  *   2. the turn has made OPENHARNESS_MAX_TOOL_STEPS requests . STEPS EXHAUSTED (below)
- *   3. a call the log holds with no answer .................. answer it `execution lost` (X3)
+ *   3. a call the log holds with no answer and no user waiting on it .. `execution lost` (X3)
+ *   3b. a call still waiting on the user (#309), no message beside it . PAUSE (below)
  *   4. no unanswered message left ........................... session.status_idle, return idle
  *   5. re-read the session; its CURRENT `model` (U3 — a `user.message` may have switched it,
  *      even while the previous request was streaming) is what this request runs, is recorded
@@ -142,15 +153,15 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  *                      (one append, before anything runs: what the model asked for is in the
  *                       log whatever happens next)
  *   the calls run CONCURRENTLY through the registry — those the permission allowed; a refused
- *   one is answered without running
+ *   one is answered without running, and one that waits on the user is not answered at all
  *   ................. agent.tool_result × N { tool_use_id, content, is_error }
  *                      (one append, in CALL ORDER, whatever order they finished in)
  *   then loop from 1: the answers are what owes the next request
  *
  *   A tool_result is `is_error: true` for everything that is not what the tool produced: a
- *   refusal (`Permission to use <name> has been denied.`, or, for a policy of `ask`, the
- *   sentence that says the approval #309 adds does not exist yet), a timeout, an interrupt
- *   (`Interrupted by the user.`), the tool's own failure, or `execution lost` (below).
+ *   refusal (`Permission to use <name> has been denied.`), a timeout, an interrupt
+ *   (`Interrupted by the user.`), the tool's own failure, or `execution lost` (below). A call
+ *   waiting on the user has none yet — see PAUSE.
  *
  * STEPS EXHAUSTED — the turn has made OPENHARNESS_MAX_TOOL_STEPS model requests (X2)
  *   ........................................... session.error { tool_steps_exhausted_error,
@@ -161,17 +172,43 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  *   a sentence a reader can act on rather than through a retry that would run out again. The
  *   session goes idle, so the next message starts a fresh turn with its own budget.
  *
- * EXECUTION LOST — a call the log holds with no result (X3)
+ * EXECUTION LOST — a call the log holds with no result and no user waiting on it (X3)
  *   ................. agent.tool_result { is_error: true, "execution lost" }
  *
  *   A brain that finds one inherited it: the process that made the call died before storing
  *   its answer. The call is **never run again** — it may already have had an effect nobody
  *   recorded, and doing it twice is worse than not knowing — so the model is told the
  *   execution was lost and decides what to do about it. The one call this must not answer is
- *   one waiting on the user (#309), which is the seam `repairLostExecutions` documents.
+ *   one the user has not answered yet (#309): nothing is lost while the question is open, and a
+ *   resumed brain keeps waiting.
  *
  *   This runs at the request boundary, before any request is built: an assistant turn whose
  *   calls have no answers is a request providers refuse.
+ *
+ * PAUSE — a call whose decision is "the user has to answer this" (epic #303, X6; #309)
+ *   the user has answered it (a `user.tool_confirmation` in the log)
+ *     ..................................... run it, write the denial, or write the answers as
+ *                                           its `agent.tool_result` (one append, call order),
+ *                                           then loop from 1 — the result owes a request
+ *     the turn inherited an open turn, and the call is one the user *allowed*
+ *     ..................................... agent.tool_result { is_error: true, "execution
+ *                                           lost" }: the approval is in the log and nobody
+ *                                           knows whether it ran, so it never runs again
+ *   nothing has answered it, and no message arrived
+ *     ..................................... session.status_idle
+ *                                           { stop_reason: { type: requires_action,
+ *                                                            event_ids: the calls } }
+ *     ..................................... return paused
+ *   a user.message arrived while it waited
+ *     ..................................... agent.tool_result × N { is_error: true,
+ *                                           "The user sent a message instead." }, then loop
+ *                                           from 1 with the message
+ *   an interrupt arrived while it waited ..... the same results, then INTERRUPT
+ *
+ *   A pause is a turn end, not a wait in the process: the calls are in the log, the session is
+ *   idle, and nothing is held open. That is what makes it survive a restart — a resumed brain
+ *   reads the same log and keeps waiting — and what makes the `requires_action` stop reason the
+ *   whole of what a client needs to draw the question.
  *
  * MODEL FAILURE — no credential for the model's provider (epic #65, A5)
  *   The credential is resolved before the span start, so no span is opened for a request that
@@ -222,6 +259,12 @@ export type TurnOutcomeKind =
   | 'idle'
   /** There was nothing to do: no open turn and nothing queued. Nothing was written. */
   | 'noop'
+  /**
+   * The turn ended because it is waiting on the user (epic #303, X6; #309): the session is idle
+   * with `stop_reason: { type: 'requires_action' }`, and one `user.tool_confirmation` starts the
+   * turn that carries on. Nothing is retried and nothing is lost — the calls are in the log.
+   */
+  | 'paused'
   /** The turn was cut short by an interrupt, by `signal` or by a queued `user.interrupt`. */
   | 'interrupted'
   /**
@@ -330,8 +373,8 @@ export interface RunTurnOptions {
    * before the request is built — a tool the user turned off is left out of the offer entirely
    * — and because an edit then applies from the next request on, exactly as a model switch
    * does. A host that injects none gets each tool's own declared permission. `allow` and `deny`
-   * are honoured; `ask` is the pause of #309 and is refused with a message that says so until
-   * it exists, so a setting nobody can honour never quietly becomes "run it".
+   * are honoured; `ask` pauses the turn until the user answers (epic #303, #309), and a
+   * `remember: session` approval is read back off the log from then on.
    */
   readonly toolSettings?: ToolSettingsResolver
   /**
@@ -465,15 +508,46 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   }
   const queued = await store.getPendingUserEvents(sessionId)
   const turnState = await store.getTurnState(sessionId)
+  /**
+   * Whether the log holds a call the user has answered whose turn has not run yet (#309).
+   *
+   * A `user.tool_confirmation` is not a queued user event — the server writes it, processed —
+   * so a session a user has just answered looks idle to everything that reads the store's
+   * pending list. The newest tool event is the cheap test: between a confirmation and the turn
+   * it starts, nothing else writes one, so reading the newest of the three types answers it in
+   * one page instead of walking the log on every idle sweep.
+   */
+  const answeredWaiting = async (): Promise<boolean> => {
+    const page = await store.listEventsUnscoped(sessionId, {
+      types: [
+        EVENT_TYPES.agentToolUse,
+        EVENT_TYPES.agentToolResult,
+        EVENT_TYPES.userToolConfirmation,
+      ],
+      order: 'desc',
+      limit: 1,
+    })
+    return page.data[0]?.type === EVENT_TYPES.userToolConfirmation
+  }
+  /**
+   * Whether this turn took over an open turn rather than opening one (X3).
+   *
+   * It matters for exactly one decision (#309): a call the user approved but whose execution the
+   * log never recorded is answered `execution lost` by a turn that **inherited** someone else's —
+   * whatever it allowed may already have run — while a turn that opens on an idle session is the
+   * one the confirmation started, and runs it. Nothing in the log tells the two apart; the turn
+   * state at the moment this call began does.
+   */
+  const recovered = turnState.state !== 'idle'
   if (turnState.state === 'idle' && queued.length === 0) {
-    // An idle session with nothing queued is a no-op — unless a manual compaction is waiting
-    // (K8; #283). A `/compact` is not a user event, so it never shows up in `queued`: the log
-    // is the only place it lives, and reading it here is what lets an idle session compact
-    // without a message to answer. A host that wired no compaction never looks.
-    if (
-      options.compaction === undefined ||
-      pendingManualCompaction(await readLog(store, sessionId)) === null
-    ) {
+    // An idle session with nothing queued is a no-op — unless something waiting in the log owes
+    // this turn. Two things do, and neither is a user event, so neither shows up in `queued`:
+    // a manual compaction (K8; #283), and a call the user has just answered (epic #303, #309).
+    // A host that wired no compaction never looks for the first.
+    const compactionPending =
+      options.compaction !== undefined &&
+      pendingManualCompaction(await readLog(store, sessionId)) !== null
+    if (!compactionPending && !(await answeredWaiting())) {
       return { outcome: 'noop' }
     }
   }
@@ -515,8 +589,21 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
   const pendingInterruptIds = async (): Promise<EventId[]> =>
     (await store.getPendingUserEvents(sessionId)).filter(isUserInterrupt).map((event) => event.id)
 
+  /**
+   * Answer the calls that are still waiting on the user, because the user did something else.
+   *
+   * A `user.message` that arrives while calls wait resolves them — the reader chose to say
+   * something rather than to answer — and so does an interrupt (epic #303, X6; #309). Either way
+   * the model is told what happened (`The user sent a message instead.`) rather than left with a
+   * call that never came back.
+   */
+  const releaseWaiting = async (): Promise<void> => {
+    await resolveWaiting({ calls: awaitingUser(await readLog(store, sessionId)), append })
+  }
+
   /** End the turn the way an interrupt does, whatever it interrupted. */
   const endInterrupted = async (partial?: PartialReply): Promise<TurnOutcome> => {
+    await releaseWaiting()
     const interrupts = await pendingInterruptIds()
     if (partial !== undefined) {
       // A request is open, so its span end is what ends the work the interrupt stopped — and
@@ -546,7 +633,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     }
     // Nothing was in flight: the turn ends on the interrupt, and its idle event carries the
     // claim on the interrupt events that arrived while nothing was running.
-    await append([statusIdle(interrupts)])
+    await append([statusIdle({ consumes: interrupts })])
     return { outcome: 'interrupted' }
   }
 
@@ -668,14 +755,61 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         ...(options.tools === undefined ? {} : { tools: options.tools }),
       })
     let read = await readLog(store, sessionId)
-    // The crash rule (X3): a call the log holds with no answer is one this brain inherited —
-    // the turn that made it died before storing its result — so it is answered with
-    // `execution lost` and the model decides what to do. **Never re-run**: whatever the call
-    // did may already have happened, and doing it twice is worse than not knowing. It comes
-    // first, because the request below has to see an answer for every call it is told about:
-    // an assistant message whose calls have no results is a request providers refuse.
-    if (pendingToolUse(read).length > 0) {
+    // ---- The user's answers, and the calls still waiting on them (epic #303, X6; #309).
+    //
+    // Three questions, all asked of the same log and settled in this order, because each one
+    // changes what the next means:
+    //
+    // 1. the calls the user has answered since the last request. They are answered here — the
+    //    tool runs, or the denial is written, or the answers become the result — because the
+    //    request below has to see a result for every call it is told about.
+    const confirmations = confirmationsByCall(read)
+    const answeredByUser = answeredWaitingCalls(read)
+    if (answeredByUser.length > 0) {
+      const secrets =
+        options.resolveToolSecrets === undefined
+          ? undefined
+          : await options.resolveToolSecrets(current.owner_id)
+      await answerConfirmations({
+        calls: answeredByUser,
+        confirmations,
+        registry: options.tools,
+        ...(secrets === undefined ? {} : { secrets }),
+        ...(signal === undefined ? {} : { signal }),
+        recovered,
+        append,
+      })
+      read = await readLog(store, sessionId)
+    }
+    // 2. The crash rule (X3): a call the log holds with no answer and no user waiting on it is
+    //    one this brain inherited — the turn that made it died before storing its result — so it
+    //    is answered with `execution lost` and the model decides what to do. **Never re-run**:
+    //    whatever the call did may already have happened, and doing it twice is worse than not
+    //    knowing. A call still waiting on the user is not one of these — nothing is lost, the
+    //    question is open — so it is answered by the user or not at all.
+    if (lostExecutions(read).length > 0) {
       await repairLostExecutions(read, append)
+      read = await readLog(store, sessionId)
+    }
+    // 3. The calls still waiting on the user. Nothing times out and nothing is held open: the
+    //    session goes idle with `requires_action` naming them, and the pause survives a restart
+    //    by having been written down. A message that arrived while they waited — or an
+    //    interrupt, which the top of the loop already ended the turn on — resolves them instead,
+    //    and this turn carries on with the message.
+    const waiting = awaitingUser(read)
+    if (waiting.length > 0) {
+      if (claims.length === 0) {
+        await append([
+          statusIdle({
+            stopReason: {
+              type: 'requires_action',
+              event_ids: waiting.map((call) => call.id),
+            },
+          }),
+        ])
+        return { outcome: 'paused' }
+      }
+      await resolveWaiting({ calls: waiting, append })
       read = await readLog(store, sessionId)
     }
     // The manual request first (K8; #283). A `/compact [instructions]` is handled at a request
@@ -763,7 +897,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           message: missingCredentialMessage(provider),
           retry_status: { type: 'exhausted' },
         }),
-        statusIdle(claims),
+        statusIdle({ consumes: claims }),
       ])
       return { outcome: 'error' }
     }
@@ -786,7 +920,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           message: error.message,
           retry_status: { type: 'exhausted' },
         }),
-        statusIdle(claims),
+        statusIdle({ consumes: claims }),
       ])
       return { outcome: 'error' }
     }
@@ -1087,6 +1221,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         calls: result.toolCalls,
         registry: toolRegistry,
         ...(toolSettings === undefined ? {} : { settings: toolSettings }),
+        // The tools this chat has already agreed to (#309): a `remember: session` approval is
+        // read back off the log it was written to, so a later call to that tool runs without
+        // asking again. It comes from the same read the request was built from.
+        approved: sessionApprovedTools(read),
         ...(secrets === undefined ? {} : { secrets }),
         ...(signal === undefined ? {} : { signal }),
         append,

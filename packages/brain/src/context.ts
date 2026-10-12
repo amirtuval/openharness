@@ -959,6 +959,12 @@ function conversationAfter(
 ): BuiltConversation {
   const messages: ConversationMessage[] = []
   const toolNames = toolNamesOf(events)
+  // Every call the user's answers have settled, by the event id that names it (#309). A call with
+  // no result is one still waiting on the user: the turn that made it paused instead of asking
+  // again (turn.ts), so a request never carries it, and this is what keeps that true here — a
+  // provider refuses an assistant turn whose calls are not answered by the very next message, so
+  // a pending call is left out rather than sent as a call nothing answers.
+  const answered = answeredCalls(events)
   let assistant: { seq: number; text: string; calls: ToolCallPart[] } | null = null
   // Where the current turn's answers belong: right after the assistant message, or the end of
   // the list while no turn with calls has been closed. See the note above about interleaving.
@@ -973,7 +979,9 @@ function conversationAfter(
     }
     const { seq, text, calls } = assistant
     assistant = null
-    if (calls.length === 0) {
+    // A call still waiting on the user is not part of the request (see `answered` above).
+    const settled = calls.filter((call) => answered.has(call.toolCallId))
+    if (settled.length === 0) {
       if (text.length > 0) {
         messages.push({ message: { role: 'assistant', content: text }, seq })
       }
@@ -983,7 +991,7 @@ function conversationAfter(
     if (text.length > 0) {
       content.push({ type: 'text', text })
     }
-    content.push(...calls)
+    content.push(...settled)
     messages.push({ message: { role: 'assistant', content }, seq })
     answers = { index: messages.length, seq, parts: [] }
   }
@@ -1094,6 +1102,17 @@ function toolNamesOf(events: readonly StoredEvent[]): Map<EventId, string> {
     }
   }
   return names
+}
+
+/** The ids of the calls the log answers — the calls a request may carry (see `conversationAfter`). */
+function answeredCalls(events: readonly StoredEvent[]): Set<string> {
+  const answered = new Set<string>()
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.agentToolResult) {
+      answered.add(event.tool_use_id)
+    }
+  }
+  return answered
 }
 
 /**

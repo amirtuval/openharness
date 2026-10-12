@@ -150,7 +150,8 @@ import { type TestClock, createTestClock } from './clock'
  * - **subscriptions** — stored events in `seq` order, chunk delivery interleaved, isolation,
  *   unsubscribe, and the final `session.deleted` a deleted session's subscribers receive.
  * - **partition signals** — delivery, fan-out to a partition's listeners, and dropping.
- * - **findSessionsNeedingWork** — pending events and open turns, scoped to partitions.
+ * - **findSessionsNeedingWork** — pending events, open turns and a pause whose confirmation
+ *   has landed (#309), scoped to partitions.
  * - **partition leases** — acquire, renew (including through a lapse nobody took over), expiry
  *   at `expires_at`, steal after expiry, release.
  * - **scheduler membership** (#122) — a heartbeat recording an instance, the window that keeps
@@ -3069,6 +3070,35 @@ export function runSessionStoreConformance(
         expect(await store.findSessionsNeedingWork(partitions)).toEqual([running.id, unfinished.id])
       })
 
+      it('finds a paused session once a confirmation answers one of its calls (#309)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const call = newEventId()
+        await append(store, session.id, [statusRunning(), toolUse(call, 'ask_user')])
+        await append(store, session.id, [statusPausedFor([call])])
+        // Waiting on the user is not work: nothing has answered the call yet.
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+        // The confirmation the server stored, with no signal to the scheduler, is the work.
+        await append(store, session.id, [userToolConfirmation(call)])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
+      })
+
+      it('leaves a paused session waiting when a confirmation names another call (#309)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const waiting = newEventId()
+        const other = newEventId()
+        await append(store, session.id, [
+          statusRunning(),
+          toolUse(waiting, 'web_fetch'),
+          toolUse(other, 'todo_write'),
+        ])
+        await append(store, session.id, [statusPausedFor([waiting])])
+        // A confirmation for a call the pause did not name answers nothing it waits on.
+        await append(store, session.id, [userToolConfirmation(other)])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+      })
+
       it('leaves out sessions with nothing to do', async () => {
         const { store, clock } = await setup()
         const agent = await store.createAgent(agentInput(), OWNER_A)
@@ -3554,6 +3584,19 @@ function statusIdle(): AppendableEvent {
 /** A `session.status_idle` claiming `consumes`, as the brain ends an idle turn on an interrupt (P4). */
 function statusIdleFor(consumes: EventId[]): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusIdle, stop_reason: { type: 'end_turn' }, consumes }
+}
+
+/** A `session.status_idle` that paused on `eventIds`, as the brain ends a turn waiting on the user (#309). */
+function statusPausedFor(eventIds: EventId[]): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionStatusIdle,
+    stop_reason: { type: 'requires_action', event_ids: eventIds },
+  }
+}
+
+/** A `user.tool_confirmation` answering a waiting call — the event the server writes (#309). */
+function userToolConfirmation(callId: EventId): AppendableEvent {
+  return { type: EVENT_TYPES.userToolConfirmation, tool_use_id: callId, result: 'allow' }
 }
 
 /** A `session.status_rescheduled` to append. */

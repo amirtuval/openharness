@@ -1,10 +1,12 @@
 import { WEB_FETCH_TOOL_NAME, WEB_SEARCH_API_KEY, WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
 import type { ToolRegistry } from '@openharness/hands'
+import { ASK_USER_TOOL_NAME } from '@openharness/protocol'
 import { InMemorySessionStore } from '@openharness/session'
 import { describe, expect, it } from 'vitest'
 
 import { createProviderFetch } from './catalog/provider-fetch'
 import { emptyRegistry } from './catalog/registry'
+import type { SearchConfig } from './config'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
 import { createSearchAllowance } from './searches'
 import {
@@ -14,17 +16,17 @@ import {
   TEST_TOOL_NAME,
   testEchoTool,
 } from './tools'
-import type { SearchConfig } from './config'
 import type { TurnToolsOptions } from './tools'
 
 /**
  * The tools this server runs with (epic #303; the built-ins are #305, the per-user settings are
- * #307).
+ * #307, and `ask_user` is #309).
  *
  * The registry itself is `@openharness/hands`' and is tested there; what this file pins is the
- * server's half: which tools a deployment offers, when `web_search` is one of them, that the
- * operator's key reaches a step only while the user's allowance lasts, and that the settings
- * resolver the turn is handed reads the session owner's stored choices.
+ * server's half: which tools a deployment registers — the built-ins of #305 and `ask_user` for
+ * every process, the test `echo` tool under the mock model — when `web_search` is one of them,
+ * that the operator's key reaches a step only while the user's allowance lasts, and that the
+ * settings resolver the turn is handed reads the session owner's stored choices.
  */
 
 /** The tools a turn is handed, as `main.ts` builds them. */
@@ -56,9 +58,9 @@ function turnTools(
 const SEARCH: SearchConfig = { provider: 'brave', apiKey: 'operator-key', dailyLimit: 2 }
 
 describe('createTurnRegistry and createTurnTools', () => {
-  it('offers the built-in tools to every deployment', () => {
+  it('offers the built-ins and ask_user to every deployment', () => {
     const { names, turn } = turnTools({})
-    expect(names).toEqual([WEB_FETCH_TOOL_NAME, 'todo_write'])
+    expect(names).toEqual([ASK_USER_TOOL_NAME, WEB_FETCH_TOOL_NAME, 'todo_write'])
     expect(turn.maxToolSteps).toBe(50)
     // The gate is wired to the registry, so a model that cannot call tools is offered none.
     expect(turn.toolSupportFor).toBeTypeOf('function')
@@ -68,8 +70,9 @@ describe('createTurnRegistry and createTurnTools', () => {
     expect(turn.resolveToolSecrets).toBeUndefined()
   })
 
-  it('adds the test tool for the mock model, ahead of the built-ins', () => {
+  it('adds the test tool for the mock model, after ask_user and ahead of the built-ins', () => {
     expect(turnTools({ kind: 'mock' }).names).toEqual([
+      ASK_USER_TOOL_NAME,
       TEST_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
@@ -78,6 +81,7 @@ describe('createTurnRegistry and createTurnTools', () => {
 
   it('offers web_search only where an operator configured a search API', () => {
     expect(turnTools({ search: SEARCH }).names).toEqual([
+      ASK_USER_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
       WEB_SEARCH_TOOL_NAME,
@@ -86,17 +90,20 @@ describe('createTurnRegistry and createTurnTools', () => {
 
   it('reads the owner’s stored choices through the resolver it wires (#307)', async () => {
     const store = new InMemorySessionStore()
-    // A registry of the test's own, so the answer has exactly one tool to speak about.
+    // A registry of the test's own, so the answer has exactly two tools to speak about: the
+    // real `ask_user` beside the test `echo` tool.
     const { turn } = turnTools({ store, registry: createTestToolRegistry() })
     await store.putToolSettings('user_a', {
       builtin: { [TEST_TOOL_NAME]: { enabled: false, policy: 'deny' } },
     })
 
     expect(await turn.toolSettings?.('user_a', null)).toEqual({
+      [ASK_USER_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TOOL_NAME]: { enabled: false, permission: 'deny' },
     })
-    // A user who has saved nothing gets the tool's own declaration: offered, and allowed.
+    // A user who has saved nothing gets each tool's own declaration: offered, and allowed.
     expect(await turn.toolSettings?.('user_b', null)).toEqual({
+      [ASK_USER_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TOOL_NAME]: { enabled: true, permission: 'allow' },
     })
   })
@@ -156,13 +163,40 @@ describe('createTurnRegistry and createTurnTools', () => {
     expect(testEchoTool.permission).toBe('allow')
   })
 
-  it('builds the built-ins through createTurnRegistry, and the test one on its own', () => {
+  it('builds the built-ins and ask_user through createTurnRegistry, and the test registry on its own', () => {
     const built = createTurnRegistry({
       config: { search: null },
       kind: 'provider',
       searchTransport: createProviderFetch(),
     })
-    expect(built.tools.map((tool) => tool.name)).toEqual([WEB_FETCH_TOOL_NAME, 'todo_write'])
-    expect(createTestToolRegistry().tools.map((tool) => tool.name)).toEqual([TEST_TOOL_NAME])
+    expect(built.tools.map((tool) => tool.name)).toEqual([
+      ASK_USER_TOOL_NAME,
+      WEB_FETCH_TOOL_NAME,
+      'todo_write',
+    ])
+    expect(createTestToolRegistry().tools.map((tool) => tool.name)).toEqual([
+      ASK_USER_TOOL_NAME,
+      TEST_TOOL_NAME,
+    ])
+  })
+
+  it('registers an ask_user that declares a policy and never answers a call itself', async () => {
+    const registry = createTurnRegistry({
+      config: { search: null },
+      kind: 'provider',
+      searchTransport: createProviderFetch(),
+    })
+    const tool = registry.get(ASK_USER_TOOL_NAME)
+
+    // `allow` is the declared policy (X7/X8: the pause is the tool's own, not a permission's),
+    // and its `run` is the safety net for a call nothing should have run.
+    expect(tool?.permission).toBe('allow')
+    const result = await registry.execute(
+      ASK_USER_TOOL_NAME,
+      { questions: [{ question: 'Which?', header: 'Which', type: 'confirm' }] },
+      {},
+    )
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0]?.text).toContain('answered by the user')
   })
 })

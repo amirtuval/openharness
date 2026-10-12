@@ -135,6 +135,7 @@ session. It is also the SSE `id` and the resume position, so a client that recon
 | ---------------------------------- | ------------- | --------------------------------------------------------------------------------------- |
 | `user.message`                     | the client    | a message, until the brain claims it                                                    |
 | `user.interrupt`                   | the client    | stop the turn in flight                                                                 |
+| `user.tool_confirmation`           | the server    | // extension: the user answered a call that was waiting on them (#309)                  |
 | `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
 | `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                         |
 | `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
@@ -207,10 +208,9 @@ what came back:
   `Tool … timed out`, `Interrupted by the user.`, or `execution lost` for a call a crashed turn
   never ran).
 - **`evaluated_permission` is what the settings said about that call** — `allow`, `ask` or
-  `deny`, the same vocabulary Anthropic uses. `deny` refuses the call without running it. `ask`
-  is the pausing half, which arrives with #309: a user may store it now, and until then the
-  call is refused with a sentence saying the approval does not exist yet, rather than being run
-  or reported as a denial the user never made.
+  `deny`, the same vocabulary Anthropic uses. `deny` refuses the call without running it, and
+  `ask` is the pause: the call is stored, nothing runs it, and the turn ends with nothing left
+  to do but wait for the user (see [Pausing for the user](#pausing-for-the-user-epic-303-x6-issue-309)).
 - **The tools a request offered are recorded on its span.** `span.model_request_start.tools`
   is a `{ name, source }` per offered tool — `builtin` today, `mcp` with #312 — so the log says
   what the model could have called, not only what it did. A request with no tools writes none.
@@ -219,7 +219,8 @@ what came back:
   `OPENHARNESS_MAX_TOOL_STEPS` model requests per turn (50 by default), after which the turn
   ends with a `session.error` of type `tool_steps_exhausted_error` rather than retrying.
 - **A tool is never re-run.** A brain that inherits a call with no result writes an `is_error`
-  result for it and lets the model decide what to do next.
+  result for it and lets the model decide what to do next — except a call the user has not
+  answered yet, which is still open and simply keeps waiting.
 - **A model that cannot call tools is offered none.** `GET /v1/models` reports each model's
   `tool_call`, and a model whose registry entry says `false` chats exactly as it did before
   tools existed.
@@ -236,6 +237,83 @@ are `builtin` ones — a call's `input` is the JSON object below, and the result
 A `web_fetch` result **leads with the address it finally came from** and says the content is
 untrusted data from the web, not instructions: it is the one tool whose text arrives from a
 place nobody in this deployment chose, and the log records that the model was told so.
+
+#### Pausing for the user (epic #303, X6; issue #309)
+
+A turn can stop because it is waiting for you. Two things make a call wait: the user's policy
+for that tool is `ask`, or the model called **`ask_user`** — the one built-in every deployment
+registers, whose calls are answered by the user whatever the policy says, because your answers
+_are_ its result.
+
+```json
+// 1. the model asks for a tool it may not run on its own
+{ "type": "agent.tool_use", "id": "sevt_…", "seq": 4, "processed_at": "…",
+  "name": "web_fetch", "input": { "url": "https://example.com" },
+  "evaluated_permission": "ask" }
+// 2. nothing runs it, and the turn ends naming the call it waits on
+{ "type": "session.status_idle", "id": "sevt_…", "seq": 5, "processed_at": "…",
+  "stop_reason": { "type": "requires_action", "event_ids": ["sevt_…"] } }
+// 3. the user answers, with one event
+{ "type": "user.tool_confirmation", "tool_use_id": "sevt_…", "result": "allow" }
+// 4. the brain writes the call's result and carries on
+{ "type": "agent.tool_result", "id": "sevt_…", "seq": 7, "processed_at": "…",
+  "tool_use_id": "sevt_…", "content": [{ "type": "text", "text": "…" }], "is_error": false }
+```
+
+- **The pause is a turn end, not a wait in the process.** The session is `idle` with
+  `stop_reason: { "type": "requires_action", "event_ids": [ … ] }`, and the ids are the
+  `agent.tool_use` events waiting — the calls' own ids. Nothing is held open and nothing times
+  out: a pause waits until it is answered, and it survives a restart, because it is in the log
+  rather than in a process. A client draws the question or the approval prompt from that.
+- **`ask_user`'s questions.** One to four questions, each with a `question`, a `header` (at most
+  12 characters) and a `type`: `choice` (2–6 options of `label` + optional `description`, and
+  `multi_select`; the user may always answer "Other" in their own words), `text` (an optional
+  `placeholder`) or `confirm` (yes/no). A call whose questions are malformed is answered with an
+  `is_error` result the model can fix, rather than pausing on a question nobody could answer.
+
+```json
+// what the model asks
+{ "type": "agent.tool_use", "id": "sevt_…", "seq": 4, "processed_at": "…",
+  "name": "ask_user", "evaluated_permission": "ask",
+  "input": { "questions": [
+    { "question": "Which environment should I deploy to?", "header": "Environment",
+      "type": "choice", "options": [{ "label": "staging" },
+                                     { "label": "production", "description": "the live one" }] },
+    { "question": "Anything else I should know?", "header": "Notes", "type": "text" } ] } }
+// what the user answers
+{ "type": "user.tool_confirmation", "tool_use_id": "sevt_…", "result": "allow",
+  "answers": [
+    { "question": "Which environment should I deploy to?", "labels": ["staging"] },
+    { "question": "Anything else I should know?", "text": "the release is on Thursday" } ] }
+```
+
+- **The answer is the result.** `ask_user` never runs: the brain writes your answers as the
+  call's `agent.tool_result`, one line per question
+  (`Which environment should I deploy to?: staging`). A `deny` means you declined to answer.
+  The answers are validated against the questions the call asked — every question answered
+  exactly once, each answer of the type its question takes, and only the labels the question
+  offers — and one that does not fit is the protocol's 400 `invalid_request_error`, storing
+  nothing.
+- **One event answers every pause**, and it must name a call that is really waiting: a
+  confirmation for a call that already ran, for one the policy allowed outright, or for an id
+  this session does not have, is the same 400 and stores nothing. `allow` runs the call (or
+  carries its answers), `deny` refuses it, and `deny_message` says why —
+  `The user denied this: …`.
+- **`remember` is how long an approval lasts.** `once` (or the field left out) is this call;
+  `session` allows every later call of that tool in this chat — the confirmation event _is_ the
+  record, so it survives a reload and a compaction, and an edit that rewinds past it forgets it;
+  `always` does the same and writes your stored policy for that tool to `allow`, so the next
+  chat inherits it (see [Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)).
+  `remember` belongs to an approval and `answers` to a question: sending one where the other
+  belongs is a 400.
+- **A message or an interrupt ends the waiting.** A `user.message` that arrives while calls are
+  waiting resolves them all — each with an `is_error` result saying `The user sent a message
+instead.` — and the turn carries on with your message; an interrupt resolves them the same way
+  and ends the turn.
+- **A call waiting on you is not "execution lost".** A brain that takes over a session which
+  crashed while waiting keeps waiting; one that takes over a call you approved but which never
+  finished answers `execution lost` instead of running it again, because nobody can say whether
+  it ran.
 
 #### Per-user tool settings (epic #303, X4; issue #307)
 

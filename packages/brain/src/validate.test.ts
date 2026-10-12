@@ -55,7 +55,7 @@ describe('assertValidEvents', () => {
           error: { type: 'brain_lost' },
           supersedes: range,
         }),
-        statusIdle([newEventId()]),
+        statusIdle({ consumes: [newEventId()] }),
         eventStart(messageId),
         eventDelta(messageId, 'Hel'),
         agentMessage(messageId, 'Hello', range),

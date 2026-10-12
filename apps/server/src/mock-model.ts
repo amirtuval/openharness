@@ -1,5 +1,6 @@
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider'
-import type { ModelUsage } from '@openharness/protocol'
+import type { AskUserInput, ModelUsage } from '@openharness/protocol'
+import { ASK_USER_TOOL_NAME } from '@openharness/protocol'
 import { MockLanguageModelV4 } from 'ai/test'
 
 import type { ModelFactory } from '@openharness/brain'
@@ -90,6 +91,39 @@ export const MOCK_TERMINAL_MARKER = '__fail_terminal__'
  */
 export const MOCK_TOOL_MARKER = '__tool__'
 
+/**
+ * The marker that makes the model ask the user a question (epic #303, X6; #309).
+ *
+ * The model calls `ask_user` on the request that carries the marker, so a whole pause can be
+ * driven through the real server: the call is stored, the turn ends `requires_action`, and one
+ * `user.tool_confirmation` carries the answers — after which the model is asked again and
+ * answers what it was told, like any other tool result.
+ */
+export const MOCK_ASK_MARKER = '__ask__'
+
+/**
+ * The question a `__ask__` prompt asks: one choice, one free-text — the two shapes an e2e test
+ * can answer without inventing a UI, and enough to pin that the answers are validated against
+ * the question they answer.
+ */
+export const MOCK_ASK_INPUT: AskUserInput = {
+  questions: [
+    {
+      question: 'Which environment should I deploy to?',
+      header: 'Environment',
+      type: 'choice',
+      options: [{ label: 'staging' }, { label: 'production' }],
+    },
+    { question: 'Anything else I should know?', header: 'Notes', type: 'text' },
+  ],
+}
+
+/** The answers that fit {@link MOCK_ASK_INPUT}: what a test sends back unchanged. */
+export const MOCK_ASK_ANSWERS = [
+  { question: 'Which environment should I deploy to?', labels: ['staging'] },
+  { question: 'Anything else I should know?', text: 'the release is on Thursday' },
+] as const
+
 /** The token counts every request of this model reports. Fixed, so tests can assert them. */
 export const MOCK_MODEL_USAGE: ModelUsage = {
   input_tokens: 42,
@@ -117,9 +151,11 @@ export function createMockModelFactory(): ModelFactory {
     supportedUrls: {},
     doStream: (options) => {
       const message = lastUserText(options.prompt)
-      // A prompt that already carries a tool result is a request the tool loop made after a
-      // call: the model answers what the tool said rather than calling it again.
-      const result = lastToolResult(options.prompt)
+      // A prompt whose **last** message is a tool result is a request the tool loop made right
+      // after a call: the model answers what the tool said rather than calling it again. The
+      // last message, not any tool result: a chat's later turns carry the results of the calls
+      // before them, and a new message behind one is a message like any other.
+      const result = endsWithToolResult(options.prompt) ? lastToolResult(options.prompt) : undefined
       const plan =
         result === undefined
           ? planFor(message, attempts.record(message))
@@ -177,6 +213,13 @@ export function planFor(message: string, attempt: number): ModelPlan {
   }
   if (message.startsWith(MOCK_HOLD_MARKER)) {
     return { chunks: [MOCK_HOLD_TEXT], delayMs: 0, hold: true }
+  }
+  if (message.startsWith(MOCK_ASK_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: ASK_USER_TOOL_NAME, input: MOCK_ASK_INPUT }],
+    }
   }
   if (message.startsWith(MOCK_TOOL_MARKER)) {
     // The text after the marker, or the marker-less message when the caller wrote none: either
@@ -262,6 +305,15 @@ function lastUserText(prompt: readonly PromptMessage[]): string {
     return message.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join('')
   }
   return ''
+}
+
+/**
+ * Whether the prompt's last message is a tool result — the shape of the request that follows a
+ * tool step, and the only one the mock answers with what the tool said.
+ */
+function endsWithToolResult(prompt: readonly PromptMessage[]): boolean {
+  const last = prompt[prompt.length - 1]
+  return last !== undefined && last.role === 'tool'
 }
 
 /**

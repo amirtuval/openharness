@@ -1,4 +1,4 @@
-import type { ToolRegistry, ToolRunContext } from '@openharness/hands'
+import type { ToolRegistry, ToolResult, ToolRunContext } from '@openharness/hands'
 import { createToolRegistry, errorResult } from '@openharness/hands'
 import type {
   AgentToolUseEvent,
@@ -11,13 +11,20 @@ import type {
   ToolReference,
   UserId,
 } from '@openharness/protocol'
-import { EVENT_TYPES } from '@openharness/protocol'
+import { ASK_USER_TOOL_NAME, EVENT_TYPES } from '@openharness/protocol'
 import type { AppendableEvent } from '@openharness/session'
 import type { ToolSet } from 'ai'
 import { zodSchema } from 'ai'
 
 import { agentToolResult, agentToolUse } from './events'
 import type { ModelToolCall } from './model'
+import {
+  awaitingUser,
+  confirmationsByCall,
+  executionLost,
+  malformedQuestion,
+  waitsForUser,
+} from './pausing'
 
 /**
  * The loop's half of tools: what a request offers, what the settings in force say about a call,
@@ -47,14 +54,11 @@ export const DEFAULT_MAX_TOOL_STEPS = 50
  * request's offer — the model cannot see it and cannot call it — which is what the per-user
  * "on or off" and a mode's override decide between them. `permission` is the permission a call
  * to it is **evaluated under** when it is offered: `allow` runs the call, `deny` refuses it
- * without running it, and `ask` is the pause of
- * [#309](https://github.com/amirtuval/openharness/issues/309) — accepted and stored now, and
- * until pausing exists treated as a refusal rather than running something the user has not
- * agreed to.
+ * without running it, and `ask` pauses the turn until the user answers (epic #303, #309).
  *
  * The two are separate for a reason: a tool with `deny` is still offered (the model may call
- * it and be told no, which it can act on), and #309's "always allow" is remembered per tool,
- * which is why a permission is a per-tool value and not a single switch.
+ * it and be told no, which it can act on), and a `remember: session` approval is remembered per
+ * tool, which is why a permission is a per-tool value and not a single switch.
  */
 export interface ToolDecision {
   /** Whether the tool is offered to the model at all. */
@@ -203,6 +207,12 @@ export interface ToolStepOptions {
   readonly registry: ToolRegistry
   /** What the settings in force say; each tool's own permission when absent (#307). */
   readonly settings?: ToolSettings
+  /**
+   * The tools this chat has already been told to allow — a `remember: session` approval
+   * (epic #303, #309). Read off the log by the turn (`sessionApprovedTools`), because the
+   * confirmation event is the record; a name here is offered and run without asking again.
+   */
+  readonly approved?: ReadonlySet<string>
   /** The per-user values the host resolved for this turn (X4). */
   readonly secrets?: Readonly<Record<string, string>>
   /** The turn's signal: an aborted call is answered as interrupted. */
@@ -225,29 +235,37 @@ export interface ToolStepOptions {
  * 4. **The results are stored in call order**, in one append: the log reads as the model asked
  *    its questions, not as they happened to finish.
  *
- * A call the settings refuse is never run: it is answered as an `is_error` result that says
- * why — `Permission to use <name> has been denied.` for `deny`, and for `ask` a sentence saying
- * the approval it needs does not exist yet (#309) — so the model learns what happened rather
- * than being left to guess. A call naming a tool nothing carries is the exception — there is no
- * permission question to answer, so the registry answers it (`No tool named <name> is
- * registered.`). A call naming a tool this request did not offer cannot arrive from the offer
- * the request was built from; if one does anyway, the registry answers it the same way, because
- * the tool is not in the registry this step was handed. An interrupt during the step is not
- * special here — every call gets an answer, those cut short with `Interrupted by the user.` —
- * and the loop ends the turn on it afterwards.
+ * A call the settings refuse is never run: it is answered as an `is_error` result that says why
+ * (`Permission to use <name> has been denied.`), so the model learns what happened rather than
+ * being left to guess. A call the user has to answer is **not** answered here at all: it is
+ * stored, nothing runs it, and the turn ends `requires_action` — the results arrive in the turn
+ * the `user.tool_confirmation` starts (`./pausing`). The one exception is a question no client
+ * could render (`ask_user` called with a shape its schema refuses): the model is told what was
+ * wrong with it and asks again, rather than the turn pausing on something nobody can answer.
+ *
+ * A call naming a tool nothing carries is the exception to the refusals — there is no permission
+ * question to answer, so the registry answers it (`No tool named <name> is registered.`). A call
+ * naming a tool this request did not offer cannot arrive from the offer the request was built
+ * from; if one does anyway, the registry answers it the same way, because the tool is not in the
+ * registry this step was handed. An interrupt during the step is not special here — every call
+ * gets an answer, those cut short with `Interrupted by the user.`, and a call waiting on the user
+ * is left waiting for the turn's ending to resolve (see `runTurn`) — and the loop ends the turn
+ * on it afterwards.
  */
 export async function runToolStep(options: ToolStepOptions): Promise<void> {
   const { calls, registry, settings, append } = options
   if (calls.length === 0) {
     return
   }
-  // The permission per call, resolved from the settings and the tool's own declaration before
-  // anything is stored, so each call's event records the decision it was actually made under.
-  const permissions = calls.map((call) => permissionFor(registry, settings, call.name))
+  const approved = options.approved ?? new Set<string>()
+  // The decision per call, resolved from the settings, the tool's own declaration and the
+  // approvals this chat already has, before anything is stored — so each call's event records
+  // the decision it was actually made under.
+  const decisions = calls.map((call) => decisionFor(registry, settings, call.name, approved))
   const inputs = calls.map((call) => asToolInput(call.input))
   const stored = await append(
     calls.map((call, index) =>
-      agentToolUse(call.name, inputs[index] ?? {}, permissions[index] ?? 'deny'),
+      agentToolUse(call.name, inputs[index] ?? {}, decisions[index]?.permission ?? 'deny'),
     ),
   )
   const context: ToolRunContext = {
@@ -255,16 +273,30 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
     ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
   }
   const results = await Promise.all(
-    calls.map((call, index) =>
-      runs(registry, call.name, permissions[index] ?? 'deny')
-        ? registry.execute(call.name, inputs[index] ?? {}, context)
-        : Promise.resolve(errorResult(refusal(call.name, permissions[index] ?? 'deny'))),
-    ),
+    calls.map(async (call, index): Promise<ToolResult | null> => {
+      const decision = decisions[index] ?? { permission: 'deny' as const, waiting: false }
+      const input = inputs[index] ?? {}
+      if (decision.waiting) {
+        // The call is the user's to answer (#309): nothing runs, and no result is written — the
+        // turn ends `requires_action` and the next turn answers it from the confirmation. The
+        // one exception is a question nothing could answer: the model is told what was wrong
+        // with it and asks again, rather than the turn pausing on a call no client can render.
+        const problem = malformedQuestion({ name: call.name, input })
+        return problem === null ? null : errorResult(problem)
+      }
+      if (runs(registry, call.name, decision.permission)) {
+        return await registry.execute(call.name, input, context)
+      }
+      return errorResult(refusal(call.name))
+    }),
   )
   await append(
-    stored.map((event, index) =>
-      agentToolResult(event.id, results[index]?.content ?? [], results[index]?.isError === true),
-    ),
+    stored.flatMap((event, index) => {
+      const result = results[index]
+      return result === null || result === undefined
+        ? []
+        : [agentToolResult(event.id, result.content, result.isError === true)]
+    }),
   )
 }
 
@@ -278,10 +310,11 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
  * `execution lost` and the model decides what to do about it: try again, try something else,
  * or tell the user.
  *
- * The one call this must *not* answer is one waiting on the user — an approval or an
- * `ask_user` question (#309) — because there is nothing to be lost: the question is still
- * open, and writing a result over it would answer a question nobody asked. Nothing pauses a
- * turn yet, so every inherited call is repaired; that check is the seam #309 fills.
+ * The one call this must *not* answer is one still waiting on the user — an approval or an
+ * `ask_user` question with nothing answering it yet (#309) — because there is nothing to be
+ * lost: the question is still open, and a resumed brain keeps waiting (see
+ * {@link lostExecutions}). A call the user *did* answer, and which then went unanswered, **is**
+ * one of these: whatever the approval allowed may already have run.
  *
  * @param events the session's log, as the turn's replay read handed it over
  * @param append the turn's append
@@ -290,26 +323,35 @@ export async function repairLostExecutions(
   events: readonly StoredEvent[],
   append: (events: AppendableEvent[]) => Promise<StoredEvent[]>,
 ): Promise<void> {
-  const lost = pendingToolUse(events)
+  const lost = lostExecutions(events)
   if (lost.length === 0) {
     return
   }
   await append(
     lost.map((call) =>
-      agentToolResult(
-        call.id,
-        [
-          {
-            type: 'text',
-            text:
-              `Tool ${call.name}: execution lost. The turn that started this call did not finish, ` +
-              'so it was not run again.',
-          },
-        ],
-        true,
-      ),
+      agentToolResult(call.id, [{ type: 'text', text: executionLost(call.name) }], true),
     ),
   )
+}
+
+/**
+ * The calls the log holds with no answer that a brain inherited rather than made (X3).
+ *
+ * Every unanswered call except the ones still waiting on the user: a call nobody has been asked
+ * about is open, and answering it would end a question the user may still answer. A call with a
+ * confirmation is not waiting any more — the user answered, and whether the loop had got as far
+ * as running it is exactly what a crash makes unknowable — so it is one of these.
+ *
+ * @param events the session's log, as the turn's replay read handed it over
+ */
+export function lostExecutions(events: readonly StoredEvent[]): AgentToolUseEvent[] {
+  const confirmations = confirmationsByCall(events)
+  const waiting = new Set(
+    awaitingUser(events)
+      .filter((call) => !confirmations.has(call.id))
+      .map((call) => call.id),
+  )
+  return pendingToolUse(events).filter((call) => !waiting.has(call.id))
 }
 
 /**
@@ -334,35 +376,57 @@ export function pendingToolUse(events: readonly StoredEvent[]): AgentToolUseEven
 }
 
 /**
- * The permission one call is evaluated under (epic #303, X4; #307).
+ * What one call is decided to be (epic #303, X4; #307; #309).
+ *
+ * `permission` is what the call's `agent.tool_use` records — the decision it was made under —
+ * and `waiting` says whether the turn has to stop for the user. They are two fields because a
+ * pause is recorded as `ask` while what it means is "not yet": the call is stored, nothing runs,
+ * and the turn ends `requires_action`.
+ */
+interface CallDecision {
+  readonly permission: ToolPermission
+  /** Whether the call is waiting on the user rather than running now. */
+  readonly waiting: boolean
+}
+
+/**
+ * Decide one call: what it is evaluated under, and whether it waits for the user.
  *
  * The settings in force first — they are what a user chose, with the request's mode override
  * already applied — and the tool's own declared permission otherwise, so a host with no
  * settings, and a tool a user has never configured, keep the behaviour #304 shipped. A name
  * that no tool carries has no declaration either, and reads as `deny`: a call nothing may run
  * is exactly what `deny` says.
+ *
+ * A `deny` refuses the call whatever else is true: it is the user's own decision about the tool,
+ * and the one thing that outranks a pause. Otherwise a call the settings evaluate as `ask` — or
+ * a call to `ask_user`, which always asks — waits, unless this chat has already been told to
+ * allow that tool (`remember: session`, epic #303, #309). A remembered approval never waives
+ * `ask_user`: a question is still a question, and only the user's answers can answer it.
  */
-function permissionFor(
+function decisionFor(
   registry: ToolRegistry,
   settings: ToolSettings | undefined,
   name: string,
-): ToolPermission {
-  return settings?.[name]?.permission ?? registry.get(name)?.permission ?? 'deny'
+  approved: ReadonlySet<string>,
+): CallDecision {
+  const tool = registry.get(name)
+  const permission = settings?.[name]?.permission ?? tool?.permission ?? 'deny'
+  if (permission === 'deny') {
+    return { permission, waiting: false }
+  }
+  if (waitsForUser(permission, tool !== undefined, name)) {
+    const remembered = name !== ASK_USER_TOOL_NAME && approved.has(name)
+    return remembered
+      ? { permission: 'allow', waiting: false }
+      : { permission: 'ask', waiting: true }
+  }
+  return { permission, waiting: false }
 }
 
-/**
- * What a refused call is answered with (epic #303, X4; #307).
- *
- * `deny` says it was denied. `ask` says what it is waiting for and that the wait cannot happen
- * yet: the pause and the `user.tool_confirmation` that answers it are
- * [#309](https://github.com/amirtuval/openharness/issues/309), so a policy the user set to
- * "ask me first" refuses the call **with a sentence that says so** rather than running
- * something nobody agreed to — and rather than reporting a denial the user never made.
- */
-function refusal(name: string, permission: ToolPermission): string {
-  return permission === 'ask'
-    ? `Permission to use ${name} requires your approval, which is not available yet.`
-    : `Permission to use ${name} has been denied.`
+/** What a refused call is answered with (epic #303, X4). */
+function refusal(name: string): string {
+  return `Permission to use ${name} has been denied.`
 }
 
 /**

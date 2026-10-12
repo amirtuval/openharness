@@ -795,12 +795,20 @@ export interface SessionStore {
   onPartitionSignal(partition: number, listener: PartitionSignalListener): Promise<Unsubscribe>
 
   /**
-   * The sessions in `partitions` that need work: pending user events, or an open turn.
+   * The sessions in `partitions` that need work: pending user events, an open turn, or a
+   * pause whose answer has landed.
    *
    * This is recovery's starting point, and it is deliberately log-derived — it does not consult
    * leases, signals or any other transient state, so it answers the same thing for a partition
    * that has just been taken over as it does for one that is running normally. A session with
    * pending user events *and* an open turn is returned once.
+   *
+   * The third case is the pause (epic #303, X6; #309): a session whose last turn ended
+   * `requires_action` and which now holds a `user.tool_confirmation` naming one of the calls it
+   * waits on. A confirmation is written by the server already processed, so it is not a queued
+   * user event and the session reads idle — the signal that would start the answering turn is a
+   * hint, and one an instance lost before it began leaves the chat stuck until another message.
+   * Asking the log here is what keeps a missed signal from stranding an answer.
    *
    * The result is ordered by `(created_at, id)` ascending: oldest session first.
    */

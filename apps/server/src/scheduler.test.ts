@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   EVENT_TYPES,
+  newEventId,
   type AgentMessageEvent,
   type ModelRequestEndEvent,
   type SessionId,
@@ -356,6 +357,72 @@ describe('recovery on start', () => {
 
     await waitForIdle(test.store, sessionId)
     expect(repliesOf(await readHistory(test.store, sessionId))).toEqual(['found it'])
+  })
+
+  it('resumes a pause from a confirmation no signal announced (#309)', async () => {
+    const { context: test, sessionId } = await fixture({ replies: [{ text: ['resumed'] }] })
+    // A turn that paused: a request whose model asked for a tool the settings say to ask about,
+    // and the idle that waits on it (`requires_action`). The request claimed the message, so
+    // nothing is left queued — the confirmation is the only work in the log.
+    const call = newEventId()
+    const [message] = await test.store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'please do it' }] },
+    ])
+    if (message === undefined) {
+      throw new Error('the store did not return the message it was given')
+    }
+    await test.store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.sessionStatusRunning },
+      { type: EVENT_TYPES.modelRequestStart, consumes: [message.id], model: 'test/model' },
+      {
+        id: call,
+        type: EVENT_TYPES.agentToolUse,
+        name: 'echo',
+        input: { text: 'hi' },
+        evaluated_permission: 'ask',
+      },
+    ])
+    await test.store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.sessionStatusIdle,
+        stop_reason: { type: 'requires_action', event_ids: [call] },
+      },
+    ])
+    // Waiting on the user is not busy: a recovery that ran now would do nothing.
+    expect(await test.store.findSessionsNeedingWork([partitionOf(sessionId)])).toEqual([])
+
+    // The user answered, and the instance that would have started the turn died before it
+    // began: the confirmation is in the log, but nothing signalled the scheduler.
+    await test.store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.userToolConfirmation,
+        tool_use_id: call,
+        result: 'deny',
+        deny_message: 'not now',
+      },
+    ])
+
+    // Recovery — a read of the log, not a replay of signals — finds the answer and runs the turn.
+    // The session is idle when start() is called, so wait for the reply rather than for idle:
+    // the turn has not opened when the recovery scan runs, and `waitForIdle` would return at once.
+    await test.scheduler.start()
+    await waitFor(
+      async () =>
+        (await readHistory(test.store, sessionId)).some(
+          (event) => event.type === EVENT_TYPES.agentMessage,
+        ),
+      { message: 'the resumed turn did not reply' },
+    )
+    await waitForIdle(test.store, sessionId)
+
+    const history = await readHistory(test.store, sessionId)
+    expect(repliesOf(history)).toEqual(['resumed'])
+    // The denial became the call's result, and the request that follows is the reply.
+    expect(
+      history.some(
+        (event) => event.type === EVENT_TYPES.agentToolResult && event.tool_use_id === call,
+      ),
+    ).toBe(true)
   })
 })
 

@@ -16,12 +16,13 @@ import type { ModelRegistry } from './catalog/registry'
 import { createToolSupportResolver } from './catalog/tool-support'
 import type { SearchConfig } from './config'
 import type { ResolvedModel } from './model'
+import { askUserTool } from './pausing'
 import type { SearchAllowance } from './searches'
 import { createToolSettingsResolver } from './tool-settings'
 
 /**
- * The tools a turn may offer (epic #303, X4; the built-ins are #305), and how this server wires
- * them together with the per-user settings (#307).
+ * The tools a turn may offer (epic #303, X4; the built-ins are #305; the per-user settings are
+ * #307), and how this server registers and wires them.
  *
  * Every deployment gets the built-in tools of
  * [#305](https://github.com/amirtuval/openharness/issues/305): `web_fetch` and `todo_write`
@@ -31,6 +32,11 @@ import { createToolSettingsResolver } from './tool-settings'
  * `OPENHARNESS_SEARCH_API_KEY` therefore offers two tools and no search, which is a smaller
  * offer rather than a broken one. The test model additionally gets the `echo` tool, which is
  * what lets the e2e suite drive a whole tool turn through the real server.
+ *
+ * **`ask_user` is registered by every deployment, whatever the model** (epic #303, #309): a
+ * model that needs a decision asks the user for one, the turn ends `requires_action`, and the
+ * user's answer is the call's result. It is the one tool the server itself provides, and it is
+ * process-independent — nothing about it is a test hook.
  *
  * Two things here are the server's alone, and they are why the tools live in `@openharness/hands`
  * and the wiring does not:
@@ -73,9 +79,9 @@ export const testEchoTool: ToolDefinition<{ text: string }> = {
   run: (input) => textResult(input.text),
 }
 
-/** The registry the test hook alone runs with: just {@link testEchoTool}. */
+/** The registry the test hook runs with: {@link testEchoTool} beside the real {@link askUserTool}. */
 export function createTestToolRegistry(): ToolRegistry {
-  return createToolRegistry([testEchoTool])
+  return createToolRegistry([askUserTool, testEchoTool])
 }
 
 /**
@@ -97,13 +103,15 @@ export interface TurnRegistryOptions {
 }
 
 /**
- * The tools this process registers (epic #303; the built-ins are #305).
+ * The tools this process registers (epic #303; the built-ins are #305; `ask_user` is #309).
  *
  * `web_fetch` and `todo_write` are registered for every process, whatever model it runs, and
  * `web_search` is added only where the operator configured a search API — with no provider to
  * call there is nothing to offer, and a deployment that configured none gets a smaller offer
- * rather than a broken one. The test model (`kind === 'mock'`) gets the `echo` tool ahead of
- * the built-ins, since the tools that reach the world would be exercised by a script that
+ * rather than a broken one. `ask_user` is registered by every process too, ahead of them: the
+ * model can ask the user a question and the turn pauses until they answer, whichever model the
+ * process runs. The test model (`kind === 'mock'`) gets the `echo` tool after `ask_user`,
+ * ahead of the tools that reach the world, since those would be exercised by a script that
  * cannot use them.
  *
  * One function, called once, because two readers need the same answer: the turn's options
@@ -112,10 +120,11 @@ export interface TurnRegistryOptions {
  */
 export function createTurnRegistry(options: TurnRegistryOptions): ToolRegistry {
   const { config, kind, searchTransport } = options
-  const tools: ToolDefinition[] = [createWebFetchTool(), todoWriteTool]
+  const tools: ToolDefinition[] = [askUserTool]
   if (kind === 'mock') {
-    tools.unshift(testEchoTool)
+    tools.push(testEchoTool)
   }
+  tools.push(createWebFetchTool(), todoWriteTool)
   const search = config.search
   if (search !== null) {
     tools.push(
@@ -184,6 +193,10 @@ export interface TurnToolsOptions {
 /**
  * Resolve the tools a turn runs with: the registry, the settings over it (#307), the support
  * gate, the operator's search key (#305) and the step budget.
+ *
+ * Every deployment registers `ask_user` (#309), so a chat always offers at least it: a chat
+ * whose owner has turned every tool off offers nothing — an empty offer, not a missing one —
+ * and a host that would rather run without tools passes the turn no options at all.
  *
  * The registry is built **once per process** and holds no per-user state: which user is
  * searching is resolved per step (`resolveToolSecrets` is asked with the session's owner), so

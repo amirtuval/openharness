@@ -1,6 +1,6 @@
 import { WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
 import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
-import { EVENT_TYPES } from '@openharness/protocol'
+import { ASK_USER_TOOL_NAME, EVENT_TYPES } from '@openharness/protocol'
 import type {
   AgentToolResultEvent,
   AgentToolUseEvent,
@@ -19,6 +19,9 @@ import { e2eHarness, readLog, typesOf, waitForTurnEnd } from './harness'
  * through `@openharness/hands` in the server process, stores the answer and asks again — and
  * what a client reads back is the sequence of events that says so. Nothing below is mocked
  * except the model, which is the mock the deployment's test mode is for.
+ *
+ * The `echo` tool is the test hook's; `ask_user` (#309) is registered by every deployment, so
+ * both are in the offer and the span records both.
  */
 
 const harness = e2eHarness('tools')
@@ -68,14 +71,15 @@ describe('a tool turn', () => {
       is_error: false,
     })
 
-    // The step's own request offered the tool before it was called, and the answer bought a
+    // The step's own request offered the tools before one was called, and the answer bought a
     // second request — which is where the model's reply to the result comes from.
     //
-    // The offer is the process's whole registry (epic #303, #305): the test `echo` tool beside
-    // the built-ins every deployment gets. `web_search` is not among them, because this server
-    // runs with no `OPENHARNESS_SEARCH_API_KEY` — a deployment with no search provider offers
-    // no search tool rather than one that always fails.
+    // The offer is the process's whole registry (epic #303, #305, #309): `ask_user`, which every
+    // deployment gets, beside the test `echo` tool and the built-ins. `web_search` is not among
+    // them, because this server runs with no `OPENHARNESS_SEARCH_API_KEY` — a deployment with
+    // no search provider offers no search tool rather than one that always fails.
     const offered = [
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: TEST_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },

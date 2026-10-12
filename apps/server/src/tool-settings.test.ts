@@ -8,6 +8,7 @@ import {
 import type { ToolDefinition } from '@openharness/hands'
 import {
   API_VERSION_PREFIX,
+  ASK_USER_TOOL_NAME,
   EVENT_TYPES,
   ListToolSettingsResponseSchema,
   ModeSchema,
@@ -447,7 +448,7 @@ describe('a chat under the settings', () => {
     expect(textOf(result)).toBe('Permission to use web_search has been denied.')
   })
 
-  it('honours an ask as a refusal that says the approval is not here yet', async () => {
+  it('pauses on an ask: the call is recorded, nothing runs it, and the turn waits', async () => {
     const test = createTestApp({
       tools: REGISTRY,
       registry: createBundledRegistry(),
@@ -462,13 +463,17 @@ describe('a chat under the settings', () => {
     await send(test, session.id, message('add a todo'))
     await waitForIdle(test.store, session.id)
 
-    expect((await toolUses(test, session.id))[0]).toMatchObject({
-      name: 'todo_write',
-      evaluated_permission: 'ask',
+    const [call] = await toolUses(test, session.id)
+    expect(call).toMatchObject({ name: 'todo_write', evaluated_permission: 'ask' })
+    // No result: the user has not answered, and the turn is idle naming the call it waits on.
+    expect(await toolResults(test, session.id)).toEqual([])
+    const idle = (await readHistory(test.store, session.id))
+      .filter((event) => event.type === EVENT_TYPES.sessionStatusIdle)
+      .at(-1)
+    expect(idle).toMatchObject({
+      type: EVENT_TYPES.sessionStatusIdle,
+      stop_reason: { type: 'requires_action', event_ids: [call?.id] },
     })
-    expect(textOf((await toolResults(test, session.id))[0])).toBe(
-      'Permission to use todo_write requires your approval, which is not available yet.',
-    )
   })
 })
 
@@ -490,6 +495,7 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
     })
 
     expect((await getTools(test)).map((entry) => entry.name)).toEqual([
+      ASK_USER_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
     ])
@@ -499,6 +505,7 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
     await waitForIdle(test.store, session.id)
 
     expect((await spans(test, session.id))[0]?.tools).toEqual([
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
     ])
@@ -521,6 +528,7 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
     // A tool that is off is not in the offer at all — the model cannot see it — and the span
     // records what was really offered.
     expect((await spans(test, session.id))[0]?.tools).toEqual([
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
     ])
   })
@@ -534,6 +542,14 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
     // The tool is not registered — an operator configured no search API — so a stored setting
     // for it is listed as unavailable rather than hidden, and never offered.
     expect(await getTools(test)).toEqual([
+      {
+        name: ASK_USER_TOOL_NAME,
+        source: 'builtin',
+        enabled: true,
+        policy: 'allow',
+        default_policy: 'allow',
+        available: true,
+      },
       {
         name: WEB_FETCH_TOOL_NAME,
         source: 'builtin',
@@ -571,6 +587,7 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
     })
 
     expect((await getTools(test)).map((entry) => entry.name)).toEqual([
+      ASK_USER_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
       WEB_SEARCH_TOOL_NAME,
@@ -590,6 +607,7 @@ describe('the built-in tools under the settings (#305 × #307)', () => {
     // The mode's override is applied over the user's settings (which say nothing here), so the
     // search tool #305 registered is not offered — the two features meeting in one offer.
     expect((await spans(test, session.id))[0]?.tools).toEqual([
+      { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
     ])

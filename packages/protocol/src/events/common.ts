@@ -38,6 +38,18 @@ export const EVENT_TYPES = {
    * {@link AgentToolResultEventSchema}.
    */
   agentToolResult: 'agent.tool_result',
+  /**
+   * // extension: the user answered a call that was waiting on them (epic #303, X6; #309).
+   *
+   * One event answers every pause: an approval the settings demanded (`result`), or the
+   * answers to an `ask_user` call (`answers`). A client sends it; the server writes it, once
+   * it has checked that the call it names is really waiting, and the brain turns it into the
+   * `agent.tool_result` the call is owed — a client never writes a tool result. It is stored
+   * processed, not queued: the event itself is the record, so an approval survives compaction
+   * and replay and a rewind past it takes it back. See
+   * {@link UserToolConfirmationEventSchema}.
+   */
+  userToolConfirmation: 'user.tool_confirmation',
   /** The agent started working. */
   sessionStatusRunning: 'session.status_running',
   /** The agent finished its turn and is waiting for input. */
@@ -143,6 +155,7 @@ export type EventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]
 export const STORED_EVENT_TYPES = [
   EVENT_TYPES.userMessage,
   EVENT_TYPES.userInterrupt,
+  EVENT_TYPES.userToolConfirmation,
   EVENT_TYPES.agentMessage,
   EVENT_TYPES.agentToolUse,
   EVENT_TYPES.agentToolResult,
