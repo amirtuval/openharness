@@ -16,6 +16,7 @@ import {
   type UserId,
   type UserUsage,
 } from '@openharness/protocol'
+import { SessionNotFoundError } from '@openharness/session'
 import type { OwnerScope, SessionStore } from '@openharness/session'
 
 import type { ModelRegistry } from './catalog/registry'
@@ -120,6 +121,12 @@ export interface UsageReader {
   user(userId: UserId, range: UsageRange): Promise<UserUsage>
 }
 
+/**
+ * A usage answer's numbers, without the two fields that are about *which* sessions they cover:
+ * what {@link assemble} builds, and — since #344 — exactly what `descendants` carries (S8).
+ */
+type UsageNumbers = Omit<SessionUsage, 'session_id' | 'descendants'>
+
 /** What {@link createUsageReader} needs. */
 export interface UsageReaderOptions {
   /** The durable log both reads go through. */
@@ -193,10 +200,47 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
     }
   }
 
+  /**
+   * The whole tree under one session, read through the caller's own scope (epic #340, S8; #344).
+   *
+   * A subagent is a real session with its own log, so its requests are billed to it — but a chat
+   * that delegates work should not look cheap, which is why the session route sums the subtree.
+   * A descendant deleted while this ran is skipped rather than failing the read: its log is gone,
+   * and there is nothing left to bill.
+   */
+  const readDescendants = async (
+    sessionId: SessionId,
+    options: OwnerScope,
+  ): Promise<{ readonly requests: RecordedRequest[]; readonly searches: number }> => {
+    const requests: RecordedRequest[] = []
+    let searches = 0
+    for (const descendantId of await store.listDescendants(sessionId, options)) {
+      const read = await readSession(descendantId, options).catch((error: unknown) => {
+        if (error instanceof SessionNotFoundError) {
+          return null
+        }
+        throw error
+      })
+      if (read !== null) {
+        requests.push(...read.requests)
+        searches += read.searches
+      }
+    }
+    return { requests, searches }
+  }
+
   return {
     async session(sessionId, options) {
       const { requests, searches } = await readSession(sessionId, options)
-      return { session_id: sessionId, ...assemble(requests, prices, searches) }
+      const descendants = await readDescendants(sessionId, options)
+      // The session's totals cover the tree (S8), and `descendants` is the subtree's own share
+      // of the same numbers — so a reader shows what the work the chat delegated cost without
+      // walking the tree, and the total it is part of is the chat's whole bill.
+      return {
+        session_id: sessionId,
+        ...assemble([...requests, ...descendants.requests], prices, searches + descendants.searches),
+        descendants: assemble(descendants.requests, prices, descendants.searches),
+      }
     },
 
     async user(userId, range) {
@@ -359,7 +403,7 @@ function assemble(
   requests: readonly RecordedRequest[],
   prices: ModelPriceLookup,
   searches: number,
-): Omit<SessionUsage, 'session_id'> {
+): UsageNumbers {
   const totals = emptyUsage()
   const byModel = new Map<string, ModelTotals>()
   const costs: (number | null)[] = []

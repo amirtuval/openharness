@@ -175,6 +175,11 @@ export function createSubagentTypeResolver(deps: SubagentTypeDeps): SubagentType
             reasoningEffort: parent.reasoningEffort,
             systemPromptAddition: null,
             toolOverride: parent.toolOverride,
+            // The parent's own mode, so a child of a chat that follows one follows it too: the
+            // mode is what carries the tool and MCP-server override, and a child created on it
+            // resolves exactly as its parent's next request does (#344). `null` means the child
+            // is a plain session on the parent's model.
+            modeId: parent.modeId,
             ...(await toolsInForce(deps, ownerId, parent.toolOverride)),
           },
         }
@@ -203,6 +208,10 @@ export function createSubagentTypeResolver(deps: SubagentTypeDeps): SubagentType
           reasoningEffort: mode.reasoning_effort,
           systemPromptAddition: mode.system_prompt_addition,
           toolOverride: mode.tools,
+          // The child is created **on** this mode (#344): it follows it live, so retuning the
+          // mode retunes the helper, and the override above is applied by the mode resolver
+          // rather than restated on a session that could go stale.
+          modeId: mode.id,
           ...(await toolsInForce(deps, ownerId, mode.tools)),
         },
       }

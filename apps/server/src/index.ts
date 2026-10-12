@@ -237,6 +237,9 @@ export {
   createMockModelFactory,
   MOCK_ASK_ANSWERS,
   MOCK_ASK_INPUT,
+  MOCK_AGENT_MARKER,
+  MOCK_AGENT_MESSAGE_MARKER,
+  MOCK_AGENT_STOP_MARKER,
   MOCK_ASK_MARKER,
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
@@ -252,6 +255,11 @@ export {
   MOCK_TERMINAL_MARKER,
   MOCK_TOOL_MARKER,
   MOCK_WAIT_MARKER,
+  MESSAGE_PARENT_MARKER,
+  agentInputOf,
+  agentMessageInputOf,
+  agentStopInputOf,
+  messageParentInputOf,
   planFor,
   testTaskInputOf,
   testWaitInputOf,
@@ -301,6 +309,7 @@ export {
   type TaskNotifier,
   type TaskNotifierDeps,
 } from './tasks'
+export { createSubagentTypeResolver, type SubagentTypeDeps } from './subagent-types'
 export {
   TEST_TASK_DELAY_MS,
   TEST_TASK_RESULT,

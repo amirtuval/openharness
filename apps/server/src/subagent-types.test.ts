@@ -51,6 +51,7 @@ const PARENT: SubagentParent = {
   model: 'anthropic/claude-sonnet-5',
   reasoningEffort: 'medium',
   toolOverride: null,
+  modeId: null,
 }
 
 /** The id of the caller the harness's requests are made as. */

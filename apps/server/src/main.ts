@@ -58,6 +58,7 @@ import { LocalScheduler, type SessionScheduler } from './scheduler'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
 import { createTaskNotifier } from './tasks'
 import { withTestBackgroundTasks } from './test-tasks'
+import { createSubagentTypeResolver } from './subagent-types'
 import { createTurnRegistry, createTurnTools, type TurnToolOptions } from './tools'
 
 /**
@@ -311,6 +312,17 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     callbackUrl: new URL('/v1/me/mcp_servers/oauth/callback', config.betterAuthUrl).href,
     logger,
   })
+  // The subagent types (epic #340, S2; the tools: #344): a type is a mode with a description,
+  // so the resolver reads the same store, credentials and registry the mode resolver does. It
+  // is handed to the turn options and closed over by the tools the loop builds per session —
+  // `agent` is its only caller — and the signals the tools send are the scheduler's own (a
+  // child started, messaged or stopped must be looked at now, not at the next sweep).
+  const subagentTypes = createSubagentTypeResolver({
+    store,
+    credentials,
+    tools: turnRegistry,
+    mcpServers,
+  })
   const turnTools = createTurnTools({
     config,
     kind: resolvedModel.kind,
@@ -318,6 +330,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     tools: turnRegistry,
     store,
     mcp: { service: mcpServers, fetch: mcpFetch },
+    subagents: subagentTypes,
+    signal: signalToScheduler,
     logger,
   })
 

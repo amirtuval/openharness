@@ -357,14 +357,15 @@ describe('the test background task', () => {
     expect(ran.isError).toBe(true)
   })
 
-  it('is registered for the test model, and never for a provider-backed deployment', () => {
-    // #344 registers `agent_wait` (and whatever starts a subagent) for every deployment; until
-    // then the mechanism's tools ride on the mock model, so a real chat is untouched.
+  it('registers the wait for every deployment, and the test task for the mock model', () => {
+    // #344 registered `agent_wait` (and the rest of the subagent tools) for every deployment, so
+    // the wait is no longer a test hook: it is a tool a real chat is offered. What still rides on
+    // the mock model is the task the test model can **start** — a real deployment's is `agent`.
     const mocked = createTurnRegistry({ kind: 'mock' }).tools.map((tool) => tool.name)
     const provider = createTurnRegistry({ kind: 'provider' }).tools.map((tool) => tool.name)
     expect(mocked).toContain(TASK_WAIT_TOOL_NAME)
+    expect(provider).toContain(TASK_WAIT_TOOL_NAME)
     expect(mocked).toContain('task_start')
-    expect(provider).not.toContain(TASK_WAIT_TOOL_NAME)
     expect(provider).not.toContain('task_start')
   })
 })
