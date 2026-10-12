@@ -276,50 +276,6 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
   }
 }
 
-/** What one session's log holds for a usage report: its requests, and how many searches it made. */
-interface SessionUsageRead {
-  readonly requests: RecordedRequest[]
-  /** How many `web_search` calls the log holds — the calls that were answered (#305). */
-  readonly searches: number
-}
-
-/**
- * Counts the `web_search` calls a log holds, as its events are read (epic #303, #305).
- *
- * The same rule the store's per-user read follows, applied to one session's log: a call counts
- * when its `agent.tool_result` exists and does not carry `is_error`. A call a policy refused,
- * one the tool could not run and one a crashed turn never answered are not searches.
- *
- * A call and its result are one identity (the result names the call's event id, epic #303 X1),
- * and the pair can straddle a page boundary — so the calls seen so far are kept, and dropped
- * as their answers arrive. That is one entry per unanswered call, never the whole log.
- */
-function searchCounter(): {
-  observe(events: readonly StoredEvent[]): void
-  count(): number
-} {
-  const waiting = new Set<string>()
-  let answered = 0
-  return {
-    observe(events) {
-      for (const event of events) {
-        if (event.type === EVENT_TYPES.agentToolUse) {
-          if (event.name === WEB_SEARCH_TOOL_NAME) {
-            waiting.add(event.id)
-          }
-        } else if (
-          event.type === EVENT_TYPES.agentToolResult &&
-          !event.is_error &&
-          waiting.delete(event.tool_use_id)
-        ) {
-          answered += 1
-        }
-      }
-    },
-    count: () => answered,
-  }
-}
-
 /**
  * The provider half of a request's model id, or `''` for a request the log does not attribute.
  *

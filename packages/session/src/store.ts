@@ -1269,32 +1269,6 @@ export interface ToolUseRecord {
   readonly processed_at: Timestamp
 }
 
-/** Query of {@link SessionStore.listToolUses} (epic #303, #305). */
-export interface ListToolUsesOptions extends OwnerScope {
-  /** Only calls of this tool, by the name the call's event carried; every tool when absent. */
-  readonly name?: string
-  /** The window's start, inclusive — a UTC instant, as the caller's local day was converted. */
-  readonly from: Date
-  /** The window's end, exclusive. */
-  readonly to: Date
-}
-
-/**
- * One tool call the log recorded and answered, as {@link SessionStore.listToolUses} reads it
- * (epic #303, #305).
- *
- * Two facts and nothing else: which tool the model called, and when the call was stored —
- * which is the instant the window filters on and the day a caller groups by. The result's
- * content is deliberately not here: a usage read counts calls, and what a call said is the
- * model's business, not a report's.
- */
-export interface ToolUseRecord {
-  /** The tool's name, as the call's `agent.tool_use` carried it. */
-  readonly name: string
-  /** When the call was stored: the call event's `processed_at`. */
-  readonly processed_at: Timestamp
-}
-
 /**
  * A Better Auth session id (epic #65, A2): the `id` of one row in Better Auth's `session`
  * table.

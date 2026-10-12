@@ -14,8 +14,6 @@ import {
 import { InMemorySessionStore } from '@openharness/session'
 import type { SessionStore } from '@openharness/session'
 
-import { WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
-
 import { createBundledRegistry } from './catalog/registry'
 import { asUser, createTestApp, readHistory, waitForIdle, type TestContext } from './test-support'
 
