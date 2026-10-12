@@ -417,10 +417,9 @@ export const CreateMcpServerRequestSchema = z
       'server detect the authentication from the URL',
     path: ['headers'],
   })
-  .refine((body) => body.auth !== undefined || body.headers === undefined, {
+  .refine((body) => body.headers === undefined || body.auth === undefined || body.auth === 'headers', {
     error:
-      'a `headers` map is created without `auth`; it implies `auth: \'headers\'`, so the two ' +
-      'must not be sent together',
+      'a `headers` map implies `auth: \'headers\'`; it may not be sent beside another auth type',
     path: ['auth'],
   })
 

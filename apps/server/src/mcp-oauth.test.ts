@@ -57,17 +57,28 @@ async function makeScenario(
   options: {
     registration?: boolean
     expiresIn?: number
+    /** Require the `resource` parameter on the token endpoint (RFC 8707, issue #314). */
+    requireResource?: boolean
+    /** Refuse a token not issued for this MCP server's own URL (Linear's shape, issue #314). */
+    resourceBound?: boolean
+    /** Refuse with an empty body, as `mcp.linear.app` does (issue #314). */
+    emptyRefusalBody?: boolean
   } = {},
 ): Promise<Scenario> {
   const clock = createTestClock(Date.UTC(2026, 2, 15, 10, 0, 0))
   const authorization = await startStubAuthorizationServer({
     registration: options.registration ?? true,
     ...(options.expiresIn === undefined ? {} : { expiresIn: options.expiresIn }),
+    ...(options.requireResource === true ? { requireResource: true } : {}),
     scopes: ['mcp'],
   })
   const mcp = await startStubMcpServer({
     authorizationServer: authorization.issuer,
     scopes: ['mcp'],
+    ...(options.resourceBound === true
+      ? { issuedResourceOf: (token: string) => authorization.resourceOf(token) }
+      : {}),
+    ...(options.emptyRefusalBody === true ? { emptyRefusalBody: true } : {}),
   })
   stubs.push(authorization, mcp)
   const store = new InMemoryMcpServerStore({ now: clock.now })
@@ -370,5 +381,164 @@ describe('MCP OAuth: disconnect', () => {
     expect(
       await scenario.service.resolve((await scenario.test.currentUser()).id, created.id),
     ).toBeNull()
+  })
+})
+
+describe('MCP: a resource-bound server, Linear’s shape (issue #314)', () => {
+  it('completes the flow and lists tools when the server only accepts its own audience', async () => {
+    // One authorization server, one resource server that refuses any token not minted for it —
+    // exactly how `mcp.linear.app` behaves. The flow's own token names the resource, so the
+    // whole round trip works; the regression this pins is the *refresh* below.
+    const scenario = await makeScenario({ requireResource: true, resourceBound: true })
+    const created = await createOAuthServer(scenario)
+    await completeFlow(scenario, created.id)
+
+    const after = await scenario.test.request(`${BASE}/${created.id}`)
+    const connected = (await after.json()) as McpServer
+    expect(connected.status).toBe('connected')
+    expect(connected.tools.map((tool) => tool.name)).toEqual(['search', 'ping'])
+    expect(scenario.authorization.resourceOf('access-1')).toBe(scenario.mcp.url)
+  })
+
+  it('sends the resource on a refresh, so a resource-bound server keeps working', async () => {
+    // The token lives a second, so the next resolution refreshes it. A refresh that omits the
+    // RFC 8707 `resource` parameter is either refused (this authorization server) or answered
+    // with a token for the wrong audience (Linear) — the bug this test exists for.
+    const scenario = await makeScenario({
+      expiresIn: 1,
+      requireResource: true,
+      resourceBound: true,
+    })
+    const created = await createOAuthServer(scenario)
+    await completeFlow(scenario, created.id)
+
+    const issuedBefore = scenario.authorization.issuedTokens.length
+    const resolved = await scenario.service.resolve(
+      (await scenario.test.currentUser()).id,
+      created.id,
+    )
+    expect(resolved).not.toBeNull()
+    // A fresh token — never the one the flow minted — and one minted for this server's own
+    // resource, which is what the `resource` parameter on the refresh buys.
+    const fresh = scenario.authorization.issuedTokens.slice(issuedBefore)
+    expect(fresh.length).toBeGreaterThan(0)
+    expect(resolved?.headers.Authorization).toBe(`Bearer ${fresh[fresh.length - 1]}`)
+    expect(scenario.authorization.resourceOf(fresh[fresh.length - 1] ?? '')).toBe(scenario.mcp.url)
+  })
+
+  it('reports the HTTP status when the server refuses with an empty body', async () => {
+    const scenario = await makeScenario({ emptyRefusalBody: true })
+    const created = await createOAuthServer(scenario)
+    await completeFlow(scenario, created.id)
+
+    // The server now wants a token nobody can have: every request is the empty-bodied 401 whose
+    // SDK message stopped at "Error POSTing to endpoint:" — the report the maintainer saw.
+    scenario.mcp.setRequiredToken('a-token-nothing-issues')
+    const tested = await post(scenario.test, `${BASE}/${created.id}/test`)
+    const refused = (await tested.json()) as McpServer
+    expect(refused.status).toBe('needs_reconnect')
+    expect(refused.last_error).toContain('401')
+    expect(refused.last_error).not.toMatch(/endpoint:\s*$/)
+    // The refresh that a 401 earns also names the status it was refused with.
+    expect(refused.last_error).toMatch(/401/)
+  })
+})
+
+describe('MCP: the auth type is detected, not chosen (issue #314)', () => {
+  it('detects OAuth from a 401 whose metadata advertises an authorization server', async () => {
+    const scenario = await makeScenario()
+    // A server that needs credentials: an unauthenticated probe is a 401, and its RFC 9728
+    // metadata names the authorization server.
+    scenario.mcp.setRequiredToken('a-real-token')
+    const response = await scenario.test.request(BASE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: scenario.mcp.url }),
+    })
+    expect(response.status).toBe(201)
+    const created = (await response.json()) as McpServer
+    expect(created.auth).toBe('oauth')
+    expect(created.status).toBe('needs_reconnect')
+    // No name was typed, so it came from the URL's host.
+    expect(created.name).toBe('127-0-0-1')
+  })
+
+  it('detects none from a successful initialize, and lists the tools', async () => {
+    const scenario = await makeScenario()
+    const response = await scenario.test.request(BASE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'open', url: scenario.mcp.url }),
+    })
+    expect(response.status).toBe(201)
+    const created = (await response.json()) as McpServer
+    expect(created.auth).toBe('none')
+    expect(created.status).toBe('connected')
+    expect(created.tools.map((tool) => tool.name)).toEqual(['search', 'ping'])
+  })
+
+  it('a headers map implies headers, and is used to reach the server', async () => {
+    const scenario = await makeScenario()
+    const response = await scenario.test.request(BASE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        url: scenario.mcp.url,
+        headers: { Authorization: 'Bearer access-1' },
+      }),
+    })
+    expect(response.status).toBe(201)
+    const created = (await response.json()) as McpServer
+    expect(created).toMatchObject({ auth: 'headers', status: 'connected' })
+    expect(created.header_names).toEqual(['Authorization'])
+    expect(scenario.mcp.authorizations).toContain('Bearer access-1')
+  })
+
+  it('a 401 from a server with no OAuth metadata is an error that says what to do', async () => {
+    const scenario = await makeScenario()
+    // The same stub, but with no authorization server to discover: a plain API-key server.
+    const keyed = await startStubMcpServer({ requiredToken: 'k' })
+    stubs.push(keyed)
+    const response = await scenario.test.request(BASE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: keyed.url }),
+    })
+    expect(response.status).toBe(201)
+    const created = (await response.json()) as McpServer
+    expect(created.auth).toBe('none')
+    expect(created.status).toBe('error')
+    expect(created.last_error).toContain('401')
+    expect(created.last_error).toContain('custom headers')
+  })
+
+  it('an unreachable server is stored with a clear reason rather than a silent failure', async () => {
+    const scenario = await makeScenario()
+    const response = await scenario.test.request(BASE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // Nothing listens on port 1.
+      body: JSON.stringify({ url: 'http://127.0.0.1:1/mcp' }),
+    })
+    expect(response.status).toBe(201)
+    const created = (await response.json()) as McpServer
+    expect(created.auth).toBe('none')
+    expect(created.status).toBe('error')
+    expect(created.last_error).toBeTruthy()
+    expect(created.last_error).not.toContain('undefined')
+  })
+
+  it('still accepts an explicit auth, for a caller that knows better', async () => {
+    const scenario = await makeScenario()
+    const response = await scenario.test.request(BASE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ auth: 'oauth', name: 'asserted', url: scenario.mcp.url }),
+    })
+    expect(response.status).toBe(201)
+    expect((await response.json()) as McpServer).toMatchObject({
+      auth: 'oauth',
+      status: 'needs_reconnect',
+    })
   })
 })
