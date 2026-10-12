@@ -174,7 +174,7 @@ function activityLine(state: TranscriptState): TaskActivityLine {
     return { kind: 'tool', name: call.name, summary: toolCallSummary(call) }
   }
   const todos = state.todos
-  if (hasItems(todos)) {
+  if (todos !== null && todos.length > 0) {
     return { kind: 'todos', done: completedCount(todos), total: todos.length }
   }
   return state.status === 'running' ? { kind: 'writing' } : { kind: 'idle' }
@@ -189,11 +189,6 @@ function runningCall(state: TranscriptState): TranscriptToolCall | null {
     }
   }
   return null
-}
-
-/** Whether a task list exists and has anything in it. */
-function hasItems(todos: TodoList | null): todos is TodoList & { readonly length: number } {
-  return todos !== null && todos.length > 0
 }
 
 /** How many of a list's items are done — the `N` of "N of M". */

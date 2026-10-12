@@ -207,6 +207,21 @@ describe('tasksFromEvents (#340, S4; #345)', () => {
     ])
   })
 
+  it('carries no child session for a task that has none', () => {
+    // A kind that is not a session of its own — a subprocess, a scheduled job — carries no
+    // child, and a card offers Open only when there is one to open.
+    const log = [
+      makeSessionTaskStarted({
+        seq: 3,
+        task_id: taskId,
+        description,
+        child_session_id: undefined,
+      }),
+    ]
+
+    expect(tasksFromEvents(log)[0]).toMatchObject({ childSessionId: null, position: 3 })
+  })
+
   it('ignores a notification for a task the events do not start', () => {
     expect(tasksFromEvents([outcome(taskId, 'result', 'orphaned', 4)])).toEqual([])
   })
