@@ -7,6 +7,7 @@ import {
   ModeIdSchema,
   ProviderCredentialIdSchema,
   SessionIdSchema,
+  SkillIdSchema,
   ULID_LENGTH,
   generateId,
   isAgentId,
@@ -15,12 +16,14 @@ import {
   isModeId,
   isProviderCredentialId,
   isSessionId,
+  isSkillId,
   isUlid,
   newAgentId,
   newEventId,
   newModeId,
   newProviderCredentialId,
   newSessionId,
+  newSkillId,
   parseId,
   tryParseId,
   ulid,
@@ -95,6 +98,7 @@ describe('id generation', () => {
     expect(newEventId()).toMatch(/^sevt_[0-9A-HJKMNP-TV-Z]{26}$/)
     expect(newProviderCredentialId()).toMatch(/^pcred_[0-9A-HJKMNP-TV-Z]{26}$/)
     expect(newModeId()).toMatch(/^mode_[0-9A-HJKMNP-TV-Z]{26}$/)
+    expect(newSkillId()).toMatch(/^skl_[0-9A-HJKMNP-TV-Z]{26}$/)
   })
 
   it('orders by the timestamp it was given, whatever the prefix', () => {
@@ -124,6 +128,7 @@ describe('parseId', () => {
       'providerCredential',
     )
     expect(parseId(`${ID_PREFIXES.mode}${SAMPLE_ULID}`).type).toBe('mode')
+    expect(parseId(`${ID_PREFIXES.skill}${SAMPLE_ULID}`).type).toBe('skill')
   })
 
   it('rejects an unknown prefix, a missing prefix and a malformed ULID', () => {
@@ -171,6 +176,9 @@ describe('id guards', () => {
     expect(isModeId(newModeId())).toBe(true)
     expect(isModeId(newAgentId())).toBe(false)
     expect(isAgentId(newModeId())).toBe(false)
+    expect(isSkillId(newSkillId())).toBe(true)
+    expect(isSkillId(newModeId())).toBe(false)
+    expect(isModeId(newSkillId())).toBe(false)
     expect(isId('agent_', undefined)).toBe(false)
   })
 })
@@ -184,12 +192,14 @@ describe('id schemas', () => {
     const event = `${ID_PREFIXES.event}${SAMPLE_ULID}`
     const credential = `${ID_PREFIXES.providerCredential}${SAMPLE_ULID}`
     const mode = `${ID_PREFIXES.mode}${SAMPLE_ULID}`
+    const skill = `${ID_PREFIXES.skill}${SAMPLE_ULID}`
 
     expect(AgentIdSchema.parse(agent)).toBe(agent)
     expect(SessionIdSchema.parse(session)).toBe(session)
     expect(EventIdSchema.parse(event)).toBe(event)
     expect(ProviderCredentialIdSchema.parse(credential)).toBe(credential)
     expect(ModeIdSchema.parse(mode)).toBe(mode)
+    expect(SkillIdSchema.parse(skill)).toBe(skill)
   })
 
   it('reject ids of another kind', () => {
@@ -202,5 +212,7 @@ describe('id schemas', () => {
     ).toBe(false)
     expect(ModeIdSchema.safeParse(newAgentId()).success).toBe(false)
     expect(ModeIdSchema.safeParse(`${ID_PREFIXES.mode}nope`).success).toBe(false)
+    expect(SkillIdSchema.safeParse(newModeId()).success).toBe(false)
+    expect(SkillIdSchema.safeParse(`${ID_PREFIXES.skill}nope`).success).toBe(false)
   })
 })

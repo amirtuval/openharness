@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { TimestampSchema } from '../common'
-import { McpServerIdSchema, ModeIdSchema } from '../ids'
+import { McpServerIdSchema, ModeIdSchema, SkillIdSchema } from '../ids'
 import { ReasoningEffortSchema } from '../reasoning'
 import { ToolNameSchema } from './tool-settings'
 import { DEFAULT_MODEL_PATTERN, UserIdSchema } from './user'
@@ -82,11 +82,12 @@ export type ModeReference = z.infer<typeof ModeReferenceSchema>
  * - **On and off, never a permission.** A mode decides *which* tools a chat has, not what a
  *   call to one may do: a permission is the user's (E6), and "always allow" (#309) is
  *   remembered per tool.
- * - **Built-in tools by name, MCP servers by id.** `builtin` is keyed by tool name and
- *   `mcp_servers` by a server's `mcps_` id — a mode turns a whole server on or off, never one
- *   MCP tool, because an MCP tool's permission and its server's presence are different things
- *   and only the second is a mode's (#311/#312). Two keys rather than one, so neither can be
- *   mistaken for the other: a tool name is free text and a server id is not.
+ * - **Built-in tools by name, MCP servers and skills by id.** `builtin` is keyed by tool name,
+ *   `mcp_servers` by a server's `mcps_` id and `skills` by a skill's `skl_` id — a mode turns a
+ *   whole server or a whole skill on or off, never one MCP tool (an MCP tool's permission and
+ *   its server's presence are different things, and only the second is a mode's; #311/#312).
+ *   Separate keys rather than one, so none can be mistaken for another: a tool name is free
+ *   text and an id is not.
  */
 export const ModeToolOverrideSchema = z.object({
   /** Per-tool on/off; a tool not named follows the user's own setting. */
@@ -110,6 +111,22 @@ export const ModeToolOverrideSchema = z.object({
    * MCP servers" and "an empty map" are the same thing.
    */
   mcp_servers: z.record(McpServerIdSchema, z.boolean()).optional(),
+  /**
+   * // extension: per-**skill** on/off for the user's imported skills (epic #349, K8). A
+   * sibling of `mcp_servers`, keyed by a skill's `skl_` id, and read exactly the same way: a
+   * skill the map does not name follows the user's own `enabled` on the resource — the user's
+   * default — and a mode that names one turns it on or off for every chat that follows the
+   * mode, live, from the next request on. A subagent type is a mode (epic #340, S2), so this is
+   * what gives one its own set of skills.
+   *
+   * **A skill the user no longer has is simply ignored**, like a deleted MCP server: the mode
+   * routes store the map as written and do not check the ids, so deleting a skill leaves the
+   * modes that named it untroubled — the entry just matches nothing.
+   *
+   * Optional, and absent from every mode stored before #349, so "this mode says nothing about
+   * skills" and "an empty map" are the same thing.
+   */
+  skills: z.record(SkillIdSchema, z.boolean()).optional(),
 })
 
 export type ModeToolOverride = z.infer<typeof ModeToolOverrideSchema>
@@ -138,9 +155,10 @@ export const ModeSchema = z.object({
    */
   system_prompt_addition: z.string().nullable(),
   /**
-   * Which built-in tools a chat on this mode has on or off, overriding the user's own settings
-   * (#307), or `null` for no override at all — a mode that says nothing about tools and lets
-   * every chat follow its owner. Never a permission: see {@link ModeToolOverrideSchema}.
+   * Which tools, remote MCP servers and skills a chat on this mode has on or off, overriding
+   * the user's own settings (#307; the MCP half: #311; the skills half: epic #349, K8) — or
+   * `null` for no override at all, a mode that says nothing and lets every chat follow its
+   * owner. Never a permission: see {@link ModeToolOverrideSchema}.
    */
   tools: ModeToolOverrideSchema.nullable(),
   created_at: TimestampSchema,

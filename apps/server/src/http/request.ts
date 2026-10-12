@@ -8,6 +8,8 @@ import {
   ModeIdSchema,
   type SessionId,
   SessionIdSchema,
+  type SkillId,
+  SkillIdSchema,
 } from '@openharness/protocol'
 
 import type { AppEnv } from '../types'
@@ -119,6 +121,11 @@ export function modeIdParam(c: Context<AppEnv>, name: string): ModeId {
 /** Validate a path parameter that has to be an `mcps_` id; see {@link agentIdParam}. */
 export function mcpServerIdParam(c: Context<AppEnv>, name: string): McpServerId {
   return idParam(c.req.param(name), McpServerIdSchema, name)
+}
+
+/** Validate a path parameter that has to be an `skl_` id; see {@link agentIdParam}. */
+export function skillIdParam(c: Context<AppEnv>, name: string): SkillId {
+  return idParam(c.req.param(name), SkillIdSchema, name)
 }
 
 /** A query parameter name as the array its `[]` spelling collects. */

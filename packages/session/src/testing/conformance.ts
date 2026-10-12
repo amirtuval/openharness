@@ -13,6 +13,7 @@ import {
   isStoredEvent,
   newEventId,
   newMcpServerId,
+  newSkillId,
   partitionOf,
   SUMMARY_MODEL_SAME_AS_CHAT,
   type Agent,
@@ -324,15 +325,17 @@ export function runSessionStoreConformance(
 
       it('carries the tool override a mode may set, and null when it sets none (#307)', async () => {
         const { store } = await setup()
-        // The override's two halves: the built-in tools by name, and the user's MCP servers by
-        // id — a sibling key of `builtin`, never more entries in it (#311). A mode that names a
-        // server the user no longer has is stored as given and simply has no effect: nothing at
-        // this layer checks the id, which is what makes deleting a server leave such a mode
-        // alone.
+        // The override's three halves: the built-in tools by name, and the user's MCP servers
+        // and skills by id — sibling keys of `builtin`, never more entries in it (#311; #349,
+        // K8). A mode that names a server or a skill the user no longer has is stored as given
+        // and simply has no effect: nothing at this layer checks the id, which is what makes
+        // deleting one leave such a mode alone.
         const gone = newMcpServerId()
+        const goneSkill = newSkillId()
         const override = {
           builtin: { web_search: true, todo_write: false },
           mcp_servers: { [newMcpServerId()]: true, [gone]: false },
+          skills: { [newSkillId()]: false, [goneSkill]: true },
         }
         const withTools = await store.createMode(modeInput('deep', { tools: override }), OWNER_A)
         expect(withTools.tools).toEqual(override)

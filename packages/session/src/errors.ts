@@ -40,6 +40,12 @@ export const DUPLICATE_MCP_SERVER_NAME_ERROR_CODE = 'duplicate_mcp_server_name'
 /** The `code` of a {@link McpServerLimitReachedError}. Stable across builds. */
 export const MCP_SERVER_LIMIT_REACHED_ERROR_CODE = 'mcp_server_limit_reached'
 
+/** The `code` of a {@link DuplicateSkillNameError}. Stable across builds. */
+export const DUPLICATE_SKILL_NAME_ERROR_CODE = 'duplicate_skill_name'
+
+/** The `code` of a {@link SkillLimitReachedError}. Stable across builds. */
+export const SKILL_LIMIT_REACHED_ERROR_CODE = 'skill_limit_reached'
+
 /** What a {@link FencedError} reports: which write, which partition, and why it was refused. */
 export interface FencedErrorDetails {
   /** The partition the write carried a fence for. */
@@ -305,6 +311,58 @@ export class McpServerLimitReachedError extends Error {
     // is the sort of thing that ends up pasted into a screenshot.
     super(`cannot create an MCP server: the limit of ${limit} servers is reached`)
     this.name = 'McpServerLimitReachedError'
+    this.ownerId = ownerId
+    this.limit = limit
+  }
+}
+
+/**
+ * A create was refused because the user already has a skill with that name (epic #349, K4).
+ *
+ * A skill's name is unique among its owner's skills — it is what the user imports it as, the
+ * folder it came from, and the slash command it is run by (K7) — and the uniqueness is
+ * enforced by the store (a unique constraint in Postgres), not only checked by the caller, so
+ * two concurrent creates cannot both take the name.
+ */
+export class DuplicateSkillNameError extends Error {
+  /** Stable, machine-readable code; see {@link DUPLICATE_SKILL_NAME_ERROR_CODE}. */
+  readonly code = DUPLICATE_SKILL_NAME_ERROR_CODE
+
+  /** The owner whose skills already include the name. */
+  readonly ownerId: UserId
+
+  /** The name that was already taken. */
+  readonly skillName: string
+
+  constructor(ownerId: UserId, name: string) {
+    super(`a skill named ${JSON.stringify(name)} already exists`)
+    this.name = 'DuplicateSkillNameError'
+    this.ownerId = ownerId
+    this.skillName = name
+  }
+}
+
+/**
+ * A create was refused because the user is at `MAX_SKILLS_PER_USER` (epic #349, K4).
+ *
+ * The cap is a store rule rather than the caller's, because only the store can count a user's
+ * skills and insert one without a race between the two.
+ */
+export class SkillLimitReachedError extends Error {
+  /** Stable, machine-readable code; see {@link SKILL_LIMIT_REACHED_ERROR_CODE}. */
+  readonly code = SKILL_LIMIT_REACHED_ERROR_CODE
+
+  /** The owner who is at the limit. */
+  readonly ownerId: UserId
+
+  /** The limit that was reached. */
+  readonly limit: number
+
+  constructor(ownerId: UserId, limit: number) {
+    // The caller's own id is not in the message: it is noise to the person reading it, and it
+    // is the sort of thing that ends up pasted into a screenshot.
+    super(`cannot create a skill: the limit of ${limit} skills is reached`)
+    this.name = 'SkillLimitReachedError'
     this.ownerId = ownerId
     this.limit = limit
   }

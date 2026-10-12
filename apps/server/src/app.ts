@@ -15,12 +15,16 @@ import {
   AgentNotFoundError,
   DuplicateMcpServerNameError,
   DuplicateModeNameError,
+  DuplicateSkillNameError,
   InMemoryMcpServerStore,
+  InMemorySkillStore,
   McpServerLimitReachedError,
   ModeLimitReachedError,
+  SkillLimitReachedError,
   SessionNotFoundError,
   type McpServerStore,
   type SessionStore,
+  type SkillStore,
 } from '@openharness/session'
 
 import { consoleLogger, type AppEnv, type Logger } from './types'
@@ -46,6 +50,7 @@ import {
   type McpServerServiceOptions,
 } from './mcp/service'
 import { registerMcpOAuthCallbackRoute, registerMcpServerRoutes } from './routes/mcp-servers'
+import { registerSkillRoutes } from './routes/skills'
 import { registerMeRoutes } from './routes/me'
 import { registerToolSettingsRoutes } from './routes/tool-settings'
 import { registerModeRoutes } from './routes/modes'
@@ -114,6 +119,12 @@ export interface AppOptions {
    * passes the durable store and the deployment's callback URL.
    */
   readonly mcpServers?: McpServersAppOptions
+  /**
+   * Where users' imported skills live (epic #349, K4). Omitted, the routes run over an
+   * in-memory store — enough for a test that does not exercise them; `main.ts` passes the
+   * durable one.
+   */
+  readonly skills?: SkillStore
   /**
    * The model catalogue (epic #92): what `GET /v1/models` answers, and the per-provider cache
    * entry the credential PUT/DELETE routes drop (C4). `main.ts` builds it with the real
@@ -469,6 +480,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
         ...(options.mcpServers?.now === undefined ? {} : { now: options.mcpServers.now }),
         logger: options.mcpServers?.logger ?? logger,
       }),
+    skills: options.skills ?? new InMemorySkillStore(),
     catalog: options.catalog,
     // The automatic default model (epic #116, U4) is built here, per app: the record of who
     // the server has picked for lives as long as this app does (see `default-model.ts`).
@@ -533,6 +545,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   registerAiSdkRoutes(app, deps)
   registerProviderCredentialRoutes(app, deps)
   registerMcpServerRoutes(app, deps)
+  registerSkillRoutes(app, deps)
   registerModelRoutes(app, deps)
   registerModeRoutes(app, deps)
 
@@ -547,12 +560,14 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       error instanceof DuplicateModeNameError ||
       error instanceof ModeLimitReachedError ||
       error instanceof DuplicateMcpServerNameError ||
-      error instanceof McpServerLimitReachedError
+      error instanceof McpServerLimitReachedError ||
+      error instanceof DuplicateSkillNameError ||
+      error instanceof SkillLimitReachedError
     ) {
-      // A mode or MCP-server write the store refused: a name the caller already has, or the
-      // cap (#245, M6; #303, X10). Both are conflicts with the resource's current state, and
-      // the store's messages say which — `conflict_error` is the protocol's type for exactly
-      // that.
+      // A mode, MCP-server or skill write the store refused: a name the caller already has, or
+      // the cap (#245, M6; #303, X10; #349, K4). All are conflicts with the resource's current
+      // state, and the store's messages say which — `conflict_error` is the protocol's type for
+      // exactly that.
       return errorResponse(c, 'conflict_error', error.message)
     }
     if (error instanceof RangeError) {

@@ -21,15 +21,20 @@
  *   servers and their pending OAuth states (epic #303, X10): the resource's metadata in and
  *   out, the sealed header map, tokens and registered OAuth client only for the reads the
  *   server's connection check and token refresh make.
+ * - **{@link SkillStore}** (`./skills`) — the storage contract for users' imported skills
+ *   (epic #349, K4): a snapshot's metadata and every file of it in and out, a listing never
+ *   reading a file's content, and a snapshot replaced whole in one transaction.
  * - **{@link InMemorySessionStore}** and **{@link InMemoryCredentialStore}** (`./memory`) —
  *   the in-memory implementations: the test fakes for every other package, and the reference
- *   behaviour for the contracts. **{@link InMemoryMcpServerStore}** is the third.
+ *   behaviour for the contracts. **{@link InMemoryMcpServerStore}** and
+ *   **{@link InMemorySkillStore}** are the others.
  * - **{@link Clock}** and {@link timestampAt} (`./clock`) — the injectable time source every
  *   store takes, so tests can move time instead of waiting for it.
  * - **{@link FencedError}**, {@link SessionNotFoundError}, {@link AgentNotFoundError},
  *   {@link DuplicateEventIdError}, {@link ClaimConflictError}, {@link DuplicateModeNameError},
  *   {@link ModeLimitReachedError}, {@link DuplicateMcpServerNameError},
- *   {@link McpServerLimitReachedError} (`./errors`) — the typed failures a store raises.
+ *   {@link McpServerLimitReachedError}, {@link DuplicateSkillNameError},
+ *   {@link SkillLimitReachedError} (`./errors`) — the typed failures a store raises.
  *
  * Since #245 (M6) the contract also carries a user's **modes** — the named presets a chat can
  * follow — in `./store`: `createMode`, `getMode`, `listModes`, `updateMode` and `deleteMode`.
@@ -48,4 +53,5 @@ export * from './credentials'
 export * from './errors'
 export * from './mcp-servers'
 export * from './memory'
+export * from './skills'
 export * from './store'

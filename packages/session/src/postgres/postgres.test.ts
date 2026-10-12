@@ -5,11 +5,13 @@ import { join } from 'node:path'
 import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
+  SKILL_MD_FILENAME,
   SessionSchema,
   isStoredEvent,
   newEventId,
   newSessionId,
   partitionOf,
+  skillFileSize,
   type CreateAgentRequest,
   type EventId,
   type Session,
@@ -24,9 +26,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import type { UpsertCredentialInput } from '../credentials'
 import type { CreateMcpServerInput } from '../mcp-servers'
+import type { CreateSkillInput, SkillFileInput, SkillSnapshotInput } from '../skills'
 import {
   DuplicateEventIdError,
   DuplicateMcpServerNameError,
+  DuplicateSkillNameError,
   FencedError,
   isFencedError,
 } from '../errors'
@@ -41,9 +45,11 @@ import {
 } from '../testing/conformance'
 import { runCredentialStoreConformance } from '../testing/credentials-conformance'
 import { runMcpServerStoreConformance } from '../testing/mcp-servers-conformance'
+import { runSkillStoreConformance } from '../testing/skills-conformance'
 import {
   createPostgresCredentialStore,
   createPostgresMcpServerStore,
+  createPostgresSkillStore,
   createPostgresSessionStore,
   migrate,
   type PostgresSchema,
@@ -127,6 +133,9 @@ if (target === null) {
   /** Every MCP server store a test made, closed again afterwards. */
   const mcpStores: ReturnType<typeof createPostgresMcpServerStore>[] = []
 
+  /** Every skill store a test made, closed again afterwards. */
+  const skillStores: ReturnType<typeof createPostgresSkillStore>[] = []
+
   beforeAll(async () => {
     let connectionString = DATABASE_URL
     if (connectionString === '') {
@@ -142,6 +151,7 @@ if (target === null) {
     await Promise.all(stores.splice(0).map((store) => store.close()))
     await Promise.all(credentialStores.splice(0).map((store) => store.close()))
     await Promise.all(mcpStores.splice(0).map((store) => store.close()))
+    await Promise.all(skillStores.splice(0).map((store) => store.close()))
   })
 
   afterAll(async () => {
@@ -182,6 +192,15 @@ if (target === null) {
       return trackMcpServers(createPostgresMcpServerStore({ pool }, { now: clock.now }))
     },
     { name: 'PostgresMcpServerStore', ensureUsers },
+  )
+
+  /** The skill store's conformance suite, on the same tables and users (#349, K4). */
+  runSkillStoreConformance(
+    async (clock) => {
+      await truncateAll()
+      return trackSkills(createPostgresSkillStore({ pool }, { now: clock.now }))
+    },
+    { name: 'PostgresSkillStore', ensureUsers },
   )
 
   // -------------------------------------------------------------- extra tests
@@ -829,6 +848,80 @@ if (target === null) {
     })
   })
 
+  // ---------------------------------------------- the skill store's extra tests
+
+  describe('PostgresSkillStore: more than the contract asks', () => {
+    it('keeps one row per (user, name) when two stores create at once', async () => {
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const first = trackSkills(createPostgresSkillStore({ pool }, { now: () => START_MS }))
+      const second = trackSkills(createPostgresSkillStore({ pool }, { now: () => START_MS }))
+      // Two uncoordinated creates of the same name: the unique constraint decides, one wins and
+      // the other is refused — never two rows. The count under the advisory lock is the other
+      // half of the same rule, and `MAX_SKILLS_PER_USER` of them at once is the suite's.
+      const results = await Promise.allSettled([
+        first.create(skillInput()),
+        second.create(skillInput()),
+      ])
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      const refused = results.find((result) => result.status === 'rejected')
+      if (refused?.status !== 'rejected') {
+        throw new Error('expected one of the two creates to be refused')
+      }
+      expect(refused.reason).toBeInstanceOf(DuplicateSkillNameError)
+      expect(await first.list({ ownerId: OWNER_A })).toHaveLength(1)
+    })
+
+    it('replaces a snapshot in one transaction, so the file set is never half-swapped', async () => {
+      // What only the real SQL can be asked: the two tables are one snapshot, and the delete
+      // and the insert that replace its files happen inside the same transaction as the
+      // metadata update — so a reader between them sees the old snapshot or the new one.
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const store = trackSkills(createPostgresSkillStore({ pool }, { now: () => START_MS }))
+      const created = await store.create(skillInput())
+      const replaced = await store.replaceSnapshot(
+        created.id,
+        { ownerId: OWNER_A },
+        {
+          ...skillSnapshot(),
+          files: [
+            { path: SKILL_MD_FILENAME, content: '# v2\n' },
+            { path: 'reference/new.md', content: 'new\n' },
+          ],
+        },
+      )
+      expect(replaced?.files.map((file) => file.path)).toEqual([
+        SKILL_MD_FILENAME,
+        'reference/new.md',
+      ])
+      // The rows are the answer, not only the store's reading of them: the old file's row is
+      // gone from the table and the new one's is there.
+      expect(await fileRows(created.id)).toEqual([
+        { path: SKILL_MD_FILENAME, size: skillFileSize('# v2\n') },
+        { path: 'reference/new.md', size: skillFileSize('new\n') },
+      ])
+    })
+
+    it('deletes a skill and its whole snapshot with the user', async () => {
+      await truncateAll()
+      await ensureUsers([OWNER_A, OWNER_B])
+      const store = trackSkills(createPostgresSkillStore({ pool }, { now: () => START_MS }))
+      const theirs = await store.create(skillInput({ ownerId: OWNER_B }))
+      const mine = await store.create(skillInput())
+
+      await sql`delete from "user" where id = ${OWNER_A}`.execute(db)
+
+      // The `on delete cascade` from `"user"` takes the skill, and its files go with the skill:
+      // nothing holds a content for a skill that is gone.
+      expect(await store.get(mine.id, { ownerId: OWNER_A })).toBeNull()
+      expect(await fileRows(mine.id)).toEqual([])
+      // The other user's snapshot is untouched, files and all.
+      expect(await store.get(theirs.id, { ownerId: OWNER_B })).not.toBeNull()
+      expect(await fileRows(theirs.id)).toHaveLength(2)
+    })
+  })
+
   /** The store a test works with: a clock it can move, and one seeded session. */
   async function seeded(clock: TestClock = createTestClock(START_MS)): Promise<{
     store: ReturnType<typeof createPostgresSessionStore>
@@ -846,6 +939,12 @@ if (target === null) {
   /** Remember a store so `afterEach` closes it. */
   function track(store: ReturnType<typeof createPostgresSessionStore>) {
     stores.push(store)
+    return store
+  }
+
+  /** Remember a skill store so `afterEach` closes it. */
+  function trackSkills(store: ReturnType<typeof createPostgresSkillStore>) {
+    skillStores.push(store)
     return store
   }
 
@@ -895,6 +994,18 @@ if (target === null) {
   }
 
   /**
+   * A skill's file rows, read straight from `skill_files`: the `(path, size)` listing the
+   * table really holds, which is what makes "the whole file set was replaced" a fact about the
+   * database rather than only about the store's answer.
+   */
+  async function fileRows(skillId: string): Promise<{ path: string; size: number }[]> {
+    const rows = await sql<{ path: string; size: number }>`
+      select path, size from skill_files where skill_id = ${skillId} order by path asc
+    `.execute(db)
+    return rows.rows.map((row) => ({ path: row.path, size: row.size }))
+  }
+
+  /**
    * How many rows each session-keyed table holds for a session, read straight from the tables
    * — what `deleteSession` has to leave at zero, and what it must not touch for another one.
    */
@@ -926,12 +1037,13 @@ if (target === null) {
     // `owner_id`s everything else references. `user_preferences` is here so one test's
     // preferences cannot leak into the next (#111), `user_tool_settings` so one test's tool
     // choices cannot (#307), `mcp_servers` and `mcp_oauth_states` so one test's remote MCP
-    // servers and their pending OAuth flows cannot (#303, X10; #311), and `scheduler_instances`
-    // so one test's memberships cannot (#122).
+    // servers and their pending OAuth flows cannot (#303, X10; #311), `skill_files` and
+    // `skills` so one test's snapshots cannot (#349, K4), and `scheduler_instances` so one
+    // test's memberships cannot (#122).
     await sql`truncate table
       events, event_claims, event_supersessions, sessions, agents, modes, partition_leases,
       scheduler_instances, provider_credentials, user_preferences, user_tool_settings,
-      mcp_oauth_states, mcp_servers`.execute(db)
+      mcp_oauth_states, mcp_servers, skill_files, skills`.execute(db)
   }
 }
 
@@ -952,6 +1064,39 @@ function mcpServerInput(overrides: Partial<CreateMcpServerInput> = {}): CreateMc
     ...overrides,
   }
 }
+
+/** The snapshot a Postgres skill test writes, overridable field by field. */
+function skillSnapshot(overrides: Partial<SkillSnapshotInput> = {}): SkillSnapshotInput {
+  return {
+    description: 'Writes the release notes for a version.',
+    frontmatter: { 'argument-hint': '[version]' },
+    source: {
+      url: 'https://github.com/example/skills',
+      ref: 'main',
+      path: 'release-notes',
+      commit_sha: '9f2c1b4e5a6d7c8b9a0f1e2d3c4b5a69788796a5',
+    },
+    files: SKILL_FILES,
+    ...overrides,
+  }
+}
+
+/** A create body for a Postgres skill test. */
+function skillInput(overrides: Partial<CreateSkillInput> = {}): CreateSkillInput {
+  return {
+    ownerId: OWNER_A,
+    name: 'release-notes',
+    enabled: true,
+    ...skillSnapshot(),
+    ...overrides,
+  }
+}
+
+/** The snapshot's two files: the `SKILL.md` every skill needs, and one reference beside it. */
+const SKILL_FILES: readonly SkillFileInput[] = [
+  { path: SKILL_MD_FILENAME, content: '# Release notes\n\nWrite them.\n' },
+  { path: 'reference/tone.md', content: 'Be terse.\n' },
+]
 
 /** A `POST /v1/agents` body. */
 function agentInput(name = 'Summarizer'): CreateAgentRequest {

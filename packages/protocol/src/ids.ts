@@ -5,15 +5,15 @@ import { z } from 'zod'
  *
  * Every id is `<prefix><ULID>`, using the same prefixes as Anthropic's Managed Agents API —
  * `agent_` for agents, `sesn_` for sessions and `sevt_` for stored session events — plus
- * `pcred_` for provider credentials, `mode_` for modes and `mcps_` for remote MCP servers
- * (openharness extensions; Anthropic has none of the three). A ULID is 26 Crockford base32 characters: a 48-bit millisecond
+ * `pcred_` for provider credentials, `mode_` for modes, `mcps_` for remote MCP servers and
+ * `skl_` for skills (openharness extensions; Anthropic has none of the four). A ULID is 26 Crockford base32 characters: a 48-bit millisecond
  * timestamp followed by 80 random bits, so ids sort by creation time and are globally unique
  * without coordination.
  *
  * The ids this module produces are also **branded** at the type level
  * ({@link AgentId}, {@link SessionId}, {@link EventId}, {@link ProviderCredentialId},
- * {@link ModeId}, {@link McpServerId}), so a session id cannot be passed where an event id is
- * expected.
+ * {@link ModeId}, {@link McpServerId}, {@link SkillId}), so a session id cannot be passed
+ * where an event id is expected.
  */
 
 /** The id prefixes this protocol uses, keyed by the kind of thing they name. */
@@ -24,11 +24,12 @@ export const ID_PREFIXES = {
   providerCredential: 'pcred_',
   mode: 'mode_',
   mcpServer: 'mcps_',
+  skill: 'skl_',
 } as const
 
 /**
  * A key of {@link ID_PREFIXES}:
- * `'agent' | 'session' | 'event' | 'providerCredential' | 'mode' | 'mcpServer'`.
+ * `'agent' | 'session' | 'event' | 'providerCredential' | 'mode' | 'mcpServer' | 'skill'`.
  */
 export type IdType = keyof typeof ID_PREFIXES
 
@@ -39,6 +40,7 @@ const ID_PREFIX_ENTRIES: readonly (readonly [IdType, string])[] = [
   ['providerCredential', ID_PREFIXES.providerCredential],
   ['mode', ID_PREFIXES.mode],
   ['mcpServer', ID_PREFIXES.mcpServer],
+  ['skill', ID_PREFIXES.skill],
 ]
 
 /** Length of the ULID part of an id. */
@@ -241,6 +243,16 @@ export function isMcpServerId(value: unknown): value is string {
   return isId(value, 'mcpServer')
 }
 
+/** A new `skl_` id: a user's imported skill. */
+export function newSkillId(timestampMs?: number): SkillId {
+  return SkillIdSchema.parse(generateId('skill', timestampMs))
+}
+
+/** Whether `value` is an `skl_` id. */
+export function isSkillId(value: unknown): value is string {
+  return isId(value, 'skill')
+}
+
 /**
  * Branded `agent_` id. Any agent id in this package is interchangeable with `string`, but a
  * session or event id is not.
@@ -300,3 +312,14 @@ export const McpServerIdSchema = z
   .brand<'McpServerId'>()
 
 export type McpServerId = z.infer<typeof McpServerIdSchema>
+
+/**
+ * Branded `skl_` id. // extension: Anthropic's Managed Agents API has no per-user skill
+ * resource, so this prefix is openharness' own.
+ */
+export const SkillIdSchema = z
+  .string()
+  .refine(isSkillId, { error: 'must be an `skl_` id' })
+  .brand<'SkillId'>()
+
+export type SkillId = z.infer<typeof SkillIdSchema>

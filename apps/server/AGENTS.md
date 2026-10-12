@@ -81,6 +81,11 @@ protocol's schemas, so the shapes are not repeated here — see
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | `ConnectMcpServerRequestSchema` (`client`)  | `{ authorization_url }`; 422 `mcp_connection_error` for a discovery/registration failure, 400 for a non-OAuth server                                                                                                             |
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | —                                           | the `McpServer` with its tokens dropped, on `needs_reconnect`                                                                                                                                                                    |
 | `GET`    | `/v1/me/mcp_servers/oauth/callback`             | `code`, `state`                             | the provider's redirect back — **no session**; 302 to the app (web) or an HTML page (CLI), 400 with a page for a bad, expired or misused state                                                                                   |
+| `GET`    | `/v1/me/skills`                                 | —                                           | `{ data: Skill[] }`, the caller's own, oldest first; metadata only, never a file's content (epic #349, K4)                                                                                                                       |
+| `GET`    | `/v1/me/skills/{skill_id}`                      | —                                           | the `Skill` with `SKILL.md`'s content, or 404 for another user's or an unknown id                                                                                                                                                |
+| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | —                                           | one file's `{ path, size, content }`; 404 for a path the snapshot does not hold, and for another user's skill alike                                                                                                              |
+| `POST`   | `/v1/me/skills/{skill_id}`                      | `UpdateSkillRequestSchema`                  | the updated `Skill` (`enabled`), or 404; 400 for a body that names no field                                                                                                                                                      |
+| `DELETE` | `/v1/me/skills/{skill_id}`                      | —                                           | 204, and the whole snapshot goes with it; 404 for another user's or an unknown id                                                                                                                                                |
 
 Every `/v1` route except `auth-config` and the MCP OAuth callback requires a session (see
 "Authentication" and "Remote MCP servers"), and every resource is scoped to its owner. The two
@@ -754,6 +759,12 @@ answer is the **effective** state of each tool:
   mode naming a server the user no longer has is ignored, not refused: the mode routes store
   the map as written (`routes/modes.ts`) and nothing re-writes a mode when a server is deleted.
   See [Remote MCP servers](#remote-mcp-servers-epic-303-x10).
+- **The mode's override has a skills half too** (epic #349, K8). The same `Mode.tools` carries
+  `skills`, an on/off patch over the user's imported skills by id — a third sibling of
+  `builtin`, read exactly as `mcp_servers` is. It is `skills.ts`'s, and it reads the same one
+  override the host resolved once, so a chat's built-in tools and its skills cannot disagree. A
+  mode naming a skill the user no longer has is ignored, not refused, for the same reason. See
+  [Skills](#skills-epic-349-k4).
 
 ### Pausing for the user (epic #303, X6; #309)
 
@@ -987,6 +998,59 @@ header`, and nothing when the request did carry one. No header **value** is ever
   app is served same-origin, so the URL a browser can reach is the public URL, and `createApp`
   takes it as `McpServersAppOptions.callbackUrl` (a test passes its own).
 
+## Skills (epic #349, K4; the settings answer: K8)
+
+A **skill** is a folder of instructions in the open Agent Skills format that a user imports from
+a public git repository and reviews (K1, K3). What this server does with one is the resource
+half: the routes over `/v1/me/skills`, and the answer "which skills is this request given". The
+clone, the preview and the refresh diff are #351's; the `skill`/`skill_read` tools, the listing
+and the slash-command invocation are #352's; the screens are #353/#354's. Everything here is
+wired so those land beside it rather than through it.
+
+- **The store is the resource's home** (`@openharness/session`'s `SkillStore`, K4): a skill is
+  a **snapshot** — the parsed frontmatter, the source URL/ref/path/commit and every file — and
+  the store answers metadata only, never a file's content. `createApp` takes it as
+  `AppOptions.skills` (an in-memory store when a test omits one) and `main.ts` builds the
+  durable one from the same pool the log uses, beside the credential and MCP-server stores.
+  There is no service layer: a snapshot is stored text, so nothing goes through the vault or the
+  network.
+- **The routes are owner-scoped like every other resource** (A4): the owner is always
+  `c.get('user').id`, another user's skill is a 404, and so is a file of one — the same answer
+  an unknown path gets, so a path cannot probe for a skill. A **malformed** `skl_` id in a path
+  is the 400 every bad id gets, because it could not name a skill however the database looked.
+- **`GET /v1/me/skills/{skill_id}` is the one read that carries a file's content**: a skill is
+  read by its `SKILL.md`, and a settings screen that had to fetch it separately would make two
+  requests to draw one row. Every other read is metadata — `files` is a path and a size each —
+  and any other file has a read of its own, whose `{path}` is the **rest of the URL** (Hono's
+  `:path{.+}`), because a skill's paths are relative and may hold slashes
+  (`reference/tone.md`). A skill always holds a `SKILL.md` — the store refuses a snapshot
+  without one (K1) — so a read that finds none is a broken invariant and answers the generic
+  500 rather than a 404 that would claim the skill is missing.
+- **`POST /v1/me/skills/{skill_id}` takes `enabled` and nothing else.** What a skill _is_, is
+  its snapshot, and the only field a user changes without a refresh (K5) is whether it is on
+  (K8); a new snapshot comes from re-importing (#351). `DELETE` removes the skill and its whole
+  snapshot, which is one statement: the files cascade.
+- **The two store refusals an import will meet are already mapped.** A name the caller already
+  has and the fifty-first skill are the protocol's 409 `conflict_error` in `app.ts`, beside the
+  mode and MCP-server ones — the store raises `DuplicateSkillNameError`/`SkillLimitReachedError`
+  under the per-owner lock modes and servers use, so two imports racing for the last slot cannot
+  both land.
+- **The settings answer lives in `skills.ts`**, next to `tool-settings.ts` and for the same
+  reason: it is the one place the user's own choice and a mode's override meet. `skillsInForce`
+  is the rule — **a mode that names a skill wins; a skill it does not name follows the user's
+  `enabled`** — and `listSkillsInForce` is that rule over one store read per request, which is
+  what makes a switch flipped in the settings, or a mode edited, apply from the next request on.
+  A map entry naming a deleted skill is ignored rather than refused, exactly as an MCP server's
+  is. `createSkillSettingsResolver` is the seam the brain is handed (#352); it returns the
+  **skill resources**, so a listing has each skill's name and description without reading a
+  file.
+- **`Mode.tools.skills` is the third sibling key** (#349, K8), beside `builtin` and
+  `mcp_servers`, and it is stored by the mode routes as written — no check against the skills
+  present — which is what leaves a mode that named a deleted skill untroubled.
+  `isolation.test.ts` sweeps the routes with a second user, and `skills.test.ts` covers them
+  plus the override: the user's own `enabled` with no mode, a mode turning one off and another
+  on, and an entry naming a skill that is gone.
+
 ## Usage and cost (epic #245, A2; issue #247)
 
 `GET /v1/sessions/{session_id}/usage` and `GET /v1/me/usage` answer what was spent, and `usage.ts`
@@ -1055,19 +1119,19 @@ Every failure is the protocol's envelope — `{ type: 'error', error: { type, me
 the status `API_ERROR_STATUS_BY_TYPE` gives that type — and every response carries a
 `request-id` header the body repeats as `request_id`.
 
-| what happened                                               | type                          | status |
-| ----------------------------------------------------------- | ----------------------------- | ------ |
-| a body, query or path id that does not match a schema       | `invalid_request_error`       | 400    |
-| a store cursor that is valid but not for this endpoint      | `invalid_request_error`       | 400    |
-| no session, or an invalid, expired or revoked one           | `authentication_error`        | 401    |
-| a cookie-authenticated write from an untrusted origin       | `permission_error`            | 403    |
-| a provider key the provider refused on save (A5)            | `invalid_provider_credential` | 422    |
-| a `?refresh=true` inside the minute since the last one (C4) | `rate_limit_error`            | 429    |
-| a mode whose model cannot be used (#245, M6)                | `mode_unavailable_error`      | 422    |
-| a mode name already taken, or the twentieth mode (#245)     | `conflict_error`              | 409    |
-| an id that names no agent, session or mode                  | `not_found_error`             | 404    |
-| a route that does not exist                                 | `not_found_error`             | 404    |
-| anything else                                               | `api_error`                   | 500    |
+| what happened                                                                                           | type                          | status |
+| ------------------------------------------------------------------------------------------------------- | ----------------------------- | ------ |
+| a body, query or path id that does not match a schema                                                   | `invalid_request_error`       | 400    |
+| a store cursor that is valid but not for this endpoint                                                  | `invalid_request_error`       | 400    |
+| no session, or an invalid, expired or revoked one                                                       | `authentication_error`        | 401    |
+| a cookie-authenticated write from an untrusted origin                                                   | `permission_error`            | 403    |
+| a provider key the provider refused on save (A5)                                                        | `invalid_provider_credential` | 422    |
+| a `?refresh=true` inside the minute since the last one (C4)                                             | `rate_limit_error`            | 429    |
+| a mode whose model cannot be used (#245, M6)                                                            | `mode_unavailable_error`      | 422    |
+| a name already taken, or a per-user cap reached: a mode, an MCP server, a skill (#245; #303, X10; #349) | `conflict_error`              | 409    |
+| an id that names no agent, session or mode                                                              | `not_found_error`             | 404    |
+| a route that does not exist                                                                             | `not_found_error`             | 404    |
+| anything else                                                                                           | `api_error`                   | 500    |
 
 A malformed path id is a 400 rather than a 404: it could not name a resource even if one
 existed. Anything unrecognised is logged server-side and answered with a fixed message — a
@@ -1821,6 +1885,7 @@ before the instance stops serving it (#151).
 | `createTurnRegistry`, `createTurnTools`, `TurnRegistryOptions`, `TurnToolsOptions`, `TurnToolOptions`                                                                                                                                                                                                                                                                               | the registry a process runs with — `ask_user` and the built-ins of #305 for every process, and the test `echo` tool under `OPENHARNESS_TEST_MODEL=mock` (the provider-native `web_search` is no tool of ours, so nothing is registered for it, #335) — and the tools a turn is handed: that registry, the settings resolver (#307), the support gate and the step budget                                   |
 | `askUserTool`, `assertConfirmations`, `rememberAlwaysApprovals`, `withAlwaysApprovals`, `isConfirmation`, `PausingDeps`, `RememberDeps`, `AlwaysApproval`                                                                                                                                                                                                                           | the pause's server half (epic #303, X6; #309; the remote pair: #312): the `ask_user` tool every deployment registers, the checks a `user.tool_confirmation` passes (a call of this session is waiting — built-in or remote — the answers fit its questions, the extensions make sense for it), and the stored policy an `always` approval writes (a built-in's `enabled`+`policy`, a remote tool's policy) |
 | `effectiveTools`, `toolSettingEntries`, `toolDecisions`, `createToolSettingsResolver`, `listToolSettings`, `ToolSettingsDeps`                                                                                                                                                                                                                                                       | the per-user tool settings (epic #303, X4; #307; the remote half: #312): the effective answer, as the wire's entries, as the brain's decisions, the resolver `runTurn` is handed, and the listing a route makes (a mode's override and the owner's in-force MCP servers included)                                                                                                                          |
+| `skillsInForce`, `listSkillsInForce`, `createSkillSettingsResolver`, `SkillSettingsDeps`, `SkillSettingsResolver`                                                                                                                                                                                                                                                                   | the skills in force for a request (epic #349, K8): the owner's own `enabled`, overridden by the mode's `skills` map — the pure rule, the read that applies it to a store's list, and the resolver the brain is handed (#352)                                                                                                                                                                               |
 | `createMcpToolProvider`, `McpToolProviderOptions`, `DEFAULT_MCP_TOOL_CACHE_TTL_MS`, `DEFAULT_MCP_LISTING_TIMEOUT_MS`                                                                                                                                                                                                                                                                | the remote tools a request may offer (#312): the listing — the in-force servers, their tools as `createMcpTool` definitions, a short cache keyed per user and server, and a failure per server that could not be listed — as the brain's `McpToolProvider`                                                                                                                                                 |
 | `createTestToolRegistry`, `testEchoTool`, `TEST_TOOL_NAME`, `TEST_TOOL_DESCRIPTION`                                                                                                                                                                                                                                                                                                 | the test `echo` tool, and the registry that holds it alone — test-only, behind the mock model                                                                                                                                                                                                                                                                                                              |
 | `createToolSupportResolver`                                                                                                                                                                                                                                                                                                                                                         | the per-model tool gate: whether a model can call tools, read from models.dev's `tool_call` (epic #303, X2)                                                                                                                                                                                                                                                                                                |
@@ -1922,6 +1987,11 @@ src/
   tool-settings.ts      the per-user tool settings (epic #303, X4; #307): the effective answer
                         a settings screen and the brain both read, and the resolver the loop
                         is handed
+  skills.ts             the skills in force for a request (epic #349, K8): the owner's own
+                        `enabled`, overridden by the mode's `skills` map — the settings answer
+                        the brain reads (#352)
+  routes/skills.ts      the skill routes: GET /v1/me/skills and its files, POST (enabled),
+                        DELETE (#349, K4)
   routes/tool-settings.ts  GET/PUT /v1/me/tools
   runner.ts             SessionRunner: one turn per session, re-run while there is work
   compaction.ts         DeltaCompactor: the periodic deletion of superseded chunks (D9)
@@ -2104,7 +2174,8 @@ parallel with each other.
   `'<omitted>'`), `hasEmail`, that an accepted sign-in writes nothing, and that no address or
   name appears anywhere in the serialized line.
 - `isolation.test.ts` — two users, every `/v1` route walked as the second one: 404 for a
-  by-id read, empty lists, no credentials of the other's, `/v1/me` answering the caller.
+  by-id read (a skill's files included, so a path cannot probe for one), empty lists, no
+  credentials of the other's, `/v1/me` answering the caller.
 - `azure-credentials.test.ts` (#245, A3a) — the named-credential route end to end: the metadata
   an azure save returns, a second credential under `azure-eu`, the 400s (a name a provider id
   owns, an `api_key` under a named one, a malformed name, a non-https endpoint, no deployments),
@@ -2296,6 +2367,15 @@ session` remembered for the chat and `remember: always` written to the user's se
   before the listing, a server turned off and a mode turning one off, the settings screen listing
   a remote tool with `mcp_server` and the `ask` default, the listing cache (one listing for a
   turn's several requests, another after the server changes), and name sanitizing and collisions.
+- `skills.test.ts` (epic #349, K4; the settings answer: K8) — the skill routes and the skills in
+  force: a listing that carries no file's content, the single-skill read with `SKILL.md`'s
+  content, a file read by a path that holds a slash, the 404s (an unknown skill, an unknown
+  path, a path outside the folder, a deleted skill), the 400s (a malformed id, a body that names
+  no field), the `enabled` switch, a delete that takes the snapshot, and then the resolution:
+  the user's own `enabled` with no mode, a mode (saved through the real route) turning one off
+  and another on, a map entry naming a skill that is gone ignored rather than refused, and the
+  answer carrying a skill's metadata and never a file's content. `isolation.test.ts` and
+  `auth.test.ts` walk the routes too.
 - `tool-settings.test.ts` (epic #303, X4; #307) — the per-user tool settings over HTTP, with a
   registry of the test's own: the effective list under the declared defaults, a declared `ask`
   reported rather than assumed `allow`, a stored setting for a tool the process does not
