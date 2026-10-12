@@ -41,6 +41,7 @@ import { ProviderSetup } from '../components/provider-setup'
 import { formatCostTotal } from '../components/reply-meta'
 import { InputRule, modelLabel, modelPriceLookup, StatusLine } from '../components/status-line'
 import { TodoPanel } from '../components/todo-panel'
+import { ToolSettingsScreen } from '../components/tool-settings'
 import { ToolNoticesView } from '../components/tool-notices'
 import { lastDrawn, TranscriptView } from '../components/transcript-view'
 import { TruncationNotice } from '../components/truncation-notice'
@@ -496,6 +497,29 @@ export function ChatScreen({
   }, [client, context, openUrl, request])
 
   /**
+   * Open this build's tools in the prompt slot — `/tools` (epic #303, X4; #335).
+   *
+   * The counterpart of the web app's Settings → Tools, and the in-chat answer to "there is no
+   * way to set ask/deny/allow for the built-in tools": one row per tool with its on/off and its
+   * permission, ←/→ cycling the permission and space toggling the tool, each change one
+   * `PUT /v1/me/tools`. The model is handed over so the server reports availability against the
+   * chat's own model (`?model_id=`) — `web_search` on a model whose provider has none says so
+   * rather than drawing a dead switch (#335).
+   */
+  const openToolSettings = useCallback((): void => {
+    void request<void>((settle) => (
+      <ToolSettingsScreen
+        client={client}
+        context={context}
+        modelId={currentModelOf(session)}
+        onDone={() => {
+          settle()
+        }}
+      />
+    ))
+  }, [client, context, request, session])
+
+  /**
    * Reconnect the server a turn's `mcp_*` failure named (epic #303, X10; #313).
    *
    * The log carries the server's **name** and nothing else — an error says a server failed, not
@@ -600,6 +624,7 @@ export function ChatScreen({
       newChat: onNewChat,
       setupProviders: openProviders,
       openMcpServers,
+      openToolSettings,
       compact: (instructions) => void session.compact(instructions),
       clearScreen: clear,
       exit: onExit,

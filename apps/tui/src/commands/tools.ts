@@ -1,4 +1,9 @@
-import { mcpToolPolicyBody, type Client } from '@openharness/client'
+import {
+  mcpToolPolicyBody,
+  toolAvailabilityNote,
+  toolPolicyNote,
+  type Client,
+} from '@openharness/client'
 import type { ToolPermission, ToolSettingEntry } from '@openharness/protocol'
 
 import type { ToolsPatch } from '../args'
@@ -16,6 +21,9 @@ import { reportFailure, type CommandIo } from './io'
  * A tool this deployment does not register is printed rather than hidden, with `not available`
  * beside it: it is never offered to a model whatever the switch says, and a reader who wonders
  * why their search does nothing has the answer on this line.
+ *
+ * The same settings are in a chat, as `/tools` (#335), and this listing says so: a reader who
+ * ran this to change one thing should not have to leave the conversation to change the next.
  *
  * **The listing is this build's own tools and nothing else** (#313). A remote MCP tool belongs to
  * a server — no on/off of its own, and a permission set per server on `/mcp`'s tools face — so
@@ -108,6 +116,11 @@ export function formatTools(entries: readonly ToolSettingEntry[]): string[] {
       `${remote === 1 ? '1 tool comes' : `${remote} tools come`} from MCP servers; their permissions are set per server with \`/mcp\`.`,
     )
   }
+  // The in-chat counterpart, named where a reader of this listing is already looking (#335):
+  // the same settings, without leaving the conversation.
+  if (builtin.length > 0) {
+    lines.push('In a chat, `/tools` sets these without leaving it.')
+  }
   return lines
 }
 
@@ -116,14 +129,10 @@ function builtinLines(entries: readonly ToolSettingEntry[]): string[] {
   const width = Math.max(...entries.map((entry) => entry.name.length))
   return entries.map((entry) => {
     const state = entry.enabled ? 'on ' : 'off'
-    const availability = entry.available ? '' : ' · not available on this server'
-    const policy =
-      entry.policy === entry.default_policy
-        ? `${entry.policy} (default)`
-        : entry.default_policy === null
-          ? entry.policy
-          : `${entry.policy} (default ${entry.default_policy})`
-    return `${entry.name.padEnd(width)}  ${state}  ${policy}${availability}`
+    const availability = toolAvailabilityNote(entry)
+    return `${entry.name.padEnd(width)}  ${state}  ${toolPolicyNote(entry)}${
+      availability === null ? '' : ` · ${availability}`
+    }`
   })
 }
 
