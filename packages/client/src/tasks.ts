@@ -1,4 +1,12 @@
-import { EVENT_TYPES, toolCallInput, toolCallOfferedName } from '@openharness/protocol'
+import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
+  EVENT_TYPES,
+  TASK_WAIT_TOOL_NAME,
+  toolCallInput,
+  toolCallOfferedName,
+} from '@openharness/protocol'
 import type {
   DeepReadonly,
   SessionId,
@@ -129,11 +137,17 @@ export interface TaskCard {
  * A card draws where the `agent` call is, an `agent_message` draws as a line of its own
  * inside it, and `agent_wait` / `agent_stop` are the reader's own affordances rather than
  * something the model did worth a line — so none of the four is drawn as an ordinary tool call
- * (S9). Spelled here because two packages have to agree on them and this one may not depend on
- * `@openharness/hands`, which registers them; they are part of the wire the log records, like
- * `tools.ts`'s `web_fetch`.
+ * (S9). The names are the protocol's own (#344 spells them once for the deployment that offers
+ * them, the brain that answers them and the frontends that draw the card), gathered here so a
+ * frontend does not have to list them again; `message_parent` is deliberately **not** one of
+ * them, because it is a **child's** tool and never appears in the parent's log.
  */
-export const TASK_TOOL_NAMES = ['agent', 'agent_message', 'agent_wait', 'agent_stop'] as const
+export const TASK_TOOL_NAMES = [
+  AGENT_TOOL_NAME,
+  AGENT_MESSAGE_TOOL_NAME,
+  TASK_WAIT_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+] as const
 
 /**
  * Whether a tool call is one of the task machinery's own (epic #340, S9).
@@ -201,9 +215,9 @@ export function tasksFromEvents(events: Iterable<StoredEvent>): readonly TaskCar
     if (event.type === EVENT_TYPES.agentToolUse) {
       const name = toolCallOfferedName(event)
       const input = toolCallInput(event)
-      if (name === TASK_AGENT_TOOL) {
+      if (name === AGENT_TOOL_NAME) {
         calls.push({ seq: event.seq, description: stringField(input, 'description') })
-      } else if (name === TASK_MESSAGE_TOOL) {
+      } else if (name === AGENT_MESSAGE_TOOL_NAME) {
         const taskId = stringField(input, 'task_id')
         const text = stringField(input, 'text')
         const builder = taskId === null ? undefined : builders.get(taskId)
@@ -265,12 +279,6 @@ export function tasksFromEvents(events: Iterable<StoredEvent>): readonly TaskCar
     }))
     .sort((left, right) => left.position - right.position)
 }
-
-/** The tool that starts a task — the card's own call (epic #340, S5). */
-const TASK_AGENT_TOOL = 'agent'
-
-/** The tool that says something to a task: a line of its own in the card (epic #340, S5). */
-const TASK_MESSAGE_TOOL = 'agent_message'
 
 /** The `agent` call a `session.task_started` has not claimed yet. */
 interface AgentCall {
