@@ -73,8 +73,21 @@ agent's name. That happens once. A title passed to `POST /v1/sessions`, and one 
 message produced, is never overwritten; a session created with `initial_events` is named the
 same way, in the same request.
 
+A session is **interactive** unless the request asks for one that is not (`interactive: false`):
+a non-interactive session's model cannot stop to ask the user anything — `ask_user` is never
+offered to it, and a call whose effective policy is `ask` is answered at once with an error
+instead of pausing the turn — while a person may still send it messages and interrupt it. It is
+set at creation and never changes (epic #340, S1). A session may also **belong to another one**
+(epic #340, S3): the fields that place it in that tree (`parent_session_id`, `parent_task_id`,
+`root_session_id`, `depth`) are read-only and the server's alone to write — only a tool a chat
+runs creates a child (#344) — and `GET /v1/sessions` lists the caller's top-level chats, with
+`?parent_session_id=` answering one session's children.
+
 **Deleting a session.** `DELETE /v1/sessions/{session_id}` answers `204` and takes the session
-and its whole log with it — events, claims, supersessions, everything keyed by it. It is
+and its whole log with it — events, claims, supersessions, everything keyed by it — **and its
+descendants**: a child belongs to its parent, so one delete removes the whole subtree (epic
+#340, S7), stopping each descendant's turn first and ending each one's streams with its own
+final `session.deleted`. It is
 irreversible and owner-scoped: another user's session answers `404`, exactly as it does
 everywhere else. A running turn is stopped first, so nothing keeps writing to a log that is
 gone, and every open stream for the session receives one final `session.deleted` frame and
@@ -102,10 +115,10 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/agents`                                    | list agents, oldest first                                                                                                                 |
 | `GET`    | `/v1/agents/{agent_id}`                         | read one agent                                                                                                                            |
 | `POST`   | `/v1/agents/{agent_id}`                         | update an agent; sessions already created keep their snapshot                                                                             |
-| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one)                                                                              |
-| `GET`    | `/v1/sessions`                                  | list sessions, newest first (`agent_id` filters)                                                                                          |
+| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one); `interactive` may ask for one that cannot pause (epic #340, S1)             |
+| `GET`    | `/v1/sessions`                                  | list the caller's top-level chats, newest first (`agent_id` and `parent_session_id` filter)                                               |
 | `GET`    | `/v1/sessions/{session_id}`                     | read one session                                                                                                                          |
-| `DELETE` | `/v1/sessions/{session_id}`                     | delete it and its whole log; answers `204` with no body                                                                                   |
+| `DELETE` | `/v1/sessions/{session_id}`                     | delete it, its whole log and its descendants; answers `204` with no body                                                                  |
 | `POST`   | `/v1/sessions/{session_id}/events`              | append user events; the server owns every other event type                                                                                |
 | `GET`    | `/v1/sessions/{session_id}/events`              | read the log, with `types[]`, `after_seq`, `limit` and `page`                                                                             |
 | `GET`    | `/v1/sessions/{session_id}/events/stream`       | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                                                                      |

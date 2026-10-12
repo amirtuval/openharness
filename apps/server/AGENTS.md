@@ -57,10 +57,10 @@ protocol's schemas, so the shapes are not repeated here — see
 | `GET`    | `/v1/agents`                                    | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                            |
 | `GET`    | `/v1/agents/{agent_id}`                         | —                                           | the `Agent`, or 404                                                                                                                                                                                                              |
 | `POST`   | `/v1/agents/{agent_id}`                         | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                                                                                                      |
-| `POST`   | `/v1/sessions`                                  | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used                                                                                     |
-| `GET`    | `/v1/sessions`                                  | `ListSessionsQuerySchema`                   | `{ data, next_page }`                                                                                                                                                                                                            |
+| `POST`   | `/v1/sessions`                                  | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used. Takes `interactive` (epic #340, S1); the tree fields are stripped (#341)           |
+| `GET`    | `/v1/sessions`                                  | `ListSessionsQuerySchema`                   | `{ data, next_page }` — the caller's top-level chats, or `?parent_session_id=` one session's children (epic #340, S3; #341)                                                                                                      |
 | `GET`    | `/v1/sessions/{session_id}`                     | —                                           | the `Session`, or 404                                                                                                                                                                                                            |
-| `DELETE` | `/v1/sessions/{session_id}`                     | —                                           | 204; hard delete (U5); 404 for another owner's or an unknown session                                                                                                                                                             |
+| `DELETE` | `/v1/sessions/{session_id}`                     | —                                           | 204; hard delete (U5) — the session **and its descendants** (epic #340, S7; #341); 404 for another owner's or an unknown session                                                                                                 |
 | `POST`   | `/v1/sessions/{session_id}/events`              | `SendEventsRequestSchema`                   | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) or for a `user.tool_confirmation` naming a call that is not waiting (#309)  |
 | `GET`    | `/v1/sessions/{session_id}/events`              | `ListEventsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                            |
 | `GET`    | `/v1/sessions/{session_id}/events/stream`       | `StreamEventsQuerySchema`                   | the SSE stream; 404 for an unknown session                                                                                                                                                                                       |
@@ -1219,46 +1219,37 @@ and cut to the protocol's `SESSION_TITLE_MAX_LENGTH` with an ellipsis. It is wri
 a title supplied at creation, and one an earlier message produced, is never replaced, and a
 message with no text leaves the title `null`.
 
+### The session tree, and a session that cannot ask (epic #340, S1/S3/S7; #341)
+
+A subagent is a session that belongs to another one, and the server is the only thing that may
+put a session in that tree. Three pieces of it live here; the fields themselves are the
+protocol's and the store's.
+
+- **`POST /v1/sessions` takes `interactive`** (S1), defaulting to `true` — a chat someone is
+  typing into. The tree fields (`parent_session_id`, `parent_task_id`, `root_session_id`,
+  `depth`) are **not** in the request schema, so a body that names one has it stripped like any
+  unknown field: only the server creates a child, which is what keeps a client from placing
+  itself in somebody's tree. A session is created as a child through
+  `SessionStore.createSession`'s `parentSessionId`/`parentTaskId` — the seam #344's `agent` tool
+  uses — and the store derives the root and the depth from the parent it reads owner-scoped.
+- **`GET /v1/sessions` answers the caller's top-level chats** (S3): a child is not a chat of its
+  own, so the route always passes a `parentSessionId` — `query.parent_session_id ?? null` — and
+  `null` is the store's "no parent". `?parent_session_id=<sesn_…>` answers that session's
+  children instead, owner-scoped like every other narrowing, so another user's parent id is an
+  empty page rather than a 404 or somebody else's children.
+- **`DELETE /v1/sessions/{id}` takes the subtree** (S7): the route stops the session's own turn
+  first — so the turn that could still start a child is over — then every descendant's
+  (`store.listDescendants`, each through `scheduler.stopSession`, which on another instance is
+  a partition signal), and only then deletes. The store's delete removes the whole subtree in
+  one transaction and announces `session.deleted` on each session's channel, so a stream
+  following a child ends the way one following the parent does.
+
+Nothing else about a child is special: it is a real session with its own log, model and mode,
+its own turn, its own usage and its own streams, and `GET /v1/sessions/{id}`, the events routes
+and the usage route all work on one exactly as they work on a top-level chat. What a child does
+_not_ get is the parent's history: its first `user.message` is the prompt its parent wrote.
+
 ### Model-first sessions (#94)
-
-Chatting does not require an agent (epic #92). `POST /v1/sessions` takes an agent, an inline
-`model`, or both — the protocol's `CreateSessionRequestSchema` refinement refuses a request
-naming neither, and the server answers it as the 400 `invalid_request_error` it is. What the
-session _stores_ is its effective configuration, `model` and `system`, always: with an agent
-those are the agent's, copied at creation (the snapshot stays in `agent`, whose four fields are
-the agent's own values), and an inline `model`/`system` overrides either field. Without an
-agent, `agent` is `null`, `model` is required and `system` defaults to `null` — and `routes/sessions.ts`
-checks the inline id has the router's `provider/model` shape, at least two non-empty
-slash-separated parts, or the request is a 400. It is a shape check, not a catalogue lookup:
-the router accepts models the catalog does not know yet (C5).
-
-The route passes the request's `model`/`system` into `SessionStore.createSession`'s options
-(#93), and `effectiveSessionConfig` — shared by both stores — is the one place the merge
-happens. **Creating a session never calls a provider and never needs a stored credential**: it
-is a store write, so a key the owner lacks is not learned here. The turn is where it surfaces
-— the brain reads `session.model` for the request and the owner's credential for its provider,
-and a session whose owner has no key for it ends with the brain's `missing_provider_credential`
-`session.error`, exactly as before. The AI SDK adapter and the title fallback (`titles.ts`
-derives from the first message, whatever the session was created from) do not read the agent,
-so both already work with `agent: null`.
-
-A model can also be switched mid-chat (epic #116, U3): a `user.message` carrying `model`
-projects onto `sessions.model` in the append transaction (#111), and the brain resolves the
-session's **current** model at every request boundary, so the switch — a different provider
-included — applies from the next message. `POST …/events` and the `initial_events` of
-`POST /v1/sessions` check that id's `provider/model` shape (`model-id.ts`) and answer 400
-otherwise; the check is shared with the session's inline model.
-
-A **`reasoning_effort`** rides the same message the same way (#252): `low`, `medium` or `high`,
-or `null` for the provider's default again. The server stores it exactly as sent — on
-`POST …/events` and on the `initial_events` of creation alike — and the brain reads the newest
-one out of the log at each request boundary and records what a request was asked for and what it
-ran with on its span. The field needs no route-level check the way a model id does: it is an
-enum, so the protocol's schema is what refuses a level it does not have, with the 400 the route
-gives every bad body. How each provider is asked, and the clamp its own knob needs, is the
-brain's (`packages/brain/src/reasoning.ts`); which models take an effort at all is this server's,
-from the same models.dev registry the context budget reads — see "The reasoning effort, per
-model".
 
 ## Preferences and the automatic default (U1/U4)
 
@@ -2136,10 +2127,18 @@ parallel with each other.
   message queued behind an interrupt, recovery on start (a dead turn finished, a queued message
   nobody signalled, and — #309 — a pause resumed from a confirmation the recovery scan found
   with no signal sent), concurrency, stopping, and the fence reaching the store.
+- `session-tree.test.ts` (epic #340, S1/S3; #341) — the tree at the API: a chat is interactive
+  unless the create body asks for `false` (and a non-boolean is a 400), the tree fields a
+  client sends are stripped so the session is a top-level chat of its own, the list answers the
+  top-level chats by default and one session's children on request (a childless session an
+  empty page, a non-session parent id a 400, another user's parent id an empty page, the agent
+  filter still narrowing inside the parent one), a child reads back with its parent, root and
+  depth, and a person may still message and interrupt a non-interactive chat.
 - `session-delete.test.ts` — U5: the 204 and the whole-log cascade (every read of the
   session throws or 404s), the 404 for another user and for an unknown id, a 400 for a
   malformed one, a running turn stopped with nothing appended after the delete resolved and
-  no second request, `SessionRunner.stopSession` keeping a queued message from starting
+  no second request, the cascade over three levels with the middle level's turn running (the
+  whole subtree gone, nothing written after), `SessionRunner.stopSession` keeping a queued message from starting
   another turn, the noop a pass for a deleted session answers (and the `SessionNotFoundError`
   `runTurn` itself throws), a late signal for a deleted session not disturbing the scheduler,
   the final `session.deleted` an open SSE stream receives before it closes, and the AI SDK
