@@ -372,27 +372,67 @@ function providerError(statusCode: number, message: string): Error {
   return Object.assign(new Error(message), { statusCode })
 }
 
+/**
+ * The opening of the task-list reminder the brain appends after the history (#331).
+ *
+ * The mock has to know it because the reminder is a *user* message and it rides **after**
+ * everything else, so a request in a chat that has a task list ends with it rather than with what
+ * the test wrote. Without this the markers below would stop matching the moment a `__todos__`
+ * turn had run — the echo would answer its own reminder — and a tool step's follow-up request
+ * would not be recognised as one. The sentence is `todoBlockText`'s in
+ * `@openharness/brain`'s `context.ts`, restated here because that module does not export it.
+ */
+const TODO_REMINDER_OPENING =
+  'Your current todo list (keep it up to date with todo_write as you work):'
+
+/** Whether a message is that reminder. */
+export function isTodoReminder(text: string): boolean {
+  return text.startsWith(TODO_REMINDER_OPENING)
+}
+
+/** The text of a provider-level prompt message. */
+function messageText(message: PromptMessage): string {
+  if (typeof message.content === 'string') {
+    return message.content
+  }
+  return message.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join('')
+}
+
+/**
+ * The index of the prompt's last message that is not a trailing reminder — the message a request
+ * really ends on, from the mock's point of view.
+ */
+function lastMeaningfulIndex(prompt: readonly PromptMessage[]): number {
+  let index = prompt.length - 1
+  while (index >= 0) {
+    const message = prompt[index]
+    if (message === undefined || message.role !== 'user' || !isTodoReminder(messageText(message))) {
+      break
+    }
+    index -= 1
+  }
+  return index
+}
+
 /** The text of the last user message of a provider-level prompt, or `''` when there is none. */
 function lastUserText(prompt: readonly PromptMessage[]): string {
-  for (let index = prompt.length - 1; index >= 0; index -= 1) {
+  for (let index = lastMeaningfulIndex(prompt); index >= 0; index -= 1) {
     const message = prompt[index]
     if (message === undefined || message.role !== 'user') {
       continue
     }
-    if (typeof message.content === 'string') {
-      return message.content
-    }
-    return message.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join('')
+    return messageText(message)
   }
   return ''
 }
 
 /**
- * Whether the prompt's last message is a tool result — the shape of the request that follows a
- * tool step, and the only one the mock answers with what the tool said.
+ * Whether the prompt ends in a tool result — the shape of the request that follows a tool step,
+ * and the only one the mock answers with what the tool said. A reminder the brain appended after
+ * that result does not change the answer (#331).
  */
 function endsWithToolResult(prompt: readonly PromptMessage[]): boolean {
-  const last = prompt[prompt.length - 1]
+  const last = prompt[lastMeaningfulIndex(prompt)]
   return last !== undefined && last.role === 'tool'
 }
 

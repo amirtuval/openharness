@@ -54,7 +54,7 @@ import {
 /** Run one whole turn of a session through the mock model. */
 async function runTurn(
   text: string,
-  options: { retry?: RetryPolicy; tools?: boolean } = {},
+  options: { retry?: RetryPolicy; tools?: boolean; followUp?: string } = {},
 ): Promise<{ history: Awaited<ReturnType<typeof readHistory>>; previews: StreamEvent[] }> {
   const store = new InMemorySessionStore()
   const config = testConfig({})
@@ -93,6 +93,16 @@ async function runTurn(
   ])
   scheduler.signal(session.id, 'work')
   await waitForIdle(store, session.id, 30_000)
+  if (options.followUp !== undefined) {
+    // A second turn in the same chat: what a marker has to survive once the first one left
+    // something in the log (a task list, most of all — the brain's reminder then rides after the
+    // history of every later request, #331).
+    await store.appendEvents(session.id, [
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: options.followUp }] },
+    ])
+    scheduler.signal(session.id, 'work')
+    await waitForIdle(store, session.id, 30_000)
+  }
   const history = await readHistory(store, session.id)
   await scheduler.stop()
   return { history, previews }
@@ -183,6 +193,18 @@ describe('the echo', () => {
     expect(history.filter((event) => event.type === EVENT_TYPES.modelRequestStart)).toHaveLength(2)
     expect(replies(history).join('\n')).toContain('[x] step 1')
     expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+  })
+
+  it('still answers a marker once the chat has a task list (#331: the reminder rides last)', async () => {
+    const { history } = await runTurn(`${MOCK_TODO_MARKER} 3`, {
+      tools: true,
+      followUp: `${MOCK_TODO_MARKER} 6`,
+    })
+
+    // The reminder the brain appends after the history is a user message, so a request in a chat
+    // that has a list ends with it rather than with what the test wrote. The second marker still
+    // reaches the model — the list is the six the second turn wrote.
+    expect(readTodoList(history)).toHaveLength(6)
   })
 
   it('answers a bare __todos__ with the default list, and never an unbounded one', async () => {

@@ -1591,7 +1591,11 @@ the only thing that constructs it, and it only does so when the variable says `m
 | `__todos__ [n]`      | calls `todo_write` with `n` items (three when it is not said), so a chat's task list can be driven through the whole server (#305; the terminal's pinned list, #308) |
 
 A marker matches the _start_ of the message, so `__slow__ tell me something` still streams
-slowly. Usage is fixed (`MOCK_MODEL_USAGE`: 42 input, 17 output, no cache) so a test can assert
+slowly. The message a marker is matched against is the newest one that is not the brain's own
+task-list reminder (#331): the reminder is a `user` message appended **after** the history, so
+without that rule every marker would stop matching the moment a `__todos__` turn had run — the
+mock would answer its own reminder — and a tool step's follow-up request would not be recognised
+either. Usage is fixed (`MOCK_MODEL_USAGE`: 42 input, 17 output, no cache) so a test can assert
 the exact numbers a `span.model_request_end` carries. The retry marker counts attempts per
 prompt, which is what lets it fail once and succeed on the retry inside one turn.
 
@@ -2331,7 +2335,8 @@ session` remembered for the chat and `remember: always` written to the user's se
   two tool turns in one chat work. `__todos__` (#305; the terminal's pinned list: #308) calls
   `todo_write` with the list `todoInputOf` builds — three items by default, as many as the
   prompt's `n` asks for, capped at fifty and deterministic in state per position, so a test can
-  assert a frame without a fixture of its own.
+  assert a frame without a fixture of its own. It is also what pins the reminder rule above: a
+  second `__todos__` message in a chat that already has a list still reaches the model.
 - `catalog/reasoning-support.test.ts` (#252) — the reasoning gate on its own: a reasoning model's
   levels narrowed to ours, a model whose own levels leave out one of ours, a non-reasoning
   model, a reasoning model with a token-budget knob, and an effort vocabulary sharing nothing
