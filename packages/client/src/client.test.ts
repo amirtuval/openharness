@@ -110,6 +110,19 @@ describe('request building', () => {
     expect(query.get('page')).toBe(cursor)
   })
 
+  it('sends the sessions list’s parent filter, which is what asks for a session’s children', async () => {
+    const { client, mock } = clientWith(() => jsonResponse({ data: [], next_page: null }))
+
+    const parent = makeSession()
+    await client.sessions.list({ parent_session_id: parent.id })
+
+    // The filter is a documented query parameter of the protocol (epic #340, S3), and this is
+    // the only thing that puts it on the wire: a list that dropped it would answer the
+    // caller's chats while a caller believed it had asked for one chat's children.
+    const query = new URL(mock.urlOf(0)).searchParams
+    expect(query.get('parent_session_id')).toBe(parent.id)
+  })
+
   it('spells array query parameters the way the protocol documents', async () => {
     const { client, mock } = clientWith(() => jsonResponse({ data: [], next_page: null }))
 

@@ -111,6 +111,23 @@ export interface SessionsTable {
   agent_name: string | null
   agent_model_id: string | null
   agent_system: string | null
+  /**
+   * Whether a person is on the other end (epic #340, S1): written once from the creation
+   * request and never updated, like `owner_id`. `false` is a session whose model cannot stop
+   * to ask anything — `ask_user` is never offered to it and an `ask` call is answered at once.
+   */
+  interactive: boolean
+  /** The session this one belongs to (#340, S3), or `null` for a top-level chat. */
+  parent_session_id: string | null
+  /** The `task_` id the parent started this session for (#340, S3/S4), or `null`. */
+  parent_task_id: string | null
+  /**
+   * The top-level chat the whole tree hangs off (#340, S3) — the session's own id when it is
+   * that chat, which the `0032` migration backfills for every session created before it.
+   */
+  root_session_id: string
+  /** `0` for a top-level chat, one more than the parent's for a child (#340, S3). */
+  depth: number
   created_at: Date
   updated_at: Date
 }
@@ -556,6 +573,13 @@ export function sessionFromRow(row: SessionRow): Session {
     system: row.system,
     mode: row.mode as Session['mode'],
     agent: sessionAgentFromRow(row),
+    interactive: row.interactive,
+    // A `null` column is a top-level chat, so the tree fields read as the protocol's own
+    // "no parent" rather than as an id nothing has (#340, S3).
+    parent_session_id: row.parent_session_id as Session['parent_session_id'],
+    parent_task_id: row.parent_task_id as Session['parent_task_id'],
+    root_session_id: row.root_session_id as Session['root_session_id'],
+    depth: row.depth,
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),
   }

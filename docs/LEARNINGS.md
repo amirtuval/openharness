@@ -160,6 +160,23 @@ never overwritten. There is no `session.updated` event, so a loaded client is ne
 changed and has to re-read — the reason the web app does exactly one re-read per session instead
 of polling ([#29](https://github.com/amirtuval/openharness/issues/29)).
 
+**A session tree is not answerable by a root column: a subtree needs recursion, and "what is
+live" needs the log rather than the status projection.** `root_session_id` makes "every
+descendant of a root" one indexed query, but it cannot answer "every descendant of _this_
+session" — the branch under a middle child — so `listDescendants` is a `with recursive` walk over
+`parent_session_id` in Postgres and a level-by-level filter in the fake, and the two have to agree
+on the order (level by level, `(created_at, id)` inside a level) or the conformance suite fails.
+The delete cascade uses the same walk, and it has to stop **every** descendant's turn before the
+rows go, which is why the server reads the subtree before deleting rather than letting a foreign
+key do it: a cascade would remove rows behind `deleteSession`'s owner check and end nobody's
+stream. And the cap query (epic #340, S6) counts a descendant as live while its turn is **not
+finished** — a turn open, work queued for a turn that has not started, or a last turn paused on
+the user — which the `sessions.status` projection cannot say: it is `running` or `idle`, and a
+paused child and a just-created one both read `idle`. The predicates are the log-derived ones
+`findSessionsNeedingWork` already used, one query over the subtree instead of a partition scan
+([#341](https://github.com/amirtuval/openharness/issues/341),
+[`packages/session/src/postgres/store.ts`](../packages/session/src/postgres/store.ts)).
+
 ## Scheduling, leases and crash recovery
 
 **A lease lapse is stealable, not lost.** `expires_at` exists so _another_ instance can take the
@@ -345,6 +362,19 @@ a channel name is a 63-byte identifier (`ohs_` plus 32 hex of the session id's S
 `event_supersessions` carry no foreign keys, because test harnesses truncate `events` in one
 statement and Postgres refuses to truncate a table an FK points at. And row triggers do not fire on
 `TRUNCATE`, so a truncating test cannot prove the revocation path.
+
+**A migration that makes a column `not null` breaks the test that writes a row the old way, so
+the backfill needs a test of its own.** `0015_session_model.sql`'s row-written-pre-#93 test
+inserts a legacy row and then re-runs `migrate()` over it — which only works because that test
+drops the new `not null` first. `0032_session_tree.sql` adds `root_session_id` the same way, and
+the same test had to **name the column in its insert**, because by then the schema is migrated and
+the insert is refused without it: the row is a pre-#93 one in a modern schema, not a pre-#340 one.
+The backfill therefore earned its own test — drop the `not null`, insert, assert the null, run
+`migrate()`, assert the session reads as its own root, interactive, at depth 0 — which is the only
+shape that proves the `update … where root_session_id is null` runs, and what keeps the file
+idempotent for a re-run over a real database
+([#341](https://github.com/amirtuval/openharness/issues/341),
+[`packages/session/migrations/0032_session_tree.sql`](../packages/session/migrations/0032_session_tree.sql)).
 
 **Two conventions for "the default" live side by side, and a count-then-insert is not made atomic
 by a transaction.** A stored value that could equal the default must be NULL
@@ -840,6 +870,23 @@ the news is the call's result, framed with the task it actually came from, and t
 wait again. The alternative — news sitting in the log until the deadline — is the failure the
 whole mechanism exists to prevent ([#343](https://github.com/amirtuval/openharness/issues/343),
 [`packages/brain/src/tasks.ts`](../packages/brain/src/tasks.ts)).
+
+**A turn that cannot ask is decided where the pause is decided, and the tool has to be gone
+before the model sees it.** "Never offered `ask_user`" is not the same as "its `ask_user` call
+is refused": a tool the request does not carry is one the model cannot see or call, so the
+child's question never becomes a pause nobody will answer, and the span's record of the offer
+says the same thing the request did. `withoutAskUser` therefore filters the **registry the whole
+turn works from** — the offer, the recorded offer and the registry a call is run through, in one
+place — rather than the tool list, which is what makes a hallucinated call read as one naming no
+tool, exactly like any other call to something the request was not built with. The second half is
+the `ask` policy: it is answered at once (epic #340, S1) but **stored with
+`evaluated_permission: ask`**, because that is the decision the call was really made under — a
+reader that saw `deny` there could not tell a policy the user chose from a system that decided
+for them — and the answer's sentence names the reason rather than the tool, since it applies to
+every `ask` call and a user's fix is to set the policy to `allow`
+([#341](https://github.com/amirtuval/openharness/issues/341),
+[`packages/brain/src/tools.ts`](../packages/brain/src/tools.ts)).
+
 
 ## Provider-opaque content and reasoning
 

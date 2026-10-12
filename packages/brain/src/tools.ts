@@ -160,6 +160,35 @@ export function toolsFor(
 }
 
 /**
+ * The registry a **non-interactive** session's turn works from (epic #340, S1): the same
+ * registry with `ask_user` taken out, or the registry unchanged when the session is
+ * interactive.
+ *
+ * A session whose model cannot stop to ask a person anything is never *offered* the question
+ * tool — that is the decision, not "offer it and refuse the call": a tool the request does not
+ * carry is one the model cannot see, which is exactly what `claude -p` does and what keeps a
+ * child session's turns from turning into questions nobody will answer. Removing it from the
+ * registry the turn works from covers all three places the tool could otherwise appear: the
+ * request's offer, the `tools` a `span.model_request_start` records, and the registry a call is
+ * run through — so a model that asked anyway is answered as a call naming no tool, because the
+ * tool really is not in the registry that step was handed.
+ *
+ * A registry that does not hold `ask_user` (a host that registered none, a user who turned it
+ * off) comes back as itself, so an interactive and a non-interactive chat build identical
+ * requests wherever the question tool was never on the table.
+ */
+export function withoutAskUser(
+  registry: ToolRegistry | undefined,
+  interactive: boolean,
+): ToolRegistry | undefined {
+  if (interactive || registry === undefined || registry.get(ASK_USER_TOOL_NAME) === undefined) {
+    return registry
+  }
+  const tools = registry.tools.filter((tool) => tool.name !== ASK_USER_TOOL_NAME)
+  return tools.length === 0 ? undefined : createToolRegistry(tools)
+}
+
+/**
  * The registry with the tools a user has turned off left out, or `undefined` when that leaves
  * none (epic #303, X4; #307).
  *
@@ -262,6 +291,17 @@ export interface ToolStepOptions {
    * confirmation event is the record; a name here is offered and run without asking again.
    */
   readonly approved?: ReadonlySet<string>
+  /**
+   * Whether a person is on the other end (epic #340, S1); omitted, `true`.
+   *
+   * A non-interactive session's model cannot stop to ask the user anything, so a call whose
+   * effective policy is `ask` is **denied at once** rather than pausing the turn: it is stored
+   * with `evaluated_permission: ask` — the decision it was really made under, which a reader
+   * still needs — and answered with an `is_error` result saying what a non-interactive run
+   * cannot do, so the model learns why and acts on it. Nothing pauses, and the turn goes on.
+   * The user's way to let such a tool run is to set its policy to `allow` (#307).
+   */
+  readonly interactive?: boolean
   /** The per-user values the host resolved for this turn (X4). */
   readonly secrets?: Readonly<Record<string, string>>
   /** The turn's signal: an aborted call is answered as interrupted. */
@@ -306,6 +346,7 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
   if (calls.length === 0) {
     return
   }
+  const interactive = options.interactive !== false
   const approved = options.approved ?? new Set<string>()
   // The decision per call, resolved from the settings, the tool's own declaration and the
   // approvals this chat already has, before anything is stored — so each call's event records
@@ -333,11 +374,20 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
       const decision = decisions[index] ?? { permission: 'deny' as const, waiting: false }
       const input = inputs[index] ?? {}
       if (decision.waiting) {
-        // The call is the user's to answer (#309) or a background task's to resolve (#340, S5):
-        // nothing runs, and no result is written — the turn ends `requires_action` or
-        // `waiting_on_tasks`, and the turn that follows answers it. The one exception is a call
-        // nothing could honour — an `ask_user` question or an `agent_wait` whose arguments the
-        // protocol refuses — where the model is told what was wrong with it and asks again,
+        // A non-interactive session never pauses **on the user** (epic #340, S1): there is
+        // nobody to ask, so an `ask` policy is a refusal the model is told about at once — the
+        // call keeps the permission it was evaluated under, and the turn carries on with the
+        // answer beside it. A **task wait** is not that kind of pause and is left alone (#343):
+        // what resolves it is a notification or a clock, neither of which needs a reader.
+        const waitForTasks = waitsForTasks(registry.get(call.name) !== undefined, call.name)
+        if (interactive === false && !waitForTasks) {
+          return errorResult(NON_INTERACTIVE_REFUSAL)
+        }
+        // Otherwise the call is the user's to answer (#309) or a background task's to resolve
+        // (#340, S5): nothing runs, and no result is written — the turn ends `requires_action`
+        // or `waiting_on_tasks`, and the turn that follows answers it. The one exception is a
+        // call nothing could honour — an `ask_user` question or an `agent_wait` whose arguments
+        // the protocol refuses — where the model is told what was wrong with it and asks again,
         // rather than the turn pausing on something no client or no clock could resolve.
         const problem =
           malformedQuestion({ name: call.name, input }) ??
@@ -519,6 +569,18 @@ function decisionFor(
 function refusal(name: string): string {
   return `Permission to use ${name} has been denied.`
 }
+
+/**
+ * What a call evaluated as `ask` is answered with in a non-interactive session (epic #340, S1).
+ *
+ * The sentence names the reason rather than the tool, because it is not this tool the run
+ * cannot honour — it is every call whose policy is `ask` — and it says what would change the
+ * answer, which is a policy the user can set (#307). It is a refusal, so `is_error` and the
+ * call's recorded `evaluated_permission: ask` are what a reader sees: the log says the call
+ * was one the settings ask about, and the answer says why nothing ran.
+ */
+export const NON_INTERACTIVE_REFUSAL =
+  "This tool needs the user's approval, which a non-interactive run cannot ask for."
 
 /**
  * Whether a call is handed to the registry — which is what runs it, or answers that nothing of

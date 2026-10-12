@@ -6,15 +6,15 @@ import { z } from 'zod'
  * Every id is `<prefix><ULID>`, using the same prefixes as Anthropic's Managed Agents API —
  * `agent_` for agents, `sesn_` for sessions and `sevt_` for stored session events — plus
  * `pcred_` for provider credentials, `mode_` for modes, `mcps_` for remote MCP servers and
- * `task_` for background tasks
- * (openharness extensions; Anthropic has none of the four). A ULID is 26 Crockford base32 characters: a 48-bit millisecond
+ * `task_` for the background tasks a chat starts (openharness extensions; Anthropic has none
+ * of the four). A ULID is 26 Crockford base32 characters: a 48-bit millisecond
  * timestamp followed by 80 random bits, so ids sort by creation time and are globally unique
  * without coordination.
  *
  * The ids this module produces are also **branded** at the type level
  * ({@link AgentId}, {@link SessionId}, {@link EventId}, {@link ProviderCredentialId},
- * {@link ModeId}, {@link McpServerId}, {@link TaskId}), so a session id cannot be passed where an event id is
- * expected.
+ * {@link ModeId}, {@link McpServerId}, {@link TaskId}), so a session id cannot be passed where
+ * an event id is expected.
  */
 
 /** The id prefixes this protocol uses, keyed by the kind of thing they name. */
@@ -239,7 +239,7 @@ export function newMcpServerId(timestampMs?: number): McpServerId {
   return McpServerIdSchema.parse(generateId('mcpServer', timestampMs))
 }
 
-/** A new `task_` id: one background task a session started (epic #340, S4; #343). */
+/** A new `task_` id: a background task a chat started (epic #340, S4; #343). */
 export function newTaskId(timestampMs?: number): TaskId {
   return TaskIdSchema.parse(generateId('task', timestampMs))
 }
@@ -315,8 +315,11 @@ export const McpServerIdSchema = z
 export type McpServerId = z.infer<typeof McpServerIdSchema>
 
 /**
- * Branded `task_` id. // extension: Anthropic's Managed Agents API has no background tasks, so
- * this prefix is openharness' own (epic #340, S4; #343).
+ * Branded `task_` id. // extension: Anthropic's Managed Agents API has no background-task
+ * resource, so this prefix is openharness' own. A task is what a chat's `agent` call starts
+ * (epic #340, S4): the id `session.task_started` carries, the handle `agent_message` /
+ * `agent_wait` / `agent_stop` name, and the value `Session.parent_task_id` holds on the child
+ * session the task runs.
  */
 export const TaskIdSchema = z
   .string()

@@ -529,9 +529,9 @@ if (target === null) {
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
       // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
       // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql`,
-      // `0027_tool_settings.sql`, `0030_mcp_oauth_state_client.sql` and
-      // `0031_mcp_tool_policies.sql` one or more
-      // `add column if not exists` (#150, #203, #282, #307, #311, #312), and
+      // `0027_tool_settings.sql`, `0030_mcp_oauth_state_client.sql`,
+      // `0031_mcp_tool_policies.sql` and `0032_session_tree.sql` one or more
+      // `add column if not exists` (#150, #203, #282, #307, #311, #312, #340), and
       // `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
       // `0027_tool_settings.sql`, `0028_paused_confirmation_work.sql` and
       // `0029_mcp_servers.sql` build an index or a table (#247, #305, #307, #309, #311): a
@@ -561,6 +561,9 @@ if (target === null) {
       // #312's file adds the remote tool policies to the settings table `0027` created, and is
       // numbered after #311's pair for the same reason they follow `0028`.
       expect(files).toContain('0031_mcp_tool_policies.sql')
+      // #340's file adds the session tree to `sessions`, and is numbered after the tools
+      // stack's tip for the same reason — the numbers have to be unique and ordered.
+      expect(files).toContain('0032_session_tree.sql')
       // `0034_task_notifications.sql` builds the two indexes a background task's notification
       // needs (#343): the partial one the pending read and the work scan use, and the unique one
       // that makes an append idempotent on its `source_key`. Both are exercised below, after the
@@ -582,6 +585,9 @@ if (target === null) {
         files.indexOf('0031_mcp_tool_policies.sql'),
       )
       expect(files.indexOf('0031_mcp_tool_policies.sql')).toBeLessThan(
+        files.indexOf('0032_session_tree.sql'),
+      )
+      expect(files.indexOf('0032_session_tree.sql')).toBeLessThan(
         files.indexOf('0034_task_notifications.sql'),
       )
       expect(await migrate(db)).toEqual(files)
@@ -696,17 +702,20 @@ if (target === null) {
       const legacyId = newSessionId()
 
       // `model` is `not null` since 0015. The migration sets that back; dropping it here is
-      // what a database that predates the column looks like to the insert.
+      // what a database that predates the column looks like to the insert. `root_session_id`
+      // is written because the column exists by now (`0032`) and is `not null`: this row is a
+      // pre-#93 one in a migrated schema, not a pre-#340 row — the migration's own backfill
+      // has a test of its own below.
       await sql`alter table sessions alter column model drop not null`.execute(db)
       await sql`
         insert into sessions (
           id, owner_id, status, partition, title,
           agent_id, agent_name, agent_model_id, agent_system,
-          model, system, created_at, updated_at
+          model, system, root_session_id, created_at, updated_at
         ) values (
           ${legacyId}, ${OWNER_A}, 'idle', ${partitionOf(legacyId)}, ${'Before #93'},
           ${agent.id}, ${agent.name}, ${agent.model.id}, ${agent.system},
-          null, null, ${new Date(START_MS)}, ${new Date(START_MS)}
+          null, null, ${legacyId}, ${new Date(START_MS)}, ${new Date(START_MS)}
         )
       `.execute(db)
 
@@ -729,6 +738,51 @@ if (target === null) {
       })
       // What the store hands out is the protocol's session, exactly — the backfilled row
       // included: no leftover field and nothing missing.
+      expect(SessionSchema.parse(session)).toEqual(session)
+    })
+
+    it('backfills the tree for a session stored before #340, and reads it as a top-level chat', async () => {
+      // Every session in a real database predates the tree: `0032_session_tree.sql` makes it
+      // its own root, interactive and at depth 0, which is what a top-level chat is. This is
+      // that row, written with the tree columns left empty.
+      await truncateAll()
+      await ensureUsers([OWNER_A])
+      const store = track(createPostgresSessionStore({ pool }, { now: () => START_MS }))
+      const agent = await store.createAgent(agentInput(), OWNER_A)
+      const legacyId = newSessionId()
+
+      // `root_session_id` is `not null` since 0032, and the migration sets that back after it
+      // backfills: dropping it here is what a database that predates the column looks like.
+      await sql`alter table sessions alter column root_session_id drop not null`.execute(db)
+      await sql`
+        insert into sessions (
+          id, owner_id, status, partition, title, model, system,
+          created_at, updated_at
+        ) values (
+          ${legacyId}, ${OWNER_A}, 'idle', ${partitionOf(legacyId)}, ${'Before #340'},
+          ${{ id: agent.model.id }}::jsonb, ${agent.system},
+          ${new Date(START_MS)}, ${new Date(START_MS)}
+        )
+      `.execute(db)
+
+      const before = await sql<{ root_session_id: string | null; interactive: boolean }>`
+        select root_session_id, interactive from sessions where id = ${legacyId}
+      `.execute(db)
+      expect(before.rows[0]).toEqual({ root_session_id: null, interactive: true })
+
+      // The runner re-runs every file on every `migrate()` call, so this applies 0032's
+      // backfill to the row above — which is what a deploy of #340 does to a real database.
+      await migrate(db)
+
+      const session = await store.getSession(legacyId, { ownerId: OWNER_A })
+      expect(session).toMatchObject({
+        id: legacyId,
+        interactive: true,
+        parent_session_id: null,
+        parent_task_id: null,
+        root_session_id: legacyId,
+        depth: 0,
+      })
       expect(SessionSchema.parse(session)).toEqual(session)
     })
 

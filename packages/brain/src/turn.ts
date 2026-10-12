@@ -115,6 +115,7 @@ import {
   runToolStep,
   toolSet,
   toolsFor,
+  withoutAskUser,
 } from './tools'
 import type { RetryPolicy } from './retry'
 import { backoffDelay, resolveRetryPolicy } from './retry'
@@ -949,8 +950,12 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
     )
     await reportMcpFailures(mcp.failures)
     // One registry for this request, this build's tools and the remote ones together: everything
-    // downstream is keyed by a tool's name and knows nothing about where it came from.
-    const available = combineTools(options.tools, mcp.registry)
+    // downstream is keyed by a tool's name and knows nothing about where it came from — and, for
+    // a non-interactive session, `ask_user` is not in it at all (epic #340, S1). The session's
+    // own flag decides, because it is fixed at creation: the request is built without the
+    // question tool, the span records an offer without it, and a call to it is answered by the
+    // registry as one naming a tool this step was not handed.
+    const available = withoutAskUser(combineTools(options.tools, mcp.registry), session.interactive)
     // How big the request this boundary is about to make is (K2/K6/X9), measured with the two
     // numbers the strategy's own caps are read against: the chat model's history budget, from the
     // same resolver the engine plans with (#246) — the strategy resolves its budget from the
@@ -1645,6 +1650,9 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         // read back off the log it was written to, so a later call to that tool runs without
         // asking again. It comes from the same read the request was built from.
         approved: sessionApprovedTools(read),
+        // Whether a person is on the other end (epic #340, S1): a call evaluated as `ask` is
+        // denied at once rather than pausing a turn nobody will answer.
+        interactive: session.interactive,
         ...(secrets === undefined ? {} : { secrets }),
         ...(signal === undefined ? {} : { signal }),
         append,
