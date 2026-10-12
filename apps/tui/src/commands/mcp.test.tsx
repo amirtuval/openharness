@@ -194,6 +194,32 @@ describe('the servers screen', () => {
     expect((await fake.mcpServers.list()).data[0]?.name).toBe('wiki')
   })
 
+  it('opens an edit on the values it holds, so Enter keeps the URL and the name (#314)', async () => {
+    const { app, fake } = renderMcp({ mcpServers: [NOTES] })
+    await waitForScreen(app, 'MCP servers')
+
+    // Enter on the row edits it. There is no auth prompt any more — the URL, the name, the
+    // optional header and on/off — and each field opens on what the server already holds, so a
+    // reader changing nothing presses Enter through it.
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Edit notes')
+    await waitForFrame(app, 'URL (the Streamable HTTP endpoint)')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Name (optional')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Custom header name')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Custom header value (optional)')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'On by default for your chats')
+    pressKey(app, 'enter')
+
+    await waitForFrame(app, 'notes')
+    const updated = (await fake.mcpServers.list()).data[0]
+    // The URL and the name it opened on survived, and no auth type or header map was invented.
+    expect(updated).toMatchObject({ name: 'notes', url: NOTES.url, auth: 'oauth' })
+  })
+
   it('refuses a name and a URL the protocol refuses, on the prompt', async () => {
     const { app } = renderMcp()
     await waitForScreen(app, 'MCP servers')

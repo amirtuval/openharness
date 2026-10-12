@@ -451,7 +451,11 @@ class McpServerServiceImpl implements McpServerService {
     const patch: MutableUpdate = {
       ...(body.name === undefined ? {} : { name: body.name }),
       ...(body.url === undefined ? {} : { url: body.url }),
-      ...(body.auth === undefined ? {} : { auth: body.auth }),
+      // The **resolved** auth, not just what the body said (issue #314): a `headers` map implies
+      // `headers`, and a patch that stored the map but left `auth` alone would leave a server
+      // reporting `header_names` it never sends under. Written only when it changes, so a plain
+      // rename does not churn the row.
+      ...(auth === current.auth ? {} : { auth }),
       ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
       // The names a list shows follow the map the server now sends: a replaced map has new
       // names, and a server that is no longer `headers` has none.

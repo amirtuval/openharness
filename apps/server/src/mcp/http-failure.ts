@@ -127,9 +127,15 @@ export function describeMcpFailure(
     return bound(scrub(base, secrets))
   }
   const message = messageOf(error)
-  const reason = message === null ? 'the request failed' : scrub(message, secrets)
-  const trimmed = reason.trim()
-  return bound(trimmed.length === 0 ? 'the request failed' : trimmed)
+  const reason = message === null ? null : scrub(message, secrets)
+  const trimmed = reason?.trim() ?? ''
+  if (trimmed.length === 0) {
+    return 'no response from the MCP server, and no reason was reported'
+  }
+  // With no status there was no HTTP answer at all — a transport failure, or a request the SDK
+  // refused before it was sent — so the reason is introduced rather than left bare: `fetch
+  // failed` on its own does not tell a reader which server it was about.
+  return bound(`no response from the MCP server: ${trimmed}`)
 }
 
 /** An error's message, or `null` when there is nothing readable. */

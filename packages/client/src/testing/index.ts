@@ -1639,7 +1639,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           }),
         )
       }
-      const changedAuth = patch.auth !== undefined && patch.auth !== found.auth
+      // The *resolved* auth: a header map implies headers, so that is a change too (#314).
+      const changedAuth = auth !== found.auth
       if (changedAuth) {
         // Whatever the old auth type carried is gone: a header map for anything that is no
         // longer `headers`, and the tokens for anything whose auth changed at all.

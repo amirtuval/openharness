@@ -1,6 +1,7 @@
 import {
   estimatedTokensLabel,
   mcpAuthLabel,
+  mcpTestOutcome,
   mcpServerTools,
   mcpStatusDetail,
   mcpStatusLabel,
@@ -451,11 +452,13 @@ export function McpServersScreen({
       return
     }
     if (input === 't') {
-      // The check's own answer is what a reader is shown: the status detail the server wrote.
+      // The check's own answer, in the words both frontends use (`mcpTestOutcome`, issue #314):
+      // the tool count when it listed, and — for an `oauth` server with no token, which cannot
+      // be checked at all — "Connect first" rather than the row's own status read back.
       void act(
         current,
         () => client.mcpServers.test(current.id),
-        (checked) => mcpStatusDetail(checked),
+        (checked) => mcpTestOutcome(checked).message,
       )
       return
     }
@@ -506,11 +509,16 @@ export function McpServersScreen({
             {currentField.options === undefined ? (
               <SecretInput
                 // A new prompt is a new input, so a value from the previous field is never
-                // carried into this one.
+                // carried into this one — and an **edit** opens each field on the value it
+                // already holds, so Enter keeps it and only what the reader retypes changes
+                // (issue #314: with no auth prompt, the URL is the one field an edit always
+                // needs, and retyping it to change nothing would be absurd). A secret field is
+                // never prefilled: the value is sealed and never came back.
                 key={`${String(editingServer?.id)}:${currentField.name}:${step}`}
                 placeholder={currentField.secret ? 'paste it' : 'type it'}
                 mask={currentField.secret}
                 optional={currentField.optional}
+                initialValue={currentField.secret ? undefined : values[currentField.name]}
                 busy={busy}
                 onSubmit={(value) => {
                   void answer(value)
