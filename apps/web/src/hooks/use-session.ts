@@ -6,6 +6,7 @@ import {
   type Client,
   type ClearedToolResults,
   type SessionUsage,
+  type TaskCard,
   type TranscriptConfirmation,
   type TranscriptContext,
   type TranscriptError,
@@ -81,6 +82,14 @@ export interface SessionView {
   readonly toolCalls: readonly TranscriptToolCall[]
   /** The task list the model last wrote, or `null` (epic #303, X5; #305; #308). */
   readonly todos: TodoList | null
+  /**
+   * The background tasks this chat ran, in the order their cards draw (epic #340, S9; #346).
+   *
+   * One per `session.task_started` the log holds — the type, the description, the status, what
+   * the parent and the child said to each other and the latest result — each carrying the
+   * `position` of the `agent` call that started it, which is where its card is drawn.
+   */
+  readonly tasks: readonly TaskCard[]
   /** The tool results the newest request shortened, or `[]` (epic #303, X9; #306; #308). */
   readonly truncatedToolResults: readonly TruncatedToolResult[]
   /** The old tool results the newest request cleared, or `null` (epic #303, X9; #306; #308). */
@@ -161,6 +170,24 @@ export interface SessionView {
   readonly compact: (instructions?: string) => Promise<boolean>
   /** Ask the running session to stop. */
   readonly interrupt: () => Promise<void>
+  /**
+   * Stop a background task a chat started, by interrupting the **child** session it runs in
+   * (epic #340, S9; issue #346).
+   *
+   * The reader's own Stop, and the only route there is: `agent_stop` is a tool the *parent model*
+   * calls, and nothing in the API lets a client write a `session.task_status`. So the card's Stop
+   * is the child's `user.interrupt` — which is exactly what a person may do to a non-interactive
+   * session (S1).
+   *
+   * **What the card reads afterwards is `done`, not `stopped`.** A child's interrupted turn ends
+   * like any other turn ends, and the brain's child-turn delivery announces every ended turn as a
+   * `result` notification with `status: idle` (`packages/brain/src/agents.ts`'s
+   * `childTurnDelivery`) — `stopped` is written by `agent_stop` alone. The task really has stopped
+   * (its child is not running), so the card's status is a word off rather than a wrong fact; the
+   * gap is recorded in this issue's PR rather than papered over here, because closing it means a
+   * server-side rule about what an interrupt of a child means.
+   */
+  readonly stopTask: (childSessionId: string) => Promise<void>
   /**
    * Answer calls that are waiting on the reader (epic #303, X6; #309; #310).
    *
@@ -392,6 +419,21 @@ export function useSession(client: Client, sessionId: string): SessionView {
     }
   }, [client, sessionId, serverUrl])
 
+  const stopTask = useCallback(
+    async (childSessionId: string): Promise<void> => {
+      setRequestError(null)
+      try {
+        // The child's own interrupt; see the interface's note on what a card reads afterwards.
+        await client.interrupt(childSessionId)
+      } catch (caught) {
+        if (!noteAuthenticationError(client, caught)) {
+          setRequestError(describeError(caught, { serverUrl }))
+        }
+      }
+    },
+    [client, serverUrl],
+  )
+
   const dismissError = useCallback(() => {
     setRequestError(null)
   }, [])
@@ -406,6 +448,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
     manualCompaction: state.manualCompaction,
     toolCalls: state.toolCalls,
     todos: state.todos,
+    tasks: state.tasks,
     truncatedToolResults: state.truncatedToolResults,
     clearedToolResults: state.clearedToolResults,
     confirmations: state.confirmations,
@@ -423,6 +466,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
     send,
     compact,
     interrupt,
+    stopTask,
     respond,
     dismissError,
   }
