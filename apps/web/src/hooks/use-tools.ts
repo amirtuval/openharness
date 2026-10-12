@@ -1,4 +1,5 @@
-import type { Client } from '@openharness/client'
+import type { Client, McpServerTool } from '@openharness/client'
+import { mcpServerPolicyBody } from '@openharness/client'
 import type {
   BuiltinToolSetting,
   ListToolSettingsResponse,
@@ -42,6 +43,19 @@ export interface ToolsView {
    * the server's, so a built-in write here never disturbs a remote one and the other way round.
    */
   readonly savePolicy: (name: ToolName, policy: ToolPermission) => Promise<SaveToolsResult>
+  /**
+   * Store one permission for **every** tool of a server, in one write (epic #303, #313).
+   *
+   * The batch a server's own control sends: `PUT /v1/me/tools` with the server's whole tool set
+   * in the `mcp` map at the same permission (`mcpServerPolicyBody`), never one write per row. A
+   * server with no tools writes nothing and answers `{ ok: true }` — there is no setting to
+   * store — and the server's answer replaces what this view holds, so the per-tool selects show
+   * the permission the write really left behind.
+   */
+  readonly saveServerPolicy: (
+    tools: readonly McpServerTool[],
+    policy: ToolPermission,
+  ) => Promise<SaveToolsResult>
   /** Read the entries again, after a write another tab made. */
   readonly reload: () => Promise<void>
   /** Clear the error. */
@@ -137,9 +151,34 @@ export function useTools(client: Client, modeId?: ModeId): ToolsView {
     [client, serverUrl],
   )
 
+  const saveServerPolicy = useCallback(
+    async (
+      entryTools: readonly McpServerTool[],
+      policy: ToolPermission,
+    ): Promise<SaveToolsResult> => {
+      const body = mcpServerPolicyBody(entryTools, policy)
+      if (body === null) {
+        return { ok: true }
+      }
+      setSaving(true)
+      try {
+        const saved = await client.tools.put(body)
+        setTools(saved)
+        setError(null)
+        return { ok: true }
+      } catch (caught) {
+        noteAuthenticationError(client, caught)
+        return { ok: false, message: describeError(caught, { serverUrl }) }
+      } finally {
+        setSaving(false)
+      }
+    },
+    [client, serverUrl],
+  )
+
   const dismissError = useCallback(() => {
     setError(null)
   }, [])
 
-  return { tools, loading, error, saving, save, savePolicy, reload, dismissError }
+  return { tools, loading, error, saving, save, savePolicy, saveServerPolicy, reload, dismissError }
 }

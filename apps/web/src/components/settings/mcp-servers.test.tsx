@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { FakeClientOptions } from '@openharness/client/testing'
+import { ApiError } from '@openharness/client'
 
 import { makeFake, renderApp } from '../../test-support/render-app'
 
@@ -39,6 +40,20 @@ async function serverRow(name: string): Promise<HTMLElement> {
     throw new Error(`no server row for ${name}`)
   }
   return row as HTMLElement
+}
+
+/**
+ * The batch control's state line, read out of its element.
+ *
+ * The line is two text nodes inside one span, so the element with the slot is what says what a
+ * reader sees — and it is what a stylesheet (and this test) can address on a page of servers.
+ */
+function batchState(row: HTMLElement): HTMLElement {
+  const found = row.querySelector('[data-slot="mcp-tools-batch-state"]')
+  if (found === null) {
+    throw new Error('no batch state line on the row')
+  }
+  return found as HTMLElement
 }
 
 afterEach(() => {
@@ -167,6 +182,70 @@ describe('Settings → MCP servers', () => {
       const { data } = await fake.tools.list()
       expect(data.find((entry) => entry.name === 'notes__search')?.policy).toBe('allow')
     })
+  })
+
+  it('sets every tool of a server at once, in one write, and the rows follow it (#313)', async () => {
+    const fake = makeFake({ mcpServers: [NOTES] })
+    renderApp(fake, { hash: '#/settings' })
+
+    const row = await serverRow('notes')
+    // Visible without opening anything: the state the server's tools are in together, and the
+    // three choices, each named for its server.
+    expect(await within(row).findByText(/All tools:/)).toBeInTheDocument()
+    expect(batchState(row)).toHaveTextContent('All tools: Ask (all)')
+
+    const put = vi.spyOn(fake.tools, 'put')
+    await user.click(within(row).getByRole('button', { name: 'Set every tool on notes to Deny' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.tools.list()
+      expect(data.find((entry) => entry.name === 'notes__search')?.policy).toBe('deny')
+      expect(data.find((entry) => entry.name === 'notes__read')?.policy).toBe('deny')
+    })
+    // **One** request, carrying every tool of that server at the permission chosen — never one
+    // write per row.
+    expect(put).toHaveBeenCalledTimes(1)
+    expect(put.mock.calls[0]?.[0]).toEqual({ mcp: { notes__search: 'deny', notes__read: 'deny' } })
+
+    // The state line reads what the write left behind, and so does each row of the list.
+    await waitFor(() => expect(batchState(row)).toHaveTextContent('All tools: Deny (all)'))
+    await user.click(within(row).getByRole('button', { name: /2 tools/ }))
+    expect(await within(row).findByLabelText('notes__search when called')).toHaveValue('deny')
+    expect(within(row).getByLabelText('notes__read when called')).toHaveValue('deny')
+
+    put.mockRestore()
+  })
+
+  it('says Mixed when a server’s tools differ, and the rows say which is which', async () => {
+    const fake = makeFake({
+      mcpServers: [NOTES],
+      toolSettings: { builtin: {}, mcp: { notes__search: 'allow' } },
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    const row = await serverRow('notes')
+    await waitFor(() => expect(batchState(row)).toHaveTextContent('All tools: Mixed'))
+
+    await user.click(within(row).getByRole('button', { name: /2 tools/ }))
+    expect(await within(row).findByLabelText('notes__search when called')).toHaveValue('allow')
+    expect(within(row).getByLabelText('notes__read when called')).toHaveValue('ask')
+  })
+
+  it('reports a refused batch write inline, and leaves the state where it was', async () => {
+    const fake = makeFake({ mcpServers: [NOTES] })
+    vi.spyOn(fake.tools, 'put').mockRejectedValue(
+      new ApiError(500, 'the server fell over', { type: 'api_error' }),
+    )
+    renderApp(fake, { hash: '#/settings' })
+
+    const row = await serverRow('notes')
+    await user.click(within(row).getByRole('button', { name: 'Set every tool on notes to Allow' }))
+
+    // The card's own failure banner, in the server's words, and nothing claimed about the rows.
+    const banner = await screen.findByRole('alert')
+    expect(banner).toHaveTextContent('The MCP server request failed')
+    expect(banner).toHaveTextContent('the server fell over')
+    expect(batchState(row)).toHaveTextContent('All tools: Ask (all)')
   })
 
   it('tests a server, reports its failure, and turns it off', async () => {
