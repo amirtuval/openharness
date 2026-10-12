@@ -1133,6 +1133,19 @@ the user ended and a delete answered "no"), `1` for a server, network or sign-in
 bad command line or config, and `130`/`143` when signalled
 ([#197](https://github.com/amirtuval/openharness/issues/197)).
 
+**A terminal's scrollback is write-once, so anything that must change lives in the live area — and
+a second column is impossible.** Ink's `<Static>` prints each item once and never rewrites it (it
+renders `items.slice(index)` from the last length it saw), which is exactly what stops a streamed
+reply from repainting the scrollback on every delta — and also a one-way door. A toggle such as `oh`'s
+Ctrl+O detail view can only expand calls still in the live area; calls above it keep their compact
+line, so say so rather than letting the key look broken. For the same reason the task list is pinned
+at the bottom of the live area, folded and windowed to fit the terminal's height: a panel "on the
+right" would have to be part of the live frame, redraw on every delta and narrow — re-wrap — lines
+the terminal has already printed. When choosing control keys, remember Ink reports raw bytes
+(`Ctrl+O` is `0x0F`, `Ctrl+T` `0x14`) and that some multiplexers swallow keys before they arrive
+(epic [#303](https://github.com/amirtuval/openharness/issues/303); on the tools stack:
+`apps/tui/src/components/tool-call.tsx`, `todo-panel.tsx`).
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take

@@ -74,6 +74,7 @@ export function TranscriptView({
   summaries = [],
   toolCalls = [],
   decisionOf,
+  detail = false,
   width,
   currentModel,
   costOf,
@@ -91,6 +92,16 @@ export function TranscriptView({
    * transcript's decisions.
    */
   readonly decisionOf?: ((call: TranscriptToolCall) => string | null) | undefined
+  /**
+   * Ctrl+O: draw every call's full input and a capped result under its line (issue #308).
+   *
+   * It applies to what is still in the live area, and **not** to what `<Static>` has already
+   * written: Ink's scrollback is write-once (#208, X2), so a call that has settled keeps
+   * whatever it was drawn with — a terminal cannot reflow history a reader has already
+   * scrolled past. The toggle is therefore read at the moment a call is drawn, which is what
+   * makes "turn it on, then watch the turn" the useful way to use it.
+   */
+  readonly detail?: boolean | undefined
   /** How wide the terminal is; the tests draw at a width they can read (see `MessageView`). */
   readonly width?: number | undefined
   /** The model the session runs, for the per-reply metadata lines (issue #208). */
@@ -149,7 +160,12 @@ export function TranscriptView({
       // brings its own blank line like a divider does, and draws nothing under it.
       <Fragment key={entry.call.id}>
         {setsOffBlock(previous) && <Text> </Text>}
-        <ToolCallView call={entry.call} decision={decisionOf?.(entry.call) ?? null} width={width} />
+        <ToolCallView
+          call={entry.call}
+          decision={decisionOf?.(entry.call) ?? null}
+          detail={detail}
+          width={width}
+        />
       </Fragment>
     ) : (
       <Fragment key={entry.message.id}>
