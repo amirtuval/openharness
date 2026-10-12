@@ -1,6 +1,6 @@
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider'
 import type { AskUserInput, ModelUsage } from '@openharness/protocol'
-import { ASK_USER_TOOL_NAME } from '@openharness/protocol'
+import { ASK_USER_TOOL_NAME, TODO_WRITE_TOOL_NAME } from '@openharness/protocol'
 import { MockLanguageModelV4 } from 'ai/test'
 
 import type { ModelFactory } from '@openharness/brain'
@@ -111,6 +111,42 @@ export const MOCK_ASK_MARKER = '__ask__'
  * exactly what makes it worth having.
  */
 export const MOCK_MCP_MARKER = '__mcp__'
+
+/**
+ * The marker that makes the model write a task list (epic #303, #305).
+ *
+ * The model calls `todo_write` on the request that carries the marker, so the whole list a
+ * client draws — the newest successful call is the state — can be driven through the real
+ * server, brain, store and log. The text after the marker is how many items the list has
+ * (defaulting to {@link MOCK_TODO_DEFAULT_COUNT}), which is what lets a test ask for a list
+ * long enough to fold, or a short one that stays open.
+ */
+export const MOCK_TODO_MARKER = '__todos__'
+
+/** How many items a `__todos__` prompt writes when it does not say. */
+export const MOCK_TODO_DEFAULT_COUNT = 3
+
+/** The most items a `__todos__` prompt will write, so a typo cannot ask for a million. */
+export const MOCK_TODO_MAX_COUNT = 50
+
+/**
+ * The list a `__todos__` prompt asks for: a deterministic state per position, so a test can
+ * assert a frame without inventing its own fixture. The first item is done, the second is the
+ * one in progress, and everything after is pending — the shape a reader sees mid-turn.
+ */
+export function todoInputOf(message: string): { todos: { content: string; status: string }[] } {
+  const asked = Number.parseInt(message.slice(MOCK_TODO_MARKER.length).trim(), 10)
+  const count =
+    Number.isFinite(asked) && asked > 0
+      ? Math.min(asked, MOCK_TODO_MAX_COUNT)
+      : MOCK_TODO_DEFAULT_COUNT
+  return {
+    todos: Array.from({ length: count }, (_, index) => ({
+      content: `step ${index + 1}`,
+      status: index === 0 ? 'done' : index === 1 ? 'in_progress' : 'pending',
+    })),
+  }
+}
 
 /**
  * The tool call a `__mcp__` prompt makes: the name it names, and the arguments it carries.
@@ -257,6 +293,13 @@ export function planFor(message: string, attempt: number): ModelPlan {
   }
   if (message.startsWith(MOCK_MCP_MARKER)) {
     return { chunks: [], delayMs: 0, toolCalls: [mcpCallOf(message)] }
+  }
+  if (message.startsWith(MOCK_TODO_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: TODO_WRITE_TOOL_NAME, input: todoInputOf(message) }],
+    }
   }
   if (message.startsWith(MOCK_TOOL_MARKER)) {
     // The text after the marker, or the marker-less message when the caller wrote none: either
