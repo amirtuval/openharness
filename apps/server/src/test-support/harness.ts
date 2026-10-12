@@ -44,6 +44,7 @@ import {
 } from '../auth'
 import { ModelCatalog } from '../catalog/catalog'
 import { createMaxOutputResolver, createTokenBudgetResolver } from '../catalog/context-budget'
+import { createProviderFetch } from '../catalog/provider-fetch'
 import { createReasoningSupportResolver } from '../catalog/reasoning-support'
 import { createContextCompactionResolver } from '../context-compaction'
 import { createModeResolver } from '../modes'
@@ -60,6 +61,7 @@ import {
   DEFAULT_TRUSTED_PROXY_HOPS,
   type LogFormat,
   type SchedulerKind,
+  type SearchConfig,
   type ServerConfig,
 } from '../config'
 import type { Tracer, TracingMode } from '../observability/tracing'

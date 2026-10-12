@@ -699,6 +699,98 @@ disagree about what a reader is being asked.
   the box — the reader is told before pressing Enter, not after. The row's status then reads
   `dismissed`: the reader moving on is not a failure.
 
+### The tools, on screen (epic #303, X1/X2/X4/X5/X9; issue #308)
+
+The tools work is visible in six places, and every piece of state comes from the transcript
+(`packages/client`'s `toolCalls`, `todos`, the newest request's `truncatedToolResults` /
+`clearedToolResults`) with every word from its `src/tools.ts` — so the page and `oh` cannot
+disagree.
+
+- **`tool-call.tsx` is one call's compact line**: the status mark, the tool's name, the shared
+  `toolCallSummary` (a URL, a query, a task count, a question) and the status words, behind a
+  Radix `Collapsible` that opens to the pretty-printed input and whatever the call answered. It
+  takes an `action` slot for #310's approval prompt — drawn **outside** the trigger, so its
+  buttons are not nested in a button — and badges `source: 'mcp'` (#312), with the server in the
+  badge's `title` and on the row as `data-server`; the name is already the model-facing
+  `<server>__<tool>` spelling, so no second word of chrome is spent on it. The whole line is the
+  extension point: a new caller passes props rather than reaching for a store.
+- **`MessageList` groups consecutive calls into one `role="group"` block** — a run of one stays
+  the bare line it already is — and renders them from `transcriptEntries(messages, summaries,
+toolCalls)`, the client's one merge, so a call draws where its event sits.
+- **`todo-panel.tsx` is the chat's task list**, pinned above the composer (not in the scroller:
+  it is chrome about the work) while the chat has one, with the three states drawn differently
+  and "2 of 5 done" in its header.
+- **`tool-notices.tsx`** draws the step-limit notice (which _replaces_ the red error banner for
+  that one error type — it is a notice, not a failure), "this model can't use tools" (the
+  catalog entry's `tool_call === false`), and what the newest request shortened or cleared. All
+  four are the client's sentences.
+- **the chat header** carries `N searches` beside the cost, the same count the usage routes
+  report, read off the calls the transcript already holds.
+- **Settings → Tools** is one row per tool: on/off, the permission (with the tool's own
+  declaration named as the default), and an unavailable tool listed rather than hidden.
+  `hooks/use-tools.ts` reads it and merges one write; the fake backs the route. Its **remote MCP
+  half** (#312) is listed **grouped by server** — a `data-slot="mcp-server-group"` section per
+  server, one read-only row per tool under its offered name — because editing it is #313: a
+  remote tool has no on/off of its own, and its policy lives in `PUT /v1/me/tools`'s `mcp` map,
+  which a row shaped like a built-in's would write to the wrong place. Showing them is the point
+  — an entry that silently vanished would read as a tool that does not exist.
+
+**A mode may turn a tool on or off** (#307). `mode-form-dialog.tsx` grew a Tools section whose
+choice per tool is tri-state — _Follow my settings_ (the absence of a name in the patch), _Always
+on_, _Always off_ — which `lib/tools.ts`'s `modeToolChoice` / `withModeToolChoice` translate to
+and from the wire's `{ builtin: { name: boolean } }`. A patch that ends up empty is sent as
+`null`, the one value that reads as "follow my settings" on both sides; a mode never changes a
+permission, and the Modes list shows what a mode overrides under its name. Only this build's own
+tools get a switch (#312): a remote MCP tool's presence is its server's, which a mode patches by
+id — a half of the editor that is #313 — while `withModeToolChoice` carries a mode's existing
+`mcp_servers` patch through a save untouched, and the row counts the servers a mode names rather
+than reading them as "follow your settings".
+
+### The pause, on screen (epic #303, X6; issues #309, #310)
+
+A turn can end waiting on the reader, and the page answers it where the call is drawn — the tool,
+its input (behind the disclosure #308 already had) and the choices are one block. Every word and
+every event comes from `@openharness/client`'s `src/approvals.ts`, so the page and `oh` cannot
+disagree about what a reader is being asked.
+
+- **`approval-prompt.tsx`** is a call waiting on `ask`: **Allow once**, **Allow for this chat**,
+  **Always allow**, and **Deny** — which opens a message box rather than sending at once, because
+  a denial is often worth explaining (an empty message sends a plain denial; the protocol wants a
+  non-empty `deny_message`). Each button sends one `user.tool_confirmation` through the chat's
+  `respond`, which is where the request and its failure live. **A remote MCP call gets the same
+  prompt** (#312) — a pause is a fact about the log, not about a tool — with the heading naming
+  the server (`notes__search (mcp: notes)`, `pendingCallHeading`) and `data-server` on the
+  prompt, so a reader allowing a remote tool knows whose it is; the confirmation names the
+  `agent.mcp_tool_use` event's own id, which is what the server checks and the brain answers with
+  an `agent.mcp_tool_result`.
+- **`ask-user-form.tsx`** is an `ask_user` call: one to four questions, each with its header as a
+  chip, drawn as radios — or checkboxes when the call asks for several — with the options'
+  descriptions beside them and the **Other** write-in row the type always allows, as an input
+  (`text`), or as a yes/no pair (`confirm`). **Submit** sends every answer as one confirmation
+  carrying `answers`; **Decline** denies the call. Submit stays off until the protocol's own
+  `askUserAnswerProblems` is satisfied — the same check the server refuses a 400 with — and what
+  is still missing is named beside the questions, so a malformed answer is never something the
+  reader learns from a failed request.
+- **`MessageList` draws a prompt under its own call**, out of `pendingCalls(toolCalls)` — the
+  client's one reading of which calls wait — with a prompt only for a call whose decision is not
+  yet in the log. A call whose confirmation **is** there has been answered and the turn is on its
+  way, which is what makes a reload land where a live tab left off; while this tab's own answer
+  is in flight the buttons are off and the row says "Answering…".
+- **Several approvals are answered together.** A run of two or more gets a bar at the foot of the
+  transcript with **Allow all** and **Deny all** — one event per call, in one batch, and "Allow
+  all" is the **once** approval for each: answering several at once must not hand out a remembered
+  permission nobody chose. A lone approval gets no bar: a second copy of its own buttons is noise.
+  A question never joins it — `ask_user` cannot be allowed without its answers, and the server
+  refuses an approval carrying none.
+- **An answered call shows what was decided.** The confirmation is the log's record, so the row's
+  trailing slot carries `confirmationSummary` — "Allowed for this chat", "Always allowed" — which
+  the tool's own result cannot say. A denial and an answered question draw nothing there: the
+  result the brain wrote already says them.
+- **The composer says a message declines what waits.** A `user.message` resolves every waiting
+  call ("The user sent a message instead"), so `pendingCallsNotice` is drawn as a dashed row above
+  the box — the reader is told before pressing Enter, not after. The row's status then reads
+  `dismissed`: the reader moving on is not a failure.
+
 **The composer is one surface.** Border, focus ring (`focus-within:`) and elevation belong to
 the whole thing, so the model control reads as part of it and the ring appears when focus is
 anywhere inside. It grows with its text up to 200px and then scrolls — measured and set by

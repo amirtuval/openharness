@@ -302,6 +302,19 @@ export interface ContextStrategyConfig {
  * marker where the rest went — and every cap is recorded for the span. Neither touches the log, and neither splits a pair: the result
  * still answers its call, with a shorter answer.
  *
+ * ## Tool results (X9, #306)
+ *
+ * A result is the one part of a request that can be arbitrarily large without anyone having
+ * written it, so it is sized twice. A result older than the verbatim tail of the history — the
+ * recent quarter of the budget the compaction engine keeps in full (K4) — has its body replaced
+ * by {@link CLEARED_TOOL_RESULT}: old tool output is what a request can most afford to give up,
+ * and giving it up is cheaper than a summary, which is why clearing happens first and why a
+ * context it brings back under the threshold is never summarized at all. A result **inside** the
+ * tail is capped to the smaller of its tool's declared `maxResultTokens` and a fifth of the
+ * budget ({@link TOOL_RESULT_BUDGET_RATIO}), head and tail around the omission marker, and every
+ * cap is recorded for the span. Neither touches the log, and neither splits a pair: the result
+ * still answers its call, with a shorter answer.
+ *
  * @param config the per-model budgets; see {@link DEFAULT_CONTEXT_TOKEN_BUDGET}
  */
 export function createContextStrategy(config: ContextStrategyConfig = {}): ContextStrategy {
@@ -1175,6 +1188,7 @@ function planRequest(
   options: ContextStrategyOptions,
   summary: ContextSummaryEvent | null,
   budget: number,
+  tools: ToolRegistry | undefined,
 ): ContextStrategyResult {
   const { system, tools } = options
   const systemMessages: ModelMessage[] = []
@@ -1454,6 +1468,335 @@ function conversationAfter(
         }
         break
       }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [], parts: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (event.type === EVENT_TYPES.agentOpaqueContent) {
+          // The step's own opaque parts (X13; #334): the ones this request may carry back, and
+          // it is the step's assistant message they belong to — opened here when the step
+          // streamed no text at all, which is exactly the tool-calling step this exists for.
+          const parts = opaqueReplayParts(event, opaque)
+          if (parts.length > 0) {
+            assistant ??= { seq: event.seq, text: '', calls: [], parts: [] }
+            assistant.parts.push(...parts)
+          }
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
+        }
+        break
+      }
+      case EVENT_TYPES.agentToolUse: {
+        flushAnswers()
+        assistant ??= { seq: event.seq, text: '', calls: [] }
+        assistant.calls.push({
+          type: 'tool-call',
+          toolCallId: event.id,
+          toolName: event.name,
+          input: event.input,
+        })
+        break
+      }
+      case EVENT_TYPES.agentToolResult: {
+        closeAssistant()
+        answers ??= { index: messages.length, seq: event.seq, parts: [] }
+        const raw = textOf(event.content)
+        const tool = toolNames.get(event.tool_use_id) ?? ''
+        // What the request carries instead of the result exactly as it was stored (X9): an old
+        // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+        // either way — the call stays answered, with a shorter answer.
+        const planned = planToolResult(results, event.seq, tool, raw)
+        answers.parts.push({
+          type: 'tool-result',
+          toolCallId: event.tool_use_id,
+          toolName: tool,
+          output:
+            event.is_error === true
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+        })
+        if (planned.truncation !== undefined) {
+          truncatedResults.push(planned.truncation)
+        }
+        if (planned.cleared !== undefined) {
+          cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+        }
+        flushAnswers()
+        break
+      }
+      default:
+        break
     }
   }
   closeAssistant()

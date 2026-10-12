@@ -21,6 +21,7 @@ import {
   DEFAULT_KEY_PROVIDER,
   DEFAULT_LOG_FORMAT,
   DEFAULT_PORT,
+  DEFAULT_SEARCH_DAILY_LIMIT,
   DEFAULT_SCHEDULER,
   DEFAULT_TRACE_SAMPLE_RATE,
   DEFAULT_TRACING,
@@ -44,6 +45,9 @@ const REQUIRED = {
   BETTER_AUTH_URL: 'http://localhost:3000',
   OPENHARNESS_SECRETS_KEY: 'b3Blbmhhcm5lc3MtdGVzdC1zZWNyZXRzLWtleS0zMmI=',
 }
+
+/** The operator's search key a test sets (epic #303, #305). A shape, never a real key. */
+const SEARCH_KEY = 'brave-test-key'
 
 /** A Cloud KMS key resource name, the shape `OPENHARNESS_KMS_KEY` takes (#150). Not a secret. */
 const KMS_KEY =
@@ -144,6 +148,9 @@ describe('readServerConfig', () => {
         OPENHARNESS_TRACING: 'cloud-trace',
         OPENHARNESS_TRACE_SAMPLE_RATE: '0.5',
         GOOGLE_CLOUD_PROJECT: 'openharness-dev',
+        OPENHARNESS_SEARCH_PROVIDER: 'brave',
+        OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY,
+        OPENHARNESS_SEARCH_DAILY_LIMIT: '25',
       }),
     )
 
@@ -197,6 +204,36 @@ describe('readServerConfig', () => {
 
     expect(config.deltaRetentionMs).toBe(0)
     expect(config.compactIntervalMs).toBe(0)
+  })
+
+  it('turns search on with a key, and refuses a provider without one', () => {
+    // A key alone names the one provider this build has an adapter for.
+    expect(readServerConfig(env({ OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY })).search).toEqual({
+      provider: 'brave',
+      apiKey: SEARCH_KEY,
+      dailyLimit: DEFAULT_SEARCH_DAILY_LIMIT,
+    })
+    // A provider named without a key is the configuration mistake it is: the operator asked for
+    // search and gave no way to authenticate, so the boot says which variable is missing.
+    expect(() => readServerConfig(env({ OPENHARNESS_SEARCH_PROVIDER: 'brave' }))).toThrow(
+      /OPENHARNESS_SEARCH_API_KEY/,
+    )
+    expect(() =>
+      readServerConfig(
+        env({ OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY, OPENHARNESS_SEARCH_PROVIDER: 'exa' }),
+      ),
+    ).toThrow(/OPENHARNESS_SEARCH_PROVIDER/)
+    // Zero is a limit: the tool stays configured and answers every call with the notice.
+    expect(
+      readServerConfig(
+        env({ OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY, OPENHARNESS_SEARCH_DAILY_LIMIT: '0' }),
+      ).search?.dailyLimit,
+    ).toBe(0)
+    expect(() =>
+      readServerConfig(
+        env({ OPENHARNESS_SEARCH_API_KEY: SEARCH_KEY, OPENHARNESS_SEARCH_DAILY_LIMIT: '-1' }),
+      ),
+    ).toThrow(/OPENHARNESS_SEARCH_DAILY_LIMIT/)
   })
 
   it('refuses a retention window that is not a count of milliseconds', () => {
