@@ -8,9 +8,14 @@ import {
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
 import type { ToolRegistry } from '@openharness/hands'
 import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
   API_VERSION_PREFIX,
   ASK_USER_TOOL_NAME,
+  MESSAGE_PARENT_TOOL_NAME,
   ModeSchema,
+  TASK_WAIT_TOOL_NAME,
   TODO_WRITE_TOOL_NAME,
   WEB_SEARCH_TOOL_NAME,
   type Mode,
@@ -256,13 +261,22 @@ describe('resolving a subagent type (#342)', () => {
         reasoningEffort: PARENT.reasoningEffort,
         systemPromptAddition: null,
         toolOverride: null,
+        // The parent continues, and the parent follows no mode — so the child starts on a plain
+        // session rather than on one (#344).
+        modeId: null,
         // This process's built-ins in the registry's order, with the provider-native
-        // `web_search` the settings list beside them (#335). `ask_user` is among them because
-        // this is the type's tool set as a chat resolves it: a *child* is never offered it
-        // (epic #340, S1), which the loop applies from the session's own `interactive` flag —
-        // the child is created with it off, and this resolver does not decide it.
+        // `web_search` the settings list beside them (#335) and the subagent tools every
+        // deployment registers (#344). `ask_user` is among them because this is the type's tool
+        // set as a chat resolves it: a *child* is never offered it (epic #340, S1), which the
+        // loop applies from the session's own `interactive` flag — the child is created with it
+        // off, and this resolver does not decide it.
         tools: [
           ASK_USER_TOOL_NAME,
+          AGENT_TOOL_NAME,
+          AGENT_MESSAGE_TOOL_NAME,
+          TASK_WAIT_TOOL_NAME,
+          AGENT_STOP_TOOL_NAME,
+          MESSAGE_PARENT_TOOL_NAME,
           WEB_FETCH_TOOL_NAME,
           TODO_WRITE_TOOL_NAME,
           WEB_SEARCH_TOOL_NAME,
@@ -287,6 +301,11 @@ describe('resolving a subagent type (#342)', () => {
     // the parent's own request — so the tool it turned off is absent and the rest are there.
     expect(resolution.ok && resolution.type.tools).toEqual([
       ASK_USER_TOOL_NAME,
+      AGENT_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
+      TASK_WAIT_TOOL_NAME,
+      AGENT_STOP_TOOL_NAME,
+      MESSAGE_PARENT_TOOL_NAME,
       TODO_WRITE_TOOL_NAME,
       WEB_SEARCH_TOOL_NAME,
     ])
@@ -312,7 +331,19 @@ describe('resolving a subagent type (#342)', () => {
         reasoningEffort: 'high',
         systemPromptAddition: 'Be terse.',
         toolOverride: mode.tools,
-        tools: [ASK_USER_TOOL_NAME, WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME],
+        // The child is created **on** the mode (#344): it follows it live, so the tool and MCP
+        // override above is applied by the mode resolver rather than restated on a session.
+        modeId: mode.id,
+        tools: [
+          ASK_USER_TOOL_NAME,
+          AGENT_TOOL_NAME,
+          AGENT_MESSAGE_TOOL_NAME,
+          TASK_WAIT_TOOL_NAME,
+          AGENT_STOP_TOOL_NAME,
+          MESSAGE_PARENT_TOOL_NAME,
+          WEB_FETCH_TOOL_NAME,
+          WEB_SEARCH_TOOL_NAME,
+        ],
         mcpServers: [],
       },
     })
@@ -427,7 +458,16 @@ describe('resolving a subagent type (#342)', () => {
       description: 'Second description.',
       model: 'openai/gpt-4.1-mini',
       reasoningEffort: 'low',
-      tools: [ASK_USER_TOOL_NAME, TODO_WRITE_TOOL_NAME, WEB_SEARCH_TOOL_NAME],
+      tools: [
+        ASK_USER_TOOL_NAME,
+        AGENT_TOOL_NAME,
+        AGENT_MESSAGE_TOOL_NAME,
+        TASK_WAIT_TOOL_NAME,
+        AGENT_STOP_TOOL_NAME,
+        MESSAGE_PARENT_TOOL_NAME,
+        TODO_WRITE_TOOL_NAME,
+        WEB_SEARCH_TOOL_NAME,
+      ],
     })
   })
 })

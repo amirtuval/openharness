@@ -240,11 +240,13 @@ provider, or "my default model" with no default set. It ends in `_error`, unlike
 | `TASK_WAIT_TOOL_NAME`, `TaskWaitInputSchema` / `TaskWaitInput`, `parseTaskWaitInput()`, `taskWaitInputProblems()`, `taskWaitTimeoutMs()`, `TASK_WAIT_DEFAULT_TIMEOUT_MS`, `TASK_WAIT_MAX_TIMEOUT_MS` | the durable wait (epic #340, S5; #343): the one tool whose call ends a turn waiting for background tasks (`agent_wait { task_ids?, timeout_s? }`), the reading of its arguments the brain and a deployment share, what is wrong with a call the protocol refuses, and the bounds a wait is held to (ten minutes by default, an hour at most) |
 | `TASK_KINDS`, `TaskKindSchema` / `TaskKind`, `TASK_STATUSES`, `TaskStatusSchema` / `TaskStatus`, `TASK_NOTIFICATION_KINDS`, `TaskNotificationKindSchema` / `TaskNotificationKind`, `TASK_DESCRIPTION_MAX_LENGTH`, `TASK_SOURCE_KEY_MAX_LENGTH` | the background-task vocabulary (epic #340, S4; #343): which kinds of task exist (`subagent` today), what one may be doing (`running \| idle \| failed \| stopped`), what a notification says happened (`result \| message \| failed`), and the two bounds |
 | `TaskIdSchema` / `TaskId`, `newTaskId()`, `isTaskId()` | the `task_` id one background task is named by — the handle's id, the value `session.task_started` carries, and the `Session.parent_task_id` of the child session a task runs in (epic #340, S1/S4) |
+| `AGENT_TOOL_NAME`, `AGENT_MESSAGE_TOOL_NAME`, `AGENT_STOP_TOOL_NAME`, `MESSAGE_PARENT_TOOL_NAME`, `AgentToolInputSchema` / `AgentToolInput`, `AgentMessageToolInputSchema` / `AgentMessageToolInput`, `AgentStopToolInputSchema` / `AgentStopToolInput`, `MessageParentToolInputSchema` / `MessageParentToolInput`, `DEFAULT_MAX_AGENT_DEPTH`, `DEFAULT_MAX_LIVE_TASKS` | the subagent tools (epic #340, S5/S6; #344): the four names a class name is a parent side — `agent { type, description, prompt }`, `agent_message { task_id, text }`, `agent_stop { task_id }` — and the one a **child** reaches up with (`message_parent { text }`, whose parent and task are the session's own), plus the two nesting limits of S6 and their defaults (a depth of 3, ten live descendants per root chat) |
 | `JsonValueSchema` / `JsonValue`, `ToolInputSchema` / `ToolInput` | what a tool call's input may hold: JSON, and nothing else — the narrowness is what keeps `agent.tool_use.input` readable by every reader of the log |
 | `TODO_WRITE_TOOL_NAME`, `TodoStatusSchema` / `TodoStatus`, `TodoItemSchema` / `TodoItem`, `TodoListSchema` / `TodoList`, `TodoWriteInputSchema` / `TodoWriteInput` | the `todo_write` tool's vocabulary (#305): the three states, one item, the whole list, and the object a call carries it in |
 | `readTodoList(events)` | the list a log holds — the newest successful `todo_write` call's own input — or `null` when none has taken effect. The one reading the brain and the frontends share (#308) |
 | `WEB_SEARCH_TOOL_NAME` | `web_search`, the one built-in this build does not run (#303, X14; #335): it names the native tool a provider is offered, is the key a user's stored settings and a mode's override carry (`builtin.web_search`), is what the span's offer and a search's call record, and is the name a client renders. Spelled once because three packages have to agree on it and none owns it |
 | `UsageSearchesSchema` / `UsageSearches` | how many searches a usage answer covers (#305; #335): a count, never a price — the `web_search` calls an older log holds, plus what each request's `searches` counted for the provider-executed kind |
+| `DescendantUsageSchema` / `DescendantUsage` | what a chat's **descendants** spent (epic #340, S8; #344): the same totals a session's usage carries — four counters, cost and its `unpriced_requests`, the per-model split and the search count — over the subtree and nothing else, so a chat's bill names the work it delegated |
 | `TimestampSchema`, `MetadataSchema`, `PageLimitSchema`, `ListOrderSchema`, `DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`, `METADATA_MAX_PAIRS`, `METADATA_MAX_KEY_LENGTH`, `METADATA_MAX_VALUE_LENGTH` | shared scalars and limits |
 | `PACKAGE_NAME` | the package name; lets a dependent prove the import resolved |
 
@@ -922,6 +924,13 @@ counted (`searches`, #335). A search runs on the request's own model key and no 
 in this repository, so inventing one would be the estimate the rest of this surface refuses to
 make — the count is a sibling of the totals rather than a member of them, and a day's entry
 carries its own.
+
+`SessionUsage.descendants` is the subtree's own share of a chat's numbers (epic #340, S8; #344):
+a subagent is a real session with its own log, so its requests are billed to it — but a chat that
+delegates work should not look cheap, and the session route's totals, cost, per-model split and
+search count cover the whole tree, with `descendants` (the same shape without `session_id`) saying
+how much of it was the helpers'. A chat with no children answers zeroes in it; the per-user route
+is unchanged, because every session it counts is already there on its own.
 
 **The four `ModelUsage` counters are disjoint** — no token is counted twice — which is what makes
 `usageCost`'s arithmetic (each counter at its own rate) correct. `input_tokens` is the **uncached**

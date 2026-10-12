@@ -9,7 +9,11 @@ import {
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_MAX_TOOL_STEPS,
 } from '@openharness/brain'
-import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
+import {
+  DEFAULT_MAX_AGENT_DEPTH,
+  DEFAULT_MAX_LIVE_TASKS,
+  DEFAULT_PARTITION_COUNT,
+} from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
@@ -84,6 +88,8 @@ describe('readServerConfig', () => {
       corsOrigins: [],
       maxConcurrentSessions: DEFAULT_MAX_CONCURRENT_SESSIONS,
       maxToolSteps: DEFAULT_MAX_TOOL_STEPS,
+      maxAgentDepth: DEFAULT_MAX_AGENT_DEPTH,
+      maxLiveTasks: DEFAULT_MAX_LIVE_TASKS,
       drainTimeoutMs: DEFAULT_DRAIN_TIMEOUT_MS,
       instanceId: config.instanceId,
       partitions: DEFAULT_PARTITION_COUNT,
@@ -129,6 +135,8 @@ describe('readServerConfig', () => {
         OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
         OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
         OPENHARNESS_MAX_TOOL_STEPS: '7',
+        OPENHARNESS_MAX_AGENT_DEPTH: '2',
+        OPENHARNESS_MAX_LIVE_TASKS: '4',
         OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
         SCHEDULER: 'postgres',
         OPENHARNESS_INSTANCE_ID: 'instance-a',
@@ -168,6 +176,8 @@ describe('readServerConfig', () => {
       corsOrigins: ['http://a.test', 'http://b.test'],
       maxConcurrentSessions: 12,
       maxToolSteps: 7,
+      maxAgentDepth: 2,
+      maxLiveTasks: 4,
       drainTimeoutMs: 250,
       instanceId: 'instance-a',
       partitions: 8,

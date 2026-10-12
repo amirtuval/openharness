@@ -100,8 +100,10 @@ describe('the subagent tools’ names and inputs (S5; #344)', () => {
     // The description is bounded like every other free text a caller sets (`#343`); the prompt
     // is not, because it is a message — the child's first.
     expect(
-      AgentToolInputSchema.safeParse({ ...ok, description: 'x'.repeat(TASK_DESCRIPTION_MAX_LENGTH + 1) })
-        .success,
+      AgentToolInputSchema.safeParse({
+        ...ok,
+        description: 'x'.repeat(TASK_DESCRIPTION_MAX_LENGTH + 1),
+      }).success,
     ).toBe(false)
     expect(AgentToolInputSchema.safeParse({ ...ok, prompt: 'x'.repeat(4000) }).success).toBe(true)
   })
@@ -126,9 +128,9 @@ describe('the subagent tools’ names and inputs (S5; #344)', () => {
     expect(MessageParentToolInputSchema.safeParse({ text: '' }).success).toBe(false)
     // The parent and the task are the session's own (`parent_session_id`, `parent_task_id`), so
     // there is no field for either and an unknown one is stripped like any other.
-    expect(
-      MessageParentToolInputSchema.parse({ text: 'hi', task_id: newTaskId() }),
-    ).toEqual({ text: 'hi' })
+    expect(MessageParentToolInputSchema.parse({ text: 'hi', task_id: newTaskId() })).toEqual({
+      text: 'hi',
+    })
   })
 
   it('defaults the nesting limits to three and ten (S6)', () => {

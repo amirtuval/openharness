@@ -238,7 +238,11 @@ export function createUsageReader(options: UsageReaderOptions): UsageReader {
       // walking the tree, and the total it is part of is the chat's whole bill.
       return {
         session_id: sessionId,
-        ...assemble([...requests, ...descendants.requests], prices, searches + descendants.searches),
+        ...assemble(
+          [...requests, ...descendants.requests],
+          prices,
+          searches + descendants.searches,
+        ),
         descendants: assemble(descendants.requests, prices, descendants.searches),
       }
     },

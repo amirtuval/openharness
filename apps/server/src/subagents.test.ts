@@ -1,4 +1,3 @@
-import { createToolRegistry } from '@openharness/hands'
 import type { ToolRegistry } from '@openharness/hands'
 import {
   AGENT_MESSAGE_TOOL_NAME,
@@ -9,6 +8,7 @@ import {
   MESSAGE_PARENT_TOOL_NAME,
   TASK_WAIT_TOOL_NAME,
   type AgentToolResultEvent,
+  type EventId,
   type Session,
   type SessionId,
   type SessionTaskNotificationEvent,
@@ -22,11 +22,10 @@ import {
   MOCK_AGENT_STOP_MARKER,
   MOCK_HOLD_MARKER,
   MOCK_TERMINAL_MARKER,
+  createMockModelFactory,
 } from './mock-model'
 import { describe, expect, it } from 'vitest'
 
-import { createMockModelFactory } from './mock-model'
-import { askUserTool } from './pausing'
 import { createTurnRegistry } from './tools'
 import { createTestApp, postJson, readHistory, waitFor, waitForIdle } from './test-support'
 import type { TestContext, TestOptions } from './test-support'
@@ -208,8 +207,10 @@ describe('starting a helper (S3/S4/S5; #344)', () => {
     // And the parent uses it: the notification is a queued event, and the next request of the
     // chat claims it — told once, to the request that answers it.
     const used = await log(context, session.id)
+    const notificationId = notification?.id
+    expect(notificationId).toBeDefined()
     const claim = of(used, EVENT_TYPES.modelRequestStart).find((event) =>
-      event.consumes?.includes(notification?.id ?? ''),
+      event.consumes?.includes(notificationId as EventId),
     )
     expect(claim).toBeDefined()
     expect(await context.store.getPendingTaskNotifications(session.id)).toEqual([])

@@ -1161,6 +1161,57 @@ on that mode gets — so `usableModeModel` is one function both callers share �
 differs by reader: a chat's 422 tells the _user_ to edit the mode, and a type's message tells the
 _model_ what it can do instead (`apps/server/src/modes.ts`).
 
+**A tool that must reach a session cannot be a definition a host registers — the loop has to
+build it.** Every piece of a subagent tool needs the store and the session: creating the child,
+reading the parent's tasks, writing the status, waking a partition. A `ToolDefinition`'s `run` is
+handed a signal, a timeout and a secrets map and nothing else, deliberately (`@openharness/hands`
+reads no environment and no database), so the tools had to live where the **session** is known —
+`packages/brain/src/agents.ts`, built per request inside the turn — with `@openharness/hands`
+keeping only the surface (names, schemas, the words a model reads) and the server keeping the one
+thing the brain cannot know: the types, which are the owner's modes
+([#344](https://github.com/amirtuval/openharness/issues/344)). The process-wide registry still
+carries the five so a settings screen can list them and a mode can override one, and the loop
+**replaces** each definition with the session-bound one — two tools under one name is what a
+registry refuses, so "register it for the listing, replace it for the turn" is the only shape
+that keeps both readers honest.
+
+**`general-purpose` is the parent continued, so the child has to be created _on_ the parent's
+mode — which meant the resolved type needed the mode's **id**, not just its configuration.**
+`ResolvedSubagentType` carries `toolOverride`, but an override is a patch and a session stores a
+mode **id**: without it a `general-purpose` child of a chat following a mode would run the
+parent's model and effort while silently losing the mode's tool and MCP-server override, and a
+mode type's child would not follow the mode at all — retuning the mode would retune the parent's
+next request but not its helpers. The fix is two fields (`SubagentParent.modeId`,
+`ResolvedSubagentType.modeId`) and one line at the creation site
+([#344](https://github.com/amirtuval/openharness/issues/344)); the lesson is that "the type
+resolves exactly as a chat on that mode does" is only true if the child _is_ a chat on that mode,
+and a snapshot of a resolution is not the same object as the mode.
+
+**An announcement that only the writer can make needs a place in the recovery scan.** S4's
+delivery is exactly once — a child's turn end writes a notification keyed by the turn — but the
+write is the child's own, so a process that died between the turn's end and the write leaves an
+idle child holding news nobody has, and _nothing else reaches it_: the turn did finish, so the
+log has no queued event and no open turn, and the parent sits idle for ever. The fix is a fifth
+case in `findSessionsNeedingWork` (both stores): a **child** whose newest status is an idle that
+ended a turn and whose parent's log holds no notification under that turn's key is work, and the
+turn it starts only delivers the news and writes nothing to its own log
+([#344](https://github.com/amirtuval/openharness/issues/344)). It is the same shape as the passed
+wait deadline of #343 — the store is where "nothing else will ever look at this session" has to
+be said — and the reason a pause is explicitly **not** this case: a child parked in `agent_wait`
+is still working, and announcing it as a result would tell the parent its helper had finished.
+
+**A rewind's consequences are found through what the log still _names_, not through the range it
+recorded.** S7 says rewinding past an `agent` call stops that child and drops its news, and the
+obvious implementation — read the superseded range, find the `session.task_started` events inside
+it — needs a raw (`includeSuperseded`) read of the whole log on every turn. The parent's
+**children** answer the same question from two indexed reads: a child whose `parent_task_id` no
+visible `session.task_started` accounts for is one the reader took back (only a rewind can
+remove a start from a replay read), so the child is stopped and the status written there and
+then. The news it sends afterwards is dropped by the same rule as it is read — a notification
+whose task the visible log does not name is not a task of this chat — which is also why the
+check is one comparison against the `taskStarts` map the loop already has
+([#344](https://github.com/amirtuval/openharness/issues/344)).
+
 ## Frontends: the web app and the TUI
 
 **A 401 is the only "am I signed in?" signal, and it replaces the whole screen — with exactly two

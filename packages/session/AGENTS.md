@@ -523,6 +523,17 @@ The partition scheduler computes each instance's fair share from that list; the 
 promises nothing more than the rows, and a membership that is lost costs one heartbeat's
 announcement.
 
+**A child whose finished turn its parent was never told about is work** (epic #340, S4; #344).
+`findSessionsNeedingWork` reports it, in both stores: the child's newest status event is a
+`session.status_idle` whose stop reason is `end_turn` (a pause is not an end), and its parent's
+log holds no `session.task_notification` whose `source_key` is `<child_session_id>:<idle seq>` —
+the key S4's delivery is exactly-once on. Nothing else would reach such a session: the turn did
+finish, so it has no queued event and no open turn, and the parent is idle waiting for news that
+will never come. The delivery itself is the brain's (a turn on the child writes the notification
+and nothing to its own log); this is what finds the child, the way the passed-deadline case finds
+a wait nothing else would resume. The predicate is a child's only — a top-level chat owes no
+announcement — and the child's parent is read in the same query.
+
 **A task notification is appended from outside the session, once per key** (epic #340, S4;
 #343). `appendTaskNotification` is the one way anything reaches a session from outside it — a
 child session finishing its turn — and it is a store method rather than an `appendEvents` call
@@ -1156,7 +1167,7 @@ dependency table.
   the caller does not own (or an id nothing has) refused, a task id with no parent, the
   top-level default and the children filter of a list, the descendants walk — level by level,
   owner-scoped, subtree from wherever it is asked — the live count (a queued message, an open
-  turn and a pause each counting; a finished turn leaving), the cascade a delete performs over
+  turn, a pause on the user and a wait on tasks each counting; a finished turn leaving), the cascade a delete performs over
   three levels (and from the middle, leaving the parent), and one `session.deleted` delivered
   per session of the subtree. Both stores run it, and `postgres.test.ts` adds the `0032`
   backfill over a session row written the pre-tree way, beside the ordered list of every
@@ -1199,7 +1210,11 @@ dependency table.
   work scan's cases are beside them: a session a task just wrote to is work, a task wait is
   work **only once its deadline has passed**, and a wait something has since answered is not
   (resolving one writes its result and carries the turn on, so the log's newest status event is
-  a later idle).
+  a later idle). Since #344 a **child whose finished turn its parent was never told about** is
+  work as well — until the notification keyed by that turn is in the parent's log — and a turn
+  that **paused** is not. The live count's own cases are beside those: a child parked in
+  `agent_wait` counts as live exactly as one paused on the user does, which is what makes
+  S6's cap a cap on work rather than on open turns.
 - `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
   durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that

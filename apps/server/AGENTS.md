@@ -139,45 +139,47 @@ itself is a `session.context_summary` with reason `manual`.
 
 ## Environment variables
 
-| variable                                  | default                          | what it does                                                                                                                                                                                                           |
-| ----------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                            | —                                | run on Postgres, migrating on boot; unset means in-memory                                                                                                                                                              |
-| `SCHEDULER`                               | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                                                                                                                                                |
-| `BETTER_AUTH_SECRET`                      | — (**required**)                 | signs sessions and cookies                                                                                                                                                                                             |
-| `BETTER_AUTH_URL`                         | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                                                                                                                                                      |
-| `OPENHARNESS_SECRETS_KEY`                 | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`                                                                                                                                 |
-| `OPENHARNESS_KEY_PROVIDER`                | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)                                                                                                                         |
-| `OPENHARNESS_KMS_KEY`                     | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                                                                                                                                                      |
-| `OPENHARNESS_KEY_CACHE_TTL_MS`            | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                                                                                                                                             |
-| `OPENHARNESS_DEV_LOGIN`                   | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set                                                                                                                          |
-| `GOOGLE_CLIENT_ID`/`_SECRET`              | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)                                                                                                                                    |
-| `GITHUB_CLIENT_ID`/`_SECRET`              | —                                | enable GitHub sign-in                                                                                                                                                                                                  |
-| `MICROSOFT_CLIENT_ID`/`_SECRET`           | —                                | enable Microsoft sign-in                                                                                                                                                                                               |
-| `MICROSOFT_TENANT_ID`                     | `common`                         | the Entra tenant the Microsoft provider authenticates against                                                                                                                                                          |
-| `PORT`                                    | `3000`                           | the port to listen on                                                                                                                                                                                                  |
-| `OPENHARNESS_TEST_MODEL`                  | —                                | `mock` swaps in the deterministic test model                                                                                                                                                                           |
-| `OPENHARNESS_WEB_DIR`                     | —                                | a built web app to serve at `/`                                                                                                                                                                                        |
-| `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | off                              | `1` lets a **custom OpenAI-compatible** credential **or a remote MCP server** reach a private/loopback address (epic #245, M4; #249; #303, X10); never Azure; off in staging and production                            |
-| `OPENHARNESS_TRUSTED_PROXY_HOPS`          | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)                                                                                                                        |
-| `OPENHARNESS_CORS_ORIGINS`                | —                                | comma-separated origins to allow; unset means no CORS headers                                                                                                                                                          |
-| `OPENHARNESS_MAX_CONCURRENT_SESSIONS`     | `4`                              | how many sessions may be running at once                                                                                                                                                                               |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `5000`                           | how long shutdown waits for a turn in flight                                                                                                                                                                           |
-| `OPENHARNESS_INSTANCE_ID`                 | hostname + pid + random suffix   | this instance's id in the lease table                                                                                                                                                                                  |
-| `OPENHARNESS_PARTITIONS`                  | `64` (the protocol's)            | how many partitions the session space has                                                                                                                                                                              |
-| `OPENHARNESS_LEASE_TTL_MS`                | `30000`                          | how long a partition lease lasts before it must be renewed                                                                                                                                                             |
-| `OPENHARNESS_HEARTBEAT_MS`                | `10000`                          | how often leases are renewed and free partitions taken                                                                                                                                                                 |
-| `OPENHARNESS_SWEEP_MS`                    | `60000`                          | how often owned partitions are re-scanned for missed work                                                                                                                                                              |
-| `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                                                                                     |
-| `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                                                                                     |
-| `OPENHARNESS_COMPACTION_THRESHOLD`        | `0.7`                            | the share of the chat model's context budget at which older history is summarized (epic #277, K2; #279), and the default a user who has not chosen one follows (C3, #282); a fraction in `0..1`                        |
-| `OPENHARNESS_CLEAR_THRESHOLD`             | `0.5`                            | the soft share of the chat model's budget at which old tool results are cleared before anything is summarized (#331), below `OPENHARNESS_COMPACTION_THRESHOLD`; a fraction in `0..1`, and the default needs no setting |
-| `OPENHARNESS_TODO_NUDGE`                  | off                              | `1` nudges the model to write a todo list before its first tool call (#331); off by default, because the benefit is small and a line on every session's first request is not free                                      |
-| `OPENHARNESS_MAX_TOOL_STEPS`              | `50` (the brain's)               | the most model requests one turn may make (epic #303, X2); past it the turn ends with a `tool_steps_exhausted_error` notice and goes idle, and a value below `1` fails the boot                                        |
-| `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                                                                                                |
-| `OPENHARNESS_TRACING`                     | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                                                                                                                                          |
-| `OPENHARNESS_TRACE_SAMPLE_RATE`           | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)                                                                                                                              |
-| `GOOGLE_CLOUD_PROJECT`                    | —                                | the project a JSON log line's trace id is qualified with; Cloud Logging resolves a bare id (#158)                                                                                                                      |
-| `<NAME>_FILE`                             | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)                                                                                                                              |
+| variable                                  | default                          | what it does                                                                                                                                                                                                                    |
+| ----------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                            | —                                | run on Postgres, migrating on boot; unset means in-memory                                                                                                                                                                       |
+| `SCHEDULER`                               | `local`                          | `local`, or `postgres` for the multi-instance scheduler                                                                                                                                                                         |
+| `BETTER_AUTH_SECRET`                      | — (**required**)                 | signs sessions and cookies                                                                                                                                                                                                      |
+| `BETTER_AUTH_URL`                         | — (**required**)                 | the public URL: Better Auth's base, the one trusted origin (CSRF)                                                                                                                                                               |
+| `OPENHARNESS_SECRETS_KEY`                 | — (**required** under `local`)   | base64 32-byte master key the vault seals credentials with; not needed under `gcp-kms`                                                                                                                                          |
+| `OPENHARNESS_KEY_PROVIDER`                | `local`                          | `local` (the environment key) or `gcp-kms` (Cloud KMS): who wraps the vault's data keys (#150)                                                                                                                                  |
+| `OPENHARNESS_KMS_KEY`                     | — (**required** under `gcp-kms`) | the Cloud KMS `projects/…/cryptoKeys/…` key; unused under `local`                                                                                                                                                               |
+| `OPENHARNESS_KEY_CACHE_TTL_MS`            | `300000`                         | how long unwrapped data keys stay cached in memory; `0` disables the cache                                                                                                                                                      |
+| `OPENHARNESS_DEV_LOGIN`                   | off                              | `1` enables the local dev login; localhost URLs only (A7); the way in when no provider is set                                                                                                                                   |
+| `GOOGLE_CLIENT_ID`/`_SECRET`              | —                                | enable Google sign-in (both, or neither; one provider or the dev login is required)                                                                                                                                             |
+| `GITHUB_CLIENT_ID`/`_SECRET`              | —                                | enable GitHub sign-in                                                                                                                                                                                                           |
+| `MICROSOFT_CLIENT_ID`/`_SECRET`           | —                                | enable Microsoft sign-in                                                                                                                                                                                                        |
+| `MICROSOFT_TENANT_ID`                     | `common`                         | the Entra tenant the Microsoft provider authenticates against                                                                                                                                                                   |
+| `PORT`                                    | `3000`                           | the port to listen on                                                                                                                                                                                                           |
+| `OPENHARNESS_TEST_MODEL`                  | —                                | `mock` swaps in the deterministic test model                                                                                                                                                                                    |
+| `OPENHARNESS_WEB_DIR`                     | —                                | a built web app to serve at `/`                                                                                                                                                                                                 |
+| `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | off                              | `1` lets a **custom OpenAI-compatible** credential **or a remote MCP server** reach a private/loopback address (epic #245, M4; #249; #303, X10); never Azure; off in staging and production                                     |
+| `OPENHARNESS_TRUSTED_PROXY_HOPS`          | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)                                                                                                                                 |
+| `OPENHARNESS_CORS_ORIGINS`                | —                                | comma-separated origins to allow; unset means no CORS headers                                                                                                                                                                   |
+| `OPENHARNESS_MAX_CONCURRENT_SESSIONS`     | `4`                              | how many sessions may be running at once                                                                                                                                                                                        |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `5000`                           | how long shutdown waits for a turn in flight                                                                                                                                                                                    |
+| `OPENHARNESS_INSTANCE_ID`                 | hostname + pid + random suffix   | this instance's id in the lease table                                                                                                                                                                                           |
+| `OPENHARNESS_PARTITIONS`                  | `64` (the protocol's)            | how many partitions the session space has                                                                                                                                                                                       |
+| `OPENHARNESS_LEASE_TTL_MS`                | `30000`                          | how long a partition lease lasts before it must be renewed                                                                                                                                                                      |
+| `OPENHARNESS_HEARTBEAT_MS`                | `10000`                          | how often leases are renewed and free partitions taken                                                                                                                                                                          |
+| `OPENHARNESS_SWEEP_MS`                    | `60000`                          | how often owned partitions are re-scanned for missed work                                                                                                                                                                       |
+| `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                                                                                              |
+| `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                                                                                              |
+| `OPENHARNESS_COMPACTION_THRESHOLD`        | `0.7`                            | the share of the chat model's context budget at which older history is summarized (epic #277, K2; #279), and the default a user who has not chosen one follows (C3, #282); a fraction in `0..1`                                 |
+| `OPENHARNESS_CLEAR_THRESHOLD`             | `0.5`                            | the soft share of the chat model's budget at which old tool results are cleared before anything is summarized (#331), below `OPENHARNESS_COMPACTION_THRESHOLD`; a fraction in `0..1`, and the default needs no setting          |
+| `OPENHARNESS_TODO_NUDGE`                  | off                              | `1` nudges the model to write a todo list before its first tool call (#331); off by default, because the benefit is small and a line on every session's first request is not free                                               |
+| `OPENHARNESS_MAX_TOOL_STEPS`              | `50` (the brain's)               | the most model requests one turn may make (epic #303, X2); past it the turn ends with a `tool_steps_exhausted_error` notice and goes idle, and a value below `1` fails the boot                                                 |
+| `OPENHARNESS_MAX_AGENT_DEPTH`             | `3` (the protocol's)             | how deep a tree of helpers may get (epic #340, S6; #344): a session at this depth is not offered the tools that start another one, so a top-level chat (depth 0) may nest two levels below it; a value below `1` fails the boot |
+| `OPENHARNESS_MAX_LIVE_TASKS`              | `10` (the protocol's)            | how many of one root chat's live descendants there may be (S6; #344) before an `agent` call is answered with an `is_error` the model acts on; a value below `1` fails the boot                                                  |
+| `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                                                                                                         |
+| `OPENHARNESS_TRACING`                     | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                                                                                                                                                   |
+| `OPENHARNESS_TRACE_SAMPLE_RATE`           | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)                                                                                                                                       |
+| `GOOGLE_CLOUD_PROJECT`                    | —                                | the project a JSON log line's trace id is qualified with; Cloud Logging resolves a bare id (#158)                                                                                                                               |
+| `<NAME>_FILE`                             | —                                | for any secret above: read the value from this path instead of `<NAME>` (#154, see below)                                                                                                                                       |
 
 Every **secret** in that table — `DATABASE_URL`, `BETTER_AUTH_SECRET`,
 `OPENHARNESS_SECRETS_KEY`, and each provider's `*_CLIENT_SECRET` — can be delivered as a file
@@ -646,11 +648,22 @@ here.
   unavailability has two wordings: `modeUnavailableMessage` tells a _user_ to edit the mode,
   and this one tells a _model_ what it can do instead.
 - **It carries both halves of the tool answer**, and deliberately: `toolOverride` is the patch
-  the type imposes (the mode's own `tools`, or the parent's for `general-purpose`) for a caller
-  that creates the child **on the mode** so it follows it live, and `tools`/`mcpServers` are
-  that patch **applied** to the owner's settings — the set the child really has — for a caller
-  that builds the child's turn options itself. Policies are in neither: a policy is the user's
-  (E6).
+  the type imposes (the mode's own `tools`, or the parent's for `general-purpose`), and
+  `tools`/`mcpServers` are that patch **applied** to the owner's settings — the set the child
+  really has — for a caller that asks without creating a session. Policies are in neither: a
+  policy is the user's (E6).
+- **It carries the mode id the child is created on** (#344): `modeId` is the mode's own id for a
+  mode type and the **parent's** for `general-purpose` (it is the parent continued), `null` for
+  a chat that follows none. That is what makes the override above real rather than advisory —
+  the caller creates the child **on** the mode (`createSession`'s `mode`, with the resolved model
+  as the header's fallback), and the loop then resolves the mode for the child's every request
+  exactly as it does for a chat's, retuning included.
+- **`main.ts` builds it once and it reaches the tools through the turn options.** The resolver
+  is built from the same store, credential store, tool registry and MCP service the mode
+  resolver is, and handed to `createTurnTools` as `subagents`, which adds the two limits and the
+  scheduler's own `signal` and puts the whole thing in `RunTurnOptions` (the field names are the
+  brain's own, so the runner spreads it unchanged). `agent` is its only caller; `subagents` not
+  being wired is a deployment with no subagents at all, not an error.
 - **A child is never offered `ask_user`** (epic #340, S1) — a subagent cannot ask the user, and
   its system prompt says so (`@openharness/brain`'s `SUBAGENT_SYSTEM_PROMPT`). That is not this
   resolver's: the loop reads the session's own `interactive` flag, which the child is created
@@ -838,12 +851,18 @@ append path, and the **wake**, so a chat reacts on its own instead of waiting fo
   that outlives the process is recovered by `findSessionsNeedingWork`, which reports a
   `waiting_on_tasks` session whose deadline has passed (#343) — the two paths are the same turn
   as far as the brain is concerned.
-- **The tools are the mock model's, until #344.** `createTurnRegistry` adds
-  `testTaskTool` (`task_start`) and `testTaskWaitTool` (`agent_wait`) under
-  `OPENHARNESS_TEST_MODEL=mock`, and `main.ts` wraps the store with
-  `withTestBackgroundTasks` in the same mode. A real deployment gets neither yet: the tool a
-  chat waits with belongs to [#344](https://github.com/amirtuval/openharness/issues/344), which
-  registers it (and the one that starts a subagent) beside these.
+- **The tools are real since #344.** `createTurnRegistry` registers the five subagent tools —
+  `agent`, `agent_message`, `agent_wait`, `agent_stop` and the child's `message_parent` — for
+  **every** deployment, which is what a settings screen lists and a mode overrides. The
+  definitions it holds are the surface with a `run` that says the harness answers the call
+  (`@openharness/hands`' `HARNESS_TOOL_HANDLERS`): the loop replaces each with the session-bound
+  one per request (`@openharness/brain`'s `withSubagentTools`), and a host that wired no type
+  resolver gets neither — the loop then adds nothing and takes nothing away.
+- **The test hooks are the mock model's.** `createTurnRegistry` adds `testTaskTool`
+  (`task_start`) under `OPENHARNESS_TEST_MODEL=mock`, and `main.ts` wraps the store with
+  `withTestBackgroundTasks` in the same mode: the task a chat **waits** with is the real
+  `agent_wait` now, so `testTaskWaitTool` is only for a test that wants the tool on its own
+  (`createTestToolRegistry` deliberately leaves it out).
 - **The test hook is a store proxy, and that is the only shape that works.** A tool cannot
   append: `ToolRunContext` is a signal and a secret map, and a tool has no idea which session it
   was called in. The process that owns the store does, so `withTestBackgroundTasks` watches for
@@ -1124,6 +1143,13 @@ prices each request with the registry's rates, and assembles the totals and the 
   1,000 searches on top of tokens (`SEARCH_PRICE_PER_CALL`), and OpenAI's and xAI's search is
   priced through the model's own rates — so the money is claimed exactly where the provider
   published a rate, and the count stands on its own where none exists.
+- **The per-session route covers the whole tree** (epic #340, S8; #344): it reads the session's
+  log **and every descendant's** (`store.listDescendants`, one page-walk each, a descendant
+  deleted meanwhile skipped rather than failing the read), sums them into `totals`, `cost`,
+  `by_model` and `searches`, and answers the subtree's own share as `descendants` — the same
+  shape without `session_id`. So a chat that delegated work does not look cheap, and a reader
+  can still say how much of the bill was the helpers'. A chat with no children answers zeroes
+  there.
 - **The per-session route** is owner-scoped (another user's session is the store's
   `SessionNotFoundError`, which `app.onError` maps to the 404) and reads that session's whole
   log. **The per-user route** has no id in its path — it is always the caller — and is **one
@@ -1672,17 +1698,24 @@ and no network. It is an AI SDK `MockLanguageModelV4`, streamed through the same
 path a real provider goes through, and it lives in `mock-model.ts`; `resolveModelFactory` is
 the only thing that constructs it, and it only does so when the variable says `mock`:
 
-| last user message      | what happens                                                                                                                                                                                                                 |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| anything else          | echoed back in 4 chunks, 25 ms apart                                                                                                                                                                                         |
-| `__slow__`             | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests                                                                                                                                                  |
-| `__hold__`             | one chunk, then nothing: the request stays open until it is aborted                                                                                                                                                          |
-| `__fail_retryable__`   | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo                                                                                                                                                  |
-| `__fail_terminal__`    | HTTP 400 (`model_request_failed_error`) on every attempt                                                                                                                                                                     |
-| `__ask__`              | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309)                                                                                                                                               |
-| `__todos__ [n]`        | calls `todo_write` with `n` items (three when it is not said), so a chat's task list can be driven through the whole server (#305; the terminal's pinned list, #308)                                                         |
-| `__task__ [delay_ms]`  | calls `task_start`, the test background tool (#343): the handle comes back at once, and the process's store proxy starts the task and reports back after the delay — the whole background-task path, through the real server |
-| `__wait__ [timeout_s]` | calls `agent_wait` (#343), so the turn ends `waiting_on_tasks` — resolved by a task's news, by its deadline (the queue's timer), or by a message                                                                             |
+| last user message                       | what happens                                                                                                                                                                                                                                                                          |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| anything else                           | echoed back in 4 chunks, 25 ms apart                                                                                                                                                                                                                                                  |
+| `__slow__`                              | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests                                                                                                                                                                                                           |
+| `__hold__`                              | one chunk, then nothing: the request stays open until it is aborted                                                                                                                                                                                                                   |
+| `__fail_retryable__`                    | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo                                                                                                                                                                                                           |
+| `__fail_terminal__`                     | HTTP 400 (`model_request_failed_error`) on every attempt                                                                                                                                                                                                                              |
+| `__ask__`                               | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309)                                                                                                                                                                                                        |
+| `__todos__ [n]`                         | calls `todo_write` with `n` items (three when it is not said), so a chat's task list can be driven through the whole server (#305; the terminal's pinned list, #308)                                                                                                                  |
+| `__task__ [delay_ms]`                   | calls `task_start`, the test background tool (#343): the handle comes back at once, and the process's store proxy starts the task and reports back after the delay — the whole background-task path, through the real server                                                          |
+| `__wait__ [timeout_s]`                  | calls `agent_wait` (#343), so the turn ends `waiting_on_tasks` — resolved by a task's news, by its deadline (the queue's timer), or by a message                                                                                                                                      |
+| `__agent__ <type> \| <prompt>`          | calls `agent` (#344): the type is the first half and the prompt the rest, with the task's description derived from the prompt's first line (collapsed and bounded). The child then runs its own turn — a QA spec drives it by sending a message to the child session the handle names |
+| `__agent_message__ <task_id> \| <text>` | calls `agent_message` (#344): steers a running child or continues one that has already reported. A marker with no text sends `keep going`, because the tool's own schema refuses an empty one                                                                                         |
+| `__agent_stop__ <task_id>`              | calls `agent_stop` (#344): the child is interrupted and the task marked `stopped`                                                                                                                                                                                                     |
+| `__message_parent__ <note>`             | calls `message_parent` (#344) — the one marker a **child** writes — so the parent is told something before the child is done. The whole rest of the message is the note, separators included                                                                                          |
+
+A **child turn that fails** is the existing `__fail_terminal__`, sent to the child: the parent's
+card moves to `failed` and the news carries the provider's sentence.
 
 A marker matches the _start_ of the message, so `__slow__ tell me something` still streams
 slowly. The message a marker is matched against is the newest one that is not the brain's own
@@ -2180,6 +2213,18 @@ parallel with each other.
   message queued behind an interrupt, recovery on start (a dead turn finished, a queued message
   nobody signalled, and — #309 — a pause resumed from a confirmation the recovery scan found
   with no signal sent), concurrency, stopping, and the fence reaching the store.
+- `subagents.test.ts` (epic #340, S5/S6/S7; #344) — the whole subagent path over HTTP, with the
+  subagent runtime wired into the harness and the mock model driving the calls: `__agent__`
+  starting a helper (the handle comes back at once, the child is a **real** session with the
+  parent, the task, depth 1 and `interactive: false`, its log holding nothing but the prompt, and
+  its result reaching the parent as a notification keyed by the turn — claimed by the request
+  that folds it in), two helpers started and reporting in parallel, an unknown type answered with
+  the resolver's sentence and nothing started, a start past `OPENHARNESS_MAX_LIVE_TASKS` refused
+  (with a `__hold__` child holding the slot), `__agent_message__` continuing a child that already
+  reported (its prompt still above the message), `__agent_stop__` marking the task `stopped`, an
+  unknown handle answered `is_error`, a child's `__message_parent__` note and a `__fail_terminal__`
+  turn arriving as `message` and `failed`, and the five listed at `GET /v1/me/tools` with `allow`
+  as their default policy.
 - `session-tree.test.ts` (epic #340, S1/S3; #341) — the tree at the API: a chat is interactive
   unless the create body asks for `false` (and a non-boolean is a 400), the tree fields a
   client sends are stripped so the session is a top-level chat of its own, the list answers the
