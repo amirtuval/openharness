@@ -13,6 +13,7 @@ import {
   isStoredEvent,
   newEventId,
   newMcpServerId,
+  newTaskId,
   partitionOf,
   SUMMARY_MODEL_SAME_AS_CHAT,
   type Agent,
@@ -27,6 +28,7 @@ import {
   type Session,
   type SessionId,
   type StoredEvent,
+  type TaskId,
   type StreamEvent,
   type UserId,
   type UserPreferences,
@@ -1770,6 +1772,186 @@ export function runSessionStoreConformance(
       })
     })
 
+    // --------------------------------- background task notifications (#343)
+
+    describe('background task notifications (epic #340, S4; #343)', () => {
+      it('appends a notification that reads as queued, and stops listing it once claimed', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const taskId = newTaskId()
+        const stored = await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'result',
+          text: 'the child finished',
+          sourceKey: `${taskId}:3`,
+        })
+        expect(stored.appended).toBe(true)
+        expect(stored.event).toMatchObject({
+          type: EVENT_TYPES.sessionTaskNotification,
+          task_id: taskId,
+          kind: 'result',
+          text: 'the child finished',
+          source_key: `${taskId}:3`,
+        })
+        // Queued, exactly as a user event is: nothing has been told the model yet.
+        expect(stored.event.processed_at).toBeNull()
+        const pending = await store.getPendingTaskNotifications(session.id)
+        expect(pending.map((event) => event.id)).toEqual([stored.event.id])
+        expect(pending[0]?.processed_at).toBeNull()
+
+        // The request that folds it in claims it, and the claim is the timestamp a read derives.
+        clock.advance(7 * SECOND)
+        await append(store, session.id, [spanStartFor([stored.event.id])])
+        expect(await store.getPendingTaskNotifications(session.id)).toEqual([])
+        const reread = (await store.listEventsUnscoped(session.id)).data.find(
+          (event) => event.id === stored.event.id,
+        )
+        expect(reread?.processed_at).toBe(timestampAt(clock.currentMs))
+        expectExact(StoredEventSchema, reread, 'a stored notification')
+      })
+
+      it('is idempotent on the source key: a second append stores nothing', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const taskId = newTaskId()
+        const input = {
+          taskId,
+          kind: 'result' as const,
+          text: 'the child finished',
+          sourceKey: `${taskId}:3`,
+        }
+        const first = await store.appendTaskNotification(session.id, input)
+        const second = await store.appendTaskNotification(session.id, input)
+        expect(second.appended).toBe(false)
+        expect(second.event).toEqual(first.event)
+        // One event in the log, and one entry in the pending list — the whole point of the key.
+        const notifications = (await store.listEventsUnscoped(session.id)).data.filter(
+          (event) => event.type === EVENT_TYPES.sessionTaskNotification,
+        )
+        expect(notifications.map((event) => event.id)).toEqual([first.event.id])
+        expect((await store.getPendingTaskNotifications(session.id)).length).toBe(1)
+      })
+
+      it('stores two notifications under different keys, in seq order', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const firstTask = newTaskId()
+        const secondTask = newTaskId()
+        const first = await store.appendTaskNotification(session.id, {
+          taskId: firstTask,
+          kind: 'result',
+          text: 'one',
+          sourceKey: `${firstTask}:1`,
+        })
+        const second = await store.appendTaskNotification(session.id, {
+          taskId: secondTask,
+          kind: 'failed',
+          text: 'two',
+          sourceKey: `${secondTask}:1`,
+        })
+        expect([first.appended, second.appended]).toEqual([true, true])
+        expect(
+          (await store.getPendingTaskNotifications(session.id)).map((event) => event.task_id),
+        ).toEqual([firstTask, secondTask])
+      })
+
+      it('keeps notifications out of the pending user events, and the user events out of its own read', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const taskId = newTaskId()
+        await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'message',
+          text: 'a note',
+          sourceKey: `${taskId}:1`,
+        })
+        const [message] = await append(store, session.id, [userMessage('hi')])
+        expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
+          message?.id,
+        ])
+        expect(
+          (await store.getPendingTaskNotifications(session.id)).map((event) => event.task_id),
+        ).toEqual([taskId])
+      })
+
+      it('refuses a claim naming a notification the log does not hold, and stores nothing', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const [message] = await append(store, session.id, [userMessage('hi')])
+        const before = (await store.listEventsUnscoped(session.id)).data
+        const error = await thrownBy(() =>
+          store.appendEvents(session.id, [spanStartFor([unknownEventId()])]),
+        )
+        expectErrorIdentity(error, 'ClaimConflictError', CLAIM_CONFLICT_ERROR_CODE)
+        expect((await store.listEventsUnscoped(session.id)).data).toEqual(before)
+        expect((await store.getPendingUserEvents(session.id)).map((event) => event.id)).toEqual([
+          message?.id,
+        ])
+      })
+
+      it('claims a notification once when two appends race for it', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const taskId = newTaskId()
+        const { event } = await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${taskId}:1`,
+        })
+        const attempt = async () => store.appendEvents(session.id, [spanStartFor([event.id])])
+        const race = await Promise.allSettled([attempt(), attempt()])
+        expect(race.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+        const rejected = race.filter((result) => result.status === 'rejected')
+        expect(rejected).toHaveLength(1)
+        expectErrorIdentity(
+          rejected[0]?.status === 'rejected' ? rejected[0].reason : null,
+          'ClaimConflictError',
+          CLAIM_CONFLICT_ERROR_CODE,
+        )
+        expect(await store.getPendingTaskNotifications(session.id)).toEqual([])
+      })
+
+      it('takes a notification a rewind replaced out of the pending list (#238)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        await append(store, session.id, [userMessage('hi')])
+        const taskId = newTaskId()
+        const { event } = await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${taskId}:1`,
+        })
+        expect((await store.getPendingTaskNotifications(session.id)).length).toBe(1)
+        await append(store, session.id, [rewindTo(1)])
+        expect(await store.getPendingTaskNotifications(session.id)).toEqual([])
+        // The event is still in the raw log — a rewind nothing deletes, replay skips it.
+        expect(
+          (await store.listEventsUnscoped(session.id, { includeSuperseded: true })).data.some(
+            (stored) => stored.id === event.id,
+          ),
+        ).toBe(true)
+      })
+
+      it('throws for a session that does not exist', async () => {
+        const { store } = await setup()
+        const missing = unknownSessionId()
+        const pendingError = await thrownBy(() => store.getPendingTaskNotifications(missing))
+        expect(pendingError).toBeInstanceOf(Error)
+        expect((pendingError as Error).name).toBe('SessionNotFoundError')
+        const appendError = await thrownBy(() =>
+          store.appendTaskNotification(missing, {
+            taskId: newTaskId(),
+            kind: 'result',
+            text: 'done',
+            sourceKey: 'nowhere:1',
+          }),
+        )
+        expect((appendError as Error).name).toBe('SessionNotFoundError')
+      })
+    })
+
     // -------------------------------------------------------- stored chunks
 
     describe('stored chunks', () => {
@@ -3211,6 +3393,48 @@ export function runSessionStoreConformance(
         expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
       })
 
+      it('finds a session a background task just wrote to (#343)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const taskId = newTaskId()
+        await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${taskId}:1`,
+        })
+        // Written by whatever ran the task, with no signal to this session's owner: the scan is
+        // the only thing that finds an idle session whose news is waiting.
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
+      })
+
+      it('finds a task wait only once its deadline has passed (#343)', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        // A `status_running` first: a turn opened, ended in the wait, and there is nothing else
+        // about the session that would make it work.
+        await append(store, session.id, [statusRunning()])
+        await append(store, session.id, [
+          statusWaitingFor([newTaskId()], clock.currentMs + 5 * SECOND),
+        ])
+        // Not yet: the wait is a pause, and a pause is not work while its deadline is ahead.
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+        clock.advance(5 * SECOND)
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
+      })
+
+      it('leaves a task wait that something has since answered out of the scan (#343)', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const call = newEventId()
+        await append(store, session.id, [statusRunning(), toolUse(call, 'agent_wait')])
+        await append(store, session.id, [statusWaitingFor([newTaskId()], clock.currentMs - SECOND)])
+        // Answering the wait writes its result and carries the turn on, so the log's last
+        // status event is a later idle — the deadline is only read while it is the newest one.
+        await append(store, session.id, [toolResult(call, false), statusIdle()])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+      })
+
       it('leaves out sessions with nothing to do', async () => {
         const { store, clock } = await setup()
         const agent = await store.createAgent(agentInput(), OWNER_A)
@@ -3696,6 +3920,17 @@ function statusIdle(): AppendableEvent {
 /** A `session.status_idle` claiming `consumes`, as the brain ends an idle turn on an interrupt (P4). */
 function statusIdleFor(consumes: EventId[]): AppendableEvent {
   return { type: EVENT_TYPES.sessionStatusIdle, stop_reason: { type: 'end_turn' }, consumes }
+}
+
+/**
+ * A `session.status_idle` that ended a turn `waiting_on_tasks`, as the brain does when the
+ * model asked to wait for background tasks (epic #340, S5; #343).
+ */
+function statusWaitingFor(taskIds: TaskId[], deadlineMs: number): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionStatusIdle,
+    stop_reason: { type: 'waiting_on_tasks', task_ids: taskIds, deadline: timestampAt(deadlineMs) },
+  }
 }
 
 /** A `session.status_idle` that paused on `eventIds`, as the brain ends a turn waiting on the user (#309). */

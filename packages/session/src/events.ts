@@ -1,46 +1,76 @@
 import {
   EVENT_TYPES,
+  type AgentToolResultEvent,
   type ModelRequestEndEvent,
   type ModelRequestStartEvent,
   type SessionStatusIdleEvent,
   type Supersedes,
 } from '@openharness/protocol'
 
-import type { AppendableEvent, CompactOptions } from './store'
+import type { AppendableEvent, CompactOptions, TaskNotificationInput } from './store'
 
 /**
  * What both stores do with the events they store, in one place.
  *
  * The in-memory store and the Postgres store share these rules so they cannot drift: which
- * event types are the user's, what a `supersedes` range has to look like before it is recorded
- * (a reply's chunks, or the tail a `session.rewind` restarts from, #238), which events such a
- * range covers when replay skips them or {@link SessionStore.compact} deletes them, and how a
- * compaction cutoff is read. Everything else about storing is each implementation's own; this
- * is only the part the contract speaks about.
+ * event types are **queued** — the user's, and since #343 a background task's notification —
+ * what a `supersedes` range has to look like before it is recorded (a reply's chunks, or the
+ * tail a `session.rewind` restarts from, #238), which events such a range covers when replay
+ * skips them or {@link SessionStore.compact} deletes them, and how a compaction cutoff is
+ * read. Everything else about storing is each implementation's own; this is only the part the
+ * contract speaks about.
  *
  * (The keyset cursors and argument checks the stores also share live in `inputs.ts`.)
  */
 
-/** Whether an event type is one the user writes; those are queued until a claim takes them. */
+/** Whether an event type is one the user writes. */
 export function isUserEventType(type: string): boolean {
   return type === EVENT_TYPES.userMessage || type === EVENT_TYPES.userInterrupt
 }
 
-/** The event types that can carry a claim on user events, and so change what is pending. */
-export type ClaimsEvent = ModelRequestStartEvent | ModelRequestEndEvent | SessionStatusIdleEvent
+/**
+ * Whether an event type is **queued**: stored unprocessed and claimed by a turn.
+ *
+ * Queued is "the log holds something the brain has not been told yet", and it is what decides
+ * three things in both stores: that the event is stored with `processed_at` left `null` (its
+ * timestamp is derived from the claim that takes it on read), that a `consumes` list may name
+ * it, and that it is part of what a session "needs work" for.
+ *
+ * Two families are queued. The user's own events — `user.message`, `user.interrupt` — and,
+ * since epic #340 S4 (#343), `session.task_notification`: a background task's news is
+ * addressed to the parent **model**, exactly as a message is, so it is claimed the same way
+ * and delivered exactly once. Everything else a session stores is written by a server or a
+ * brain that already knows what it did.
+ */
+export function isQueuedEventType(type: string): boolean {
+  return isUserEventType(type) || type === EVENT_TYPES.sessionTaskNotification
+}
+
+/** The event types that can carry a claim on queued events, and so change what is pending. */
+export type ClaimsEvent =
+  ModelRequestStartEvent | ModelRequestEndEvent | SessionStatusIdleEvent | AgentToolResultEvent
 
 /**
- * Whether an event is one of the three types whose `consumes` claims user events (P4).
+ * Whether an event is one of the four types whose `consumes` claims queued events (P4).
  *
- * The same three everywhere: a `span.model_request_start` claims the messages its request
- * answers, a `span.model_request_end` claims the interrupts that cut its request short, and a
- * `session.status_idle` claims the interrupts a turn that had nothing running ended on.
+ * Three are the turn's own bookkeeping, and each claims what it answers: a
+ * `span.model_request_start` claims the messages (and, since #343, the notifications) its
+ * request folds in, a `span.model_request_end` claims the interrupts that cut its request
+ * short, and a `session.status_idle` claims the interrupts a turn that had nothing running
+ * ended on.
+ *
+ * The fourth is the **task wait's result** (epic #340, S5; #343). A wait is resolved by the
+ * notifications that answer it, and those notifications must be claimed by the event that
+ * consumes them: the result *is* the notification, so it is the result that says the model has
+ * been told. Without it the parent's next request would be handed the same notification a
+ * second time, as steering.
  */
 export function carriesConsumes(event: { readonly type: string }): event is ClaimsEvent {
   return (
     event.type === EVENT_TYPES.modelRequestStart ||
     event.type === EVENT_TYPES.modelRequestEnd ||
-    event.type === EVENT_TYPES.sessionStatusIdle
+    event.type === EVENT_TYPES.sessionStatusIdle ||
+    event.type === EVENT_TYPES.agentToolResult
   )
 }
 
@@ -308,4 +338,24 @@ export function cutoffOf(options: CompactOptions): number {
     )
   }
   return cutoff
+}
+
+/**
+ * The event an {@link SessionStore.appendTaskNotification} writes, as the caller's input plus
+ * the store's envelope (epic #340, S4; issue #343).
+ *
+ * Both stores build it here, so the shape a notification is written in is stated once: the
+ * queued-ness comes from {@link isQueuedEventType} on the append path, and this is only the
+ * body. It is deliberately not validated here — the in-memory store parses through the
+ * protocol like every other event it keeps, and the Postgres store stores what it is given —
+ * but it is *built* here, so a field the protocol adds is a change in one place.
+ */
+export function taskNotificationEvent(input: TaskNotificationInput): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionTaskNotification,
+    task_id: input.taskId,
+    kind: input.kind,
+    text: input.text,
+    source_key: input.sourceKey,
+  }
 }

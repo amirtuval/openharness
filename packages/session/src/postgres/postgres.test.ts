@@ -9,6 +9,7 @@ import {
   isStoredEvent,
   newEventId,
   newSessionId,
+  newTaskId,
   partitionOf,
   type CreateAgentRequest,
   type EventId,
@@ -560,6 +561,11 @@ if (target === null) {
       // #312's file adds the remote tool policies to the settings table `0027` created, and is
       // numbered after #311's pair for the same reason they follow `0028`.
       expect(files).toContain('0031_mcp_tool_policies.sql')
+      // `0034_task_notifications.sql` builds the two indexes a background task's notification
+      // needs (#343): the partial one the pending read and the work scan use, and the unique one
+      // that makes an append idempotent on its `source_key`. Both are exercised below, after the
+      // re-run — a unique index that a re-run dropped would let the second append through.
+      expect(files).toContain('0034_task_notifications.sql')
       expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
         files.indexOf('0027_tool_settings.sql'),
       )
@@ -574,6 +580,9 @@ if (target === null) {
       )
       expect(files.indexOf('0030_mcp_oauth_state_client.sql')).toBeLessThan(
         files.indexOf('0031_mcp_tool_policies.sql'),
+      )
+      expect(files.indexOf('0031_mcp_tool_policies.sql')).toBeLessThan(
+        files.indexOf('0034_task_notifications.sql'),
       )
       expect(await migrate(db)).toEqual(files)
 
@@ -614,6 +623,26 @@ if (target === null) {
         userMessage('hi again'),
       ])
       expect((await store.listEventsUnscoped(session.id)).data).toEqual([rewind, edited])
+
+      // `0034`'s unique index is exercised after the re-run: the second append of one
+      // `source_key` is refused by the index and answered as the notification already stored,
+      // and `0034`'s partial index is what the pending read seeks (#343).
+      const taskId = newTaskId()
+      const input = {
+        taskId,
+        kind: 'result' as const,
+        text: 'the child finished',
+        sourceKey: `${taskId}:1`,
+      }
+      const first = await store.appendTaskNotification(session.id, input)
+      expect(first.appended).toBe(true)
+      expect(await store.appendTaskNotification(session.id, input)).toEqual({
+        event: first.event,
+        appended: false,
+      })
+      expect(
+        (await store.getPendingTaskNotifications(session.id)).map((event) => event.id),
+      ).toEqual([first.event.id])
     })
 
     it('stores a rewind’s range and its kind, beside the chunk range a reply records (#238)', async () => {

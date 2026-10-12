@@ -37,6 +37,7 @@ import {
   type ProviderCredential,
   type Session,
   type SessionId,
+  type SessionTaskNotificationEvent,
   type StoredEvent,
   type Supersedes,
   type SummaryModel,
@@ -74,9 +75,11 @@ import {
   assertRewinds,
   carriesConsumes,
   cutoffOf,
+  isQueuedEventType,
   isSuperseded,
   isUserEventType,
   supersessionsOf,
+  taskNotificationEvent,
   type AppendedEvent,
   type SupersessionRecord,
 } from './events'
@@ -125,6 +128,8 @@ import type {
   TurnState,
   TurnStateKind,
   Unsubscribe,
+  TaskNotificationAppend,
+  TaskNotificationInput,
   UpdateSessionRequest,
 } from './store'
 
@@ -615,6 +620,41 @@ export class InMemorySessionStore implements SessionStore {
     return { data: data.map((event) => this.#share(event)), next_page }
   }
 
+  getPendingTaskNotifications(sessionId: SessionId): Promise<SessionTaskNotificationEvent[]> {
+    const record = this.#requireSession(sessionId)
+    const ranges = this.#supersessions.get(sessionId)
+    const pending = record.events
+      .map((entry) => entry.event)
+      .filter(
+        (event): event is SessionTaskNotificationEvent =>
+          event.type === EVENT_TYPES.sessionTaskNotification &&
+          !this.#claims.has(event.id) &&
+          !isSuperseded(event, ranges),
+      )
+      .map((event) => this.#share(event))
+    return resolved(pending)
+  }
+
+  appendTaskNotification(
+    sessionId: SessionId,
+    input: TaskNotificationInput,
+  ): Promise<TaskNotificationAppend> {
+    const record = this.#requireSession(sessionId)
+    const existing = notificationWithSourceKey(record, input.sourceKey)
+    if (existing !== undefined) {
+      // Idempotent on the key (#343): the caller asked again for a notification this log
+      // already holds, so nothing is stored and the caller is told which one it is.
+      return resolved({ event: this.#share(existing), appended: false })
+    }
+    const now = this.#clock()
+    const [stored] = this.#append(record, [taskNotificationEvent(input)], now)
+    if (stored === undefined || stored.type !== EVENT_TYPES.sessionTaskNotification) {
+      throw new Error('the store did not return the notification it was asked to append')
+    }
+    this.#deliver(sessionId, stored)
+    return resolved({ event: this.#share(stored), appended: true })
+  }
+
   getPendingUserEvents(sessionId: SessionId): Promise<UserEvent[]> {
     const record = this.#requireSession(sessionId)
     // Pending is "no claim", not "no `processed_at`": the claim is the fact, and the
@@ -1049,7 +1089,7 @@ export class InMemorySessionStore implements SessionStore {
         if (
           namedHere.has(consumed) ||
           target === undefined ||
-          !isUserEvent(target) ||
+          !isQueuedEvent(target) ||
           this.#claims.has(consumed) ||
           // A message a rewind replaced (#238) answers nothing: nothing outside a range may
           // claim into it.
@@ -1108,7 +1148,7 @@ export class InMemorySessionStore implements SessionStore {
     const ranges = this.#supersessions.get(record.session.id)
     const pending = record.events.some(
       (entry) =>
-        isUserEvent(entry.event) &&
+        isQueuedEvent(entry.event) &&
         !this.#claims.has(entry.event.id) &&
         !isSuperseded(entry.event, ranges),
     )
@@ -1120,7 +1160,14 @@ export class InMemorySessionStore implements SessionStore {
     // a confirmation processed — it is not a queued user event, and the session is idle — so
     // nothing else would find it; without this the chat stays stuck until the next message.
     const events = record.events.map((entry) => entry.event)
-    return answersPause(events, ranges)
+    if (answersPause(events, ranges)) {
+      return true
+    }
+    // A task wait past its deadline (epic #340, S5; #343): the last turn ended
+    // `waiting_on_tasks`, and the deadline it recorded has passed. Nothing else would reach
+    // such a session — the notification it waits for may never come — so recovery is what
+    // resumes it and answers the wait as timed out.
+    return pastDeadlineWait(events, ranges, this.#clock())
   }
 
   /**
@@ -1411,7 +1458,7 @@ function storedEventFrom(input: AppendableEvent, assigned: AssignedEventFields):
     ...storedPayload(input, assigned),
     id: assigned.id,
     seq: assigned.seq,
-    processed_at: isUserEventType(input.type) ? null : assigned.processedAt,
+    processed_at: isQueuedEventType(input.type) ? null : assigned.processedAt,
   })
 }
 
@@ -1450,11 +1497,36 @@ function isUserEvent(event: StoredEvent): event is UserEvent {
 }
 
 /**
- * The `processed_at` a reader sees: a user event's comes from the claim that took it — `null`
+ * Whether a stored event is one a turn claims: the user's own, or a task's notification
+ * (epic #340, S4; #343). See {@link isQueuedEventType}.
+ */
+function isQueuedEvent(event: StoredEvent): boolean {
+  return isQueuedEventType(event.type)
+}
+
+/** The notification this session's log already holds under `sourceKey`, if any (#343). */
+function notificationWithSourceKey(
+  record: SessionRecord,
+  sourceKey: string,
+): SessionTaskNotificationEvent | undefined {
+  for (const entry of record.events) {
+    const event = entry.event
+    if (event.type === EVENT_TYPES.sessionTaskNotification && event.source_key === sourceKey) {
+      return event
+    }
+  }
+  return undefined
+}
+
+/**
+ * The `processed_at` a reader sees: a queued event's comes from the claim that took it — `null`
  * while none has — and every other event keeps the one the store wrote when it appended it.
+ *
+ * Queued means the user's own events and, since #343, a background task's notification; see
+ * {@link isQueuedEventType}.
  */
 function derivedProcessedAt(event: StoredEvent, claim: ClaimRecord | undefined): Timestamp | null {
-  if (isUserEvent(event)) {
+  if (isQueuedEventType(event.type)) {
     return claim === undefined ? null : timestampAt(claim.claimedAtMs)
   }
   return event.processed_at
@@ -1515,6 +1587,38 @@ function answersPause(
       waiting.has(event.tool_use_id) &&
       !isSuperseded(event, ranges),
   )
+}
+
+/**
+ * The task wait this log is sitting on, when its deadline has passed (epic #340, S5; #343).
+ *
+ * The fourth thing the work scan looks for, and the same kind of fact as {@link answersPause}:
+ * the last turn ended `waiting_on_tasks`, its deadline is at or before the store's clock, and
+ * the wait's result is not in the log. Nothing else would reach such a session — a wait holds
+ * no lease, no slot and no timer that outlives the process — so recovery is what resumes it and
+ * answers the wait as timed out.
+ *
+ * Only the **newest** status event is read, which is what tells a wait still open from one
+ * already answered: resolving a wait writes its result and carries the turn on, so the log's
+ * last status is a later idle (or a running) event and this reads nothing. A wait a rewind
+ * covered is not one of these either (#238).
+ */
+function pastDeadlineWait(
+  events: readonly StoredEvent[],
+  ranges: readonly SupersessionRecord[] | undefined,
+  now: number,
+): boolean {
+  const lastStatus = findLastStatusEvent(events)
+  if (
+    lastStatus === null ||
+    lastStatus.type !== EVENT_TYPES.sessionStatusIdle ||
+    lastStatus.stop_reason.type !== 'waiting_on_tasks' ||
+    isSuperseded(lastStatus, ranges)
+  ) {
+    return false
+  }
+  const deadline = Date.parse(lastStatus.stop_reason.deadline)
+  return Number.isFinite(deadline) && deadline <= now
 }
 
 /** The last status event in a log, or `null` when the log has none. */

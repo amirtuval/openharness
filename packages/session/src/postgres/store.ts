@@ -28,6 +28,7 @@ import {
   type ModelRequestStartEvent,
   type Session,
   type SessionId,
+  type SessionTaskNotificationEvent,
   type SessionStatus,
   type StoredEvent,
   type StreamEvent,
@@ -67,8 +68,10 @@ import {
   carriesConsumes,
   cutoffOf,
   isEventSeq,
+  isQueuedEventType,
   isUserEventType,
   REWIND_KIND,
+  taskNotificationEvent,
   supersessionsOf,
   type AppendedEvent,
   type RewindTarget,
@@ -98,6 +101,8 @@ import type {
   ModelRequestUsage,
   OwnerScope,
   ToolUseRecord,
+  TaskNotificationAppend,
+  TaskNotificationInput,
   UnscopedListEventsOptions,
   PartitionFence,
   PartitionLease,
@@ -829,6 +834,94 @@ export class PostgresSessionStore implements SessionStore {
     return rows.map(eventFromRow).filter(isUserEvent)
   }
 
+  async getPendingTaskNotifications(sessionId: SessionId): Promise<SessionTaskNotificationEvent[]> {
+    if ((await readSession(this.#db, sessionId)) === undefined) {
+      throw new SessionNotFoundError(sessionId)
+    }
+    // The same read as the user events', one event type over: pending is "no claim", and an
+    // event a rewind replaced (#238) is not waiting for anything.
+    const rows = await this.#db
+      .selectFrom('events as e')
+      .leftJoin('event_claims as c', 'c.event_id', 'e.id')
+      .selectAll('e')
+      .select('c.claimed_at as claimed_at')
+      .where('e.session_id', '=', sessionId)
+      .where('e.type', '=', EVENT_TYPES.sessionTaskNotification)
+      .where('c.event_id', 'is', null)
+      .where(
+        sql<SqlBool>`not exists (
+        select 1
+          from event_supersessions s
+         where s.session_id = e.session_id
+           and s.kind = ${REWIND_KIND}
+           and e.seq between s.from_seq and s.to_seq
+      )`,
+      )
+      .orderBy('e.seq', 'asc')
+      .execute()
+    return rows.map(eventFromRow).filter(isTaskNotification)
+  }
+
+  async appendTaskNotification(
+    sessionId: SessionId,
+    input: TaskNotificationInput,
+  ): Promise<TaskNotificationAppend> {
+    // The cheap half of idempotency: a key this session's log already holds is answered
+    // without an insert at all. It is not the guarantee — two instances can both find nothing
+    // and both insert — which is what the unique index (`0034`) is for; the catch below turns
+    // its violation into the same answer.
+    const existing = await this.#notificationWithSourceKey(sessionId, input.sourceKey)
+    if (existing !== null) {
+      return { event: existing, appended: false }
+    }
+    try {
+      const stored = await this.appendEvents(sessionId, [taskNotificationEvent(input)])
+      const [event] = stored
+      if (event === undefined || !isTaskNotification(event)) {
+        throw new Error('the store did not return the notification it was asked to append')
+      }
+      return { event, appended: true }
+    } catch (error) {
+      if (!isUniqueViolation(error, TASK_NOTIFICATION_SOURCE_KEY_CONSTRAINTS)) {
+        throw error
+      }
+      // Another writer got there first: the append rolled back whole, so nothing of it is in
+      // the log, and the notification the key names is the one that committed.
+      const found = await this.#notificationWithSourceKey(sessionId, input.sourceKey)
+      if (found === null) {
+        throw error
+      }
+      return { event: found, appended: false }
+    }
+  }
+
+  /**
+   * The notification this session's log already holds under `sourceKey`, or `null` (#343).
+   *
+   * Read outside any transaction, which is what both callers want: the first is the fast path
+   * of {@link PostgresSessionStore.appendTaskNotification}, and the second runs after a refused
+   * insert's transaction has rolled back.
+   */
+  async #notificationWithSourceKey(
+    sessionId: SessionId,
+    sourceKey: string,
+  ): Promise<SessionTaskNotificationEvent | null> {
+    const row = await this.#db
+      .selectFrom('events')
+      .selectAll()
+      .where('session_id', '=', sessionId)
+      .where('type', '=', EVENT_TYPES.sessionTaskNotification)
+      .where(sql<SqlBool>`payload ->> 'source_key' = ${sourceKey}`)
+      .orderBy('seq', 'asc')
+      .limit(1)
+      .executeTakeFirst()
+    if (row === undefined) {
+      return null
+    }
+    const event = eventFromRow({ ...row, claimed_at: null })
+    return isTaskNotification(event) ? event : null
+  }
+
   async getTurnState(sessionId: SessionId): Promise<TurnState> {
     if ((await readSession(this.#db, sessionId)) === undefined) {
       throw new SessionNotFoundError(sessionId)
@@ -1093,8 +1186,10 @@ export class PostgresSessionStore implements SessionStore {
     }
     // Derived from the log alone — no lease, no signal, no transient state — so a partition
     // that has just been taken over gets the same answer as one that is running normally.
-    // A session with pending user events *and* an open turn matches once, because it is one
-    // row with two conditions.
+    // A session that needs work for several reasons at once matches once, because it is one
+    // row with several conditions. The clock is read here for the one condition that is about
+    // time: a task wait whose deadline has passed (#343), which nothing else would resume.
+    const now = this.#clock()
     const found = await sql<{ id: string }>`
       select s.id
         from sessions s
@@ -1104,7 +1199,14 @@ export class PostgresSessionStore implements SessionStore {
              select 1
                from events e
               where e.session_id = s.id
-                and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+                -- A claim names a *queued* event: the user's own, or — since #343 — a background
+         -- task's notification, which the event that folds it in (or the wait result that
+         -- answers it) consumes.
+         and e.type in (
+           ${EVENT_TYPES.userMessage},
+           ${EVENT_TYPES.userInterrupt},
+           ${EVENT_TYPES.sessionTaskNotification}
+         )
                 and not exists (
                   select 1 from event_claims c where c.event_id = e.id
                 )
@@ -1135,6 +1237,39 @@ export class PostgresSessionStore implements SessionStore {
            -- writes a confirmation processed — it is not a queued user event, and the session
            -- is idle — so an instance that died before its turn began (or never heard the
            -- signal) would leave the answer with nothing to pick it up; this is what finds it.
+           -- A task wait past its deadline (#343): the last turn ended waiting_on_tasks and
+           -- the deadline it recorded has passed. Resolving a wait writes its result and
+           -- carries the turn on, so a wait already answered has a later status event and is
+           -- not this case — only the newest status is read.
+           or exists (
+             select 1
+               from events st
+              where st.session_id = s.id
+                and st.type = ${EVENT_TYPES.sessionStatusIdle}
+                and st.seq = (
+                  select max(e3.seq)
+                    from events e3
+                   where e3.session_id = s.id
+                     and e3.type in (
+                       ${EVENT_TYPES.sessionStatusRunning},
+                       ${EVENT_TYPES.sessionStatusIdle},
+                       ${EVENT_TYPES.sessionStatusRescheduled}
+                     )
+                )
+                and st.payload -> 'stop_reason' ->> 'type' = 'waiting_on_tasks'
+                -- Both sides cast: the payload's deadline is JSON text and the parameter is
+                -- an unknown-typed bind, so without this Postgres compares two strings — and
+                -- the ISO deadline's T sorts after node-postgres' serialized space, which made
+                -- every wait look un-expired.
+                and (st.payload -> 'stop_reason' ->> 'deadline')::timestamptz <= ${instant(now)}::timestamptz
+                and not exists (
+                  select 1
+                    from event_supersessions x
+                   where x.session_id = st.session_id
+                     and x.kind = ${REWIND_KIND}
+                     and st.seq between x.from_seq and x.to_seq
+                )
+           )
            or exists (
              select 1
                from events st
@@ -1372,7 +1507,7 @@ export class PostgresSessionStore implements SessionStore {
         // from that claim on read; the column is *never written* for one (P4) — `undefined`
         // leaves it out of the insert, so the row keeps the column's null. Everything else
         // happened now, and reads its `processed_at` back from here.
-        processed_at: isUserEventType(input.type) ? undefined : at,
+        processed_at: isQueuedEventType(input.type) ? undefined : at,
       }
     })
     // What the batch records beside its events, checked before anything commits. The events
@@ -1472,7 +1607,14 @@ export class PostgresSessionStore implements SessionStore {
         join events e
           on e.id = claim.event_id
          and e.session_id = ${sessionId}
-         and e.type in (${EVENT_TYPES.userMessage}, ${EVENT_TYPES.userInterrupt})
+         -- A claim names a *queued* event: the user's own, or — since #343 — a background
+         -- task's notification, which the event that folds it in (or the wait result that
+         -- answers it) consumes.
+         and e.type in (
+           ${EVENT_TYPES.userMessage},
+           ${EVENT_TYPES.userInterrupt},
+           ${EVENT_TYPES.sessionTaskNotification}
+         )
          -- Nothing outside a rewound range claims into it (#238): the messages a rewind
          -- replaced answer no request, so a claim naming one is refused like any other.
          and not exists (
@@ -2116,6 +2258,16 @@ const EVENT_ID_CONSTRAINTS = new Set(['events_pkey', 'events_id_key'])
 const MODE_NAME_CONSTRAINTS = new Set(['modes_owner_name_key'])
 
 /**
+ * The index a second notification for one `source_key` violates (`0034`).
+ *
+ * Named, not inferred from the SQLSTATE alone: a unique violation on anything else — an event
+ * id a second writer took, say — is a different fact and must surface as itself.
+ */
+const TASK_NOTIFICATION_SOURCE_KEY_CONSTRAINTS = new Set([
+  'events_task_notification_source_key_idx',
+])
+
+/**
  * The advisory lock a mode creation takes, keyed by its owner (`0024_modes.sql`).
  *
  * The `MAX_MODES_PER_USER` cap is a count followed by an insert, and a transaction alone does
@@ -2144,6 +2296,11 @@ export function isUniqueViolation(error: unknown, constraints: ReadonlySet<strin
   }
   const { code, constraint } = error as { readonly code?: unknown; readonly constraint?: unknown }
   return code === UNIQUE_VIOLATION && typeof constraint === 'string' && constraints.has(constraint)
+}
+
+/** Whether a stored event is a background-task notification (epic #340, S4; #343). */
+function isTaskNotification(event: StoredEvent): event is SessionTaskNotificationEvent {
+  return event.type === EVENT_TYPES.sessionTaskNotification
 }
 
 /** Whether `error` is Postgres refusing a write because an event id is already taken. */

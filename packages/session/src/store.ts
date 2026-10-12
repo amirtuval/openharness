@@ -18,9 +18,12 @@ import type {
   SessionId,
   SessionRewindEvent,
   SessionRewindEventInput,
+  SessionTaskNotificationEvent,
   StoredEvent,
   StoredEventType,
   StreamEvent,
+  TaskId,
+  TaskNotificationKind,
   Timestamp,
   UpdateAgentRequest,
   UpdateModeRequest,
@@ -637,6 +640,55 @@ export interface SessionStore {
   getPendingUserEvents(sessionId: SessionId): Promise<UserEvent[]>
 
   /**
+   * The background-task notifications waiting to be folded into a turn, ordered by `seq`
+   * (epic #340, S4; issue #343).
+   *
+   * A notification is a **queued** event like a user message: stored with `processed_at: null`
+   * and claimed by the event that answers it, so "has the parent model been told?" is answered
+   * by the log. Pending is "no claim" and nothing more — a notification a recorded range
+   * supersedes is not waiting either, the rule every queued read follows (#238).
+   *
+   * The brain reads these at every request boundary: a running turn folds them into its next
+   * request exactly as it folds steering in, an idle session's work scan starts a turn for
+   * them, and a turn waiting on tasks resolves its wait with the ones for its own tasks. They
+   * are deliberately not part of {@link SessionStore.getPendingUserEvents}: a message and a
+   * task's news are both queued, but only one of them is the user talking, and a caller that
+   * wants one must not silently get the other.
+   *
+   * @throws SessionNotFoundError when the session does not exist
+   */
+  getPendingTaskNotifications(sessionId: SessionId): Promise<SessionTaskNotificationEvent[]>
+
+  /**
+   * Append a background-task notification to a session's log, **once per `source_key`**
+   * (epic #340, S4; issue #343).
+   *
+   * This is how anything reaches a session from outside it — a child session finishing its
+   * turn, a background job reporting a failure — and it is deliberately one method rather than
+   * an `appendEvents` call the caller assembles: the guarantee is exactly once, and the log is
+   * the only thing that can give it. The append is idempotent on `input.sourceKey`: a second
+   * call naming a key this session's log already holds stores **nothing** and answers the
+   * notification that is already there with `appended: false`, however many instances make the
+   * call or however often a recovery path runs. A crash between the append and whatever follows
+   * it therefore costs nothing: the delivery can be retried until it answers `appended: false`,
+   * and the parent's brain will claim the notification exactly once.
+   *
+   * The notification is stored **queued** — `processed_at: null`, claimed by the event that
+   * answers it (usually the `span.model_request_start` of the request that folds it in, and for
+   * a task wait the `agent.tool_result` that resolves it) — so nothing here waits for a turn to
+   * notice it. No fence is needed, for the same reason a user event needs none: the event is
+   * durable the moment it is stored, and the owner's brain is what claims it.
+   *
+   * @returns the stored notification, and whether this call is the one that wrote it
+   * @throws SessionNotFoundError when the session does not exist
+   * @throws RangeError when the input is not a notification the protocol would accept
+   */
+  appendTaskNotification(
+    sessionId: SessionId,
+    input: TaskNotificationInput,
+  ): Promise<TaskNotificationAppend>
+
+  /**
    * What the session's turn looks like, from the log alone.
    *
    * `idle` when no turn is open — the last status event is `session.status_idle`, or there is
@@ -804,13 +856,19 @@ export interface SessionStore {
   onPartitionSignal(partition: number, listener: PartitionSignalListener): Promise<Unsubscribe>
 
   /**
-   * The sessions in `partitions` that need work: pending user events, an open turn, or a
-   * pause whose answer has landed.
+   * The sessions in `partitions` that need work: a **queued** event nobody has claimed, an
+   * open turn, a pause whose answer has landed, or a task wait whose deadline has passed.
    *
    * This is recovery's starting point, and it is deliberately log-derived — it does not consult
    * leases, signals or any other transient state, so it answers the same thing for a partition
-   * that has just been taken over as it does for one that is running normally. A session with
-   * pending user events *and* an open turn is returned once.
+   * that has just been taken over as it does for one that is running normally. A session that
+   * needs work for several reasons at once is returned once.
+   *
+   * Queued means what {@link SessionStore.getPendingUserEvents} and
+   * {@link SessionStore.getPendingTaskNotifications} read: the user's own events, and — since
+   * epic #340 S4 (#343) — a background task's notification. A notification is written by
+   * whatever ran the task, on an instance that may not be this one and with no way to signal
+   * this session's owner, so the scan is the only thing that finds it.
    *
    * The third case is the pause (epic #303, X6; #309): a session whose last turn ended
    * `requires_action` and which now holds a `user.tool_confirmation` naming one of the calls it
@@ -818,6 +876,14 @@ export interface SessionStore {
    * user event and the session reads idle — the signal that would start the answering turn is a
    * hint, and one an instance lost before it began leaves the chat stuck until another message.
    * Asking the log here is what keeps a missed signal from stranding an answer.
+   *
+   * The fourth is the **task wait past its deadline** (epic #340, S5; #343): a session whose
+   * last turn ended `waiting_on_tasks` with a `deadline` at or before the store's clock. It is
+   * the same kind of fact as the pause's — the answer will never arrive by itself, and the
+   * scheduler's timer for it is a hint like any other — and it is what makes a wait that
+   * outlives the process that took it recoverable. A wait a notification or a message has since
+   * resolved is not this case: resolving one ends the turn, so the log's last status is a
+   * different idle event, and the deadline is only read while it is the newest status.
    *
    * The result is ordered by `(created_at, id)` ascending: oldest session first.
    */
@@ -1125,6 +1191,38 @@ export interface AppendEventsOptions {
    * finds the event through {@link SessionStore.findSessionsNeedingWork} if the signal is lost.
    */
   readonly fence?: PartitionFence
+}
+
+/**
+ * A notification to write into a session's log (epic #340, S4; issue #343).
+ *
+ * The fields are the event's, minus the envelope the store assigns. `sourceKey` is the task
+ * side's own key for this notification and the whole of what makes the append idempotent; see
+ * {@link SessionStore.appendTaskNotification}.
+ */
+export interface TaskNotificationInput {
+  /** The task the notification came from: it names a `session.task_started` in the same log. */
+  readonly taskId: TaskId
+  /** What happened: a finished turn's output, a message, or a failure. */
+  readonly kind: TaskNotificationKind
+  /** The text itself — a task's output, framed as data when the parent model is told it. */
+  readonly text: string
+  /**
+   * The task side's key for this notification, e.g. `<child_session_id>:<idle seq>`.
+   *
+   * The task's own identity of "this piece of news": the same finished turn always produces
+   * the same key, so a retry, a recovery path or a second instance appending it changes
+   * nothing.
+   */
+  readonly sourceKey: string
+}
+
+/** What {@link SessionStore.appendTaskNotification} wrote — or found already written. */
+export interface TaskNotificationAppend {
+  /** The notification in the log: the one this call wrote, or the one the key already named. */
+  readonly event: SessionTaskNotificationEvent
+  /** Whether this call is the one that stored it; `false` means the key was already there. */
+  readonly appended: boolean
 }
 
 /**
