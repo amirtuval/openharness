@@ -1410,6 +1410,7 @@ __metadata:
     "@openh/cli": "workspace:*"
     "@openharness/client": "workspace:*"
     "@openharness/config": "workspace:*"
+    "@openharness/hands": "workspace:*"
     "@openharness/protocol": "workspace:*"
     "@openharness/server": "workspace:*"
     "@openharness/session": "workspace:*"

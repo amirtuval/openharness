@@ -164,6 +164,8 @@ describe('two people on one server (A4)', () => {
       ['GET', '/v1/me'],
       ['GET', '/v1/me/preferences'],
       ['PUT', '/v1/me/preferences'],
+      ['GET', '/v1/me/tools'],
+      ['PUT', '/v1/me/tools'],
       ['GET', '/v1/agents'],
       ['POST', '/v1/agents'],
       ['GET', '/v1/agents/agent_01JZZZZZZZZZZZZZZZZZZZZZZZ'],

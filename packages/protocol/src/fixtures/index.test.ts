@@ -14,11 +14,14 @@ import {
   SessionSchema,
   StoredEventDeltaSchema,
   StoredEventSchema,
+  ListToolSettingsResponseSchema,
   StoredEventStartSchema,
   StreamEventSchema,
+  ToolSettingEntrySchema,
   UserEventSchema,
   UserMessageEventSchema,
   UserSchema,
+  UserToolSettingsSchema,
 } from '../index'
 import {
   FIXTURE_MODEL_USAGE,
@@ -27,6 +30,7 @@ import {
   makeAgentMessage,
   makeContentDelta,
   makeListModelsResponse,
+  makeListToolSettingsResponse,
   makeMode,
   makeModelEntry,
   makeModelRequestEnd,
@@ -41,8 +45,10 @@ import {
   makeStatusRunning,
   makeStoredEventDelta,
   makeStoredEventStart,
+  makeToolSettingEntry,
   makeUser,
   makeUserInterrupt,
+  makeUserToolSettings,
   makeUserMessage,
   sampleAgent,
   sampleMode,
@@ -115,6 +121,18 @@ describe('fixture builders', () => {
       name: 'fast',
       model: 'openai/gpt-4.1-mini',
     })
+  })
+
+  it('builds tool settings fixtures that parse (#307)', () => {
+    expect(UserToolSettingsSchema.safeParse(makeUserToolSettings()).success).toBe(true)
+    expect(makeUserToolSettings().builtin).toEqual({})
+    expect(ToolSettingEntrySchema.safeParse(makeToolSettingEntry()).success).toBe(true)
+    expect(ListToolSettingsResponseSchema.safeParse(makeListToolSettingsResponse()).success).toBe(
+      true,
+    )
+    expect(
+      makeToolSettingEntry({ enabled: false, policy: 'deny', available: false }),
+    ).toMatchObject({ enabled: false, policy: 'deny', available: false })
   })
 
   it('builds model catalog fixtures that parse, with the overrides applied', () => {

@@ -126,7 +126,31 @@ describe('the mode endpoints', () => {
       model: MODE_DEFAULT_MODEL,
       reasoning_effort: null,
       system_prompt_addition: null,
+      // A mode that says nothing about tools has no override (#307), which is what makes it
+      // follow its owner's settings.
+      tools: null,
     })
+  })
+
+  it('carries a tool override, and clears it on an explicit null (#307)', async () => {
+    const test = createTestApp()
+    const tools = { builtin: { web_search: true, todo_write: false } }
+    const created = await createMode(test, {
+      name: 'deep',
+      model: 'anthropic/claude-sonnet-5',
+      tools,
+    })
+    expect(created.tools).toEqual(tools)
+
+    // An update that omits it keeps it; `null` is how a mode goes back to saying nothing.
+    const renamed = ModeSchema.parse(
+      await (await postJson(test, `${MODES}/${created.id}`, { name: 'renamed' })).json(),
+    )
+    expect(renamed.tools).toEqual(tools)
+    const cleared = ModeSchema.parse(
+      await (await postJson(test, `${MODES}/${created.id}`, { tools: null })).json(),
+    )
+    expect(cleared.tools).toBeNull()
   })
 
   it('refuses a duplicate name with 409, on create and on rename', async () => {

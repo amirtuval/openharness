@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { TimestampSchema } from '../common'
 import { ModeIdSchema } from '../ids'
 import { ReasoningEffortSchema } from '../reasoning'
+import { ToolNameSchema } from './tool-settings'
 import { DEFAULT_MODEL_PATTERN, UserIdSchema } from './user'
 
 /**
@@ -62,6 +63,35 @@ export const ModeReferenceSchema = z.object({
 
 export type ModeReference = z.infer<typeof ModeReferenceSchema>
 
+/**
+ * // extension: a mode's override of which built-in tools are on (epic #303, X4; issue #307).
+ *
+ * A mode's job is to make a chat behave a certain way — the same one that bundles a model and
+ * an effort bundles a tool set — so `deep` may want `web_search` on and `todo_write` off, and
+ * every chat that follows it gets that from its next request on, live, exactly as it gets the
+ * mode's model.
+ *
+ * Three things about it are deliberate:
+ *
+ * - **A per-tool patch, not a set.** A tool the mode does not name follows the user's own
+ *   setting, so a mode expresses "this one differently" rather than restating the whole tool
+ *   list — and a tool added to the build later is not silently turned off by a mode written
+ *   before it existed.
+ * - **On and off, never a permission.** A mode decides *which* tools a chat has, not what a
+ *   call to one may do: a permission is the user's (E6), and "always allow" (#309) is
+ *   remembered per tool.
+ * - **Built-in tools twice over, MCP servers once.** `builtin` is keyed by tool name; the MCP
+ *   half (#311/#312) will be server-granular here — a mode turns a whole server on or off —
+ *   and will be a sibling key of this object rather than more entries in this one, because an
+ *   MCP tool's permission is the user's and only its server's presence is a mode's.
+ */
+export const ModeToolOverrideSchema = z.object({
+  /** Per-tool on/off; a tool not named follows the user's own setting. */
+  builtin: z.record(ToolNameSchema, z.boolean()),
+})
+
+export type ModeToolOverride = z.infer<typeof ModeToolOverrideSchema>
+
 /** The `mode` resource. */
 export const ModeSchema = z.object({
   id: ModeIdSchema,
@@ -85,6 +115,12 @@ export const ModeSchema = z.object({
    * for no addition. Appended after it, never in place of it.
    */
   system_prompt_addition: z.string().nullable(),
+  /**
+   * Which built-in tools a chat on this mode has on or off, overriding the user's own settings
+   * (#307), or `null` for no override at all — a mode that says nothing about tools and lets
+   * every chat follow its owner. Never a permission: see {@link ModeToolOverrideSchema}.
+   */
+  tools: ModeToolOverrideSchema.nullable(),
   created_at: TimestampSchema,
   /** When the mode was last changed. Set on update; equal to `created_at` at creation. */
   updated_at: TimestampSchema,
@@ -104,6 +140,7 @@ export const CreateModeRequestSchema = z.object({
   model: ModeModelSchema,
   reasoning_effort: ReasoningEffortSchema.nullable().optional(),
   system_prompt_addition: z.string().nullable().optional(),
+  tools: ModeToolOverrideSchema.nullable().optional(),
 })
 
 export type CreateModeRequest = z.infer<typeof CreateModeRequestSchema>
@@ -117,6 +154,7 @@ export const UpdateModeRequestSchema = z.object({
   model: ModeModelSchema.optional(),
   reasoning_effort: ReasoningEffortSchema.nullable().optional(),
   system_prompt_addition: z.string().nullable().optional(),
+  tools: ModeToolOverrideSchema.nullable().optional(),
 })
 
 export type UpdateModeRequest = z.infer<typeof UpdateModeRequestSchema>

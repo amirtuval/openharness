@@ -253,11 +253,14 @@ separate from #46's event-store compaction.
 
 The third pillar of the architecture (the "hands"), without a sandbox yet: everything here runs
 in-process on the server. **Status:** in progress — the loop itself
-([#304](https://github.com/amirtuval/openharness/issues/304)) and the built-in tools
-([#305](https://github.com/amirtuval/openharness/issues/305)) are **built**: the events, the tool
+([#304](https://github.com/amirtuval/openharness/issues/304)), the built-in tools
+([#305](https://github.com/amirtuval/openharness/issues/305)), tool context management
+([#306](https://github.com/amirtuval/openharness/issues/306)) and the per-user settings
+([#307](https://github.com/amirtuval/openharness/issues/307)) are **built**: the events, the tool
 registry in `@openharness/hands`, the brain's loop and step limit, the policy hook, the crash
-rule, a test tool behind the mock model, and `web_fetch`, `web_search` and `todo_write`. Pausing,
-settings and MCP are the rest of the epic's 11 sub-issues.
+rule, a test tool behind the mock model, `web_fetch`, `web_search` and `todo_write`, the caps
+and clearing a request applies to tool results, and `/v1/me/tools` with a mode's override.
+Pausing and MCP are the rest of the epic's 11 sub-issues.
 
 1. **The tool loop.** The brain owns the loop, one model request per step: `agent.tool_use` →
    execute through `hands` (`execute(name, input, ctx)`) → `agent.tool_result` → the next
@@ -276,14 +279,21 @@ settings and MCP are the rest of the epic's 11 sub-issues.
    headers or **OAuth 2.1** (discovery, dynamic client registration, PKCE); secrets sealed with
    `@openharness/vault`. MCP tools ask by default, and a broken server never blocks the chat.
 
-**Configuration:** per-user settings turn built-in tools and MCP servers on or off and give each
-tool a policy (`allow | ask | deny`); a mode may override which built-in tools and MCP servers
-are on. Agents stay deferred (#96).
+**Configuration** ([#307](https://github.com/amirtuval/openharness/issues/307)): per-user
+settings turn built-in tools and MCP servers on or off and give each tool a policy
+(`allow | ask | deny`); a mode may override which built-in tools and MCP servers are on. Built:
+`/v1/me/tools` and the mode override, with the brain reading the effective set per request;
+the MCP halves arrive with #311/#312, and the approval `ask` waits on is #309. Agents stay
+deferred (#96).
 
 **Context management for tools** ([#276](https://github.com/amirtuval/openharness/issues/276)):
 a tool call and its result are never split by a cut, results are capped, old results are
-cleared before summarizing, and the summary prompt covers tool work. What to re-inject after a
-compaction waits for sandboxed tools.
+cleared before summarizing, and the summary prompt covers tool work. **Built**
+([#306](https://github.com/amirtuval/openharness/issues/306)): each tool declares
+`ToolDefinition.maxResultTokens`, a request caps the results it carries to the smaller of that
+and a fifth of the model's budget, old results are cleared before anything is summarized, and
+the summary prompt covers tool work. What to re-inject after a compaction waits for sandboxed
+tools.
 
 **Not in this phase:** client-defined custom tools (they wait for programmatic access), local
 (stdio) MCP servers, tool search, and an `auto` permission mode.

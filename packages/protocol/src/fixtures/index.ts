@@ -38,9 +38,12 @@ import type {
   UserInterruptEvent,
   UserMessageEvent,
   UserPreferences,
+  UserToolSettings,
   GetPreferencesResponse,
+  ListToolSettingsResponse,
   PreferencesDefaults,
   ToolInput,
+  ToolSettingEntry,
 } from '../index'
 
 /**
@@ -245,10 +248,51 @@ export function makeMode(overrides: Partial<Mode> = {}): Mode {
     model: 'anthropic/claude-sonnet-5',
     reasoning_effort: 'high',
     system_prompt_addition: 'Think step by step before answering.',
+    tools: null,
     created_at: fixtureTimestamp(),
     updated_at: fixtureTimestamp(),
   }
   return { ...mode, ...overrides }
+}
+
+/**
+ * A user's stored tool settings (epic #303, X4; #307): no choices at all, so every tool
+ * follows its own declaration — which is what a user who has never opened the settings screen
+ * reads.
+ *
+ * @param overrides fields to replace on the default settings
+ */
+export function makeUserToolSettings(overrides: Partial<UserToolSettings> = {}): UserToolSettings {
+  return { builtin: {}, ...overrides }
+}
+
+/**
+ * One entry of `GET /v1/me/tools`: `web_search`, registered and on, under the user's `allow`,
+ * which is also the tool's own declaration.
+ *
+ * @param overrides fields to replace on the default entry
+ */
+export function makeToolSettingEntry(overrides: Partial<ToolSettingEntry> = {}): ToolSettingEntry {
+  const entry: ToolSettingEntry = {
+    name: 'web_search',
+    source: 'builtin',
+    enabled: true,
+    policy: 'allow',
+    default_policy: 'allow',
+    available: true,
+  }
+  return { ...entry, ...overrides }
+}
+
+/**
+ * The `GET /v1/me/tools` response: one entry, registered and on.
+ *
+ * @param overrides fields to replace on the default entry
+ */
+export function makeListToolSettingsResponse(
+  overrides: Partial<ToolSettingEntry> = {},
+): ListToolSettingsResponse {
+  return { data: [makeToolSettingEntry(overrides)] }
 }
 
 /**

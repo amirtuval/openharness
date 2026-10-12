@@ -19,12 +19,31 @@ import { MockLanguageModelV4 } from 'ai/test'
 export interface ScriptedReply {
   /** The text chunks to stream, in order. Default: one empty reply. */
   readonly text?: readonly string[]
+  /**
+   * The tool calls this step makes, after the text (epic #303, X2).
+   *
+   * The arguments travel as JSON text over the same stream parts a provider sends —
+   * `tool-input-start`/`delta`/`end`, then the call — so the SDK parses the call exactly as it
+   * parses a real one, which is what the loop stores. A reply with calls finishes with
+   * `tool-calls`, so the loop runs them and asks again.
+   */
+  readonly toolCalls?: readonly ScriptedToolCall[]
   /** How long to wait before each chunk, and before the request finishes. */
   readonly delayMs?: number
   /** Reject the request instead of streaming — a provider failure. */
   readonly failWith?: Error
   /** Called as each chunk is about to be served; a test can act here. */
   readonly onChunk?: (chunk: string, index: number) => Promise<void> | void
+}
+
+/** One tool call a scripted model makes (epic #303, X2). */
+export interface ScriptedToolCall {
+  /** The tool's name, as the request offered it. */
+  readonly name: string
+  /** The arguments, as JSON — the shape a provider sends. */
+  readonly input?: unknown
+  /** The provider's own call id; a deterministic one is invented when absent. */
+  readonly id?: string
 }
 
 /** One message of a prompt the scripted model received, as the test reads it back. */
@@ -170,6 +189,7 @@ function streamOf(
 ): ReadableStream<LanguageModelV4StreamPart> {
   const chunks = reply.text ?? ['']
   const delayMs = reply.delayMs ?? 0
+  const calls = reply.toolCalls ?? []
   const steps: (() => Promise<LanguageModelV4StreamPart>)[] = [
     () => Promise.resolve({ type: 'stream-start', warnings: [] }),
     () => Promise.resolve({ type: 'text-start', id: TEXT_ID }),
@@ -179,11 +199,34 @@ function streamOf(
       return { type: 'text-delta', id: TEXT_ID, delta: chunk }
     }),
     () => Promise.resolve({ type: 'text-end', id: TEXT_ID }),
+    // The arguments travel as JSON text, the way a provider sends them, so the SDK's own parse
+    // is what the loop sees — a script that handed over an object would test the script.
+    ...calls.flatMap((call, index) => {
+      const id = call.id ?? `scripted-tool-call-${index + 1}`
+      return [
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({ type: 'tool-input-start', id, toolName: call.name }),
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({
+            type: 'tool-input-delta',
+            id,
+            delta: JSON.stringify(call.input ?? {}),
+          }),
+        (): Promise<LanguageModelV4StreamPart> => Promise.resolve({ type: 'tool-input-end', id }),
+        (): Promise<LanguageModelV4StreamPart> =>
+          Promise.resolve({
+            type: 'tool-call',
+            toolCallId: id,
+            toolName: call.name,
+            input: JSON.stringify(call.input ?? {}),
+          }),
+      ]
+    }),
     () => {
       onEnd()
       return Promise.resolve<LanguageModelV4StreamPart>({
         type: 'finish',
-        finishReason: { unified: 'stop', raw: undefined },
+        finishReason: { unified: calls.length > 0 ? 'tool-calls' : 'stop', raw: undefined },
         usage: {
           inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
           outputTokens: { total: chunks.length, text: chunks.length, reasoning: 0 },

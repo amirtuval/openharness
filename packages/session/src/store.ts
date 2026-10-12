@@ -28,6 +28,7 @@ import type {
   UserEventInput,
   UserId,
   UserPreferences,
+  UserToolSettings,
 } from '@openharness/protocol'
 
 /**
@@ -41,8 +42,8 @@ import type {
 export type { UserPreferences } from '@openharness/protocol'
 
 /**
- * A user's mode (epic #245, M6): a named preset of a model, a reasoning effort and a
- * system-prompt addition.
+ * A user's mode (epic #245, M6): a named preset of a model, a reasoning effort, a
+ * system-prompt addition and an optional override of which built-in tools are on (#307).
  *
  * The protocol defines it; it is re-exported here because it is the vocabulary of the mode
  * methods below ({@link SessionStore.createMode}, `getMode`, `listModes`, `updateMode`,
@@ -50,6 +51,16 @@ export type { UserPreferences } from '@openharness/protocol'
  * type beside the method.
  */
 export type { Mode } from '@openharness/protocol'
+
+/**
+ * A user's stored tool settings (epic #303, X4; issue #307): which built-in tools their chats
+ * may use, and the permission each call is evaluated under.
+ *
+ * The protocol defines it; it is re-exported here because it is the vocabulary of
+ * {@link SessionStore.getToolSettings} and {@link SessionStore.putToolSettings}, so an
+ * implementation of this contract — or a caller of it — can name the type beside the method.
+ */
+export type { UserToolSettings } from '@openharness/protocol'
 
 /**
  * The storage and signaling contract the brain and the server code against.
@@ -127,6 +138,13 @@ export type { Mode } from '@openharness/protocol'
  *   per-user settings beside the log: one value per user — `{ default_model, theme }` — and a
  *   user who has never saved one reads the protocol's defaults rather than a `null` or a
  *   throw. The answer is deep-frozen, like a credential, because it is a value a caller owns.
+ * - **Tool settings** (epic #303, X4; issue #307). {@link SessionStore.getToolSettings} and
+ *   {@link SessionStore.putToolSettings} are the per-user tool choices beside the log: one
+ *   value per user — `{ builtin }`, a map of tool name to `{ enabled, policy }` — and a user
+ *   who has never saved one reads `{ builtin: {} }`, so every tool follows its own declared
+ *   default. A **mode** may override which built-in tools are on (`Mode.tools`); the store
+ *   keeps that on the mode and this on the user, and applying one over the other is the
+ *   caller's, never this store's.
  * - **Deletion** (#111, epic #116 U5). {@link SessionStore.deleteSession} removes a session
  *   and its whole log — owner-scoped, and irreversible — and a subscription to it ends with a
  *   final `session.deleted` stream event instead of starving.
@@ -201,8 +219,9 @@ export interface SessionStore {
    * Create a mode owned by `ownerId`, with `created_at` and `updated_at` set to the clock's
    * current instant (epic #245, M6).
    *
-   * A mode is a user's own named preset — a model, a reasoning effort and a system-prompt
-   * addition behind a stable name — so it is created like the other per-user resources: the
+   * A mode is a user's own named preset — a model, a reasoning effort, a system-prompt
+   * addition and an optional tool override behind a stable name (#307) — so it is created
+   * like the other per-user resources: the
    * owner comes from the caller (the server passes the authenticated user), never from the
    * request, and it is stored as the mode's `owner_id`, which never changes.
    *
@@ -241,7 +260,8 @@ export interface SessionStore {
    * that id.
    *
    * An omitted field keeps its stored value; `null` clears a nullable one
-   * (`reasoning_effort`, `system_prompt_addition`); `updated_at` is set from the clock. A chat
+   * (`reasoning_effort`, `system_prompt_addition`, `tools`); `updated_at` is set from the
+   * clock. A chat
    * that follows the mode picks the change up on its next request — this is what makes a mode
    * live rather than a snapshot.
    *
@@ -414,6 +434,35 @@ export interface SessionStore {
    * instant; the answer is the preferences as written, deep-frozen.
    */
   putPreferences(userId: UserId, preferences: UserPreferences): Promise<UserPreferences>
+
+  // ---------------------------------------------------------- tool settings
+
+  /**
+   * Read a user's stored tool settings (epic #303, X4; issue #307), or the protocol's default
+   * when there are none.
+   *
+   * Tool settings are per user, like the preferences beside them: which built-in tools the
+   * user's chats may offer (`enabled`), and the permission a call to one is evaluated under
+   * (`allow | ask | deny`). A user who has never saved any reads
+   * `{ builtin: {} }` — the absence of a choice, never `null` and never a throw — and every
+   * tool then follows **its own declared default**, which is the permission its definition
+   * carries. Nothing here is a mode's: a mode may override which built-in tools are on
+   * ({@link Mode.tools}), and it is the caller — the server's resolver — that applies that
+   * over the answer. The answer is deep-frozen, like a credential.
+   */
+  getToolSettings(userId: UserId): Promise<UserToolSettings>
+
+  /**
+   * Write a user's tool settings whole, replacing what was stored, and answer what was stored
+   * (epic #303, X4; issue #307).
+   *
+   * One value per user, so a second put replaces the first in place rather than accumulating,
+   * exactly as {@link SessionStore.putPreferences} does. There is no partial update at this
+   * layer: a caller writes the complete value it wants, and the merge a
+   * `PUT /v1/me/tools` performs is the **route's** — that is what keeps one tool's setting from
+   * clearing another's. The answer is the settings as written, deep-frozen.
+   */
+  putToolSettings(userId: UserId, settings: UserToolSettings): Promise<UserToolSettings>
 
   // ----------------------------------------------------------------- events
 

@@ -134,6 +134,9 @@ describe('user isolation (A4)', () => {
       ['GET', `${API_VERSION_PREFIX}/me/modes/${a.mode.id}`],
       ['POST', `${API_VERSION_PREFIX}/me/modes/${a.mode.id}`, { name: 'renamed by B' }],
       ['DELETE', `${API_VERSION_PREFIX}/me/modes/${a.mode.id}`],
+      // The tool settings read may be asked for a chat's mode, so A's mode is not a mode B can
+      // read their own settings through (#307).
+      ['GET', `${API_VERSION_PREFIX}/me/tools?mode_id=${a.mode.id}`],
     ]
 
     for (const [method, path, request] of routes) {

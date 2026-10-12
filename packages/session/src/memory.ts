@@ -41,6 +41,7 @@ import {
   type UserId,
   type UserPreferences,
   type UserTheme,
+  type UserToolSettings,
 } from '@openharness/protocol'
 
 import { type Clock, systemClock, timestampAt } from './clock'
@@ -205,6 +206,14 @@ export class InMemorySessionStore implements SessionStore {
    */
   readonly #preferences = new Map<UserId, PreferencesRecord>()
 
+  /**
+   * The tool settings each user has saved, keyed by user id — the in-memory
+   * `user_tool_settings` table (epic #303, X4; issue #307). One entry per user who ever wrote
+   * one; a user who never did is absent, and reads as the protocol's default (`{ builtin: {} }`)
+   * rather than as an error.
+   */
+  readonly #toolSettings = new Map<UserId, ToolSettingsRecord>()
+
   constructor(options: InMemorySessionStoreOptions = {}) {
     this.#clock = options.now ?? systemClock
     this.#partitionCount = options.partitionCount ?? DEFAULT_PARTITION_COUNT
@@ -284,6 +293,7 @@ export class InMemorySessionStore implements SessionStore {
       model: input.model,
       reasoning_effort: input.reasoning_effort ?? null,
       system_prompt_addition: input.system_prompt_addition ?? null,
+      tools: input.tools ?? null,
       created_at: at,
       updated_at: at,
     }
@@ -328,6 +338,7 @@ export class InMemorySessionStore implements SessionStore {
         update.system_prompt_addition === undefined
           ? mode.system_prompt_addition
           : update.system_prompt_addition,
+      tools: update.tools === undefined ? mode.tools : update.tools,
       updated_at: timestampAt(this.#clock()),
     }
     this.#modes.set(modeId, updated)
@@ -505,6 +516,25 @@ export class InMemorySessionStore implements SessionStore {
         summary_max_passes: preferences.summary_max_passes,
       }),
     )
+  }
+
+  // ---------------------------------------------------------- tool settings
+
+  getToolSettings(userId: UserId): Promise<UserToolSettings> {
+    const stored = this.#toolSettings.get(userId)
+    // No row is "no choice stored": the protocol's one shape, and every tool then follows its
+    // own declared default.
+    return resolved(deepFreeze({ builtin: stored?.builtin ?? {} }))
+  }
+
+  putToolSettings(userId: UserId, settings: UserToolSettings): Promise<UserToolSettings> {
+    // One value per user, replaced whole — the `user_tool_settings` row's `on conflict`
+    // decides the same in Postgres.
+    this.#toolSettings.set(userId, {
+      builtin: settings.builtin,
+      updatedAtMs: this.#clock(),
+    })
+    return resolved(deepFreeze({ builtin: settings.builtin }))
   }
 
   // ----------------------------------------------------------------- events
@@ -1288,6 +1318,17 @@ interface PreferencesRecord {
   /** The summary pass limit (epic #277, K5), or `null` for the engine's own. */
   readonly summaryMaxPasses: number | null
   /** When `putPreferences` last wrote it, as the injected clock read it. */
+  readonly updatedAtMs: number
+}
+
+/**
+ * One user's stored tool settings, as the in-memory `user_tool_settings` row keeps them (epic
+ * #303, X4; issue #307): the built-in tools they have chosen for, by name.
+ */
+interface ToolSettingsRecord {
+  /** The tool choices, keyed by tool name; a tool absent follows its own declaration. */
+  readonly builtin: UserToolSettings['builtin']
+  /** When `putToolSettings` last wrote it, as the injected clock read it. */
   readonly updatedAtMs: number
 }
 

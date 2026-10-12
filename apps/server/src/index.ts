@@ -224,10 +224,13 @@ export {
   type StopSessionOptions,
 } from './scheduler'
 export {
+  createTestToolRegistry,
+  createTurnRegistry,
   createTurnTools,
   TEST_TOOL_DESCRIPTION,
   TEST_TOOL_NAME,
   testEchoTool,
+  type TurnRegistryOptions,
   type TurnToolOptions,
   type TurnToolsOptions,
 } from './tools'
@@ -236,6 +239,14 @@ export {
   type SearchAllowance,
   type SearchAllowanceOptions,
 } from './searches'
+export {
+  createToolSettingsResolver,
+  effectiveTools,
+  listToolSettings,
+  toolDecisions,
+  toolSettingEntries,
+  type ToolSettingsDeps,
+} from './tool-settings'
 export {
   DefaultModelPicker,
   RECOMMENDED_DEFAULT_MODELS,

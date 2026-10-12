@@ -38,6 +38,7 @@ import {
   type UserId,
   type UserPreferences,
   type UserTheme,
+  type UserToolSettings,
   UserThemeSchema,
 } from '@openharness/protocol'
 import {
@@ -329,6 +330,7 @@ export class PostgresSessionStore implements SessionStore {
       model: input.model,
       reasoning_effort: input.reasoning_effort ?? null,
       system_prompt_addition: input.system_prompt_addition ?? null,
+      tools: input.tools ?? null,
       created_at: instant(now),
       updated_at: instant(now),
     }
@@ -407,6 +409,7 @@ export class PostgresSessionStore implements SessionStore {
           update.system_prompt_addition === undefined
             ? row.system_prompt_addition
             : update.system_prompt_addition,
+        tools: update.tools === undefined ? row.tools : update.tools,
         updated_at: instant(now),
       }
       try {
@@ -623,6 +626,38 @@ export class PostgresSessionStore implements SessionStore {
       summary_model: preferences.summary_model,
       summary_max_passes: preferences.summary_max_passes,
     })
+  }
+
+  // ---------------------------------------------------------- tool settings
+
+  async getToolSettings(userId: UserId): Promise<UserToolSettings> {
+    const row = await this.#db
+      .selectFrom('user_tool_settings')
+      .select('builtin')
+      .where('user_id', '=', userId)
+      .executeTakeFirst()
+    // No row is "no choice stored", not an error and not a null: the protocol's one shape,
+    // and every tool then follows its own declared default.
+    return deepFreeze({ builtin: row?.builtin ?? {} })
+  }
+
+  async putToolSettings(userId: UserId, settings: UserToolSettings): Promise<UserToolSettings> {
+    const at = instant(this.#clock())
+    const value = { user_id: userId, builtin: settings.builtin, updated_at: at }
+    // One statement, like the preferences upsert: `user_id` is the primary key, so a second
+    // put replaces the row rather than accumulating, and the replacement is atomic against a
+    // concurrent one.
+    await this.#db
+      .insertInto('user_tool_settings')
+      .values(value)
+      .onConflict((conflict) =>
+        conflict.column('user_id').doUpdateSet({
+          builtin: value.builtin,
+          updated_at: value.updated_at,
+        }),
+      )
+      .execute()
+    return deepFreeze({ builtin: settings.builtin })
   }
 
   async listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse> {

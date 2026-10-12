@@ -23,11 +23,13 @@ authority where it is:
 - **A tool result can never widen what a turn may do.** It arrives as an `agent.tool_result`
   event, is stored, and goes back to the model as a message — the same channel a reply takes. It
   cannot name a tool, change a policy, change the model, add a credential or start a turn.
-- **Every call is evaluated under a policy, per call.** The loop asks the policy resolver
-  ([#307](https://github.com/amirtuval/openharness/issues/307)'s settings, and the defaults the
-  epic fixes) for the tool's effective answer _before_ it stores the call, and records what it
-  answered as `evaluated_permission` on the `agent.tool_use` event. A refused call is answered
-  with an `is_error` result and is never run.
+- **The user decides which tools exist, and every call is evaluated under a policy.** The
+  per-user settings ([#307](https://github.com/amirtuval/openharness/issues/307)) turn a tool
+  off — a tool that is off is not in a request's offer, so the model cannot name it — and give
+  each remaining tool a permission. The loop reads the tool's effective answer _before_ it
+  stores the call, and records what it answered as `evaluated_permission` on the
+  `agent.tool_use` event. A refused call is answered with an `is_error` result and is never run.
+  A mode may turn a built-in tool on or off for the chats that follow it, never a permission.
 - **A paused call is a user decision, not a tool's.** [#309](https://github.com/amirtuval/openharness/issues/309)'s
   `ask` stops the turn until the user confirms; the model cannot answer it, and it cannot ask for
   a different tool to get the same effect unnoticed.
@@ -99,10 +101,11 @@ Written honestly, so nothing here is read as a promise the code does not keep:
 | a per-call policy, recorded as `evaluated_permission`                        | built (#304); `allow` and `deny` are honoured, `ask` refuses until [#309](https://github.com/amirtuval/openharness/issues/309) lands                                                     |
 | `safeFetch` for a user-supplied URL                                          | built ([#245](https://github.com/amirtuval/openharness/issues/245)), and `web_fetch` is the tool that uses it on every hop ([#305](https://github.com/amirtuval/openharness/issues/305)) |
 | secrets scrubbed out of every tool result                                    | built (`@openharness/hands`): the operator's search key travels the same per-user channel, and a result that quoted it stores `[REDACTED]`                                               |
+| the per-user policy store: on/off and `allow`/`ask`/`deny` per tool          | built ([#307](https://github.com/amirtuval/openharness/issues/307)), over the built-in tools of [#305](https://github.com/amirtuval/openharness/issues/305)                              |
 | `web_fetch` defaulting to allow, and the user setting that to ask            | the default is `allow` ([#305](https://github.com/amirtuval/openharness/issues/305)); the setting is [#307](https://github.com/amirtuval/openharness/issues/307)'s                       |
 | the approval UI a paused turn needs                                          | [#310](https://github.com/amirtuval/openharness/issues/310)                                                                                                                              |
 | MCP servers: the resource, OAuth, and the loop                               | [#311](https://github.com/amirtuval/openharness/issues/311), [#312](https://github.com/amirtuval/openharness/issues/312)                                                                 |
-| capping and clearing old tool results, so a huge page cannot flood a context | [#306](https://github.com/amirtuval/openharness/issues/306)                                                                                                                              |
+| capping and clearing old tool results, so a huge page cannot flood a context | built ([#306](https://github.com/amirtuval/openharness/issues/306)): a tool declares its own `maxResultTokens`, and a request that carries too many old results clears the oldest        |
 
 There is **no sandbox** in this epic, deliberately (the sandboxed tools moved to
 [#315](https://github.com/amirtuval/openharness/issues/315)): a tool runs in the server process,

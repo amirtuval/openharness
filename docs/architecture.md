@@ -130,9 +130,14 @@ three built-in tools ([#304](https://github.com/amirtuval/openharness/issues/304
 model chose through `safeFetch` and answers it as Markdown; `web_search`, which a deployment
 offers only where an operator configured a search API, behind an adapter and under a per-user
 daily allowance; and `todo_write`, whose list is the newest call in the log and nothing else.
-Every deployment gets the first and the third. The MCP client will live here too
-([#312](https://github.com/amirtuval/openharness/issues/312)); the loop they run in is the
-brain's, and what they may reach is [`docs/threat-model.md`](./threat-model.md).
+Every deployment gets the first and the third. Which of them a chat may use is the user's own
+choice, stored beside the log and read per request — on or off and a permission per tool, with a
+mode able to override the on/off part
+([#307](https://github.com/amirtuval/openharness/issues/307)) — and the loop sizes what a request
+carries of a tool's result ([#306](https://github.com/amirtuval/openharness/issues/306)). The MCP
+client will live here too ([#312](https://github.com/amirtuval/openharness/issues/312)); the loop
+they run in is the brain's, and what they may reach is
+[`docs/threat-model.md`](./threat-model.md).
 
 ## Allowed dependency graph
 
