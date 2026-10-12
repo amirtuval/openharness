@@ -882,9 +882,10 @@ inline message are called. Nothing is stored twice — a card is the log plus th
   a reader can be inside a subagent's chat. **The tree is read, not guessed**: there is no route
   that answers for a whole list, so each of the newest `CHILD_PROBE_LIMIT` (20) chats is asked once
   for its children, a read that could not be answered is remembered as "none" rather than retried,
-  and the open chat is asked again whenever its tasks move (`onTasksChanged`) — which is what puts
-  a helper under its row while the reader is still in the chat. A chat below the limit is nested as
-  soon as it is opened or the list is reloaded.
+  and the open chat is asked again **when it is opened and whenever its tasks move**
+  (`onTasksChanged`) — which is what puts a helper under its row while the reader is still in the
+  chat. A chat below the limit is nested as soon as it is opened or the list is reloaded, and a
+  chat nobody has asked about draws no group rather than an empty one.
 - **The header names what the whole tree spent** (#344, S8). The number beside the chat's cost is
   the transcript's — this session's own log — so a chat that delegated work would look cheaper than
   it was. `use-subtree-usage.ts` reads `GET /v1/sessions/{id}/usage` for a chat that has run a
