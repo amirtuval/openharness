@@ -21,8 +21,14 @@
  *
  * The output is capped by {@link DEFAULT_MAX_FETCH_CHARS} — a per-tool cap, on top of the byte
  * cap `safeFetch` enforces on the response. A page over it is truncated with a marker where the
- * cut was, never silently. Capping what a *result* may cost the context is
- * [#306](https://github.com/amirtuval/openharness/issues/306)'s.
+ * cut was, never silently. A second cap sits above it: {@link WEB_FETCH_MAX_RESULT_TOKENS} says
+ * how much of a result a **model request** keeps (epic #303, X9) — the tool's declaration of
+ * what its output costs, still bounded by the brain's own share of the model's budget. The two
+ * are not the same number on purpose: `DEFAULT_MAX_FETCH_CHARS` (50,000 characters, about 12.5k
+ * tokens at the brain's four characters to a token) is what one fetch may carry, and
+ * `WEB_FETCH_MAX_RESULT_TOKENS` (16,384) is the ceiling a request may put around it, chosen so
+ * the character cap is the binding one for a normal page and the token cap only ever catches a
+ * result the brain's budget is already tightening.
  */
 
 import { z } from 'zod'
@@ -64,6 +70,22 @@ export const WEB_FETCH_MAX_BYTES = 2 * 1024 * 1024
  * *result* may cost the whole context, and how old ones are cleared, is #306's.
  */
 export const DEFAULT_MAX_FETCH_CHARS = 50_000
+
+/**
+ * The most tokens of a result a model request keeps: this tool's own declaration (epic #303, X9;
+ * #306).
+ *
+ * A fetched page is the largest thing any built-in tool returns, so it is the one that has to
+ * say what it costs. Sixteen thousand three hundred and eighty-four tokens — a power of two, a
+ * quarter of a 64k-token window — is deliberately **above** what {@link DEFAULT_MAX_FETCH_CHARS}
+ * can produce: 50,000 characters is about 12.5k tokens at the brain's four characters to a
+ * token, so for an ordinary page the tool's own character cap is the one that binds and this
+ * ceiling is only reached when nothing else has cut the result. When it does bind it is still
+ * bounded by the brain's global share of the model's budget (`TOOL_RESULT_BUDGET_RATIO` of the
+ * context, across every tool in the request), which can only lower it further — this is a tool's
+ * judgement about its own output, not a claim on the context.
+ */
+export const WEB_FETCH_MAX_RESULT_TOKENS = 16_384
 
 /** How many redirect hops are followed, each re-checked — `safeFetch`'s own default, named here. */
 export const WEB_FETCH_MAX_REDIRECTS = 5
@@ -116,6 +138,14 @@ export interface WebFetchOptions {
   readonly fetch?: PageFetch
   /** The most characters a result may carry; {@link DEFAULT_MAX_FETCH_CHARS} when absent. */
   readonly maxChars?: number
+  /**
+   * How much of a result a model request keeps; {@link WEB_FETCH_MAX_RESULT_TOKENS} when absent.
+   *
+   * It is the definition's `maxResultTokens`, not a cap this tool enforces: the whole result is
+   * returned and stored, and the brain bounds the part a request carries — the smaller of this
+   * and its own share of the model's budget.
+   */
+  readonly maxResultTokens?: number
   /** The tool's own timeout; {@link WEB_FETCH_TIMEOUT_MS} when absent. */
   readonly timeoutMs?: number
 }
@@ -140,6 +170,9 @@ export function createWebFetchTool(options: WebFetchOptions = {}): ToolDefinitio
     inputSchema: WebFetchInputSchema,
     permission: 'allow',
     timeoutMs: options.timeoutMs ?? WEB_FETCH_TIMEOUT_MS,
+    // The tool's declaration of what its own output may cost a model request (epic #303, X9);
+    // the brain caps the result to the smaller of this and its global share of the budget.
+    maxResultTokens: options.maxResultTokens ?? WEB_FETCH_MAX_RESULT_TOKENS,
     run: async (input, context) => {
       try {
         const { response, url } = await fetchPage(input.url, {
@@ -208,23 +241,66 @@ async function readBody(response: Response, contentType: string | null): Promise
 }
 
 /**
- * The body as a string, decoded with the charset the response named.
+ * The body as a string, decoded with the charset it was served as.
  *
- * `Response.text()` always assumes UTF-8, and a page that says it is `windows-1252` would come
- * back with every accented character replaced — so the bytes are read and decoded here, with
- * UTF-8 (and a name `TextDecoder` does not know) falling back to UTF-8. Decoding never fails: a
- * replacement character in the output is a better answer than a refusal.
+ * `Response.text()` always assumes UTF-8, and a page that says it is `windows-1255` would come
+ * back with every Hebrew character replaced — so the bytes are read and decoded here. Which
+ * charset to use is decided in this order, the order a browser uses: the `charset` the
+ * `content-type` header named (passed in as `charset`), then the page's **own** statement — a
+ * `<meta charset>` or `<meta http-equiv>` in its first bytes, or a byte-order mark (see
+ * {@link sniffCharset}), then UTF-8. A name `TextDecoder` does not know falls back to UTF-8.
+ * Decoding never fails either way: a replacement character in the output is a better answer
+ * than a refusal.
  */
 async function decode(response: Response, charset: string | null): Promise<string> {
   const bytes = await response.arrayBuffer()
-  if (charset === null) {
-    return new TextDecoder().decode(bytes)
-  }
+  const encoding = charset ?? sniffCharset(bytes) ?? 'utf-8'
   try {
-    return new TextDecoder(charset).decode(bytes)
+    return new TextDecoder(encoding).decode(bytes)
   } catch {
     return new TextDecoder().decode(bytes)
   }
+}
+
+/**
+ * How far into a document {@link sniffCharset} looks for a `<meta>`: the HTML spec has a browser
+ * scan the first 1024 bytes, and a charset declaration beyond this is not one a browser would
+ * honour either.
+ */
+const SNIFF_BYTES = 2048
+
+/**
+ * The charset the page states in its own bytes, or `null` when it states none.
+ *
+ * A byte-order mark is checked first because it is unambiguous, then `<meta charset=…>` and the
+ * older `<meta http-equiv="content-type" content="…; charset=…">` — both spell `charset=<name>`
+ * inside the tag, so one pattern reads either. The prefix is decoded as `latin1` (a byte-for-byte
+ * pass for the ASCII a `<meta>` is written in) rather than guessed at, so a `<meta>` is read
+ * exactly as it was written.
+ */
+function sniffCharset(bytes: ArrayBuffer): string | null {
+  const view = new Uint8Array(bytes)
+  const bom = bomCharset(view)
+  if (bom !== null) {
+    return bom
+  }
+  const prefix = new TextDecoder('latin1').decode(view.subarray(0, SNIFF_BYTES))
+  const meta = /<meta[^>]*charset\s*=\s*["']?\s*([a-z0-9_\-:.]+)/i.exec(prefix)
+  return meta?.[1]?.toLowerCase() ?? null
+}
+
+/** The charset a byte-order mark names, or `null` when the bytes start with none. */
+function bomCharset(bytes: Uint8Array): string | null {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return 'utf-8'
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return 'utf-16le'
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return 'utf-16be'
+  }
+  return null
 }
 
 /** The result's text: the address, the untrusted-data notice, and the capped body. */
@@ -242,17 +318,19 @@ function renderFetched(
 }
 
 /**
- * `text`, cut to `maxChars` with a marker where the cut was.
+ * `text`, cut to `maxChars` with a marker saying how much was left out.
  *
  * A truncation is stated rather than silent: a model that is shown the first half of a page and
- * not told so will answer as if it had read the whole thing. The marker is the last thing in
- * the result for the same reason — it is about everything above it.
+ * not told so will answer as if it had read the whole thing. So the marker names both numbers —
+ * `N of M characters shown` — which lets the model judge how much it is missing and decide
+ * whether to fetch again for more, and it is the last thing in the result because it is about
+ * everything above it. The beginning is kept, not the tail: a page leads with what it is about.
  */
 function capText(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
     return text
   }
-  return `${text.slice(0, maxChars)}\n\n[… truncated: the page was longer than ${maxChars} characters …]`
+  return `${text.slice(0, maxChars)}\n\n[… truncated: ${maxChars} of ${text.length} characters shown; the page was longer …]`
 }
 
 /** The media type of a `content-type` header, lower-cased, or `null` when there is none. */

@@ -137,12 +137,14 @@ export {
   modelContextBudget,
   summaryDescription,
   summaryModelFallback,
+  truncationNotice,
 } from './compaction'
 export type {
   ContextMeter,
   ManualCompactionNotice,
   ManualCompactionTone,
   SummaryModelFallback,
+  TruncationNotice,
 } from './compaction'
 
 export {

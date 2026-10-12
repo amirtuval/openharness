@@ -283,9 +283,11 @@ export interface ContextStrategyConfig {
  * ## The newest item (K6)
  *
  * Summarizing cannot help when the newest item alone is over the budget — it has to stay
- * verbatim — so it is not dropped but **capped** to a head and a tail with an
- * {@link OMISSION_MARKER} between them, and the record of what was cut is returned for the span.
- * The newest user message is never dropped, so nothing is silently lost.
+ * verbatim — so it is not dropped but **capped**: a message keeps a head and a tail with an
+ * {@link OMISSION_MARKER} between them (both ends carry what the other side needs), a tool
+ * result keeps its beginning ({@link capResultText} — a tool said what it had to say in the
+ * order it said it), and the record of what was cut is returned for the span. The newest user
+ * message is never dropped, so nothing is silently lost.
  *
  * ## Tool results (X9, #306)
  *
@@ -296,8 +298,8 @@ export interface ContextStrategyConfig {
  * and giving it up is cheaper than a summary, which is why clearing happens first and why a
  * context it brings back under the threshold is never summarized at all. A result **inside** the
  * tail is capped to the smaller of its tool's declared `maxResultTokens` and a fifth of the
- * budget ({@link TOOL_RESULT_BUDGET_RATIO}), head and tail around the omission marker, and every
- * cap is recorded for the span. Neither touches the log, and neither splits a pair: the result
+ * budget ({@link TOOL_RESULT_BUDGET_RATIO}) — kept from its **beginning**, with the omission
+ * marker where the rest went — and every cap is recorded for the span. Neither touches the log, and neither splits a pair: the result
  * still answers its call, with a shorter answer.
  *
  * @param config the per-model budgets; see {@link DEFAULT_CONTEXT_TOKEN_BUDGET}
@@ -1155,7 +1157,7 @@ function planToolResult(
   if (tokens <= cap) {
     return { text: raw }
   }
-  const capped = capItemText(raw, cap)
+  const capped = capResultText(raw, cap)
   return {
     text: capped,
     truncation: {
@@ -1771,19 +1773,49 @@ export function capItemText(text: string, budget: number): string {
 }
 
 /**
- * `text` cut to a head and a tail that together cost at most `budget` tokens, with
- * {@link OMISSION_MARKER} for the middle.
+ * Cut a **tool result** to at most `budget` tokens, keeping its **beginning** (X9; #314).
+ *
+ * A capped result is not a capped message, and the difference is where its meaning is. A
+ * message is the reader's own words or the model's reply, and both ends of it carry what the
+ * other side needs — the question and the constraint it ends with — which is why K6 keeps a head
+ * *and* a tail. A tool result is what a tool said, in the order it said it: a `web_fetch` page's
+ * main content, a search's hits, a list's first items. Its beginning is the part to keep, and a
+ * tail kept at the beginning's expense is a fragment from the middle of a page that reads as if
+ * it were the answer (#314: the ynet page's headline was cut away and the model was handed the
+ * page's footer instead).
+ */
+function capResultText(text: string, budget: number): string {
+  return capText(text, budget, estimateTokens(text), 'head')
+}
+
+/**
+ * `text` cut to at most `budget` tokens, with {@link OMISSION_MARKER} where the rest went.
+ *
+ * What is kept is the caller's decision and it is the whole of the difference between the two
+ * cuts: a **message** keeps a head and a tail (`both`), because both ends carry what the other
+ * side needs, and a **tool result** keeps its beginning (`head`), because a tool said what it had
+ * to say in the order it said it ({@link capResultText}).
  *
  * The marker's own size is reserved first, at the widest the count it will carry could be, so the
  * result is inside the budget whatever the omitted number turns out to be. A budget too small for
  * the marker alone gives the marker by itself — it is the smallest honest statement that text was
  * left out.
+ *
+ * @param text the text to cut
+ * @param budget the most tokens the answer may cost, marker included
+ * @param tokensBefore what `text` costs, in the same estimate
+ * @param keep which end (or ends) of `text` survives
  */
-function capText(text: string, budget: number, tokensBefore: number): string {
+function capText(
+  text: string,
+  budget: number,
+  tokensBefore: number,
+  keep: 'both' | 'head' = 'both',
+): string {
   const reserved = estimateTokens(OMISSION_MARKER(tokensBefore))
   const keepChars = Math.max(0, budget - reserved) * CHARS_PER_TOKEN
-  const headChars = Math.ceil(keepChars / 2)
-  const tailChars = Math.max(0, keepChars - headChars)
+  const headChars = keep === 'head' ? keepChars : Math.ceil(keepChars / 2)
+  const tailChars = keep === 'head' ? 0 : Math.max(0, keepChars - headChars)
   const head = text.slice(0, headChars)
   const tail = tailChars === 0 ? '' : text.slice(text.length - tailChars)
   // The count the marker reports is what the item cost minus what is left of it — the marker's
