@@ -11,6 +11,7 @@ import {
 import { InMemorySessionStore } from '@openharness/session'
 import type { RetryPolicy } from '@openharness/brain'
 
+import { createProviderFetch } from './catalog/provider-fetch'
 import { createBundledRegistry } from './catalog/registry'
 import { LocalScheduler } from './scheduler'
 import { createTurnTools, TEST_TOOL_NAME } from './tools'
@@ -62,7 +63,15 @@ async function runTurn(
     // The tools as `main.ts` wires them: the test registry for the mock model, and the support
     // gate over the registry (epic #303).
     ...(options.tools === true
-      ? { tools: createTurnTools(config, 'mock', createBundledRegistry()) }
+      ? {
+          tools: createTurnTools({
+            config,
+            kind: 'mock',
+            registry: createBundledRegistry(),
+            searchTransport: createProviderFetch(),
+            allowance: undefined,
+          }),
+        }
       : {}),
   })
   await scheduler.start()

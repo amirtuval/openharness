@@ -164,9 +164,12 @@ describe('a user’s usage', () => {
     expect(usage).toMatchObject({ from: today, to: today, tz: 'UTC' })
     expect(usage.totals.input_tokens).toBe(MOCK_MODEL_USAGE.input_tokens)
     expect(usage.by_model.map((entry) => entry.model)).toEqual([MODEL])
+    // `searches` is the count epic #303's built-ins add (#305): this chat called no tool, so
+    // the day holds none — and it is a count, never a price.
     expect(usage.by_day).toEqual([
-      { day: today, totals: usage.totals, cost: usage.cost, unpriced_requests: 0 },
+      { day: today, totals: usage.totals, cost: usage.cost, unpriced_requests: 0, searches: 0 },
     ])
+    expect(usage.searches).toBe(0)
 
     // The same request, read in a zone on the other side of the date line: it is in a
     // *different* local day there — which is what "the reader's days" means, and why the zone

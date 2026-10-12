@@ -54,6 +54,7 @@ import {
   DEFAULT_TRUSTED_PROXY_HOPS,
   type LogFormat,
   type SchedulerKind,
+  type SearchConfig,
   type ServerConfig,
 } from '../config'
 import type { Tracer, TracingMode } from '../observability/tracing'
@@ -253,6 +254,12 @@ export interface TestOptions {
    * The production default unless a test wants a turn cut short early.
    */
   readonly maxToolSteps?: number
+  /**
+   * The search API `testConfig` reports (epic #303, #305) — a `brave` provider with a key and a
+   * daily limit, for the tests that assert what `web_search` is offered and how the allowance
+   * is enforced. `null` — no search provider, which is a deployment without a key — by default.
+   */
+  readonly search?: SearchConfig | null
   /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
@@ -701,6 +708,7 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     compactIntervalMs: options.compactIntervalMs ?? 0,
     compactionThreshold: options.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
     maxToolSteps: options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS,
+    search: options.search ?? null,
     // Observability (#158) is off in a test by default: the readable log format, and no
     // exporter to load. The suites that assert on the JSON shape call `jsonLogger` directly.
     logFormat: options.logFormat ?? DEFAULT_LOG_FORMAT,

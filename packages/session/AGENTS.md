@@ -920,7 +920,10 @@ dependency table.
   The per-user usage read (#247) is in the suite too: the start/end pairing that names each
   request's model, the half-open window (`from` in, `to` out), owner scoping, the `model: null`
   a request nothing attributes gets, the `(session_id, seq)` order, a rewind's branch left out,
-  and the `RangeError` a window that is not one raises. The modes (#245, M6) are there as well:
+  and the `RangeError` a window that is not one raises. The per-user tool-call read (#305) is in
+  the suite beside it: a call its result answered, a failed call and one nothing answered both
+  left out, the `name` filter, owner scoping, the half-open window, the `(session_id, seq)`
+  order and the rewind rule. The modes (#245, M6) are there as well:
   create, read, list, partial update and delete, owner scoping on every one of them, the
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,

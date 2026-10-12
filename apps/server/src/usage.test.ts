@@ -4,6 +4,8 @@ import type { Session, SessionId, SessionUsage, UserUsage } from '@openharness/p
 import { InMemorySessionStore } from '@openharness/session'
 import type { SessionStore } from '@openharness/session'
 
+import { WEB_SEARCH_TOOL_NAME } from '@openharness/hands'
+
 import { createBundledRegistry } from './catalog/registry'
 import { asUser, createTestApp, waitForIdle, type TestContext } from './test-support'
 
@@ -106,6 +108,44 @@ async function turn(
   await waitForIdle(test.store, sessionId)
 }
 
+/**
+ * One `web_search` call, as the brain stores the pair (epic #303, #305): the call, and the
+ * result that answers it — an error result, another tool's call, or a call nothing answered
+ * when the options say so.
+ */
+async function recordSearch(
+  test: TestContext,
+  sessionId: SessionId,
+  options: {
+    readonly name?: string
+    readonly isError?: boolean
+    readonly answered?: boolean
+  } = {},
+): Promise<void> {
+  const [call] = await test.store.appendEvents(sessionId, [
+    {
+      type: 'agent.tool_use',
+      name: options.name ?? WEB_SEARCH_TOOL_NAME,
+      input: { query: 'anything' },
+      evaluated_permission: 'allow',
+    },
+  ])
+  if (call === undefined) {
+    throw new Error('the call was not stored')
+  }
+  if (options.answered === false) {
+    return
+  }
+  await test.store.appendEvents(sessionId, [
+    {
+      type: 'agent.tool_result',
+      tool_use_id: call.id,
+      content: [{ type: 'text', text: 'results' }],
+      is_error: options.isError ?? false,
+    },
+  ])
+}
+
 /** `GET /v1/sessions/{session_id}/usage`, parsed. */
 async function sessionUsage(
   test: TestContext,
@@ -146,6 +186,8 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
       cost: null,
       unpriced_requests: 0,
       by_model: [],
+      // Nothing was searched either — a count, which has no unknown to report.
+      searches: 0,
     })
   })
 
@@ -226,6 +268,20 @@ describe('GET /v1/sessions/{session_id}/usage', () => {
     expect(usage.by_model[1]?.unpriced_requests).toBe(0)
   })
 
+  it('counts the searches the session made, and only the ones that were answered', async () => {
+    const { test } = usageApp()
+    const session = await createSession(test)
+    await turn(test, session.id)
+    await recordSearch(test, session.id)
+    // A refused call did not search, another tool's call is not a search, and a call nothing
+    // answered never ran — the same rule the daily allowance is counted by (epic #303, #305).
+    await recordSearch(test, session.id, { isError: true })
+    await recordSearch(test, session.id, { name: 'web_fetch' })
+    await recordSearch(test, session.id, { answered: false })
+
+    expect((await sessionUsage(test, session.id)).searches).toBe(1)
+  })
+
   it('is owner-scoped: another user’s session is the 404 an unknown id gets', async () => {
     const { test } = usageApp()
     const session = await createSession(test)
@@ -288,6 +344,31 @@ describe('GET /v1/me/usage', () => {
       await userUsageRequest(test, 'from=2026-10-08&to=2026-10-08&tz=Asia%2FKolkata')
     ).json()) as UserUsage
     expect(oneDayIst.totals.input_tokens).toBe(10)
+  })
+
+  it('counts a user’s searches in the day the reader is in', async () => {
+    const { test, clock } = usageApp()
+    const session = await createSession(test)
+    // The same two instants as the day-grouping test: one UTC day, two Asia/Kolkata days.
+    clock.set('2026-10-08T18:00:00.000Z')
+    await turn(test, session.id)
+    await recordSearch(test, session.id)
+    clock.set('2026-10-08T19:00:00.000Z')
+    await turn(test, session.id)
+    await recordSearch(test, session.id)
+
+    const ist = (await (
+      await userUsageRequest(test, 'from=2026-10-01&to=2026-10-31&tz=Asia%2FKolkata')
+    ).json()) as UserUsage
+    expect(ist.searches).toBe(2)
+    expect(ist.by_day.map((day) => day.searches)).toEqual([1, 1])
+    // The same searches read in UTC are one day of 2 — a count follows the reader's days
+    // exactly as the tokens do, and carries no money either way.
+    const utc = (await (
+      await userUsageRequest(test, 'from=2026-10-01&to=2026-10-31&tz=UTC')
+    ).json()) as UserUsage
+    expect(utc.searches).toBe(2)
+    expect(utc.by_day.map((day) => day.searches)).toEqual([2])
   })
 
   it('narrows to the days the range names, and defaults to the current month', async () => {
@@ -385,10 +466,11 @@ describe('GET /v1/me/usage', () => {
     expect(response.status).toBe(200)
     expect(((await response.json()) as UserUsage).totals.input_tokens).toBe(20)
 
-    // One read, and it is the windowed one: no page-walk over the caller's sessions, and no
-    // per-session read of each session's span events — which is what a month of heavy use used
-    // to cost on every request.
-    expect(calls).toEqual(['listModelRequests'])
+    // Two reads, both of them windowed: the model requests and — since epic #303, #305 — the
+    // searches, each narrower than a walk of the caller's sessions would be. No page-walk over
+    // the caller's sessions and no per-session read of each session's span events, which is
+    // what a month of heavy use used to cost on every request.
+    expect(calls).toEqual(['listModelRequests', 'listToolUses'])
     expect(calls.filter((name) => name === 'listSessions' || name === 'listEvents')).toEqual([])
   })
 

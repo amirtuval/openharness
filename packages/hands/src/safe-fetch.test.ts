@@ -9,6 +9,7 @@ import {
   SafeFetchError,
   isSafeFetchError,
   safeFetch,
+  safeFetchResult,
   type AddressResolver,
   type SafeFetchRequest,
   type SafeFetchTransport,
@@ -271,6 +272,27 @@ describe('safeFetch redirects', () => {
     const response = await safeFetch('https://public.example/start', {}, { resolver, transport })
     expect(await response.text()).toBe('arrived')
     expect(calls).toEqual(['https://public.example/start', 'https://public.example/end'])
+  })
+
+  it('answers the address it finally came from beside the response', async () => {
+    // What `web_fetch` reports as the page's own URL (#305): the last hop's, not the one the
+    // call named — a redirect is a page that says "what you asked for is here".
+    const { transport } = fakeTransport((url) =>
+      url.endsWith('/start')
+        ? new Response(null, { status: 302, headers: { location: '/end' } })
+        : new Response('arrived'),
+    )
+    const resolver = resolverFor({ 'public.example': [PUBLIC] })
+    const result = await safeFetchResult(
+      'https://public.example/start',
+      {},
+      {
+        resolver,
+        transport,
+      },
+    )
+    expect(result.url).toBe('https://public.example/end')
+    expect(await result.response.text()).toBe('arrived')
   })
 
   it('refuses a redirect that points at a private address', async () => {

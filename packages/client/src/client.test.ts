@@ -953,6 +953,7 @@ describe('usage (#247)', () => {
       cost: 0.0045,
       unpriced_requests: 0,
       by_model: [entry],
+      searches: 0,
     }
     const { client, mock } = clientWith(() => jsonResponse(usage))
 
@@ -970,7 +971,8 @@ describe('usage (#247)', () => {
       cost: 0.0045,
       unpriced_requests: 0,
       by_model: [entry],
-      by_day: [{ day: '2026-10-08', totals, cost: 0.0045, unpriced_requests: 0 }],
+      by_day: [{ day: '2026-10-08', totals, cost: 0.0045, unpriced_requests: 0, searches: 1 }],
+      searches: 1,
     }
     const { client, mock } = clientWith(() => jsonResponse(usage))
 
@@ -994,6 +996,7 @@ describe('usage (#247)', () => {
         unpriced_requests: 0,
         by_model: [entry],
         by_day: [],
+        searches: 0,
       }),
     )
 
@@ -1011,6 +1014,7 @@ describe('usage (#247)', () => {
       cost: 0.0045,
       unpriced_requests: 3,
       by_model: [entry, { ...entry, model: 'acme/mystery-1', cost: null, unpriced_requests: 3 }],
+      searches: 0,
     }
     const { client } = clientWith(() => jsonResponse(usage))
 
@@ -1028,6 +1032,7 @@ describe('usage (#247)', () => {
         cost: null,
         unpriced_requests: 2,
         by_model: [{ ...entry, cost: null, unpriced_requests: 2 }],
+        searches: 0,
       }),
     )
 

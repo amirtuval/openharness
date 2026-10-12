@@ -7,7 +7,7 @@
  * guard. A provider credential's endpoint is different: an Azure OpenAI endpoint is typed by
  * the user, and a URL the user chose is exactly what an SSRF guard is for. `safeFetch` is that
  * guard, and it is built here — in `@openharness/hands`, its first real code — because the
- * tools' own `web_fetch` will reuse it (epic #245, decision M1).
+ * tools' own `web_fetch` reuses it (epic #245, decision M1; #305).
  *
  * What it does, in order, on every hop:
  *
@@ -260,6 +260,42 @@ export async function safeFetch(
   init: RequestInit = {},
   options: SafeFetchOptions = {},
 ): Promise<Response> {
+  return (await safeFetchResult(input, init, options)).response
+}
+
+/**
+ * What a {@link safeFetchResult} call produced: the response, and **where it finally came from**.
+ *
+ * The URL is the last hop's, after every redirect the guard followed and re-checked, which is
+ * what a caller that must tell its reader where a page came from needs — `web_fetch` reports it
+ * (#305). A `Response` carries no `url` of its own here: the guard builds a new one around the
+ * capped body, and the address that was actually checked is the guard's to report, not
+ * undici's.
+ */
+export interface SafeFetchResult {
+  /** The response, with its body already capped and watched for a stall. */
+  readonly response: Response
+  /** The URL of the hop that answered, after redirects. */
+  readonly url: string
+}
+
+/**
+ * {@link safeFetch}, answering the final URL beside the response.
+ *
+ * The same request and the same guard — this is not a second way to fetch, it is the one way
+ * with one more fact returned. {@link safeFetch} is the wrapper for a caller that does not need
+ * the address.
+ *
+ * @param input the URL to fetch; a `Request` is not accepted, because its URL was not checked
+ * @param init the `fetch` options; `redirect` is always forced to `manual`
+ * @param options the per-call limits, the address option, and the test seams
+ * @throws SafeFetchError when the URL is refused or a limit is hit
+ */
+export async function safeFetchResult(
+  input: string | URL,
+  init: RequestInit = {},
+  options: SafeFetchOptions = {},
+): Promise<SafeFetchResult> {
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS
   const limits: Limits = {
     maxBytes: options.maxBytes === undefined ? DEFAULT_MAX_BYTES : options.maxBytes,
@@ -357,7 +393,7 @@ export async function safeFetch(
       current = next.href
       continue
     }
-    return guardBody(response, limits)
+    return { response: guardBody(response, limits), url: url.href }
   }
 }
 

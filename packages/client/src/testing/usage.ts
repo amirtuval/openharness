@@ -74,11 +74,13 @@ export function fakeRequestsOf(brain: FakeBrain): RecordedRequest[] {
 export function fakeUsage(
   requests: readonly RecordedRequest[],
   prices: ModelPriceLookup,
+  searches = 0,
 ): {
   totals: UsageTotals
   cost: number | null
   unpriced_requests: number
   by_model: ModelUsageBreakdown[]
+  searches: number
 } {
   const totals = emptyUsage()
   const byModel = new Map<
@@ -104,6 +106,10 @@ export function fakeUsage(
     totals,
     cost: total.cost,
     unpriced_requests: total.unpriced_requests,
+    // Always zero here: the fake's brain runs no tool loop, so a chat it serves asks for no
+    // searches (epic #303, #305). The field is carried because it is part of the protocol's
+    // answer, and a screen that renders it is rendered a truthful `0`.
+    searches,
     by_model: [...byModel]
       .map(([model, entry]) => {
         const modelCost = totalCost(entry.costs)
