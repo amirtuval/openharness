@@ -21,8 +21,16 @@ How work happens in this repo.
 5. **`docs/` stays high level.** Package details live in `<package>/AGENTS.md` and, when they
    outgrow it, `<package>/docs/`. Design specs live in issues, not in the repo.
 
+6. **Learnings are part of the change too.** [`LEARNINGS.md`](./LEARNINGS.md) records what is not
+   obvious from the code — the surprise, the provider quirk, the dead end, the decision whose
+   reason is not visible in the source. When an issue teaches you one, add it in the same PR, in
+   that file's format and its right section; update or delete entries the change makes wrong.
+   Skip anything the code or `AGENTS.md` already make obvious. This is part of the definition of
+   done, alongside the docs update above.
+
 ## Related
 
 - Architecture and the allowed dependency graph: [`architecture.md`](./architecture.md).
 - Commands, tooling and how to work inside one package: [`development.md`](./development.md).
+- What the code does not say out loud: [`LEARNINGS.md`](./LEARNINGS.md).
 - Decisions and their rationale: [`decisions/`](./decisions/README.md).
