@@ -826,14 +826,16 @@ and the guarded `fetch`.
   reason telling the reader to add an API key under custom headers — never sent down a flow that
   cannot exist; and anything else (unreachable, a 5xx) is stored in `error` with the transport's
   own reason. A body carrying a `headers` map **implies** `auth: 'headers'`, on a create and on
-  an update alike, and a map sent beside a different explicit `auth` is the protocol's 400.
-- **What a failure says** (#314). Every check goes through `recordingMcpFetch` (`mcp/
-http-failure.ts`), which remembers the last non-2xx response's status, status text and a
+  an update alike, and a map sent beside a different explicit `auth` is the protocol's 400. An
+  update writes the **resolved** auth, so adding a header to an open server really flips it.
+- **What a failure says** (#314). Every check goes through `recordingMcpFetch`
+  (`mcp/http-failure.ts`), which remembers the last non-2xx response's status, status text and a
   bounded clone-read body excerpt; `describeMcpFailure` turns that — or the thrown error when
   there was no response — into one bounded, secret-free sentence **naming the status** (`the MCP
-server answered 401 Unauthorized: {"error":"invalid_token"}`). It exists because the SDK's own
-  message ends at a colon for the empty-bodied `401` Linear answers, which told the reader
-  nothing. The same helper serves the tool loop's listing, and the full sentence is logged.
+server answered 401 Unauthorized: {"error":"invalid_token"}`, or `no response from the MCP
+server: …`). It exists because the SDK's own message ends at a colon for the empty-bodied `401`
+  Linear answers, which told the reader nothing. The same helper serves the tool loop's listing,
+  and the full sentence is logged.
 - **Secrets are sealed and never returned.** `mcp/secrets.ts` seals the header map, the OAuth
   tokens and the registered client with `@openharness/vault` under AAD
   `mcp:{userId}|{serverId}|{purpose}` — the `mcp:` prefix keeps the family from decrypting under
@@ -2158,8 +2160,8 @@ parallel with each other.
   **names** a listing shows and the value that never reaches a response or a log line, the URL
   rules (a private address and a metadata host refused with 400 and nothing stored, a non-http
   URL and a malformed path id refused), the connection check (a down server stored in
-  `status: error` and reported on demand, an authenticated one whose token is refused, and the
-  `auth` a create body resolves to with no detector at all), and `resolve`/`listEnabled` for
+  `status: error` and reported on demand, an authenticated one whose token is refused, and that
+  an update carrying a header map writes the auth it implies), and `resolve`/`listEnabled` for
   the tool loop.
 - `mcp-oauth.test.ts` (#303, X10; #311; #314) — the OAuth 2.1 client end to end against a stub
   authorization server and MCP server on loopback: RFC 9728 then RFC 8414 discovery, RFC 7591
