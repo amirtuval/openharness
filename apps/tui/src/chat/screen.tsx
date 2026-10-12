@@ -40,12 +40,13 @@ import { usePromptSlot } from '../components/prompt-slot'
 import { ProviderSetup } from '../components/provider-setup'
 import { formatCostTotal } from '../components/reply-meta'
 import { InputRule, modelLabel, modelPriceLookup, StatusLine } from '../components/status-line'
-import { TodoPanel } from '../components/todo-panel'
+import { TODO_AUTO_FOLD_THRESHOLD, TodoPanel } from '../components/todo-panel'
 import { ToolNoticesView } from '../components/tool-notices'
 import { lastDrawn, TranscriptView } from '../components/transcript-view'
 import { TruncationNotice } from '../components/truncation-notice'
 import type { PromptHistory } from '../history'
 import { modeNameOf } from '../modes'
+import { setTodoFoldChoice, todoFoldChoice } from './todo-fold'
 import type { ErrorContext } from '../errors'
 import { clearScreen } from '../terminal'
 import {
@@ -147,6 +148,28 @@ export function ChatScreen({
    * just arrived is a new thing to answer.
    */
   const [composing, setComposing] = useState(false)
+  /**
+   * Whether the task list is folded (Ctrl+T), or `null` for the reader's own choice having not
+   * been made in this chat yet — the auto-fold rule then applies (a list longer than
+   * {@link TODO_AUTO_FOLD_THRESHOLD} starts folded).
+   *
+   * It is kept beside the chat rather than in the panel, because the panel is drawn in the live
+   * area: a `<Static>` block is written once and never redrawn (#208, X2), and the list has to
+   * stay foldable for the life of the chat — across turns, while idle, and after a resume. The
+   * choice itself is remembered per chat for the process lifetime (`chat/todo-fold.ts`), so a
+   * screen mounted again on the same chat opens the way the reader left it.
+   */
+  const [todoFolded, setTodoFolded] = useState<boolean | null>(
+    () => todoFoldChoice(session.session.id) ?? null,
+  )
+  /**
+   * Whether a tool call draws its whole input and a capped result — Ctrl+O (issue #308).
+   *
+   * The terminal half of Claude Code's detail toggle. It reaches what is still in the live area:
+   * what Ink's `<Static>` has already written keeps the compact line it was drawn with, because
+   * the scrollback is write-once — see `TranscriptView`'s `detail`.
+   */
+  const [callDetail, setCallDetail] = useState(false)
   const { stdout } = useStdout()
   const { suspendTerminal } = useApp()
   // A clear is in flight. A second Ctrl+L while the first is being handed over has nowhere
@@ -369,7 +392,6 @@ export function ChatScreen({
     truncation !== null ||
     manualCompactionNoticeDrawn !== null ||
     hasToolNotices ||
-    todos !== null ||
     waiting.length > 0
 
   /**
@@ -640,6 +662,26 @@ export function ChatScreen({
       return
     }
 
+    // Ctrl+T folds the task list (issue #308). A chat with no list has nothing to fold, and the
+    // key is then a no-op rather than a fold choice for a list that may never arrive.
+    if (input === 't') {
+      const list = session.getState().transcript.todos
+      if (list !== null) {
+        const current = todoFolded ?? list.length > TODO_AUTO_FOLD_THRESHOLD
+        const next = !current
+        setTodoFoldChoice(session.session.id, next)
+        setTodoFolded(next)
+      }
+      return
+    }
+
+    // Ctrl+O is Claude Code's detail toggle, and it is free here (issue #308): the prompt reads
+    // Ctrl+A/E/U/K/W and the screen owns Ctrl+C/L/R, so nothing else claims it.
+    if (input === 'o') {
+      setCallDetail((on) => !on)
+      return
+    }
+
     if (input === 'l') {
       clear()
       return
@@ -671,6 +713,7 @@ export function ChatScreen({
         }}
         currentModel={currentModel}
         costOf={costOf}
+        detail={callDetail}
         // A reply settles into Ink's static output once and never redraws (#208, X2), so it is
         // held live until *everything* its footer needs has arrived: its own metadata, and —
         // while the prices are still being read (#247) — the rates that footer's cost is
@@ -700,10 +743,6 @@ export function ChatScreen({
               cleared={clearedToolResults}
             />
           )}
-          {/* The task list (epic #303, X5; #308) sits with the notices, under the transcript: a
-              terminal has no pinned chrome, so this is where it can be redrawn in place as the
-              model rewrites it. */}
-          {todos !== null && <TodoPanel todos={todos} />}
           {/* The approvals and questions waiting on the reader (epic #303, X6; #310). It sits
               with the notices because a terminal has no pinned chrome: it is chrome about the
               work, redrawn in place as the turn goes on, and the prompt under it is how a
@@ -724,10 +763,19 @@ export function ChatScreen({
           )}
         </>
       )}
+      {/* The chat's task list (epic #303, X5; #308) is **pinned**: it is drawn in the live area
+          just above the input section whenever the chat has one — while a turn runs, while the
+          chat is idle, and after a resume — rather than travelling up the scrollback with the
+          transcript the way a message does. A terminal has no pinned chrome and no second
+          column (see `components/todo-panel.tsx`), so this is where "always visible" can mean
+          anything: the one region Ink redraws every frame. */}
+      {todos !== null && (
+        <TodoPanel todos={todos} folded={todoFolded ?? todos.length > TODO_AUTO_FOLD_THRESHOLD} />
+      )}
       {/* The input area is its own section (issue #233): a blank line, a dim full-width rule,
           and everything the console is — the status line, the prompt, and whatever has taken
           the prompt's place — under it. */}
-      <InputRule blankAbove={owesBlank || hasNotice} />
+      <InputRule blankAbove={owesBlank || hasNotice || todos !== null} />
       <StatusLine
         agentName={agentName}
         model={model}

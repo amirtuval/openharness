@@ -170,6 +170,14 @@ export const CHAT_KEYS: readonly { readonly keys: string; readonly description: 
   { keys: 'Esc', description: 'close the command menu, keeping what is typed' },
   { keys: 'Ctrl+L', description: 'clear the screen; the session stays' },
   {
+    keys: 'Ctrl+T',
+    description: 'fold or unfold the task list above the prompt — a long one starts folded',
+  },
+  {
+    keys: 'Ctrl+O',
+    description: "show every tool call's full input and result, or the compact line again",
+  },
+  {
     keys: 'Ctrl+R',
     description: 'reconnect the MCP server a failed turn named — a notice says when to',
   },
