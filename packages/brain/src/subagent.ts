@@ -1,4 +1,10 @@
-import type { McpServerId, ModeToolOverride, ReasoningEffort, UserId } from '@openharness/protocol'
+import type {
+  McpServerId,
+  ModeId,
+  ModeToolOverride,
+  ReasoningEffort,
+  UserId,
+} from '@openharness/protocol'
 
 /**
  * Subagents, brain-side (epic #340): the **system prompt** a child runs with, and the
@@ -153,6 +159,15 @@ export interface SubagentParent {
   readonly reasoningEffort: ReasoningEffort | null
   /** The tool override the parent's own mode imposes, or `null` when it follows none. */
   readonly toolOverride: ModeToolOverride | null
+  /**
+   * The mode the parent follows, or `null` for a chat on a plain model (#344).
+   *
+   * The third answer a caller that creates the child **on a mode** needs: a `general-purpose`
+   * child of a chat that follows one follows the same mode (S2, "the parent, continued"), and
+   * the mode is what carries the tool and MCP-server override — the session record holds an id
+   * and nothing else, and `toolOverride` alone could not be stored on a child.
+   */
+  readonly modeId: ModeId | null
 }
 
 /**
@@ -188,6 +203,18 @@ export interface ResolvedSubagentType {
   readonly reasoningEffort: ReasoningEffort | null
   /** Appended to the child's system prompt, or `null` for no addition of its own. */
   readonly systemPromptAddition: string | null
+  /**
+   * The mode the child is created **on**, so it follows it live, or `null` for a child on a
+   * plain model (#344).
+   *
+   * A type that came from a mode answers its own id; {@link GENERAL_PURPOSE_TYPE} answers the
+   * parent's ({@link SubagentParent.modeId}), because it is the parent continued. It is what
+   * makes {@link ResolvedSubagentType.toolOverride} real rather than advisory: the caller passes
+   * this id to `createSession` (with the resolved `model` as the header's fallback), and the
+   * loop then resolves the mode for the child's every request exactly as it does for a chat's —
+   * model, effort, prompt addition and the tool/MCP-server override included (#245, M6).
+   */
+  readonly modeId: ModeId | null
   /**
    * The tool/MCP-server patch the type imposes, or `null`.
    *

@@ -1235,7 +1235,42 @@ export class InMemorySessionStore implements SessionStore {
     // `waiting_on_tasks`, and the deadline it recorded has passed. Nothing else would reach
     // such a session — the notification it waits for may never come — so recovery is what
     // resumes it and answers the wait as timed out.
-    return pastDeadlineWait(events, ranges, this.#clock())
+    return pastDeadlineWait(events, ranges, this.#clock()) || this.#undeliveredTurn(record)
+  }
+
+  /**
+   * Whether this session is a **child** whose finished turn its parent was never told about
+   * (epic #340, S4; #344).
+   *
+   * A child's turn end owes its parent a notification keyed `<child_session_id>:<idle seq>`,
+   * and the write is the child's own — so a process that died between the turn's end and the
+   * write leaves an idle child holding news nobody has. Nothing else reaches it: the turn *did*
+   * end, so the log holds no queued event and no open turn, and the parent is idle waiting for
+   * news that will never come. The delivery is the brain's (a turn on the child writes the
+   * notification and nothing to its own log); this is what finds the child, the way
+   * {@link pastDeadlineWait} finds a pause nothing else would resume.
+   *
+   * Only a turn that **ended** counts. A child parked in `agent_wait` is still working, and a
+   * wait past its deadline is the case above.
+   */
+  #undeliveredTurn(record: SessionRecord): boolean {
+    const { session } = record
+    if (session.parent_session_id === null || session.parent_task_id === null) {
+      return false
+    }
+    const parent = this.#sessions.get(session.parent_session_id)
+    if (parent === undefined) {
+      return false
+    }
+    const idle = endedTurn(record.events.map((entry) => entry.event))
+    if (idle === null) {
+      return false
+    }
+    const key = `${session.id}:${idle.seq}`
+    return !parent.events.some(
+      (entry) =>
+        entry.event.type === EVENT_TYPES.sessionTaskNotification && entry.event.source_key === key,
+    )
   }
 
   /**
@@ -1769,6 +1804,25 @@ function taskWaitPause(
     return null
   }
   return { event: lastStatus, deadline: lastStatus.stop_reason.deadline }
+}
+
+/**
+ * The `session.status_idle` that **ended** a log's newest turn, or `null` when nothing ended.
+ *
+ * A pause is not an end (epic #340, S4/S5; #309, #343): a turn that stopped `requires_action` or
+ * `waiting_on_tasks` is still being worked on, and announcing it would tell the parent something
+ * it is not. That is why this asks for `end_turn` rather than for any idle.
+ */
+function endedTurn(events: readonly StoredEvent[]): IdleEvent | null {
+  const lastStatus = findLastStatusEvent(events)
+  if (
+    lastStatus === null ||
+    lastStatus.type !== EVENT_TYPES.sessionStatusIdle ||
+    lastStatus.stop_reason.type !== 'end_turn'
+  ) {
+    return null
+  }
+  return lastStatus
 }
 
 /** A stored `session.status_idle`, for the two readings above. */
