@@ -210,6 +210,14 @@ export type {
 } from './mcp'
 
 export {
+  NOT_REGISTERED_NOTE,
+  cycleToolPolicy,
+  toolAvailabilityNote,
+  toolPolicyChoices,
+  toolPolicyNote,
+} from './tool-settings'
+
+export {
   APPROVAL_CHOICES,
   OTHER_CHOICE_LABEL,
   answerConfirmation,

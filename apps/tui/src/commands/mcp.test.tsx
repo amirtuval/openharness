@@ -33,6 +33,17 @@ const NOTES = makeMcpServer({
   definition_tokens: 53,
 })
 
+/** A server with more tools than any terminal shows at once. */
+const MANY_TOOLS = makeMcpServer({
+  name: 'huge',
+  tools: Array.from({ length: 60 }, (_, index) => ({
+    name: `tool_${String(index)}`,
+    description: null,
+    definition_tokens: 10,
+  })),
+  definition_tokens: 600,
+})
+
 /** Render the screen, and answer what the browser was asked to open. */
 function renderMcp(options: Parameters<typeof createFakeClient>[0] = {}): {
   readonly app: ReturnType<typeof render>
@@ -140,6 +151,58 @@ describe('the servers screen', () => {
     fake.completeMcpOAuth(NOTES.id)
     await waitForFrame(app, 'notes is connected.', 6000)
     await waitForFrame(app, 'notes · OAuth · Connected')
+  })
+
+  it('scrolls the server list once it is longer than the screen', async () => {
+    // Ten servers of two lines each are more than a 24-row terminal shows at once, and a
+    // server's tools are worth reaching without a screenful of names to walk past.
+    const many = Array.from({ length: 10 }, (_, index) =>
+      makeMcpServer({ name: `server-${String(index)}`, auth: 'none', status: 'connected' }),
+    )
+    const { app } = renderMcp({ mcpServers: many })
+    await waitForScreen(app, 'MCP servers')
+    await waitForFrame(app, '❯ server-0')
+
+    pressKey(app, 'end')
+    await waitForFrame(app, '❯ server-9')
+    expect(frameOf(app)).toContain('↑ ')
+    pressKey(app, 'home')
+    await waitForFrame(app, '❯ server-0')
+    expect(frameOf(app)).toContain('↓ ')
+  })
+
+  it('keeps a server with sixty tools inside the screen, with the all-tools row on top', async () => {
+    // The reader's report: the tools face drew every tool, so the list ran off the bottom of the
+    // terminal and the selected row went with it — on Linear's server there is no way to see what
+    // is selected or what the batch row says (#335).
+    const { app } = renderMcp({ mcpServers: [MANY_TOOLS] })
+    await waitForScreen(app, 'MCP servers')
+
+    typeText(app, 'p')
+    await waitForFrame(app, 'all tools · Ask (all)')
+    // The batch row is pinned above the window and the cursor starts on it: the frame says both
+    // where the selection is and that there is more below.
+    expect(frameOf(app)).toContain('❯ all tools · Ask (all)')
+    expect(frameOf(app)).toContain('↓ ')
+
+    // Walking down keeps the selected row on screen, and the pinned row with it.
+    for (let press = 0; press < 40; press += 1) {
+      pressKey(app, 'down')
+    }
+    await waitForFrame(app, '❯ huge__tool_39')
+    const scrolled = frameOf(app)
+    expect(scrolled).toContain('↑ ')
+    expect(scrolled).toContain('all tools · Ask (all)')
+
+    // End reaches the last tool, with the count of what is above it.
+    pressKey(app, 'end')
+    await waitForFrame(app, '❯ huge__tool_59')
+    expect(frameOf(app)).toContain('↑ ')
+
+    // Home is the batch row again — the top of the window, still pinned above it.
+    pressKey(app, 'home')
+    await waitForFrame(app, '❯ all tools · Ask (all)')
+    expect(frameOf(app)).toContain('↓ ')
   })
 
   it('walks a server’s tools and changes one permission', async () => {

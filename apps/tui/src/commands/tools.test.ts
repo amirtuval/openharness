@@ -105,13 +105,15 @@ describe('formatTools (#308)', () => {
       },
     ])
 
-    // The tool's own line, and nothing from the server but the line that says so.
-    expect(lines).toHaveLength(2)
+    // The tool's own line, nothing from the server but the line that says so, and where the
+    // same settings are in a chat (#335).
+    expect(lines).toHaveLength(3)
     expect(lines[0]).toContain('web_fetch')
     expect(lines.join('\n')).not.toContain('notes__search')
     expect(lines[1]).toBe(
       '2 tools come from MCP servers; their permissions are set per server with `/mcp`.',
     )
+    expect(lines[2]).toBe('In a chat, `/tools` sets these without leaving it.')
   })
 
   it('counts a single remote tool in the singular', () => {
