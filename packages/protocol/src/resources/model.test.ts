@@ -18,6 +18,7 @@ const entry = {
   // reserves (50,000 — the 64k ceiling is larger, so it never takes more room than the
   // quarter): epic #277 K10; #280.
   context_budget: 150_000,
+  tool_call: true,
   source: 'provider',
 }
 

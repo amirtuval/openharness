@@ -366,10 +366,15 @@ describe('GET /v1/models', () => {
       // The budget the brain trims this model to (#246, epic #277 K10; #280): the registry's
       // window less its own output ceiling, which is under the quarter the rule reserves.
       context_budget: 1047576 - 32768,
+      // A chat model the registry does not mark as unable to call tools (epic #303, X2).
+      tool_call: true,
       source: 'provider',
     })
     // A model neither side knows is still listed: never hide a usable chat model.
     expect(response.data.find((entry) => entry.id === 'openai/custom-model')).toMatchObject({
+      // And it is offered tools: the registry says nothing about it, and guessing "no" would be
+      // the same mistake as hiding it (epic #303, X2).
+      tool_call: true,
       name: 'openai/custom-model',
       context_window: null,
       max_output_tokens: null,

@@ -37,6 +37,7 @@ const nameOf = modelNameLookup([
     context_window: 200_000,
     max_output_tokens: 64_000,
     context_budget: 150_000,
+    tool_call: true,
     cost: null,
     source: 'provider',
   },

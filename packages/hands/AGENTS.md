@@ -1,14 +1,23 @@
 # @openharness/hands
 
-Pluggable _hands_: the sandboxes and tools behind `execute(name, input)` — and, until those
-land, the one outbound-request guard the rest of openharness uses.
+Pluggable _hands_: the tools behind `execute(name, input)`, the registry that runs one, and
+the one outbound-request guard the rest of openharness uses.
 
-The tools are **not implemented yet**: no sandbox, no `execute()`. What is here is
-**`safeFetch`** (epic #245, A3a), the SSRF guard for a URL a **user** supplied. Everything
-else the server fetches is a constant URL it wrote itself, so there is no address to choose
-and nothing to guard; a provider credential's endpoint is different — an Azure OpenAI endpoint
-is typed by the user, and a URL the user chose is exactly what a guard is for. The tools' own
-`web_fetch` will reuse it (epic #245, decision M1), which is why it is built here.
+Since epic #303 ([#304](https://github.com/amirtuval/openharness/issues/304)) this package
+holds the **tool registry**: a tool declares its name, the description a model reads, an input
+schema (zod), a default permission and a timeout, and `ToolRegistry.execute` runs one call of
+one and turns every outcome into a `ToolResult` the brain stores. There is **no sandbox**: a
+tool runs in this process. No built-in tool ships yet — the loop's first client is a test tool
+behind the server's `OPENHARNESS_TEST_MODEL=mock` hook, and `web_fetch`, `web_search` and
+`todo_write` arrive with [#305](https://github.com/amirtuval/openharness/issues/305) — and the
+MCP client will live here too ([#312](https://github.com/amirtuval/openharness/issues/312)).
+
+**`safeFetch`** (epic #245, A3a) is the SSRF guard for a URL a **user** supplied, and is what
+those built-ins will use. Everything else the server fetches is a constant URL it wrote
+itself, so there is no address to choose and nothing to guard; a provider credential's
+endpoint is different — an Azure OpenAI endpoint is typed by the user, and a URL the user chose
+is exactly what a guard is for. The tools' own `web_fetch` will reuse it (epic #245, decision
+M1), which is why it is built here.
 
 ## Commands
 
@@ -31,17 +40,61 @@ repo.
 
 ## Public API
 
-| export                                                                                                                               | what it is                                                                          |
-| ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `safeFetch(url, init?, options?)`                                                                                                    | fetch a user-supplied URL, refusing everything below                                |
-| `SafeFetchError`, `isSafeFetchError()`, `SafeFetchErrorCode`                                                                         | the refusal, with a stable `code`                                                   |
-| `AddressResolver`, `SafeFetchTransport`, `SafeFetchRequest`                                                                          | the two seams: how a host resolves, and how the request is made                     |
-| `SafeFetchOptions`                                                                                                                   | `allowPrivate`, `maxBytes`, `timeoutMs`, `idleTimeoutMs`, `maxRedirects`, the seams |
-| `SAVE_TIME_LIMITS`, `STREAMING_LIMITS`, `STREAMING_IDLE_TIMEOUT_MS`                                                                  | the two presets: a tight check, and a streaming-safe model call                     |
-| `DEFAULT_MAX_BYTES`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_REDIRECTS`                                                                   | `1 MiB`, `30 s`, `5` — what a call with no options gets                             |
-| `isBlockedAddress()`, `isPublicAddress()`, `isMetadataHostname()`, `parseIpAddress()`, `parseIPv4()`, `parseIPv6()`, `ParsedAddress` | the address rules, exported so a caller can reason about one on its own             |
-| `PACKAGE_NAME`                                                                                                                       | `'@openharness/hands'`                                                              |
-| `PROTOCOL_DEPENDENCY`                                                                                                                | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge              |
+| export                                                                                                                               | what it is                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `safeFetch(url, init?, options?)`                                                                                                    | fetch a user-supplied URL, refusing everything below                                                                                                                          |
+| `SafeFetchError`, `isSafeFetchError()`, `SafeFetchErrorCode`                                                                         | the refusal, with a stable `code`                                                                                                                                             |
+| `AddressResolver`, `SafeFetchTransport`, `SafeFetchRequest`                                                                          | the two seams: how a host resolves, and how the request is made                                                                                                               |
+| `SafeFetchOptions`                                                                                                                   | `allowPrivate`, `maxBytes`, `timeoutMs`, `idleTimeoutMs`, `maxRedirects`, the seams                                                                                           |
+| `SAVE_TIME_LIMITS`, `STREAMING_LIMITS`, `STREAMING_IDLE_TIMEOUT_MS`                                                                  | the two presets: a tight check, and a streaming-safe model call                                                                                                               |
+| `DEFAULT_MAX_BYTES`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_REDIRECTS`                                                                   | `1 MiB`, `30 s`, `5` — what a call with no options gets                                                                                                                       |
+| `isBlockedAddress()`, `isPublicAddress()`, `isMetadataHostname()`, `parseIpAddress()`, `parseIPv4()`, `parseIPv6()`, `ParsedAddress` | the address rules, exported so a caller can reason about one on its own                                                                                                       |
+| `PACKAGE_NAME`                                                                                                                       | `'@openharness/hands'`                                                                                                                                                        |
+| `PROTOCOL_DEPENDENCY`                                                                                                                | `@openharness/protocol`'s `PACKAGE_NAME`; proves the built-output edge                                                                                                        |
+| `createToolRegistry(tools)`                                                                                                          | a registry over a host's tools: look one up by name, or run one call                                                                                                          |
+| `ToolRegistry`, `ToolRunContext`                                                                                                     | `{ tools, get(name), execute(name, input, ctx) }`, and what a caller tells `execute` about the turn (`signal`, `secrets`, a `timeoutMs` ceiling)                              |
+| `ToolDefinition`, `ToolExecutionContext`, `ToolResult`                                                                               | one tool — name, description, zod input schema, default permission, timeout, `run` — and what `run` is handed (the turn's signal, its resolved limit, the per-user `secrets`) |
+| `textResult(text)`, `errorResult(text)`                                                                                              | the two results a tool normally answers with: one text block, the second with `isError: true`                                                                                 |
+| `DEFAULT_TOOL_TIMEOUT_MS`                                                                                                            | `30000` — a call's limit when its definition names none                                                                                                                       |
+| `scrubText(text, values)`, `REDACTED_PLACEHOLDER`                                                                                    | the redaction every result passes through: `[REDACTED]` where a resolved secret was                                                                                           |
+
+### The tool registry (epic #303; #304)
+
+A tool is a name the model calls, a description it reads, an **input schema** (zod), a default
+permission and a timeout; `run(input, ctx)` does the work. The registry holds a host's tools
+and is the only way to call one:
+
+```ts
+const registry = createToolRegistry([echo]) // throws on two tools sharing a name
+const result = await registry.execute('echo', call.input, { signal, secrets })
+```
+
+- **Every outcome is a `ToolResult`, and `execute` never throws.** A name no tool has, input the
+  tool's schema refuses (naming the field), a call that throws, one that runs past its timeout,
+  and one the turn aborted all come back as `isError` results the model reads and the brain
+  stores. There is no second failure channel, so a tool cannot take a turn down with it.
+- **The caller's `ctx` is the whole world a tool gets.** `signal` is the turn's (plus a deadline),
+  `secrets` is what the host resolved for the session's owner, and `timeoutMs` is the resolved
+  limit. `hands` reads no environment variable and no database: whatever a tool needs, the
+  server puts in `secrets` (the same injected-resolver rule the brain's credential resolver
+  follows).
+- **The limit is the smaller of the tool's own and the host's.** `ToolRunContext.timeoutMs` is a
+  ceiling, not an override — a host can shorten a call, never lengthen what a tool declared —
+  and the tool is told the resolved number in `ctx.timeoutMs`.
+- **A cut-short call is reported as cut short, whatever the tool did about it.** A timeout
+  aborts the call's signal and answers `Tool <name> timed out after <n> ms.`; a turn abort
+  answers `Interrupted by the user.`; a call whose signal was already aborted when it arrived
+  is never started. A tool that cooperates (returns its own partial answer) does not get to
+  rewrite that: the model is owed one story about the call.
+- **The limit is a race, not a hint.** The call is run against its deadline and the turn's
+  signal, and the first of the three to settle wins — so a tool that ignores the signal it was
+  handed (a library that takes none, a hand-written loop) is cut short anyway, and one hung
+  call cannot hold a turn open for as long as it likes. The abandoned call is left running
+  against an aborted signal and its answer is discarded.
+- **The turn's secrets are scrubbed out of every result and every thrown message.** Every
+  outcome passes through one redaction, so "a secret never reaches the log" (X11) is a property
+  of the registry rather than a rule each tool has to remember. Values are matched whole, so a
+  result that merely resembles one is left alone.
 
 ### What `safeFetch` refuses, and how
 
@@ -113,6 +166,10 @@ Only these (see the table in `docs/architecture.md`):
 
 `@openharness/config` is additionally allowed as a **devDependency**.
 
+The registry's input schemas are `zod`'s, so a tool's contract with the model is one schema both
+sides read — the registry parses a call with it, and the brain hands it to the AI SDK as the
+tool definition a request offers.
+
 Packages consume each other through built output only (`exports` → `dist/`); ESLint's
 `import-x/no-relative-packages` (in the shared config) rejects a relative import that leaves
 the package, and `yarn check:deps` at the repo root enforces the allowed `@openharness/*`
@@ -138,6 +195,12 @@ dependency table.
   is read, errors or is cancelled — the server's own socket set goes empty. Those tests delete
   the proxy variables at module load (`safeFetch` honours the environment, and a sandbox's egress
   proxy would otherwise answer for `127.0.0.2`).
+- `registry.test.ts` is the tool registry on its own: the tools it holds and the name it
+  refuses twice, the parsed input and the turn a tool is handed, and every way a call can end —
+  an unregistered name, input the schema refuses, a thrown error (and one with nothing to say),
+  a timeout (a call that ignores the signal is still cut short), a turn that aborted (before the
+  call and during it, and one whose tool answers after it), the host's ceiling lowering a tool's
+  own timeout, and the turn's secrets scrubbed out of a result and out of a thrown message.
 - `index.test.ts` covers the barrel.
 
 ## Rules

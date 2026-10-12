@@ -4,6 +4,8 @@ import { SUMMARY_MODEL_SAME_AS_CHAT } from '../index'
 import type {
   Agent,
   AgentMessageEvent,
+  AgentToolResultEvent,
+  AgentToolUseEvent,
   ContentDelta,
   ContextSummaryEvent,
   ContextSummaryProgressEvent,
@@ -38,6 +40,7 @@ import type {
   UserPreferences,
   GetPreferencesResponse,
   PreferencesDefaults,
+  ToolInput,
 } from '../index'
 
 /**
@@ -268,6 +271,9 @@ export function makeModelEntry(overrides: Partial<ModelEntry> = {}): ModelEntry 
     // quarter of the window, 50k, is the cap — so the ceiling only ever takes less room). A
     // test that overrides the limits should override this too, or not care about it.
     context_budget: 150_000,
+    // A chat model the registry marks as tool-capable; pass `tool_call: false` for one it
+    // does not (epic #303, X2).
+    tool_call: true,
     source: 'provider',
   }
   return { ...entry, ...overrides }
@@ -347,6 +353,57 @@ export function makeAgentMessage(
     seq: takeSeq(),
     processed_at: fixtureTimestamp(),
     content: [{ type: 'text', text }],
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `agent.tool_use`: the model asking for a tool (epic #303, X1).
+ *
+ * The event's id **is** the call's id, so a test pairs it with the `agent.tool_result` built
+ * from the same event — {@link makeAgentToolResult} takes the `agent.tool_use` and names it.
+ *
+ * @param name the tool's name, as it was offered to the model
+ * @param input the arguments the model produced
+ * @param overrides fields to replace on the event, `id` included
+ */
+export function makeAgentToolUse(
+  name: string,
+  input: ToolInput,
+  overrides: Partial<AgentToolUseEvent> = {},
+): AgentToolUseEvent {
+  const event: AgentToolUseEvent = {
+    id: newEventId(),
+    type: 'agent.tool_use',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    name,
+    input,
+    evaluated_permission: 'allow',
+  }
+  return { ...event, ...overrides }
+}
+
+/**
+ * A stored `agent.tool_result`: what a tool call produced (epic #303, X1).
+ *
+ * @param call the `agent.tool_use` this answers; its id becomes `tool_use_id`
+ * @param text the result body; becomes the single text block
+ * @param overrides fields to replace on the event
+ */
+export function makeAgentToolResult(
+  call: AgentToolUseEvent,
+  text: string,
+  overrides: Partial<AgentToolResultEvent> = {},
+): AgentToolResultEvent {
+  const event: AgentToolResultEvent = {
+    id: newEventId(),
+    type: 'agent.tool_result',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    tool_use_id: call.id,
+    content: [{ type: 'text', text }],
+    is_error: false,
   }
   return { ...event, ...overrides }
 }

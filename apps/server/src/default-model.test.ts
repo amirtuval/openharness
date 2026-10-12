@@ -58,6 +58,7 @@ function listedOf(models: readonly string[]): ListModelsResponse {
       cost: null,
       // No window, so the budget the server would report is the brain's own fallback (#280).
       context_budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
+      tool_call: true,
       source: 'provider' as const,
     })),
     providers: providers.map((provider): ProviderCatalogStatus => ({

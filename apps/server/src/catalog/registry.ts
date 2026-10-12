@@ -71,6 +71,17 @@ export interface RegistryModel {
    */
   readonly efforts?: readonly string[]
   /**
+   * Whether the model can call tools, as models.dev's `tool_call` says (epic #303, X2).
+   *
+   * Present only when it is `false`: every chat model models.dev knows carries the flag as
+   * `true`, so absence means "callable, or the registry says nothing", which the tool-support
+   * resolver and the catalogue both read the same way — an unfamiliar model is offered tools
+   * rather than quietly denied them, the same "never hide a usable model" rule the chat filter
+   * follows. It is the field `GET /v1/models` reports as `tool_call` and the brain asks the
+   * server for before it offers anything.
+   */
+  readonly toolCall?: boolean
+  /**
    * The model's list price in USD per million tokens, when models.dev publishes one (epic #245,
    * A2; issue #247).
    *
@@ -125,6 +136,8 @@ interface SnapshotModel {
   readonly chat?: boolean
   /** `true` only for a model models.dev marks reasoning-capable; absent otherwise. */
   readonly reasoning?: boolean
+  /** `false` only for a model models.dev marks as unable to call tools; absent otherwise. */
+  readonly toolCall?: boolean
   /** The effort levels models.dev lists for the model's own knob; absent when it lists none. */
   readonly efforts?: readonly string[]
   /** The price, in the script's spelling; `cacheRead`/`cacheWrite` are its camelCase. */
@@ -178,6 +191,7 @@ const MODELS_BY_PROVIDER: ReadonlyMap<string, readonly RegistryModel[]> = new Ma
         maxOutput: model.maxOutput,
         chat: model.chat,
         reasoning: model.reasoning,
+        toolCall: model.toolCall,
         efforts: model.efforts,
         ...(cost === undefined ? {} : { cost }),
       }

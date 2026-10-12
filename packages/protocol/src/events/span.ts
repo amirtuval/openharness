@@ -4,6 +4,7 @@ import { EventIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { ReasoningEffortRunSchema } from '../reasoning'
 import { ModeReferenceSchema } from '../resources/mode'
+import { ToolReferenceSchema } from '../tools'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 
 /**
@@ -170,6 +171,17 @@ export const ModelRequestStartEventSchema = z.object({
    * session that never sent an oversized message keeps the span shape it always had.
    */
   truncated: TruncationSchema.optional(),
+  /**
+   * // extension: the tools this request offered the model (epic #303, X1).
+   *
+   * A name and where it comes from, per tool, recorded per request — so the log says what the
+   * model *could* have called, not merely what it did. A request built by a deployment with no
+   * tool registry offered nothing, and so does one on a model that cannot call tools; both
+   * write no `tools` at all, which is every request stored before #304. A request that offered
+   * tools and had the model call none still carries the list: the offer is what the span
+   * records, whatever came of it.
+   */
+  tools: z.array(ToolReferenceSchema).optional(),
   /**
    * // extension: a request the compaction engine made to write a summary (epic #277, C2).
    *

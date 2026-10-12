@@ -1,5 +1,6 @@
 import type {
   ContextSummaryEvent,
+  EventId,
   ModelConfig,
   ModelRequestPurpose,
   ModelUsage,
@@ -448,30 +449,162 @@ function planRequest(
   }
 }
 
-/** The conversation the log holds after `afterSeq`, as model messages. */
+/**
+ * The conversation the log holds after `afterSeq`, as model messages.
+ *
+ * A tool step is three kinds of event and two messages. The assistant's turn is its
+ * `agent.message` (the text it streamed) and its `agent.tool_use` events (the calls it made),
+ * together in one assistant message — text parts first, then the calls, which is the order a
+ * provider reads them in — and the answers are one `tool` message whose parts name the calls
+ * they belong to.
+ *
+ * **The answers go directly behind the turn that made the calls**, even when the log put
+ * something between them. It can: a steering message arrives while a tool is running, so the
+ * log holds the call, then the user's message, then the result — and a provider refuses an
+ * assistant turn whose calls are not answered by the very next message. Moving the result up
+ * is the honest reading of the two: the call was answered before the model was asked anything
+ * else, and the steering message is answered by the request after it, which is where the log
+ * puts it too. A log that never interleaves is unaffected — the insertion point is where the
+ * result already was.
+ *
+ * A turn with no calls keeps the plain `{ role: 'assistant', content: text }` shape it has
+ * always had, so a log stored before tools existed replays as exactly the request it built
+ * then.
+ */
 function conversationAfter(
   events: readonly StoredEvent[],
   afterSeq: number,
 ): ConversationMessage[] {
   const messages: ConversationMessage[] = []
+  const toolNames = new Map<EventId, string>()
+  let assistant: { seq: number; text: string; calls: ToolCallPart[] } | null = null
+  // Where the current turn's answers belong: right after the assistant message, or the end of
+  // the list while no turn with calls has been closed. See the note above about interleaving.
+  let answers: { index: number; seq: number; parts: ToolResultPart[] } | null = null
+
+  const closeAssistant = (): void => {
+    if (assistant === null) {
+      return
+    }
+    const { seq, text, calls } = assistant
+    assistant = null
+    if (calls.length === 0) {
+      if (text.length > 0) {
+        messages.push({ message: { role: 'assistant', content: text }, seq })
+      }
+      return
+    }
+    const content: AssistantContent = []
+    if (text.length > 0) {
+      content.push({ type: 'text', text })
+    }
+    content.push(...calls)
+    messages.push({ message: { role: 'assistant', content }, seq })
+    answers = { index: messages.length, seq, parts: [] }
+  }
+  /** Put the pending answers where they belong, adding the `tool` message if it is there yet. */
+  const flushAnswers = (): void => {
+    if (answers === null || answers.parts.length === 0) {
+      return
+    }
+    const at = answers.index
+    const existing = at < messages.length ? messages[at] : undefined
+    if (existing?.message.role === 'tool') {
+      messages[at] = { message: { role: 'tool', content: answers.parts }, seq: answers.seq }
+      return
+    }
+    messages.splice(at, 0, {
+      message: { role: 'tool', content: answers.parts },
+      seq: answers.seq,
+    })
+  }
+
   for (const event of events) {
     if (event.seq <= afterSeq) {
       continue
     }
-    if (event.type === EVENT_TYPES.userMessage) {
-      const text = textOf(event.content)
-      if (text.length > 0) {
-        messages.push({ message: { role: 'user', content: text }, seq: event.seq })
+    switch (event.type) {
+      case EVENT_TYPES.userMessage: {
+        closeAssistant()
+        // Not flushed here: a call the user's message arrived in front of is still answered
+        // behind it, and the `tool` message is inserted before the user message when it lands.
+        const text = textOf(event.content)
+        if (text.length > 0) {
+          messages.push({ message: { role: 'user', content: text }, seq: event.seq })
+        }
+        break
       }
-    } else if (event.type === EVENT_TYPES.agentMessage) {
-      const text = textOf(event.content)
-      if (text.length > 0) {
-        messages.push({ message: { role: 'assistant', content: text }, seq: event.seq })
+      case EVENT_TYPES.agentMessage: {
+        flushAnswers()
+        const text = textOf(event.content)
+        if (assistant === null) {
+          assistant = { seq: event.seq, text, calls: [] }
+        } else {
+          assistant.text += text
+        }
+        break
       }
+      case EVENT_TYPES.agentToolUse: {
+        flushAnswers()
+        assistant ??= { seq: event.seq, text: '', calls: [] }
+        assistant.calls.push({
+          type: 'tool-call',
+          toolCallId: event.id,
+          toolName: event.name,
+          input: event.input,
+        })
+        toolNames.set(event.id, event.name)
+        break
+      }
+      case EVENT_TYPES.agentToolResult: {
+        closeAssistant()
+        answers ??= { index: messages.length, seq: event.seq, parts: [] }
+        const text = textOf(event.content)
+        answers.parts.push({
+          type: 'tool-result',
+          toolCallId: event.tool_use_id,
+          toolName: toolNames.get(event.tool_use_id) ?? '',
+          output:
+            event.is_error === true
+              ? { type: 'error-text', value: text.length > 0 ? text : EMPTY_TOOL_RESULT }
+              : { type: 'text', value: text.length > 0 ? text : EMPTY_TOOL_RESULT },
+        })
+        flushAnswers()
+        break
+      }
+      default:
+        break
     }
   }
+  closeAssistant()
+  flushAnswers()
   return messages
 }
+
+/**
+ * What a tool that said nothing is reported as.
+ *
+ * A provider refuses a text block with no text in it, and a `tool` message with no part at all
+ * would leave its call unanswered — which is the one thing a provider refuses outright. A
+ * result event whose content is empty (nothing this build produces, but a log is a log) is
+ * therefore reported as this one sentence rather than as something that cannot be sent.
+ */
+const EMPTY_TOOL_RESULT = '(no output)'
+
+/** An assistant message's content, as the parts `conversationAfter` builds. */
+type AssistantContent = Extract<ModelMessage, { role: 'assistant' }>['content']
+
+/** One call inside an assistant message. */
+type ToolCallPart = Extract<
+  Extract<AssistantContent, readonly unknown[]>[number],
+  { type: 'tool-call' }
+>
+
+/** One answer inside a `tool` message. */
+type ToolResultPart = Extract<
+  Extract<ModelMessage, { role: 'tool' }>['content'][number],
+  { type: 'tool-result' }
+>
 
 /** A message's blocks joined into the string a model reads. */
 function textOf(content: readonly { readonly text: string }[]): string {
@@ -480,8 +613,15 @@ function textOf(content: readonly { readonly text: string }[]): string {
 
 /**
  * Drop the oldest turns until the history fits `budget`, keeping every system message — the
- * session prompt and the summary alike — and the newest message always. See
+ * session prompt and the summary alike — and the newest turn always. See
  * {@link createContextStrategy}.
+ *
+ * A **turn** is a `user` message and everything that answers it, tool calls and results
+ * included, so the cut lands where a conversation can be read from and never between a call
+ * and its result: a request whose `tool` message lost the `assistant` message that made the
+ * calls names ids nothing introduced, which providers refuse. Anything before the first user
+ * message is an answer to nothing — a summary cut or a rewind that took the question back —
+ * and is dropped first.
  */
 function trimToBudget(
   system: readonly ModelMessage[],
@@ -494,18 +634,40 @@ function trimToBudget(
     (total, message) => total + estimateTokens(textOfMessage(message)),
     0,
   )
-  let history: ConversationMessage[] = [...conversation]
-  let total = systemTokens + tokensOf(history)
-  while (total > budget && history.length > 2) {
-    // Two at a time: a turn is a user message and the assistant reply to it.
-    history = history.slice(2)
-    total = systemTokens + tokensOf(history)
+  let turns = turnsOf(conversation)
+  if (turns[0]?.[0]?.message.role !== 'user') {
+    // A history that opens with a reply reads as an answer to nothing — a summary cut or a
+    // rewind that took the question back — so it goes, budget or no budget.
+    turns = turns.slice(1)
   }
-  if (history[0]?.message.role === 'assistant') {
-    // A history that opens with a reply reads as an answer to nothing; drop it.
-    history = history.slice(1)
+  let total = systemTokens + tokensOf(flatten(turns))
+  while (total > budget && turns.length > 1) {
+    turns = turns.slice(1)
+    total = systemTokens + tokensOf(flatten(turns))
   }
-  return history
+  return flatten(turns)
+}
+
+/**
+ * The conversation cut into turns: each starts at a `user` message, and anything before the
+ * first one is a turn of its own so that it can be dropped as the orphan it is.
+ */
+function turnsOf(
+  conversation: readonly ConversationMessage[],
+): readonly (readonly ConversationMessage[])[] {
+  const turns: ConversationMessage[][] = []
+  for (const entry of conversation) {
+    if (entry.message.role === 'user' || turns.length === 0) {
+      turns.push([])
+    }
+    turns[turns.length - 1]?.push(entry)
+  }
+  return turns
+}
+
+/** The messages of these turns, in order. */
+function flatten(turns: readonly (readonly ConversationMessage[])[]): ConversationMessage[] {
+  return turns.flatMap((turn) => [...turn])
 }
 
 /**
@@ -517,7 +679,14 @@ export function OMISSION_MARKER(tokens: number): string {
   return `[… ${tokens} tokens omitted …]`
 }
 
-/** The text of one message, whatever shape its content has. */
+/**
+ * The text of one message, whatever shape its content has.
+ *
+ * It is the size measure the budget is kept in, so everything a provider is really sent is
+ * counted: a tool call's arguments are counted as their JSON (the arguments a model wrote, and
+ * what it wrote them into), and a result as the text it carries. Counting only `text` parts
+ * would make a step of four calls look free and let a history trim later than it should.
+ */
 function textOfMessage(message: ModelMessage): string {
   const content = message.content
   if (typeof content === 'string') {
@@ -527,9 +696,29 @@ function textOfMessage(message: ModelMessage): string {
   for (const part of content) {
     if (part.type === 'text') {
       text += part.text
+    } else if (part.type === 'tool-call') {
+      text += `${part.toolName}${JSON.stringify(part.input)}`
+    } else if (part.type === 'tool-result') {
+      text += outputTextOf(part.output)
     }
   }
   return text
+}
+
+/** The text a tool result's output carries, whatever kind of output it is. */
+function outputTextOf(output: ToolResultPart['output']): string {
+  switch (output.type) {
+    case 'text':
+    case 'error-text':
+      return output.value
+    case 'json':
+    case 'error-json':
+      return JSON.stringify(output.value)
+    case 'execution-denied':
+      return output.reason ?? ''
+    case 'content':
+      return output.value.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join('')
+  }
 }
 
 /** What capping the newest item produced: the messages, and the record (or `null`). */
@@ -554,7 +743,16 @@ function capNewest(conversation: readonly ConversationMessage[], budget: number)
   if (newest === undefined) {
     return { messages: [...conversation], truncated: null }
   }
-  const text = textOfMessage(newest.message)
+  // Only a message that is one block of text is capped. An assistant turn carrying tool calls
+  // and a `tool` message answer calls by id — shortening their parts means deciding which
+  // call's result to shorten by how much, which is the tool-aware capping of #306 rather than
+  // this safety net. A request that is over budget because of a tool result is still sent: the
+  // trimming above has already dropped every older turn, and a provider that refuses it ends
+  // the turn with the overflow path's clear error rather than a request nobody can read.
+  if (typeof newest.message.content !== 'string') {
+    return { messages: [...conversation], truncated: null }
+  }
+  const text = newest.message.content
   const tokensBefore = estimateTokens(text)
   if (tokensBefore <= budget) {
     return { messages: [...conversation], truncated: null }
@@ -562,8 +760,8 @@ function capNewest(conversation: readonly ConversationMessage[], budget: number)
   const content = capText(text, budget, tokensBefore)
   const messages = [...conversation]
   messages[messages.length - 1] = {
-    // The conversation is only ever user and assistant messages (`conversationAfter`), so the
-    // capping preserves the one it found.
+    // A string-content message is a user or assistant one (`conversationAfter`), so the capping
+    // preserves the role it found.
     message:
       newest.message.role === 'user' ? { role: 'user', content } : { role: 'assistant', content },
     seq: newest.seq,

@@ -63,6 +63,44 @@ function spanEnd(seq: number, start: StoredEvent, tokens: number): StoredEvent {
   }
 }
 
+/** A tool call, as the log stores one (epic #303). */
+function toolUse(seq: number): StoredEvent {
+  return {
+    id: newEventId(),
+    type: EVENT_TYPES.agentToolUse,
+    seq,
+    processed_at: '2026-03-15T10:00:00.000Z',
+    name: 'echo',
+    input: {},
+    evaluated_permission: 'allow',
+  }
+}
+
+/** An answer to one call, as the log stores one (epic #303). */
+function toolResult(seq: number, call: StoredEvent): StoredEvent {
+  return {
+    id: newEventId(),
+    type: EVENT_TYPES.agentToolResult,
+    seq,
+    processed_at: '2026-03-15T10:00:00.000Z',
+    tool_use_id: call.id,
+    content: [{ type: 'text', text: 'echoed' }],
+    is_error: false,
+  }
+}
+
+/** The compaction engine's own request (epic #277, C2). */
+function summarySpanStart(seq: number): StoredEvent {
+  return {
+    id: newEventId(),
+    type: EVENT_TYPES.modelRequestStart,
+    seq,
+    processed_at: '2026-03-15T10:00:00.000Z',
+    model: 'anthropic/claude-sonnet-5',
+    purpose: 'summary',
+  }
+}
+
 /** A status event. */
 function status(seq: number, type: string): StoredEvent {
   return {
@@ -166,6 +204,34 @@ describe('needsModelRequest', () => {
   it('has nothing to answer when the only message is still queued', () => {
     // Which is why the loop builds its view first: an unclaimed message is the next turn's.
     expect(needsModelRequest(contextView([message(1, false)]))).toBe(false)
+  })
+
+  it('is true while the newest request’s tool step is still open (epic #303)', () => {
+    // A step that called a tool owes the next request its answers — even when it also stored a
+    // reply, which is the case the message-based rule alone reads as finished.
+    const call = toolUse(4)
+    const step = [message(1, true), spanStart(2), reply(3), call]
+    expect(needsModelRequest(step)).toBe(true)
+    // The answer does not close the step: the model still has to be asked what it makes of it.
+    expect(needsModelRequest([...step, toolResult(5, call)])).toBe(true)
+    // A chat request after it closes the step — the shape a finished tool turn leaves.
+    expect(needsModelRequest([...step, toolResult(5, call), spanStart(6), reply(7)])).toBe(false)
+  })
+
+  it('is not fooled by a summary request after a tool step', () => {
+    // The compaction engine's own request is not part of the tool loop: it must not read as the
+    // step that closed the chat's.
+    const call = toolUse(4)
+    const events = [
+      message(1, true),
+      spanStart(2),
+      reply(3),
+      call,
+      toolResult(5, call),
+      summarySpanStart(6),
+    ]
+
+    expect(needsModelRequest(events)).toBe(true)
   })
 })
 

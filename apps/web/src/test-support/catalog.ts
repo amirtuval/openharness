@@ -25,6 +25,10 @@ export function modelEntry(
     // Unpriced unless a test says otherwise: a fixture that invented rates would make a cost
     // assertion pass for the wrong reason (#247).
     cost: null,
+    // Tools unless a test says otherwise (epic #303): the server reports `tool_call: false` only
+    // for a model its registry marks unable to call them, so a fixture is tool-capable by
+    // default and a test that needs the other answer pins it in `overrides`.
+    tool_call: true,
     source: 'provider' as const,
     ...overrides,
   }

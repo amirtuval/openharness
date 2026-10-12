@@ -20,7 +20,7 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { createTogetherAI } from '@ai-sdk/togetherai'
 import { createXai } from '@ai-sdk/xai'
-import type { LanguageModel, ModelMessage } from 'ai'
+import type { LanguageModel, ModelMessage, ToolSet } from 'ai'
 import { streamText } from 'ai'
 
 import { azureBaseUrl, azureFetch } from './azure-fetch'
@@ -795,6 +795,15 @@ export interface ModelRequestParams {
   /** The messages to send, system prompt included; see `ContextStrategy`. */
   readonly messages: readonly ModelMessage[]
   /**
+   * The tools this request offers, if any (epic #303, X2).
+   *
+   * They carry **no `execute`**, deliberately: the AI SDK loops over a tool it can run and
+   * would make the next request itself, underneath the turn loop that owns the log. Without
+   * one it stops after the step and hands the calls back, which is what lets the brain store
+   * the call, run it through `@openharness/hands` and make the next request as its own step.
+   */
+  readonly tools?: ToolSet
+  /**
    * Per-provider options for this one request — the provider's own knobs, keyed the way its AI
    * SDK client reads them. The loop's use of it is the reasoning effort (`./reasoning`), which
    * is the one thing openharness sends that the AI SDK's own call options do not express.
@@ -810,6 +819,23 @@ export interface ModelRequestParams {
 }
 
 /**
+ * One tool call a model request produced.
+ *
+ * The provider's `toolCallId` is carried for completeness and then dropped: the log keys a call
+ * by the `sevt_` id of the `agent.tool_use` the loop stores for it, so nothing downstream has
+ * to remember what an Anthropic or OpenAI id looked like. `input` is what arrived, unvalidated
+ * — the registry's schema is what judges it.
+ */
+export interface ModelToolCall {
+  /** The provider's id for the call; the log does not keep it. */
+  readonly toolCallId: string
+  /** The tool's name, as the model asked for it. */
+  readonly name: string
+  /** The arguments, in whatever shape the provider delivered them. */
+  readonly input: unknown
+}
+
+/**
  * What a model request produced, however it ended.
  *
  * It answers rather than throws — including for a failure — because all three endings lead
@@ -819,6 +845,13 @@ export interface ModelRequestParams {
 export interface ModelRequestResult {
   /** The text streamed so far. Kept on abort; dropped by the caller on failure. */
   readonly text: string
+  /**
+   * The tool calls this step produced, in the order the model made them (epic #303, X2).
+   *
+   * Empty for a request that was offered no tools and for one that called none. They are what
+   * the loop stores as `agent.tool_use` events and runs, before making the next request.
+   */
+  readonly toolCalls: readonly ModelToolCall[]
   /** Token counts, or {@link ZERO_MODEL_USAGE} when the request never reported any. */
   readonly usage: ModelUsage
   /** Why the request failed, or `undefined` when it succeeded. */
@@ -838,11 +871,16 @@ export interface ModelRequestResult {
 export async function streamModelRequest(params: ModelRequestParams): Promise<ModelRequestResult> {
   const failures: unknown[] = []
   const stepUsages: ModelUsage[] = []
+  const toolCalls: ModelToolCall[] = []
   let aborted = false
   let text = ''
   const result = streamText({
     model: params.model,
     messages: [...params.messages],
+    // The tools, with no `execute` on any of them: the SDK then stops after this step and
+    // reports the calls instead of running them and making the next request itself. The loop
+    // owns that step — it stores the call, runs it through `hands` and requests again.
+    tools: params.tools,
     abortSignal: params.signal,
     // The provider's own options for this request, when the loop has any to send (the reasoning
     // effort): `undefined` here is the AI SDK's own "nothing to add", so a request with no
@@ -873,6 +911,12 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
       if (part.type === 'text-delta') {
         text += part.text
         await params.onTextDelta?.(part.text)
+      } else if (part.type === 'tool-call') {
+        toolCalls.push({
+          toolCallId: part.toolCallId,
+          name: part.toolName,
+          input: part.input,
+        })
       } else if (part.type === 'abort') {
         aborted = true
       } else if (part.type === 'finish-step') {
@@ -895,14 +939,14 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
   }
 
   if (aborted || params.signal?.aborted === true) {
-    return { text, usage: ZERO_MODEL_USAGE, error: undefined, aborted: true }
+    return { text, toolCalls, usage: ZERO_MODEL_USAGE, error: undefined, aborted: true }
   }
   const failure = failures[0]
   if (failure !== undefined) {
     if (isOwnershipError(failure)) {
       throw failure
     }
-    return { text, usage: ZERO_MODEL_USAGE, error: failure, aborted: false }
+    return { text, toolCalls, usage: ZERO_MODEL_USAGE, error: failure, aborted: false }
   }
   const usage =
     stepUsages.length === 0
@@ -910,7 +954,7 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
         // total is the only report there is.
         toModelUsage(await result.usage)
       : stepUsages.reduce(addModelUsage)
-  return { text, usage, error: undefined, aborted: false }
+  return { text, toolCalls, usage, error: undefined, aborted: false }
 }
 
 /**

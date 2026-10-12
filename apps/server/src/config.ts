@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 
-import { DEFAULT_COMPACTION_THRESHOLD } from '@openharness/brain'
+import { DEFAULT_COMPACTION_THRESHOLD, DEFAULT_MAX_TOOL_STEPS } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
 import { DEFAULT_KEY_CACHE_TTL_MS, envKeyProvider, gcpKmsKeyProvider } from '@openharness/vault'
 
@@ -110,6 +110,7 @@ export const ENV_VARS = {
   deltaRetentionMs: 'OPENHARNESS_DELTA_RETENTION_MS',
   compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
   compactionThreshold: 'OPENHARNESS_COMPACTION_THRESHOLD',
+  maxToolSteps: 'OPENHARNESS_MAX_TOOL_STEPS',
   logFormat: 'OPENHARNESS_LOG_FORMAT',
   tracing: 'OPENHARNESS_TRACING',
   traceSampleRate: 'OPENHARNESS_TRACE_SAMPLE_RATE',
@@ -201,6 +202,16 @@ export interface ServerConfig {
    * Anything outside `0..1` fails the boot rather than being accepted as a setting nobody meant.
    */
   readonly compactionThreshold: number
+  /**
+   * `OPENHARNESS_MAX_TOOL_STEPS`: the most model requests one turn may make (epic #303, X2).
+   *
+   * A turn makes one request per step of the tool loop, so this is what bounds a model that
+   * keeps calling tools: past it the turn ends with a `tool_steps_exhausted_error` notice and
+   * the session goes idle, rather than the loop running until the model chooses to stop. The
+   * default is the brain's own (`DEFAULT_MAX_TOOL_STEPS`, 50) — far past any real task, well
+   * short of a runaway — and a value below 1 fails the boot.
+   */
+  readonly maxToolSteps: number
   /** `OPENHARNESS_LOG_FORMAT`: the readable one-line format, or Cloud Logging JSON (#158). */
   readonly logFormat: LogFormat
   /** `OPENHARNESS_TRACING`: where spans go — nowhere, or Cloud Trace (#158). */
@@ -411,6 +422,9 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
       DEFAULT_COMPACTION_THRESHOLD,
       { min: 0, max: 1 },
     ),
+    // The tool loop's budget (epic #303, X2): how many model requests one turn may make. At
+    // least one — a turn that may make no request could not answer a message at all.
+    maxToolSteps: readInteger(env, ENV_VARS.maxToolSteps, DEFAULT_MAX_TOOL_STEPS, { min: 1 }),
     // Observability (#158). The log format and the trace mode are a choice each, so an
     // unknown value is a boot failure naming the variable rather than a silent default; the
     // sample rate is a fraction, and 0 is meaningful (trace nothing while keeping the

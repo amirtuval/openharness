@@ -119,14 +119,14 @@ src/
 
 ### `@openharness/client/testing`
 
-| export                                                                                        | what it is                                                                                                                                     |
-| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `createFakeClient(options?)`                                                                  | an in-memory `Client` with a scriptable brain and device flow; it stamps `context_budget` on a catalog entry it is given that lacks one (#280) |
-| `FakeClient`, `FakeClientOptions`, `FakeModelEntry`, `FakeReplyOptions`, `FakeFailureOptions` | the fake's interface and the options its scripting takes                                                                                       |
-| `FakeDeviceFlowOptions`                                                                       | the script `scriptDeviceLogin` takes                                                                                                           |
-| `FakeReply`, `FakeFailure`, `FakeScript`                                                      | one scripted reply, one scripted failure, and the queue entry they compose                                                                     |
-| `ModelListCall`                                                                               | one `models.list` call the fake answered, and its `refresh` flag                                                                               |
-| `FAKE_MODEL_USAGE`, `FAKE_SESSION_TOKEN`                                                      | the token usage every fake model request reports; the token the fake's device flow returns                                                     |
+| export                                                                                        | what it is                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createFakeClient(options?)`                                                                  | an in-memory `Client` with a scriptable brain and device flow; it stamps `context_budget` and `tool_call` on a catalog entry it is given that lacks them (#280; epic #303) |
+| `FakeClient`, `FakeClientOptions`, `FakeModelEntry`, `FakeReplyOptions`, `FakeFailureOptions` | the fake's interface and the options its scripting takes                                                                                                                   |
+| `FakeDeviceFlowOptions`                                                                       | the script `scriptDeviceLogin` takes                                                                                                                                       |
+| `FakeReply`, `FakeFailure`, `FakeScript`                                                      | one scripted reply, one scripted failure, and the queue entry they compose                                                                                                 |
+| `ModelListCall`                                                                               | one `models.list` call the fake answered, and its `refresh` flag                                                                                                           |
+| `FAKE_MODEL_USAGE`, `FAKE_SESSION_TOKEN`                                                      | the token usage every fake model request reports; the token the fake's device flow returns                                                                                 |
 
 ## The client
 

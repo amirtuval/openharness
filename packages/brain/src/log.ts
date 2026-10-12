@@ -1,6 +1,8 @@
 import type { SessionStore } from '@openharness/session'
 import { EVENT_TYPES, MAX_PAGE_LIMIT } from '@openharness/protocol'
 import type {
+  AgentToolResultEvent,
+  AgentToolUseEvent,
   EventId,
   ModelRequestPurpose,
   ModelUsage,
@@ -81,7 +83,8 @@ export function lastStatusEventType(events: readonly StoredEvent[]): StoredEvent
 }
 
 /**
- * Whether the log still owes an answer: some claimed `user.message` has no reply of its own.
+ * Whether the log still owes an answer: some claimed `user.message` has no reply of its own, or
+ * the newest chat request left a tool step open.
  *
  * A model request answers the messages that are waiting when it starts — the ones the loop has
  * claimed, and not one that arrives while it is streaming (see {@link contextView}) — and each
@@ -97,6 +100,11 @@ export function lastStatusEventType(events: readonly StoredEvent[]): StoredEvent
  * A **summary** request (`purpose: 'summary'`, C2) is skipped: it answers nothing, is followed by
  * no `agent.message`, and would otherwise take over the "answer set" its own start recorded — a
  * message that arrived while the summarizer was running would read as answered.
+ *
+ * Since epic #303 a request can also end a step without answering anything: a step that called
+ * a tool owes the next request whatever came back, so {@link awaitingToolStep} is the second
+ * half of this question. A step that streamed **text and** a call is the case that makes it
+ * necessary — the message looks answered, and the turn is not over.
  *
  * @param events the log, as {@link contextView} hands it over
  */
@@ -115,7 +123,46 @@ export function needsModelRequest(events: readonly StoredEvent[]): boolean {
       waiting = waiting.filter((message) => !answeredByRequest.includes(message))
     }
   }
-  return waiting.length > 0
+  return waiting.length > 0 || awaitingToolStep(events)
+}
+
+/**
+ * Whether the newest chat request left a tool step open: it produced tool calls (epic #303, X2).
+ *
+ * A step that called a tool is not finished — the results have to go back to the model in the
+ * next request — so the log owes that request until a later request has run. The test is
+ * "which request came last", not "is there a call with no result": a call whose result has
+ * been stored is still a step to continue, while one with no result at all is a step whose
+ * execution was lost and is answered before the next request is made (X3).
+ *
+ * A **summary** request is not a chat request: the compaction engine's own request is not part
+ * of the tool loop and must not be mistaken for the step that closed it.
+ *
+ * @param events the log, as {@link readLog} handed it over
+ */
+export function awaitingToolStep(events: readonly StoredEvent[]): boolean {
+  let lastChatStart = 0
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.modelRequestStart && event.purpose !== 'summary') {
+      lastChatStart = event.seq
+    }
+  }
+  if (lastChatStart === 0) {
+    return false
+  }
+  return events.some(
+    (event) => event.type === EVENT_TYPES.agentToolUse && event.seq > lastChatStart,
+  )
+}
+
+/** Whether a stored event is the model asking for a tool. */
+export function isToolUse(event: StoredEvent): event is AgentToolUseEvent {
+  return event.type === EVENT_TYPES.agentToolUse
+}
+
+/** Whether a stored event is an answer to a tool call. */
+export function isToolResult(event: StoredEvent): event is AgentToolResultEvent {
+  return event.type === EVENT_TYPES.agentToolResult
 }
 
 /**

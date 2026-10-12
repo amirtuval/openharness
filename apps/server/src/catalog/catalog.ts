@@ -327,6 +327,7 @@ export class ModelCatalog {
             // does not: Azure bills the resource, and a rate invented here would be a wrong
             // number on the screen (A2, #247).
             cost: registry?.cost ?? null,
+            tool_call: registry?.toolCall !== false,
             source: 'provider' as const,
           }
         }),
@@ -1101,6 +1102,10 @@ function entryOf(
     // carries what it charges, and a model models.dev does not price has `null` here rather
     // than a guess — its requests report tokens and no cost.
     cost: registry?.cost ?? null,
+    // Whether the model can call tools (epic #303, X2). The registry keeps only models.dev's
+    // `false`, so absence — an unfamiliar model, a provider-listed one the snapshot predates —
+    // reads as callable, the same never-hide rule the chat filter follows.
+    tool_call: registry?.toolCall !== false,
     source,
   }
 }

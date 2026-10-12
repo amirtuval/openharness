@@ -10,6 +10,7 @@ import { DEFAULT_PARTITION_COUNT, type SessionId } from '@openharness/protocol'
 import type { PartitionSignalKind, SessionStore } from '@openharness/session'
 
 import type { ResolveSessionCredential } from './credentials'
+import type { TurnToolOptions } from './tools'
 import { DEFAULT_MAX_CONCURRENT_PASSES, PassQueue } from './pass-queue'
 import { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
 
@@ -118,6 +119,8 @@ export interface LocalSchedulerOptions {
   readonly reasoningSupportFor?: ReasoningSupportFor
   /** What a mode resolves to, passed to every turn (#245, M6). */
   readonly resolveMode?: ModeResolver
+  /** The tools a turn may offer, and the loop's decisions about them (epic #303, X4). */
+  readonly tools?: TurnToolOptions
   /**
    * How many partitions the server's sessions are spread over; the protocol's 64 by default.
    *
@@ -178,6 +181,7 @@ export class LocalScheduler implements SessionScheduler {
           ? {}
           : { reasoningSupportFor: options.reasoningSupportFor }),
         ...(options.resolveMode === undefined ? {} : { resolveMode: options.resolveMode }),
+        ...(options.tools === undefined ? {} : { tools: options.tools }),
       })
     this.#queue = new PassQueue({
       runner,

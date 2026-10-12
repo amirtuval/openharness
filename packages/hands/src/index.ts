@@ -1,13 +1,15 @@
 import { PACKAGE_NAME as PROTOCOL_PACKAGE_NAME } from '@openharness/protocol'
 
 /**
- * `@openharness/hands` — the sandboxes and tools behind `execute(name, input)`, and the one
- * outbound-request guard the rest of openharness uses.
+ * `@openharness/hands` — the tools behind `execute(name, input)`, the registry that runs one,
+ * and the one outbound-request guard the rest of openharness uses.
  *
- * The tools are not built yet, but `safeFetch` is: a URL a **user** supplied may be fetched
- * through it and nothing else (epic #245, A3a, decision M1), because a provider credential's
- * endpoint is a URL the user typed and a request to one is exactly what needs an SSRF guard —
- * and the tools' own `web_fetch` will reuse it.
+ * A tool is a name, a description a model reads, an input schema, a default permission and a
+ * timeout; {@link createToolRegistry} holds a host's tools and {@link ToolRegistry.execute}
+ * runs one call of one, turning every outcome — a result, a refusal, a timeout, an interrupt —
+ * into the `ToolResult` the brain stores. The conformance a real tool needs (a guarded fetch
+ * for a user-supplied URL) is {@link safeFetch} (epic #245, A3a, decision M1); the built-in
+ * tools themselves arrive with #305 and live here.
  */
 
 /** This package's name. */
@@ -18,6 +20,22 @@ export const PACKAGE_NAME = '@openharness/hands'
  * `exports` → `dist/`), which is what fixes the build order.
  */
 export const PROTOCOL_DEPENDENCY = PROTOCOL_PACKAGE_NAME
+
+export {
+  createToolRegistry,
+  scrubText,
+  REDACTED_PLACEHOLDER,
+  type ToolRegistry,
+  type ToolRunContext,
+} from './registry'
+export {
+  DEFAULT_TOOL_TIMEOUT_MS,
+  errorResult,
+  textResult,
+  type ToolDefinition,
+  type ToolExecutionContext,
+  type ToolResult,
+} from './tool'
 
 export {
   DEFAULT_MAX_BYTES,

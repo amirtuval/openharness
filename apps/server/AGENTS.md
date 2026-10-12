@@ -155,6 +155,7 @@ itself is a `session.context_summary` with reason `manual`.
 | `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                                                              |
 | `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                                                              |
 | `OPENHARNESS_COMPACTION_THRESHOLD`        | `0.7`                            | the share of the chat model's context budget at which older history is summarized (epic #277, K2; #279), and the default a user who has not chosen one follows (C3, #282); a fraction in `0..1` |
+| `OPENHARNESS_MAX_TOOL_STEPS`              | `50` (the brain's)               | the most model requests one turn may make (epic #303, X2); past it the turn ends with a `tool_steps_exhausted_error` notice and goes idle, and a value below `1` fails the boot                 |
 | `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                                                                         |
 | `OPENHARNESS_TRACING`                     | `off`                            | `off`, or `cloud-trace` to export spans to Cloud Trace (#158)                                                                                                                                   |
 | `OPENHARNESS_TRACE_SAMPLE_RATE`           | `0.1`                            | the fraction of root traces kept when tracing is on; `0` keeps none, `1` keeps all (#158)                                                                                                       |
@@ -366,8 +367,9 @@ parses the query and maps the one error it can raise.
   `name`/`context_length`/`top_provider.max_completion_tokens`), from the snapshot where it
   has them, and from the model id otherwise; `null` is a legitimate value for the two limits.
   **What the snapshot actually carries** — the model's own `name`, `limit.context`,
-  `limit.output`, its price, and its **reasoning data** (`reasoning`, and the effort levels
-  models.dev lists for the model's own knob — #252's follow-up), for the 11 providers whose keys
+  `limit.output`, its price, its **reasoning data** (`reasoning`, and the effort levels
+  models.dev lists for the model's own knob — #252's follow-up) and whether it **can call tools**
+  (`tool_call`, kept only where it is `false` — epic #303, X2), for the 11 providers whose keys
   this server can validate; it is keyed by our provider ids, so `fireworks`/`together` are
   models.dev's `fireworks-ai`/`togetherai` mapped at generation time. It carries **no chat flag,
   and could not**: models.dev has none, and the fields it does have are not one —
@@ -377,7 +379,9 @@ parses the query and maps the one error it can raise.
   is a one-place change; the tests inject a stub with all four to pin the join itself. The limits
   the snapshot supplies are what fill the `null`s the provider's own list leaves for OpenAI,
   Anthropic and the rest (`model-catalog.test.ts` pins the OpenAI and Anthropic entries end to
-  end).
+  end), and `toolCall` is what an entry reports as `tool_call` — `false` for the models
+  models.dev marks unable to call tools, `true` for everything else, including a model the
+  registry does not know (the never-hide rule again).
 
   Regenerate it with `yarn workspace @openharness/server catalog:refresh`
   (`scripts/refresh-models-dev.mjs`), which fetches https://models.dev/api.json, maps the
@@ -578,6 +582,49 @@ CRUD, and the store's mode methods (`@openharness/session`) hold the rows.
   `ModeModelSchema` (a `provider/model` id or the sentinel) at the mode routes; a mode id is a
   `mode_` ULID, so a malformed one in a path is the 400 every bad id gets, and in a body it is
   the protocol's own 400.
+
+## Tools (epic #303; #304)
+
+The brain's tool loop — the model asks for a tool, the brain runs it and sends the result back —
+is `@openharness/brain`'s (`packages/brain/AGENTS.md` has the loop itself) and the tools
+themselves are `@openharness/hands`'. The server's half is small and is the whole of `tools.ts`:
+which tools a process registers, which models may be offered them, and how many requests a turn
+may make.
+
+- **No built-in tool ships yet.** The real ones — `web_fetch`, `web_search`, `todo_write` —
+  arrive with [#305](https://github.com/amirtuval/openharness/issues/305), so a deployment on a
+  provider model registers **nothing**: `createTurnTools` answers `undefined`, the brain offers
+  no tools and a chat runs exactly as it did before #304. That is not a degraded mode; it is the
+  behaviour every process had until now.
+- **The one tool this build registers is a test one, behind the test model.** An `echo` tool
+  (its input echoed back) is registered when `OPENHARNESS_TEST_MODEL=mock`, which is what lets
+  the e2e suite drive a whole tool turn through the real server, scheduler, brain, store and log.
+  The mock model calls it on a `__tool__ …` prompt and answers what it said back
+  (`mock-model.ts`), so a test can assert the call, the result, the second request and the reply
+  without a provider.
+- **Which models may call tools comes from the same registry** as the context budget and the
+  reasoning gate, through one more resolver: `catalog/tool-support.ts` answers models.dev's
+  `tool_call` for the id a request runs, `false` meaning the request is offered nothing. The
+  lookup a `provider/model` id needs — which snapshot key its first half reads, and the Bedrock
+  inference-profile fallback — is `catalog/model-lookup.ts`, shared with the reasoning gate so
+  the two cannot drift.
+- **`GET /v1/models` reports it as `tool_call`.** An entry is `false` only for a model the
+  registry marks unable to call tools (`openai/gpt-3.5-turbo` is one, and is listed all the
+  same — it is a chat model); a model nobody knows is `true`, because guessing "no" is the same
+  mistake as hiding a usable model. It is the field a client says "this model can't use tools"
+  with (#308).
+- **The step budget is `OPENHARNESS_MAX_TOOL_STEPS`** (the brain's `DEFAULT_MAX_TOOL_STEPS`, 50,
+  when unset). A turn makes one model request per step, so this is what bounds a model that keeps
+  calling tools; past it the turn ends with a visible `tool_steps_exhausted_error` and the
+  session goes idle, and the next message starts a fresh turn with a fresh budget.
+- **Nothing secret reaches a tool's result or the log.** A turn's per-user values are the host's
+  to resolve — `TurnToolOptions.resolveToolSecrets`, which #311's MCP tokens will arrive
+  through, and which nothing sets today — and `@openharness/hands` scrubs whatever it resolved
+  out of everything a tool returns before it is stored.
+
+The tools are wired in `main.ts` (`createTurnTools`) and reach a turn through the scheduler and
+`SessionRunner` as one `TurnToolOptions` object whose field names are `RunTurnOptions`' own, so
+the runner spreads it over unchanged.
 
 ## Usage and cost (epic #245, A2; issue #247)
 
@@ -1056,6 +1103,10 @@ new PostgresPartitionScheduler({
   drainTimeoutMs = 5000,
   retry,
   contextStrategy,
+  compaction, // one configuration, or the per-owner resolver (#279; C3, #282)
+  reasoningSupportFor, // which efforts a model takes, per request (#252's follow-up)
+  resolveMode, // what a mode resolves to, per request (#245, M6)
+  tools, // the tools a turn may offer (epic #303) — omitted means a chat with none
   runner,
   onError,
   onNotice, // a failure, a line about what it is doing
@@ -1332,7 +1383,8 @@ Spans come from two places:
   `span.model_request_start`/`_end` with its token usage and error. It is fed by
   `withSessionTraces()`, a store proxy that intercepts `appendEvents` and forwards everything
   else — applied in `startServer` only when tracing is on, so an untraced server passes its
-  store around unchanged. v1 has no tool-call events (`hands` is unused), so none are traced.
+  store around unchanged. Tool calls are not traced yet — a turn's spans cover its model
+  requests, and a tool call is not one of them (#303 leaves this to a later pass).
 
 `initTracing` failing (an SDK that will not load) logs and answers `noopTracer`: a server that
 cannot trace is still a server. `shutdown` flushes the tracer last of all, after the store.
@@ -1377,6 +1429,9 @@ before the instance stops serving it (#151).
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                                                                                                                                                                         | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                                                                                                                                                                                                                     |
 | `createContextCompactionResolver`, `ContextCompactionDeps`                                                                                                                                                                                                                        | the per-owner compaction resolver (epic #277 C3; #282): the session owner's stored threshold, summary model and pass limit, resolved per request over `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's budgets                                                                                                                         |
 | `createReasoningSupportResolver`                                                                                                                                                                                                                                                  | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                                                                                                                                                                                                                 |
+| `createTurnTools`, `TurnToolOptions`                                                                                                                                                                                                                                              | the tools a turn is handed and the loop's decisions about them (epic #303, X4): the test registry under `OPENHARNESS_TEST_MODEL=mock`, nothing at all otherwise                                                                                                                                                                             |
+| `createTestToolRegistry`, `testEchoTool`, `TEST_TOOL_NAME`, `TEST_TOOL_DESCRIPTION`                                                                                                                                                                                               | the test `echo` tool, and the registry that holds it — test-only, behind the mock model                                                                                                                                                                                                                                                     |
+| `createToolSupportResolver`                                                                                                                                                                                                                                                       | the per-model tool gate: whether a model can call tools, read from models.dev's `tool_call` (epic #303, X2)                                                                                                                                                                                                                                 |
 | `createProviderFetch()`, `ProviderFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`                                                                                                                                                                                                           | the provider HTTP client: egress-proxy aware, 5 s deadline (catalogue + credential checks)                                                                                                                                                                                                                                                  |
 | `createProviderModelFetch()`, `ModelFetch`                                                                                                                                                                                                                                        | the model-request half of the same client (#270): the AI SDK `FetchFunction`, egress-proxy aware, and with no deadline, injected into the fixed providers' factory                                                                                                                                                                          |
 | `CatalogCache`, `RefreshLimiter`, `DEFAULT_CATALOG_TTL_MS`, `DEFAULT_REFRESH_INTERVAL_MS`                                                                                                                                                                                         | the in-memory per-(user, provider) cache and the refresh rate limit (C4)                                                                                                                                                                                                                                                                    |
@@ -1431,6 +1486,9 @@ src/
     registry.ts         ModelRegistry over the bundled models.dev snapshot (C2)
     context-budget.ts   the per-model context budget: the rule, and the resolver (#246)
     reasoning-support.ts the per-model reasoning gate: which efforts a model takes (#252)
+    tool-support.ts     the per-model tool gate: whether a model can call tools (epic #303, X2)
+    model-lookup.ts     reading one `provider/model` id out of the registry, shared by the two
+                        per-model resolvers above
     bedrock-profiles.ts Amazon Bedrock inference profiles: the ListInferenceProfiles shape,
                         the wrapped-model mapping and the scope labels (#274)
     filter.ts           isChatModel: the never-hide/never-show rule, and the name families
@@ -1445,6 +1503,8 @@ src/
   modes.ts              modes resolved for a request, and refused when unusable (#245, M6)
   model.ts              which model factory the process runs (the router, or the mock)
   mock-model.ts         the deterministic test model and its markers
+  tools.ts              the tools a turn may offer (epic #303): the one this build registers —
+                        the test `echo` tool, behind the mock — and the support gate
   runner.ts             SessionRunner: one turn per session, re-run while there is work
   compaction.ts         DeltaCompactor: the periodic deletion of superseded chunks (D9)
   scheduler.ts          SessionScheduler, LocalScheduler, partition helpers
@@ -1733,7 +1793,8 @@ parallel with each other.
   `catalog/cache.test.ts` — the pieces on their own: the name families and the verdict
   precedence, the endpoint table (constant URLs, each provider's header and payload shape,
   every provider id sat under its own row), the bundled registry read through
-  the bundled models.dev snapshot (including that it carries no chat flag), and the TTL /
+  the bundled models.dev snapshot (including that it carries no chat flag, and that its
+  `toolCall` is written only where models.dev says `false`), and the TTL /
   invalidation / rate-limit rules on an injected clock.
 - `catalog/context-budget.test.ts` (#246) — the budget rule on its own: the model's own output
   ceiling when it is under a quarter of the window, a quarter when none is declared, and the
@@ -1741,6 +1802,19 @@ parallel with each other.
   and without `maxOutput`, a tiny model, a model id with a slash of its own, an unknown model
   and a known model with no window (both `undefined`, the brain's 32,768-token fallback), and
   the bundled snapshot answering a real window for a real model.
+- `tools.test.ts` (epic #303, #304) — the server's half of the tool loop: that the mock model
+  is the only kind that gets a registry at all (a provider model gets `undefined`, and a chat
+  then offers nothing), that the test `echo` tool is the one registered and that it echoes while
+  refusing an input its schema rejects, and that the gate is wired to the registry.
+- `catalog/tool-support.test.ts` (epic #303, X2) — the tool gate on its own: `false` only for the
+  model the registry marks unable to call tools, `undefined` for one it knows is callable and for
+  one it does not know at all, an id it cannot read, a named credential reading its type's
+  snapshot key, a Bedrock inference profile read through the model it wraps, and the bundled
+  snapshot's own answers (`openai/gpt-3.5-turbo` false; the models a chat normally runs, and a
+  custom endpoint's, left to be offered tools).
+- `mock-model.test.ts` also covers the `__tool__` marker (epic #303): a turn with the test tools
+  wired calls `echo`, stores the call and its result adjacently, makes a second request and
+  answers what the tool said; without them the call is stored nowhere and the turn ends idle.
 - `catalog/reasoning-support.test.ts` (#252) — the reasoning gate on its own: a reasoning model's
   levels narrowed to ours, a model whose own levels leave out one of ours, a non-reasoning
   model, a reasoning model with a token-budget knob, and an effort vocabulary sharing nothing

@@ -12,6 +12,10 @@ import type {
   SessionModelUsage,
   SpanError,
   Supersedes,
+  TextBlock,
+  ToolInput,
+  ToolPermission,
+  ToolReference,
   Truncation,
 } from '@openharness/protocol'
 import { EVENT_TYPES } from '@openharness/protocol'
@@ -102,7 +106,7 @@ export function spanStart(
   model: string,
   options: SpanStartOptions = {},
 ): AppendableEvent {
-  const { reasoningEffort, mode, truncated, purpose } = options
+  const { reasoningEffort, mode, truncated, purpose, tools } = options
   return {
     type: EVENT_TYPES.modelRequestStart,
     consumes: [...consumes],
@@ -111,6 +115,7 @@ export function spanStart(
     ...(mode === undefined ? {} : { mode: { id: mode.id, name: mode.name } }),
     ...(truncated === undefined ? {} : { truncated }),
     ...(purpose === undefined ? {} : { purpose }),
+    ...(tools === undefined || tools.length === 0 ? {} : { tools: [...tools] }),
   }
 }
 
@@ -138,6 +143,13 @@ export interface SpanStartOptions {
    * size accounting reads to refuse a summary request as a baseline (K2).
    */
   readonly purpose?: ModelRequestPurpose
+  /**
+   * The tools this request offered the model (epic #303, X1), or `undefined` when it offered
+   * none — a deployment with no registry, a model that cannot call tools, or a request the
+   * compaction engine made. The offer is what the span records, so a step that called nothing
+   * still says what it could have called.
+   */
+  readonly tools?: readonly ToolReference[]
 }
 
 /**
@@ -331,6 +343,55 @@ export function agentMessage(id: EventId, text: string, supersedes?: Supersedes)
     id,
     content: [{ type: 'text', text }],
     ...(supersedes === undefined ? {} : { supersedes }),
+  }
+}
+
+/**
+ * The model asked for a tool — one event per call (epic #303, X1).
+ *
+ * The store assigns the id, which **is** the call's id: `agentToolResult` names it in
+ * `tool_use_id`, and a recovering brain pairs a call with its answer by it. `input` is the
+ * arguments the model produced, already coerced to the JSON object the protocol stores
+ * ({@link ToolInput}); `permission` is what the policy in force said about this call.
+ *
+ * @param name the tool's name, as it was offered to the model
+ * @param input the arguments, as a JSON object
+ * @param permission what the policy in force said about this call
+ */
+export function agentToolUse(
+  name: string,
+  input: ToolInput,
+  permission: ToolPermission,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentToolUse,
+    name,
+    input,
+    evaluated_permission: permission,
+  }
+}
+
+/**
+ * What a tool call produced — always written, by the loop that ran it (epic #303, X1).
+ *
+ * A result the model should read as a failure is `isError: true` with the reason as its text:
+ * a refusal under a `deny` policy, a timeout, an interrupt, the tool's own failure, or the
+ * `execution lost` a turn that died before running the call leaves for its successor (X3).
+ *
+ * @param toolUseId the `agent.tool_use` this answers — its event id
+ * @param content the blocks the model is shown
+ * @param isError whether the call failed
+ */
+export function agentToolResult(
+  toolUseId: EventId,
+  content: readonly TextBlock[],
+  isError: boolean,
+): AppendableEvent {
+  return {
+    type: EVENT_TYPES.agentToolResult,
+    tool_use_id: toolUseId,
+    content: [...content],
+    is_error: isError,
   }
 }
 
