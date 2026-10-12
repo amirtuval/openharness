@@ -172,13 +172,18 @@ describe('the servers screen', () => {
 
     typeText(app, 'n')
     await waitForFrame(app, 'Add an MCP server')
-    await waitForFrame(app, 'Name (lowercase')
-    submit(app, 'wiki')
+    // The URL comes first (issue #314): it is what the server probes.
     await waitForFrame(app, 'URL (the Streamable HTTP endpoint)')
+    await waitForFrame(app, 'work out how it authenticates')
     submit(app, 'https://wiki.example.com/mcp')
-    // The auth list: Enter takes the highlighted row, which starts on None.
-    await waitForFrame(app, 'Authentication')
-    await waitForFrame(app, '❯ None')
+    // Then an optional name — never an auth type; there is nothing to classify.
+    await waitForFrame(app, 'Name (optional')
+    expect(frameOf(app)).not.toContain('Authentication')
+    submit(app, 'wiki')
+    // Then the optional custom header, which is left blank here.
+    await waitForFrame(app, 'Custom header name')
+    pressKey(app, 'enter')
+    await waitForFrame(app, 'Custom header value (optional)')
     pressKey(app, 'enter')
     // Whether it is on, then the save.
     await waitForFrame(app, 'On by default for your chats')
@@ -194,21 +199,21 @@ describe('the servers screen', () => {
     await waitForScreen(app, 'MCP servers')
 
     typeText(app, 'n')
-    await waitForFrame(app, 'Name (lowercase')
-    submit(app, 'Notes Server')
+    await waitForFrame(app, 'URL (the Streamable HTTP endpoint)')
+    submit(app, 'not-a-url')
     // Held on the same prompt, with the reason: what was typed is still in the box to fix.
-    await waitForFrame(app, 'a name is 1–32 lowercase letters')
-    expect(frameOf(app)).not.toContain('URL (the Streamable HTTP endpoint)')
+    await waitForFrame(app, 'an absolute http or https URL')
+    expect(frameOf(app)).not.toContain('Name (optional')
 
-    // Esc leaves the form; a second run checks the URL rule.
+    // Esc leaves the form; a second run checks the name rule.
     pressKey(app, 'escape')
     await waitForFrame(app, 'No servers yet.')
     typeText(app, 'n')
-    await waitForFrame(app, 'Name (lowercase')
-    submit(app, 'notes')
     await waitForFrame(app, 'URL (the Streamable HTTP endpoint)')
-    submit(app, 'not-a-url')
-    await waitForFrame(app, 'an absolute http or https URL')
+    submit(app, 'https://wiki.example.com/mcp')
+    await waitForFrame(app, 'Name (optional')
+    submit(app, 'Notes Server')
+    await waitForFrame(app, 'a name is 1–32 lowercase letters')
     pressKey(app, 'escape')
     await waitForFrame(app, 'No servers yet.')
   })

@@ -17,9 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { describeError, type ErrorContext } from '../errors'
 import {
-  MCP_AUTH_FIELD,
-  authFromLabel,
-  authHint,
+  MCP_URL_FIELD,
   mcpHeaderProblem,
   mcpServerBody,
   mcpServerFields,
@@ -158,14 +156,15 @@ export function McpServersScreen({
   /** Register or edit, then read back: a create changes the list, and the server owns its order. */
   const save = useCallback(async (): Promise<void> => {
     const target = editing
-    const auth = authFromLabel(valuesRef.current[MCP_AUTH_FIELD] ?? mcpAuthLabel('none'))
-    const problem = mcpHeaderProblem(auth, valuesRef.current, { required: target === null })
+    // No auth is chosen here (issue #314): the server probes the URL, and a header the reader
+    // typed implies `headers`.
+    const problem = mcpHeaderProblem(valuesRef.current)
     if (problem !== null) {
       setError(problem)
       return
     }
     const built = mcpServerBody(
-      { editing: target !== null && target !== undefined, auth },
+      { editing: target !== null && target !== undefined },
       valuesRef.current,
     )
     busyRef.current = true
@@ -296,17 +295,12 @@ export function McpServersScreen({
     [client, context, read],
   )
 
-  // The form's fields, computed from what has been answered: the auth choice decides whether a
-  // header pair is asked for.
+  // The form's fields: the URL, an optional name, an optional custom header, and on/off.
   const fields: readonly McpField[] =
     editing === undefined
       ? []
       : mcpServerFields({
           editing: editingServer !== null,
-          auth:
-            values[MCP_AUTH_FIELD] === undefined
-              ? null
-              : authFromLabel(values[MCP_AUTH_FIELD] ?? ''),
           storedHeaderNames: editingServer?.header_names ?? [],
         })
   const currentField = fields[Math.min(step, Math.max(fields.length - 1, 0))]
@@ -506,8 +500,8 @@ export function McpServersScreen({
         {currentField === undefined ? null : (
           <Box flexDirection="column" marginTop={1}>
             <Text>{currentField.label}</Text>
-            {currentField.name === MCP_AUTH_FIELD && currentField.options !== undefined ? (
-              <Text dimColor>{authHint(authFromLabel(currentField.options[choice] ?? ''))}</Text>
+            {currentField.name === MCP_URL_FIELD ? (
+              <Text dimColor>We check the URL on save and work out how it authenticates.</Text>
             ) : null}
             {currentField.options === undefined ? (
               <SecretInput
