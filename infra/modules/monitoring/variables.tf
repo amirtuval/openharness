@@ -56,6 +56,12 @@ variable "db_disk_threshold" {
   default     = 0.8
 }
 
+variable "app_namespace" {
+  description = "Kubernetes namespace the app runs in. Only its containers are paged on when they restart: GKE's own system DaemonSets restart once on every Autopilot node replacement, which is not something we can act on (issue #325)."
+  type        = string
+  default     = "openharness"
+}
+
 variable "container_restart_threshold" {
   description = "Container restarts within the alert window above which the policy fires. Zero means 'any restart at all'."
   type        = number
