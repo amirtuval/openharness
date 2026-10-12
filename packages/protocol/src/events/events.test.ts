@@ -144,6 +144,18 @@ const storedSamples = {
     content: text('hi'),
     is_error: false,
   },
+  'agent.opaque_content': {
+    id: eventId(),
+    type: 'agent.opaque_content',
+    seq: 4,
+    processed_at: '2026-03-15T10:00:00Z',
+    provider: 'anthropic',
+    model: 'anthropic/claude-sonnet-5',
+    parts: [
+      { type: 'reasoning', text: 'weighing the options', provider_options: { signature: 'sig' } },
+      { type: 'reasoning', text: '', provider_options: { redactedData: 'blob' } },
+    ],
+  },
   'span.model_request_start': {
     id: eventId(),
     type: 'span.model_request_start',

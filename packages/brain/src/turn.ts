@@ -25,6 +25,7 @@ import {
 } from './context'
 import {
   agentMessage,
+  agentOpaqueContent,
   compactionOutcome,
   eventDelta,
   eventStart,
@@ -70,6 +71,8 @@ import {
   streamModelRequest,
   ZERO_MODEL_USAGE,
 } from './model'
+import { captureOpaque, opaqueTargetOf } from './opaque'
+import type { OpaqueTarget } from './opaque'
 import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
 import { redactSecrets } from './redact'
 import { stuckEnd } from './stuck'
@@ -840,7 +843,10 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       compaction === null
         ? DEFAULT_CONTEXT_TOKEN_BUDGET
         : (compaction.tokenBudgetFor?.(requestModel.id) ?? DEFAULT_CONTEXT_TOKEN_BUDGET)
-    const sizeOf = (events: readonly StoredEvent[]): number =>
+    // `opaqueTarget` is this request's own replay target (epic #303, X13; #334), known once the
+    // credential is resolved — which is below the manual-compaction size taken here, so that one
+    // call measures a request without opaque parts (see `ContextSizeOptions.opaqueTarget`).
+    const sizeOf = (events: readonly StoredEvent[], opaqueTarget?: OpaqueTarget): number =>
       estimateContextSize(events, {
         model: requestModel.id,
         system: requestSystem,
@@ -848,6 +854,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
         ...(available === undefined ? {} : { tools: available }),
         ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
         ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+        ...(opaqueTarget === undefined ? {} : { opaqueTarget }),
       })
     let read = await readLog(store, sessionId)
     // ---- The user's answers, and the calls still waiting on them (epic #303, X6; #309).
@@ -1042,12 +1049,18 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       ])
       return { outcome: 'error' }
     }
+    // Where this request's provider-opaque content may be replayed (epic #303, X13; #334): the
+    // client family its model and credential make, and the model itself. Both are read at this
+    // request's boundary like the model and the credential are, so a switch — provider or model
+    // — drops every entry the request can no longer send, and `null` builds the request exactly
+    // as it was built before #334.
+    const opaqueTarget = opaqueTargetOf(requestModel.id, credential.type)
     if (compaction !== null) {
       // The trigger (K2): the real size of the request this boundary is about to make, against
       // the threshold share of the **chat** model's budget. Over it, older history is summarized
       // before the request — which is what keeps the provider from refusing it — and the log is
       // re-read so the prompt below is built from the summary, not the history it replaced.
-      const estimated = sizeOf(read)
+      const estimated = sizeOf(read, opaqueTarget ?? undefined)
       const outcome = await summarizeContext({
         chatModel: requestModel.id,
         reason: 'threshold',
@@ -1116,6 +1129,8 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       // are to the size estimate above, so the request measured and the request built agree.
       ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
       ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+      // The request's own replay target (X13; #334), the same value the size estimate was given.
+      ...(opaqueTarget === null ? {} : { opaqueTarget }),
     })
     // The tools this request offers (epic #303, X2/X4; #307), if any: a deployment with no
     // registry has nothing to offer, a model the registry marks as tool-less gets none, and a
@@ -1230,7 +1245,7 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
           statusRescheduled(),
         ])
         const fresh = await readLog(store, sessionId)
-        const estimate = sizeOf(fresh)
+        const estimate = sizeOf(fresh, opaqueTarget ?? undefined)
         const outcome = await summarizeContext({
           chatModel: requestModel.id,
           reason: 'overflow',
@@ -1312,11 +1327,28 @@ export async function runTurn(sessionId: SessionId, options: RunTurnOptions): Pr
       const totals = sessionUsage(
         withRequestUsage(usageByModel(read), requestModel.id, result.usage),
       )
+      // What this step produced that only its own provider can read back (epic #303, X13;
+      // #334), written beside the reply — before the span end, so it sits inside the step's
+      // assistant turn and the context strategy re-attaches it to that turn. A step that
+      // produced none, and every step of a model whose client reads none back, writes nothing:
+      // the log keeps the shape it always had.
+      const opaque = opaqueTarget === null ? null : captureOpaque(opaqueTarget, result.opaque)
+      const stored =
+        opaque === null || (opaque.parts.length === 0 && opaque.dropped === 0)
+          ? undefined
+          : agentOpaqueContent(opaque.provider, opaque.model, opaque.parts, opaque.dropped)
       if (result.text.length > 0) {
-        await append([agentMessage(eventId, result.text, range)])
+        await append([
+          agentMessage(eventId, result.text, range),
+          ...(stored === undefined ? [] : [stored]),
+        ])
         await append([spanEnd(start.id, result.usage), totals])
       } else {
-        await append([spanEnd(start.id, result.usage, { supersedes: range }), totals])
+        await append([
+          ...(stored === undefined ? [] : [stored]),
+          spanEnd(start.id, result.usage, { supersedes: range }),
+          totals,
+        ])
       }
     } catch (error) {
       // The events a model's report shapes are the ones that can turn out not to be protocol

@@ -27,6 +27,8 @@ import {
 import type { ModelMessage } from 'ai'
 
 import { lastModelRequest } from './log'
+import { opaqueReplayParts } from './opaque'
+import type { OpaqueMessagePart, OpaqueTarget } from './opaque'
 import { stuckReminder } from './stuck'
 
 /**
@@ -128,6 +130,15 @@ export interface ContextStrategyOptions {
    * plan is real but small, and a nudge on every turn's first request is not free.
    */
   readonly todoNudge?: boolean
+  /**
+   * // extension: the client family and model this request goes to, when its client reads back
+   * parts only it can read (epic #303, X13; #334); absent means none of them are replayed.
+   *
+   * The loop computes it from the request's model id and credential type (`./opaque`) and hands
+   * the same value to {@link estimateContextSize}, so the request that is measured and the
+   * request that is built carry the same opaque parts.
+   */
+  readonly opaqueTarget?: OpaqueTarget
 }
 
 /** Characters per token in {@link estimateTokens}. Rough, and deliberately so. */
@@ -464,6 +475,17 @@ export interface ContextSizeOptions {
    * the request without it, exactly as a strategy built with no nudge builds it.
    */
   readonly todoNudge?: boolean
+  /**
+   * // extension: the family and model the request goes to, when its client reads back parts
+   * only it can read (epic #303, X13; #334). An entry is replayed only to the family and the
+   * model that produced it, so its tokens count here exactly as they will in the request — which
+   * is what keeps this measurement and the strategy's request one answer (K2).
+   *
+   * A caller that leaves it out measures a request that carries no opaque parts. The one such
+   * caller is a manual compaction's size, taken before the request's credential is resolved: the
+   * number is that event's `tokens_before` alone, because a manual run skips the trigger.
+   */
+  readonly opaqueTarget?: OpaqueTarget
 }
 
 /**
@@ -542,8 +564,8 @@ function measureRequest(
   )
   const since =
     usable && baseline !== null
-      ? messageTextsAfter(events, baseline.seq, results)
-      : visibleHistoryTexts(events, options.system, summary, results)
+      ? messageTextsAfter(events, baseline.seq, results, options.opaqueTarget ?? null)
+      : visibleHistoryTexts(events, options.system, summary, results, options.opaqueTarget ?? null)
   // The reminders ride after the history (see {@link requestReminders}); they are part of the
   // request and so part of its size.
   since.push(...reminderTexts(events, options))
@@ -745,8 +767,9 @@ function messageTextsAfter(
   events: readonly StoredEvent[],
   afterSeq: number,
   results: ToolResultPolicy,
+  opaque: OpaqueTarget | null,
 ): string[] {
-  return conversationAfter(events, afterSeq, results).messages.map((entry) =>
+  return conversationAfter(events, afterSeq, results, opaque).messages.map((entry) =>
     textOfMessage(entry.message),
   )
 }
@@ -760,6 +783,7 @@ function visibleHistoryTexts(
   system: string | null,
   summary: ContextSummaryEvent | null,
   results: ToolResultPolicy,
+  opaque: OpaqueTarget | null,
 ): string[] {
   const texts: string[] = []
   if (system !== null && system.length > 0) {
@@ -768,7 +792,9 @@ function visibleHistoryTexts(
   if (summary !== null) {
     texts.push(summaryIntroduction(summary.summary))
   }
-  texts.push(...messageTextsAfter(events, summary === null ? 0 : summary.covers.to_seq, results))
+  texts.push(
+    ...messageTextsAfter(events, summary === null ? 0 : summary.covers.to_seq, results, opaque),
+  )
   return texts
 }
 
@@ -1170,10 +1196,11 @@ function planRequest(
     budget,
     ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
     ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+    ...(options.opaqueTarget === undefined ? {} : { opaqueTarget: options.opaqueTarget }),
   }
   const clearBefore = clearingBoundary(events, sizeOptions)
   const results = resultPolicy(events, afterSeq, budget, tools, clearBefore)
-  const built = conversationAfter(events, afterSeq, results)
+  const built = conversationAfter(events, afterSeq, results, options.opaqueTarget ?? null)
 
   const trimmed = trimToBudget(systemMessages, built.messages, budget)
   const capped = capNewest(trimmed, budget)
@@ -1252,11 +1279,28 @@ function truncationRecord(
  * {@link CLEARED_TOOL_RESULT} instead of its body, and one over its tool's cap carries a head and
  * a tail with an omission marker between them. The log is untouched either way; what is collected
  * here is what the request had to do, which the caller returns for the request's span.
+ *
+ * ## The step's opaque parts (epic #303, X13; #334)
+ *
+ * An `agent.opaque_content` event's parts are re-attached to the assistant message of the step
+ * that produced them, **before** its text and its calls — the order every provider reads them in
+ * (a `thinking` block comes before the text and the `tool_use` it reasoned about) — and only
+ * when the request goes to the family and model that produced them (`./opaque`). An entry that
+ * does not replay is left out entirely, so a model or provider switch builds the assistant turn
+ * it built before #334: no parts, the model's own text and calls.
+ *
+ * **Every** matching step's parts are replayed, not only the newest turn's: the
+ * OpenAI-compatible family needs the key on each assistant turn of a thinking-mode conversation
+ * (`./opaque` has the whole of it), and keeping them all is the contiguous window Anthropic's
+ * preserved-thinking check accepts — a block dropped from the middle is what it refuses.
+ * Nothing here caps or clears a part: they are not text, and the log's own size cap dropped any
+ * oversized one before it was stored.
  */
 function conversationAfter(
   events: readonly StoredEvent[],
   afterSeq: number,
   results: ToolResultPolicy,
+  opaque: OpaqueTarget | null,
 ): BuiltConversation {
   const messages: ConversationMessage[] = []
   const toolNames = toolNamesOf(events)
@@ -1266,7 +1310,7 @@ function conversationAfter(
   // provider refuses an assistant turn whose calls are not answered by the very next message, so
   // a pending call is left out rather than sent as a call nothing answers.
   const answered = answeredCalls(events)
-  let assistant: { seq: number; text: string; calls: ToolCallPart[] } | null = null
+  let assistant: AssistantTurn | null = null
   // Where the current turn's answers belong: right after the assistant message, or the end of
   // the list while no turn with calls has been closed. See the note above about interleaving.
   let answers: { index: number; seq: number; parts: ToolResultPart[] } | null = null
@@ -1278,23 +1322,25 @@ function conversationAfter(
     if (assistant === null) {
       return
     }
-    const { seq, text, calls } = assistant
+    const { seq, text, calls, parts } = assistant
     assistant = null
     // A call still waiting on the user is not part of the request (see `answered` above).
     const settled = calls.filter((call) => answered.has(call.toolCallId))
-    if (settled.length === 0) {
+    if (settled.length === 0 && parts.length === 0) {
       if (text.length > 0) {
         messages.push({ message: { role: 'assistant', content: text }, seq })
       }
       return
     }
-    const content: AssistantContent = []
+    const content: AssistantContent = [...parts]
     if (text.length > 0) {
       content.push({ type: 'text', text })
     }
     content.push(...settled)
     messages.push({ message: { role: 'assistant', content }, seq })
-    answers = { index: messages.length, seq, parts: [] }
+    if (settled.length > 0) {
+      answers = { index: messages.length, seq, parts: [] }
+    }
   }
   /** Put the pending answers where they belong, adding the `tool` message if it is there yet. */
   const flushAnswers = (): void => {
@@ -1332,9 +1378,58 @@ function conversationAfter(
         flushAnswers()
         const text = textOf(event.content)
         if (assistant === null) {
-          assistant = { seq: event.seq, text, calls: [] }
+          assistant = { seq: event.seq, text, calls: [], parts: [] }
         } else {
           assistant.text += text
+        }
+        break
+      }
+      default: {
+        // A tool call or its answer, whichever pair it belongs to (#312): the request builder
+        // reads them through the one abstraction so a remote call is a call like any other.
+        if (isToolCallEvent(event)) {
+          flushAnswers()
+          assistant ??= { seq: event.seq, text: '', calls: [], parts: [] }
+          assistant.calls.push({
+            type: 'tool-call',
+            toolCallId: event.id,
+            toolName: toolCallOfferedName(event),
+            input: toolCallInput(event),
+          })
+        } else if (event.type === EVENT_TYPES.agentOpaqueContent) {
+          // The step's own opaque parts (X13; #334): the ones this request may carry back, and
+          // it is the step's assistant message they belong to — opened here when the step
+          // streamed no text at all, which is exactly the tool-calling step this exists for.
+          const parts = opaqueReplayParts(event, opaque)
+          if (parts.length > 0) {
+            assistant ??= { seq: event.seq, text: '', calls: [], parts: [] }
+            assistant.parts.push(...parts)
+          }
+        } else if (isToolResultEvent(event)) {
+          const callId = toolResultCallId(event)
+          closeAssistant()
+          answers ??= { index: messages.length, seq: event.seq, parts: [] }
+          const raw = textOf(event.content)
+          const tool = toolNames.get(callId) ?? ''
+          // What the request carries instead of the result exactly as it was stored (X9): an old
+          // result's body is cleared, a fresh oversized one is capped. The pair is untouched
+          // either way — the call stays answered, with a shorter answer.
+          const planned = planToolResult(results, event.seq, tool, raw)
+          answers.parts.push({
+            type: 'tool-result',
+            toolCallId: callId,
+            toolName: tool,
+            output: toolResultIsError(event)
+              ? { type: 'error-text', value: planned.text }
+              : { type: 'text', value: planned.text },
+          })
+          if (planned.truncation !== undefined) {
+            truncatedResults.push(planned.truncation)
+          }
+          if (planned.cleared !== undefined) {
+            cleared = { results: cleared.results + 1, tokens: cleared.tokens + planned.cleared }
+          }
+          flushAnswers()
         }
         break
       }
@@ -1669,6 +1764,18 @@ const EMPTY_TOOL_RESULT = '(no output)'
 /** An assistant message's content, as the parts `conversationAfter` builds. */
 type AssistantContent = Extract<ModelMessage, { role: 'assistant' }>['content']
 
+/**
+ * One assistant turn being rebuilt: the `agent.message` text, the calls, and the opaque parts
+ * an `agent.opaque_content` event contributed (X13; #334).
+ */
+interface AssistantTurn {
+  readonly seq: number
+  text: string
+  readonly calls: ToolCallPart[]
+  /** The replayed opaque parts, in the provider's own order, sent before the text and calls. */
+  readonly parts: OpaqueMessagePart[]
+}
+
 /** One call inside an assistant message. */
 type ToolCallPart = Extract<
   Extract<AssistantContent, readonly unknown[]>[number],
@@ -1759,8 +1866,10 @@ export function OMISSION_MARKER(tokens: number): string {
  *
  * It is the size measure the budget is kept in, so everything a provider is really sent is
  * counted: a tool call's arguments are counted as their JSON (the arguments a model wrote, and
- * what it wrote them into), and a result as the text it carries. Counting only `text` parts
- * would make a step of four calls look free and let a history trim later than it should.
+ * what it wrote them into), a result as the text it carries, and an opaque part as its text and
+ * its payload — a signature or an encrypted payload really is input tokens the request pays for
+ * (epic #303, X13; K2). Counting only `text` parts would make a step of four calls look free and
+ * let a history trim later than it should.
  */
 function textOfMessage(message: ModelMessage): string {
   const content = message.content
@@ -1771,6 +1880,8 @@ function textOfMessage(message: ModelMessage): string {
   for (const part of content) {
     if (part.type === 'text') {
       text += part.text
+    } else if (part.type === 'reasoning') {
+      text += `${part.text}${part.providerOptions === undefined ? '' : JSON.stringify(part.providerOptions)}`
     } else if (part.type === 'tool-call') {
       text += `${part.toolName}${JSON.stringify(part.input)}`
     } else if (part.type === 'tool-result') {

@@ -5,6 +5,7 @@ import {
   AgentMcpToolResultEventSchema,
   AgentMcpToolUseEventSchema,
   AgentMessageEventSchema,
+  AgentOpaqueContentEventSchema,
   AgentToolResultEventSchema,
   AgentToolUseEventSchema,
 } from './agent'
@@ -65,6 +66,7 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
   AgentToolResultEventSchema,
   AgentMcpToolUseEventSchema,
   AgentMcpToolResultEventSchema,
+  AgentOpaqueContentEventSchema,
   SessionStatusRunningEventSchema,
   SessionStatusIdleEventSchema,
   SessionStatusRescheduledEventSchema,

@@ -5,6 +5,7 @@ import type {
   ContextSummaryEvent,
   EventId,
   ModelUsage,
+  OpaquePart,
   SessionRewindEvent,
   StoredEvent,
 } from '@openharness/protocol'
@@ -25,6 +26,7 @@ import {
   OMISSION_MARKER,
   RECENT_TAIL_RATIO,
   clearingCut,
+  conversationItems,
   createContextStrategy,
   cutAtUserBoundary,
   estimateContextSize,
@@ -1280,5 +1282,235 @@ describe('the todo list on a request (#331)', () => {
     expect(estimateContextSize(withList, options) - estimateContextSize(emptyList, options)).toBe(
       reminders?.[0]?.tokens,
     )
+  })
+})
+
+/** A step's provider-opaque parts, as the log stores them (epic #303, X13; #334). */
+function opaqueContent(
+  seq: number,
+  parts: readonly OpaquePart[],
+  overrides: { readonly provider?: string; readonly model?: string } = {},
+): StoredEvent {
+  const event: StoredEvent = {
+    id: newEventId(),
+    type: 'agent.opaque_content',
+    seq,
+    processed_at: '2026-03-15T10:00:00.000Z',
+    provider: overrides.provider ?? 'anthropic',
+    model: overrides.model ?? MODEL.id,
+    parts: [...parts],
+  }
+  return event
+}
+
+/** A signed Anthropic thinking block, the shape a tool-calling step stores. */
+const THINKING: OpaquePart = {
+  type: 'reasoning',
+  text: 'weighing the options',
+  provider_options: { signature: 'sig-1' },
+}
+
+/** The request's own replay target: the family and model it goes to. */
+const ANTHROPIC_TARGET = { provider: 'anthropic', model: MODEL.id } as const
+
+describe('the opaque parts of a step (epic #303, X13; #334)', () => {
+  it('re-attaches a step’s parts to its assistant turn, before the text and the calls', () => {
+    const strategy = createContextStrategy()
+    const call = toolUse(4, 'echo')
+    const events = [
+      userMessage(1, 'do it'),
+      agentMessage(2, 'On it.'),
+      opaqueContent(3, [THINKING]),
+      call,
+      toolResult(5, call, 'hi'),
+    ]
+
+    const { messages } = strategy(events, {
+      model: MODEL,
+      system: null,
+      opaqueTarget: ANTHROPIC_TARGET,
+    })
+
+    expect(messages[1]).toEqual({
+      role: 'assistant',
+      content: [
+        {
+          type: 'reasoning',
+          text: 'weighing the options',
+          providerOptions: { anthropic: { signature: 'sig-1' } },
+        },
+        { type: 'text', text: 'On it.' },
+        { type: 'tool-call', toolCallId: call.id, toolName: 'echo', input: {} },
+      ],
+    })
+  })
+
+  it('carries the parts of a step that streamed no text at all — the step this exists for', () => {
+    const strategy = createContextStrategy()
+    const call = toolUse(3, 'echo')
+    const events = [
+      userMessage(1, 'do it'),
+      opaqueContent(2, [THINKING]),
+      call,
+      toolResult(4, call, 'hi'),
+    ]
+
+    const { messages } = strategy(events, {
+      model: MODEL,
+      system: null,
+      opaqueTarget: ANTHROPIC_TARGET,
+    })
+
+    expect(messages[1]).toEqual({
+      role: 'assistant',
+      content: [
+        {
+          type: 'reasoning',
+          text: 'weighing the options',
+          providerOptions: { anthropic: { signature: 'sig-1' } },
+        },
+        { type: 'tool-call', toolCallId: call.id, toolName: 'echo', input: {} },
+      ],
+    })
+  })
+
+  it('builds the turn without them for another family, another model, or no target at all', () => {
+    const strategy = createContextStrategy()
+    const call = toolUse(3, 'echo')
+    const events = [
+      userMessage(1, 'do it'),
+      agentMessage(2, 'On it.'),
+      opaqueContent(3, [THINKING]),
+      call,
+      toolResult(4, call, 'hi'),
+    ]
+    const plain = [
+      { type: 'text', text: 'On it.' },
+      { type: 'tool-call', toolCallId: call.id, toolName: 'echo', input: {} },
+    ]
+
+    expect(strategy(events, { model: MODEL, system: null }).messages[1]).toEqual({
+      role: 'assistant',
+      content: plain,
+    })
+    // Another client family, and another model of the same family: a signature is bound to
+    // both, so neither request may carry the block.
+    expect(
+      strategy(events, {
+        model: MODEL,
+        system: null,
+        opaqueTarget: { provider: 'bedrock', model: MODEL.id },
+      }).messages[1],
+    ).toEqual({ role: 'assistant', content: plain })
+    expect(
+      strategy(events, {
+        model: MODEL,
+        system: null,
+        opaqueTarget: { provider: 'anthropic', model: 'anthropic/claude-opus-5-5' },
+      }).messages[1],
+    ).toEqual({ role: 'assistant', content: plain })
+  })
+
+  it('is not a cut item of its own, so no cut can separate it from its step', () => {
+    const call = toolUse(4, 'echo')
+    const events = [
+      userMessage(1, 'do it'),
+      agentMessage(2, 'On it.'),
+      opaqueContent(3, [THINKING]),
+      call,
+      toolResult(5, call, 'hi'),
+    ]
+
+    // The cut rules see the conversation: a message, a call, an answer. An entry is none of
+    // them — it is part of the turn that made the call — so a summary's boundary and the
+    // clearing rule can only ever move it with that turn, never away from it.
+    expect(conversationItems(events, 0, () => 100).map((item) => item.seq)).toEqual([1, 2, 4, 5])
+  })
+
+  it('counts a replayed entry as part of the request it is sent in (K2)', () => {
+    const events = [
+      userMessage(1, 'do it'),
+      agentMessage(2, 'On it.'),
+      opaqueContent(3, [THINKING]),
+    ]
+    const options = { model: MODEL.id, system: null }
+    const sent = estimateContextSize(events, { ...options, opaqueTarget: ANTHROPIC_TARGET })
+
+    // Exactly the text and the payload of the part the request carries — filed under the
+    // family's own key, which is what goes on the wire.
+    expect(sent - estimateContextSize(events, options)).toBe(
+      estimateTokens('weighing the options') +
+        estimateTokens(JSON.stringify({ anthropic: { signature: 'sig-1' } })),
+    )
+  })
+
+  it('leaves the entry where it is when old tool results are cleared (X9)', () => {
+    const strategy = createContextStrategy({ tokenBudget: 2_000 })
+    // The #331 fixture — a small budget and a low threshold, so the older result's body is
+    // cleared — with the older step carrying opaque parts. The parts have nothing to do with a
+    // result's tokens: they ride with their own step, whole, and only the result is shortened.
+    const old = toolUse(3, 'fetch')
+    const fresh = toolUse(6, 'fetch')
+    const events = [
+      userMessage(1, 'a'.repeat(40)),
+      opaqueContent(2, [THINKING]),
+      old,
+      toolResult(4, old, 'b'.repeat(800)),
+      userMessage(5, 'q'.repeat(1600)),
+      fresh,
+      toolResult(7, fresh, 'c'.repeat(800)),
+    ]
+
+    const { messages, cleared } = strategy(events, {
+      model: MODEL,
+      system: null,
+      opaqueTarget: ANTHROPIC_TARGET,
+      clearThreshold: 0.3,
+    })
+
+    expect(cleared).toEqual({ results: 1, tokens: 200 })
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: [
+        {
+          type: 'reasoning',
+          text: 'weighing the options',
+          providerOptions: { anthropic: { signature: 'sig-1' } },
+        },
+        { type: 'tool-call', toolName: 'fetch' },
+      ],
+    })
+    expect(toolResultTextsOf(messages)).toEqual([CLEARED_TOOL_RESULT(200), 'c'.repeat(800)])
+  })
+
+  it('never caps an assistant turn that carries parts (K6)', () => {
+    const strategy = createContextStrategy({ tokenBudget: 16 })
+    const huge: OpaquePart = {
+      type: 'reasoning',
+      text: 'x'.repeat(4_000),
+      provider_options: { signature: 'sig-1' },
+    }
+    const events = [userMessage(1, 'do it'), opaqueContent(2, [huge]), agentMessage(3, 'done')]
+
+    const { messages, truncated } = strategy(events, {
+      model: MODEL,
+      system: null,
+      opaqueTarget: ANTHROPIC_TARGET,
+    })
+
+    // The cap shortens one block of text; a part-bearing turn is not one, and the entry is
+    // never cut — a truncated signature is not one a provider would accept.
+    expect(truncated).toBeUndefined()
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: [
+        {
+          type: 'reasoning',
+          text: huge.text,
+          providerOptions: { anthropic: { signature: 'sig-1' } },
+        },
+        { type: 'text', text: 'done' },
+      ],
+    })
   })
 })

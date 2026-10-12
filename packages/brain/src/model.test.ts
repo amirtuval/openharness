@@ -236,6 +236,7 @@ describe('streamModelRequest', () => {
     expect(result).toEqual({
       text: '',
       toolCalls: [],
+      opaque: [],
       usage: ZERO_MODEL_USAGE,
       error: failure,
       aborted: false,
@@ -272,6 +273,69 @@ describe('streamModelRequest', () => {
     expect(result.aborted).toBe(true)
     expect(result.error).toBeUndefined()
     expect(result.usage).toEqual(ZERO_MODEL_USAGE)
+  })
+
+  it('collects the reasoning a step streamed, with the metadata its fragments carried', async () => {
+    const { factory } = mockModel({
+      reasoning: [
+        { text: 'weighing the options', metadata: { anthropic: { signature: 'sig-1' } } },
+        // A redacted block: no text at all, and its payload is the block's own body.
+        { metadata: { anthropic: { redactedData: 'blob' } } },
+      ],
+      text: ['done'],
+    })
+
+    const result = await streamModelRequest({
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
+      messages,
+    })
+
+    // A block's metadata rides a fragment of its own, with no text of it: the fragments are one
+    // part, and the order the blocks were streamed in is the order they are reported in
+    // (epic #303, X13; #334).
+    expect(result.opaque).toEqual([
+      {
+        type: 'reasoning',
+        text: 'weighing the options',
+        providerMetadata: { anthropic: { signature: 'sig-1' } },
+      },
+      { type: 'reasoning', text: '', providerMetadata: { anthropic: { redactedData: 'blob' } } },
+    ])
+  })
+
+  it('reports no opaque parts for a step that streamed none', async () => {
+    const { factory } = mockModel({ text: ['hi'] })
+
+    const result = await streamModelRequest({
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
+      messages,
+    })
+
+    expect(result.opaque).toEqual([])
+  })
+
+  it('reports no opaque parts for a request that was aborted', async () => {
+    const controller = new AbortController()
+    const { factory } = mockModel({
+      reasoning: [
+        { text: 'weighing the options', metadata: { anthropic: { signature: 'sig-1' } } },
+      ],
+      text: ['partial'],
+      onChunk: () => {
+        controller.abort()
+      },
+    })
+
+    const result = await streamModelRequest({
+      model: factory('anthropic/claude-sonnet-5', TEST_CREDENTIAL),
+      messages,
+      signal: controller.signal,
+    })
+
+    // A step that is not stored stores no parts either: a block cut off mid-stream has no
+    // signature yet, so there would be nothing a provider could read back.
+    expect(result.aborted).toBe(true)
+    expect(result.opaque).toEqual([])
   })
 
   it('never retries on its own: the turn loop owns the retries', async () => {

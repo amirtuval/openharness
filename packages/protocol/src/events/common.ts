@@ -61,6 +61,17 @@ export const EVENT_TYPES = {
    */
   agentMcpToolResult: 'agent.mcp_tool_result',
   /**
+   * // extension: the parts of a step only the provider that produced them can read back
+   * (epic #303, X13; issue #334).
+   *
+   * A thinking model's next request has to carry back what this build cannot read: an
+   * Anthropic `thinking` block with its `signature`, an OpenAI or xAI Responses reasoning item
+   * with its id, a DeepSeek step's `reasoning_content`. None of it is the reply — the reply is
+   * the `agent.message` beside this event — and a reader that does not know this event skips it
+   * like any other event it does not know. See {@link AgentOpaqueContentEventSchema}.
+   */
+  agentOpaqueContent: 'agent.opaque_content',
+  /**
    * // extension: the user answered a call that was waiting on them (epic #303, X6; #309).
    *
    * One event answers every pause: an approval the settings demanded (`result`), or the
@@ -183,6 +194,7 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.agentToolResult,
   EVENT_TYPES.agentMcpToolUse,
   EVENT_TYPES.agentMcpToolResult,
+  EVENT_TYPES.agentOpaqueContent,
   EVENT_TYPES.sessionStatusRunning,
   EVENT_TYPES.sessionStatusIdle,
   EVENT_TYPES.sessionStatusRescheduled,

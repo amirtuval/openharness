@@ -35,6 +35,17 @@ authority where it is:
 - **A paused call is a user decision, not a tool's.** [#309](https://github.com/amirtuval/openharness/issues/309)'s
   `ask` stops the turn until the user confirms; the model cannot answer it, and it cannot ask for
   a different tool to get the same effect unnoticed.
+- **Provider-opaque content is stored, never shown, and never sent onward**
+  ([#334](https://github.com/amirtuval/openharness/issues/334)). A step's `agent.opaque_content`
+  holds what its provider needs handed back unchanged — a thinking block's signature, a reasoning
+  item's id and encrypted content — and it is **not** the reply: no frontend renders it, it counts
+  as nothing a user said or was told, and the brain re-attaches it only to a request that goes to
+  the same provider family and the same model. It never reaches another provider, another
+  credential or another session, and it is never summarized or truncated: a part too large to keep
+  is dropped whole and counted. It is stored in the session's log like every other event, so it is
+  as readable by that session's owner as the rest of the log, and no more — and it can carry text
+  the provider withheld from the reply (a `thinking` block's content), so a deployment that treats
+  a transcript as safe-to-share should treat the opaque parts as part of it.
 
 ## The outbound request: SSRF
 
@@ -146,6 +157,7 @@ Written honestly, so nothing here is read as a promise the code does not keep:
 | the approval UI a paused turn needs                                          | [#310](https://github.com/amirtuval/openharness/issues/310)                                                                                                                                                                                                              |
 | MCP servers: the resource, OAuth, and the loop                               | built ([#311](https://github.com/amirtuval/openharness/issues/311), [#312](https://github.com/amirtuval/openharness/issues/312)): a user's servers, their tools offered per request under this build's name and `ask` by default, and a failure that never blocks a chat |
 | capping and clearing old tool results, so a huge page cannot flood a context | built ([#306](https://github.com/amirtuval/openharness/issues/306)): a tool declares its own `maxResultTokens`, and a request that carries too many old results clears the oldest                                                                                        |
+| provider-opaque parts: stored, unshown, same-family-and-model only           | built ([#334](https://github.com/amirtuval/openharness/issues/334)): `agent.opaque_content` is never the reply, never summarized, never truncated, and replayed only to the family and model that produced it                                                            |
 
 There is **no sandbox** in this epic, deliberately (the sandboxed tools moved to
 [#315](https://github.com/amirtuval/openharness/issues/315)): a tool runs in the server process,

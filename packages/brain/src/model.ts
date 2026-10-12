@@ -836,6 +836,28 @@ export interface ModelToolCall {
 }
 
 /**
+ * One part of a step that only the provider that produced it can read back (epic #303, X13).
+ *
+ * The AI SDK's reasoning stream, collected per block: the text it streamed, and the metadata
+ * the provider attached to any of that block's fragments — Anthropic sends a `thinking` block's
+ * `signature` on a fragment of its own, with no text — merged into one value. The AI SDK's
+ * provider clients are what turn these back into `thinking` + `signature`, a Responses
+ * reasoning item or `reasoning_content`; what the brain stores is the part, unchanged.
+ */
+export interface ModelOpaquePart {
+  /** The AI SDK assistant-part type this was collected as: `reasoning`, the only one today. */
+  readonly type: 'reasoning'
+  /** The block's text, as streamed — `''` for a block whose text the provider withheld. */
+  readonly text: string
+  /**
+   * The provider's metadata for the block, merged over the fragments it arrived on, exactly as
+   * the provider sent it. Stored under the request's own family (`./opaque`), which is the key
+   * the provider's client reads it under.
+   */
+  readonly providerMetadata?: Record<string, unknown>
+}
+
+/**
  * What a model request produced, however it ended.
  *
  * It answers rather than throws — including for a failure — because all three endings lead
@@ -852,6 +874,18 @@ export interface ModelRequestResult {
    * the loop stores as `agent.tool_use` events and runs, before making the next request.
    */
   readonly toolCalls: readonly ModelToolCall[]
+  /**
+   * // extension: the step's provider-opaque parts, in the order the provider streamed them
+   * (epic #303, X13; #334), or `[]` when the step produced none.
+   *
+   * What is collected is the part type a provider may need handed back — `reasoning` today, and
+   * #335's provider-executed tool calls and results join the same list. Which of them are
+   * *stored*, and for which client, is the family table's business (`./opaque`). A request that
+   * was aborted or failed reports none: a step that is not stored stores no parts either, and a
+   * thinking block cut off mid-stream has no signature yet, so there would be nothing a
+   * provider could read back.
+   */
+  readonly opaque: readonly ModelOpaquePart[]
   /** Token counts, or {@link ZERO_MODEL_USAGE} when the request never reported any. */
   readonly usage: ModelUsage
   /** Why the request failed, or `undefined` when it succeeded. */
@@ -872,6 +906,12 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
   const failures: unknown[] = []
   const stepUsages: ModelUsage[] = []
   const toolCalls: ModelToolCall[] = []
+  // The step's reasoning, by the id the provider streams it under: a block is opened by
+  // `reasoning-start`, extended by its deltas, and closed by `reasoning-end` — and the
+  // metadata that makes it replayable (a signature, an item id) may arrive on any of the three
+  // (epic #303, X13; #334). A Map, so the order the blocks were opened in is the order they are
+  // reported in, which is the order the provider produced them.
+  const opaque = new Map<string, ReasoningBlock>()
   let aborted = false
   let text = ''
   const result = streamText({
@@ -917,6 +957,17 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
           name: part.toolName,
           input: part.input,
         })
+      } else if (
+        part.type === 'reasoning-start' ||
+        part.type === 'reasoning-delta' ||
+        part.type === 'reasoning-end'
+      ) {
+        const open = opaque.get(part.id) ?? { text: '', metadata: {} }
+        if (part.type === 'reasoning-delta') {
+          open.text += part.text
+        }
+        mergeProviderMetadata(open.metadata, part.providerMetadata)
+        opaque.set(part.id, open)
       } else if (part.type === 'abort') {
         aborted = true
       } else if (part.type === 'finish-step') {
@@ -939,14 +990,28 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
   }
 
   if (aborted || params.signal?.aborted === true) {
-    return { text, toolCalls, usage: ZERO_MODEL_USAGE, error: undefined, aborted: true }
+    return {
+      text,
+      toolCalls,
+      opaque: [],
+      usage: ZERO_MODEL_USAGE,
+      error: undefined,
+      aborted: true,
+    }
   }
   const failure = failures[0]
   if (failure !== undefined) {
     if (isOwnershipError(failure)) {
       throw failure
     }
-    return { text, toolCalls, usage: ZERO_MODEL_USAGE, error: failure, aborted: false }
+    return {
+      text,
+      toolCalls,
+      opaque: [],
+      usage: ZERO_MODEL_USAGE,
+      error: failure,
+      aborted: false,
+    }
   }
   const usage =
     stepUsages.length === 0
@@ -954,7 +1019,55 @@ export async function streamModelRequest(params: ModelRequestParams): Promise<Mo
         // total is the only report there is.
         toModelUsage(await result.usage)
       : stepUsages.reduce(addModelUsage)
-  return { text, toolCalls, usage, error: undefined, aborted: false }
+  return {
+    text,
+    toolCalls,
+    opaque: collectedParts(opaque),
+    usage,
+    error: undefined,
+    aborted: false,
+  }
+}
+
+/** One reasoning block being collected, as its fragments arrive. */
+interface ReasoningBlock {
+  text: string
+  readonly metadata: Record<string, unknown>
+}
+
+/** The reasoning blocks one request collected, in the order the provider opened them. */
+function collectedParts(
+  collected: ReadonlyMap<string, ReasoningBlock>,
+): readonly ModelOpaquePart[] {
+  return [...collected.values()].map(({ text, metadata }) => ({
+    type: 'reasoning' as const,
+    text,
+    ...(Object.keys(metadata).length === 0 ? {} : { providerMetadata: metadata }),
+  }))
+}
+
+/**
+ * Merge one fragment's provider metadata into a block's, one level deep.
+ *
+ * A block's metadata arrives across its fragments — Anthropic's `signature` rides a fragment
+ * with no text of its own — and a later fragment may carry only part of what an earlier one
+ * did, so a plain overwrite could drop the id or the encrypted content a replay needs.
+ */
+function mergeProviderMetadata(target: Record<string, unknown>, incoming: unknown): void {
+  const record = asRecord(incoming)
+  if (record === null) {
+    return
+  }
+  for (const [key, value] of Object.entries(record)) {
+    const existing = target[key]
+    target[key] =
+      isPlainRecord(existing) && isPlainRecord(value) ? { ...existing, ...value } : value
+  }
+}
+
+/** Whether a value is a plain object — an object that is neither `null` nor an array. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**
