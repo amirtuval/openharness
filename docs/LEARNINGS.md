@@ -1271,6 +1271,37 @@ rows an arrow key should not have to walk. Colour is never the selection: the ma
 is the one thing that survives `NO_COLOR`, and a test per screen asserts the frame carries it
 ([#335](https://github.com/amirtuval/openharness/issues/335)).
 
+**A tool call and the thing it started are not linked by an id, so the client's join is a
+heuristic — and it has to be documented as one.** `agent { type, description, prompt }` returns a
+handle as a **text** result and the `session.task_started` it writes carries a `task_id` but no
+call id, so nothing in the parent's log says which call opened which card except the
+`description` both sides were given. The client matches a start to the nearest unmatched `agent`
+call with its own description (and falls back to the start's own `seq` when a trimmed replay has
+no call), which is why a call the live-task limit refused cannot steal a later task's place —
+but it is a join the log does not actually make, and a card drawn one step off is the failure
+mode ([#345](https://github.com/amirtuval/openharness/issues/345);
+`packages/client/src/tasks.ts`).
+
+**"Waiting" is a child-side fact, so a task's status cannot be derived from the parent's log
+alone.** The parent's `session.task_status` stays `running | idle | failed | stopped` while the
+child is paused in an `agent_wait` — the wait ends the child's own turn, and it is only the
+child's `session.status_idle` whose `stop_reason` says `waiting_on_tasks`. A card that read only
+the parent's log could not tell a child that is working from one that is waiting on its own
+subtasks, which is exactly the distinction the epic's UX asks for, so the client keeps the
+parent's status and takes the child's as its own input (`taskCardStatus`) rather than inventing a
+wire it cannot see ([#340](https://github.com/amirtuval/openharness/issues/340) S9; #345).
+
+**A new kind of thing in the transcript is a breaking change to every frontend, so a card is
+state and a position, not an entry.** `TranscriptEntry` is a closed union both renderers switch on
+exhaustively — the web app's last branch and `oh`'s both assume the only remaining member is a
+message — so adding `{ kind: 'task' }` makes `apps/web` and `apps/tui` fail to typecheck, and the
+package that adds it may not edit them. The background-task model therefore lives in
+`TranscriptState.tasks`, each card carrying the `seq` of the `agent` call it stands in for (and
+that call suppressed from the tool lines), so a frontend merges it with
+`selectTranscriptEntries` by position once it is ready to draw one
+([#345](https://github.com/amirtuval/openharness/issues/345);
+`packages/client/src/transcript.ts`).
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take

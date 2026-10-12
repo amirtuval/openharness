@@ -87,6 +87,7 @@ export {
   selectSummaries,
   selectSummarizing,
   selectSearchCount,
+  selectTasks,
   selectToolCalls,
   selectTodos,
   selectTranscriptEntries,
@@ -244,3 +245,18 @@ export {
 export type { ApprovalChoice, PendingCall, PendingCallKind, QuestionDraft } from './approvals'
 
 export type { StreamOptions } from './events/stream'
+
+export { TASK_TOOL_NAMES, isTaskToolName, taskCardStatus, tasksFromEvents } from './tasks'
+export type { TaskCard, TaskCardStatus, TaskMessage, TaskResult } from './tasks'
+
+export { taskActivityLabel, taskActivityOf, watchTaskActivity } from './task-activity'
+export type {
+  TaskActivityLine,
+  TaskActivityLog,
+  TaskActivityOptions,
+  TaskActivityState,
+  TaskActivityWatcher,
+} from './task-activity'
+
+export { listChildren, sessionBreadcrumb } from './session-tree'
+export type { SessionTreeSource } from './session-tree'
