@@ -2,7 +2,7 @@
  * HTML → Markdown: a fetched page as the text a model reads (epic #303, #305).
  *
  * `web_fetch` gets bytes, and bytes are not what a model should be shown: a page is a majority
- * of navigation, script, style and boilerplate around the article a reader came for. So the
+ * of navigation, script, style and boilerplate around the content a reader came for. So the
  * conversion has two halves, and both are libraries rather than hand-written rules:
  *
  * - **Main content** is [Mozilla's `Readability`](https://github.com/mozilla/readability), the
@@ -20,14 +20,31 @@
  * link. What comes back is a string that goes into a tool result, which is where the threat
  * model's rule applies — it is data the model is shown, never an instruction it follows.
  *
- * Two things are done here rather than by a library, because they are about *this* use:
+ * Four things are done here rather than by a library, because they are about *this* use:
  *
- * - **Script, style and the other non-prose elements are dropped before anything reads the
- *   page.** `turndown` would otherwise emit their text (`<style>`'s rules, a `<script>`'s
- *   source) into the markdown, and `Readability` scores them into its content estimate.
+ * - **Chrome is dropped before anything reads the page.** `script`, `style`, `noscript`,
+ *   `template`, `iframe`, `svg` and `canvas` are removed because `turndown` would otherwise emit
+ *   their text (`<style>`'s rules, a `<script>`'s source, an inline SVG's paths) and
+ *   `Readability` would score them into its content estimate. The page's **structural chrome** is
+ *   removed for the same reason: `nav`, `header`, `footer`, `aside`, `dialog` and `form`, and the
+ *   ARIA landmark roles that name the same regions (`banner`, `navigation`, `contentinfo`,
+ *   `complementary`, `search`), plus modal overlays (`role=dialog`, `aria-modal`). A consent or
+ *   cookie banner is a container the page names as one — a class or id whose words are
+ *   `cookie`/`consent`/`gdpr`, matched whole so a page *about* cookies is not mistaken for one —
+ *   and nothing here depends on a single site's markup.
+ * - **A page with no article still gets its content.** `Readability` is tuned for one article: a
+ *   news homepage whose "content" is a list of headlines can make it answer `null`, or answer a
+ *   small wrong node (a byline list, a teaser). When the article it found is missing, or is under
+ *   a quarter of the document's own text, {@link selectContent} runs a second, honest pass that
+ *   keeps the headline/teaser shape — headings, the links inside or around them, teasers, lists
+ *   and captioned images, in document order — rather than handing back the whole stripped
+ *   document. Menus and link bars are left out, and the masthead above the first real content is
+ *   skipped, so what leads is a headline and not a nav bar or a logo.
  * - **Relative links are made absolute** against the URL the page was actually fetched from, so
  *   a link a model is shown is one it can fetch — `Readability` resolves against a document URI
  *   this DOM does not have.
+ * - **The page's own `<title>` is put back as a heading** when `Readability` read one, because
+ *   the article body does not carry it.
  */
 
 import { Readability } from '@mozilla/readability'
@@ -38,12 +55,91 @@ import TurndownService from 'turndown'
  * Elements whose content is code, styling or chrome rather than prose, removed before anything
  * reads the page.
  *
- * `script` and `style` are the two the issue names; `noscript` and `template` are their
+ * `script` and `style` are the two the issue names (and a `<script type="application/ld+json">`
+ * is a `<script>`, so its inline JSON goes with them); `noscript` and `template` are their
  * equivalents (one holds markup for a browser that runs no script, the other markup no browser
- * renders), and `iframe` and `svg` are not text at all — `turndown` would emit an iframe's
- * fallback or an inline SVG's paths as paragraphs.
+ * renders), and `iframe`, `svg` and `canvas` are not text at all — `turndown` would emit an
+ * iframe's fallback, an inline SVG's paths or a canvas's fallback as paragraphs.
  */
 const DROPPED_ELEMENTS = ['script', 'style', 'noscript', 'template', 'iframe', 'svg', 'canvas']
+
+/**
+ * The page's structural chrome, by tag and by the ARIA landmark role that names the same region.
+ *
+ * A page marks its navigation with `<nav>` or `role="navigation"`, its banner with `<header>` or
+ * `role="banner"`, its footer with `<footer>` or `role="contentinfo"`, a sidebar with `<aside>`
+ * or `role="complementary"`, a search box with `role="search"`. A modal overlay — a cookie
+ * banner, a sign-up prompt, a lightbox — is a `<dialog>`, `role="dialog"` or `aria-modal`. These
+ * are the page's *own* claims about which parts are not the content, which is the principled
+ * rule this uses: no class-name guessing for menus and footers.
+ */
+const CHROME_SELECTORS = [
+  'nav',
+  'header',
+  'footer',
+  'aside',
+  'dialog',
+  'form',
+  '[role=banner]',
+  '[role=navigation]',
+  '[role=contentinfo]',
+  '[role=complementary]',
+  '[role=search]',
+  '[role=dialog]',
+  '[aria-modal=true]',
+]
+
+/**
+ * The consent/cookie-banner containers a page names as one, looked up cheaply by substring and
+ * then filtered by {@link isConsentChrome} so the substring alone never decides.
+ *
+ * `[class*=cookie i]` matches a class like `mycookierecipe` too, which is why the substring only
+ * narrows the search and the whole word decides.
+ */
+const CONSENT_CANDIDATES = [
+  '[class*=cookie i]',
+  '[class*=consent i]',
+  '[class*=gdpr i]',
+  '[id*=cookie i]',
+  '[id*=consent i]',
+  '[id*=gdpr i]',
+].join(',')
+
+/** The whole words a consent banner's class or id is built from, plus the tools that name one. */
+const CONSENT_WORDS = new Set(['cookie', 'cookies', 'consent', 'gdpr', 'onetrust'])
+
+/**
+ * A consent banner written as one word (`cookieconsent`, `cookiebanner`, `gdprnotice`), which
+ * splitting on separators leaves whole.
+ */
+const CONSENT_JOINED =
+  /^(cookie|consent|gdpr)(banner|notice|message|popup|modal|dialog|bar|box|overlay|wrapper|container|policy|alert)?$/
+
+/** Elements that carry content a reader came for: headings, paragraphs, links, captioned images. */
+const HEADING_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+
+/**
+ * The shortest anchor text that counts as a headline rather than a menu word.
+ *
+ * A headline link — a story title, a teaser — is a phrase; a nav link is a word or two (`Home`,
+ * `Log in`, `More`). Eight characters keeps `comments` out and a real headline in.
+ */
+const MIN_LINK_TEXT = 8
+
+/**
+ * How small `Readability`'s answer may be, as a fraction of the document's own text, before
+ * {@link selectContent} takes over.
+ *
+ * A quarter: a real article is normally the bulk of the visible text once script, style and
+ * chrome are gone, while a wrong node on a headline homepage is a few percent — the failure this
+ * exists for is a news homepage where `Readability` picks a byline list about 16% of the page's
+ * text instead of the content. A page whose article is genuinely smaller than a quarter of what a
+ * reader sees (a huge comment thread around a short post) falls back too, which is the right
+ * answer: the fallback keeps its paragraphs anyway. The measure is relative, not an absolute
+ * floor, so a small page and a large one are judged the same way and a short real article keeps
+ * `Readability`'s own clean extraction and its title.
+ */
+const ARTICLE_TEXT_RATIO = 0.25
 
 /** The link-shaped attributes whose values are resolved against the page's own URL. */
 const URL_ATTRIBUTES: readonly (readonly [string, string])[] = [
@@ -76,16 +172,241 @@ export function htmlToMarkdown(html: string, url: string): string {
   // `remove`, `getAttribute`, `documentElement` — which is the whole of the interface used here.
   const dom: Document = document
   dropChrome(dom)
+  dropConsentChrome(dom)
   absolutizeUrls(dom, url)
+
+  const documentText = textLength(dom.documentElement?.textContent)
   const article = readMainContent(dom)
-  // `Readability` answers `null` for a page it cannot find content in — a bare list, a page
-  // that is one table, a document with no text. The stripped document is still the honest
-  // answer then: it is the page minus its script and style, which is exactly what asked for
-  // markdown means.
-  const source = article?.content ?? dom.documentElement?.outerHTML ?? html
+  // `Readability`'s answer is trusted when it is a real share of the page's text — or when the
+  // page had no text to compare against and the answer is not empty.
+  const articleIsMain =
+    article !== null &&
+    (documentText === 0
+      ? article.content.length > 0
+      : article.text >= ARTICLE_TEXT_RATIO * documentText)
+  if (article !== null && articleIsMain) {
+    return render(article.content, article.title)
+  }
+
+  // `Readability` answered nothing usable for this page. The heuristic pass is the answer: the
+  // page's own doc-shaped content — headlines and the links that carry them, teasers, images —
+  // in document order, without the menus and chrome a whole-document fallback would keep.
+  const fallback = selectContent(dom)
+  if (fallback.length === 0 && article !== null && article.content.length > 0) {
+    // The fallback found nothing either (a page of bare divs and images); `Readability`'s own
+    // node, however small, is the honest answer then.
+    return render(article.content, article.title)
+  }
+  return render(fallback, null)
+}
+
+/** What {@link readMainContent} read: the article's HTML, its title, and the text length of its body. */
+interface MainContent {
+  readonly content: string
+  readonly title: string | null
+  readonly text: number
+}
+
+/**
+ * The page's main content, or `null` when there is none to find.
+ *
+ * `Readability` mutates the document it is handed and throws on shapes it cannot score (a
+ * malformed tree, a document with no body), so it is handed a **clone**: the caller still needs
+ * the whole cleaned document for {@link selectContent}, and a failure here is a page that could
+ * not be extracted rather than a conversion that failed.
+ */
+function readMainContent(dom: Document): MainContent | null {
+  try {
+    const article = new Readability(dom.cloneNode(true) as Document).parse()
+    if (article === null) {
+      return null
+    }
+    return {
+      content: article.content ?? '',
+      title: article.title ?? null,
+      text: textLength(article.textContent),
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The content a page without a readable article still has: its headings, the links that carry
+ * its headlines, its short paragraphs and its captioned images, in document order.
+ *
+ * It walks the cleaned body and keeps the first element at or above each content node, so a
+ * headline inside a link is kept once (the link, with the headline in it) and never twice, and
+ * a menu — a list of short links with no prose — is skipped whole. What comes out is a small
+ * document the converter turns into Markdown. When the page has no such content the answer is
+ * the empty string, which the caller reads as "nothing here".
+ */
+function selectContent(dom: Document): string {
+  // A page normally has a `<body>` and it is the content; a bare fragment parsed on its own puts
+  // its content directly under `documentElement` with an empty `<body>` beside it, so an empty
+  // `<body>` is not the answer.
+  const root = dom.body !== null && dom.body.children.length > 0 ? dom.body : dom.documentElement
+  if (root === null) {
+    return ''
+  }
+  const container = dom.createElement('div')
+  collectContent(root, container, { started: false })
+  return container.innerHTML
+}
+
+/**
+ * Walk `root`'s element children, appending each content node to `out` and descending elsewhere.
+ *
+ * `state.started` tracks whether any real content has been kept yet: until it has, a content
+ * node that is only furniture — a logo image, a one-word utility link — is skipped rather than
+ * kept, so a page's masthead does not lead the answer. Once the first real content is found,
+ * everything after it is kept as it comes.
+ */
+function collectContent(root: Element, out: Element, state: { started: boolean }): void {
+  for (const child of Array.from(root.children)) {
+    if (isMenuList(child) || isLinkBar(child)) {
+      continue
+    }
+    if (isContentElement(child)) {
+      if (!state.started && !isLeadContent(child)) {
+        continue
+      }
+      state.started = true
+      out.appendChild(child)
+      continue
+    }
+    collectContent(child, out, state)
+  }
+}
+
+/**
+ * The shortest anchor text that starts the content when it is the first thing on the page.
+ *
+ * A headline is a phrase and a utility link is a word or two, so a link this long is treated as
+ * the page's first real content and everything before it as masthead. A link with a heading in
+ * it qualifies however short it is — that is a headline by its own markup.
+ */
+const LEAD_LINK_MIN = 25
+
+/**
+ * Whether a content node is substantial enough to be the page's first kept content rather than
+ * part of the masthead above it: a heading, a paragraph, a quote/figure/pre, or a link that
+ * carries a heading or is headline-length.
+ */
+function isLeadContent(element: Element): boolean {
+  const tag = element.tagName.toLowerCase()
+  if (HEADING_TAGS.has(tag) || tag === 'p' || tag === 'blockquote' || tag === 'pre') {
+    return true
+  }
+  if (tag === 'figure') {
+    return textLength(element.textContent) > 0
+  }
+  if (tag === 'a') {
+    return (
+      element.querySelector('h1, h2, h3, h4, h5, h6, p') !== null ||
+      textLength(element.textContent) >= LEAD_LINK_MIN
+    )
+  }
+  return false
+}
+
+/**
+ * Whether an element is content a reader came for rather than structure around it.
+ *
+ * A heading with text, a paragraph with text (short ones included — a teaser is a paragraph), a
+ * blockquote/pre/figure, an image the page gave an `alt` (a tracking pixel has none), or a link
+ * whose text is a phrase rather than a menu word — or a link that wraps a captioned image, which
+ * is how a headline card is often built.
+ */
+function isContentElement(element: Element): boolean {
+  const tag = element.tagName.toLowerCase()
+  if (HEADING_TAGS.has(tag)) {
+    return textLength(element.textContent) > 0
+  }
+  if (tag === 'p') {
+    return textLength(element.textContent) > 0
+  }
+  if (tag === 'blockquote' || tag === 'pre' || tag === 'figure') {
+    return textLength(element.textContent) > 0 || element.querySelector('img') !== null
+  }
+  if (tag === 'ul' || tag === 'ol') {
+    // A list that reached here is not a menu ({@link isMenuList} is checked first); it is a list
+    // of content — steps, points, a block of headlines — and is kept whole.
+    return textLength(element.textContent) > 0
+  }
+  if (tag === 'img') {
+    return (element.getAttribute('alt') ?? '').trim().length > 0
+  }
+  if (tag === 'a') {
+    if (textLength(element.textContent) >= MIN_LINK_TEXT) {
+      return true
+    }
+    const image = element.querySelector('img[alt]')
+    return image !== null && (image.getAttribute('alt') ?? '').trim().length > 0
+  }
+  return false
+}
+
+/**
+ * Whether a list is a menu: several items that are each a short link, and no prose.
+ *
+ * A headline list — the content of a news homepage — carries long link text or a heading, so it
+ * is not one; a navigation list is items like "Home", "News", "Sport".
+ */
+function isMenuList(element: Element): boolean {
+  const tag = element.tagName.toLowerCase()
+  if (tag !== 'ul' && tag !== 'ol') {
+    return false
+  }
+  const items = Array.from(element.children).filter((child) => child.tagName.toLowerCase() === 'li')
+  if (items.length < 2) {
+    return false
+  }
+  if (element.querySelector('h1, h2, h3, h4, h5, h6, p') !== null) {
+    return false
+  }
+  const shortLinks = items.filter(
+    (item) => textLength(item.textContent) < 40 && item.querySelector('a') !== null,
+  ).length
+  return shortLinks >= Math.ceil(items.length * 0.6)
+}
+
+/**
+ * Whether an element is a bar of links — a toolbar, a utility strip, a category strip — rather
+ * than content.
+ *
+ * It is the menu-list rule widened from a list to any container: several links, essentially all
+ * of the element's (short) text inside them, and no prose at all (no heading, paragraph,
+ * quote, figure or pre). A page's top bar is like this; a block of headlines is not, because a
+ * headline block carries a heading or a teaser paragraph, and its text is not just link text.
+ * Like {@link isMenuList} this is the page's *shape*, not its class names.
+ */
+function isLinkBar(element: Element): boolean {
+  const links = Array.from(element.querySelectorAll('a'))
+  if (links.length < 3) {
+    return false
+  }
+  if (element.querySelector('h1, h2, h3, h4, h5, h6, p, blockquote, figure, pre') !== null) {
+    return false
+  }
+  const text = textLength(element.textContent)
+  if (text === 0 || text > MAX_LINK_BAR_TEXT) {
+    return false
+  }
+  const inLinks = links.reduce((sum, link) => sum + textLength(link.textContent), 0)
+  return inLinks >= text * LINK_BAR_RATIO
+}
+
+/** The most text a link bar may hold; more than this is a block of headlines rather than a strip. */
+const MAX_LINK_BAR_TEXT = 300
+
+/** The share of a link bar's text that must be inside its links for it to count as one. */
+const LINK_BAR_RATIO = 0.8
+
+/** The Markdown of one source, with the page's title as a leading heading when there is one. */
+function render(source: string, title: string | null | undefined): string {
   const markdown = turndown.turndown(source).trim()
-  const title = article?.title ?? null
-  if (title === null || title.length === 0) {
+  if (title === null || title === undefined || title.length === 0) {
     return markdown
   }
   // The title is the page's own, and `Readability` reads it from `document.title`; it is put
@@ -93,34 +414,41 @@ export function htmlToMarkdown(html: string, url: string): string {
   return `# ${title}\n\n${markdown}`
 }
 
-/**
- * The page's main content, or `null` when there is none to find.
- *
- * `Readability` mutates the document it is handed and throws on shapes it cannot score (a
- * malformed tree, a document with no body), so a failure here is a page that could not be
- * extracted rather than a conversion that failed: the caller falls back to the whole document.
- */
-function readMainContent(
-  dom: Document,
-): { content: string | null | undefined; title: string | null | undefined } | null {
-  try {
-    const article = new Readability(dom).parse()
-    if (article === null) {
-      return null
-    }
-    return { content: article.content, title: article.title }
-  } catch {
-    return null
-  }
-}
-
-/** Remove every element in {@link DROPPED_ELEMENTS}. */
+/** Remove every element in {@link DROPPED_ELEMENTS} and every {@link CHROME_SELECTORS} match. */
 function dropChrome(dom: Document): void {
-  for (const selector of DROPPED_ELEMENTS) {
+  for (const selector of [...DROPPED_ELEMENTS, ...CHROME_SELECTORS]) {
     for (const element of [...dom.querySelectorAll(selector)]) {
       element.remove()
     }
   }
+}
+
+/**
+ * Remove every consent/cookie banner, by the whole words the page named it with.
+ *
+ * The candidates come from a substring lookup ({@link CONSENT_CANDIDATES}) so the walk is small;
+ * {@link isConsentChrome} then keeps only containers whose class or id is genuinely built from a
+ * consent word — `cookie-banner`, `cookie_consent`, `gdpr-notice`, `onetrust` — and leaves a page
+ * that merely mentions cookies (a class like `mycookierecipe`) alone.
+ */
+function dropConsentChrome(dom: Document): void {
+  for (const element of [...dom.querySelectorAll(CONSENT_CANDIDATES)]) {
+    if (isConsentChrome(element)) {
+      element.remove()
+    }
+  }
+}
+
+/** Whether an element's class or id names it a consent/cookie banner. */
+function isConsentChrome(element: Element): boolean {
+  const raw = `${element.getAttribute('class') ?? ''} ${element.getAttribute('id') ?? ''}`
+  if (raw.trim().length === 0) {
+    return false
+  }
+  return raw
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .some((word) => word.length > 0 && (CONSENT_WORDS.has(word) || CONSENT_JOINED.test(word)))
 }
 
 /**
@@ -146,4 +474,9 @@ function absolutizeUrls(dom: Document, url: string): void {
       }
     }
   }
+}
+
+/** The length of some element's text with its whitespace collapsed, which is how size is judged. */
+function textLength(text: string | null | undefined): number {
+  return (text ?? '').replace(/\s+/g, ' ').trim().length
 }

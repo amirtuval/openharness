@@ -1,10 +1,16 @@
+import { readFileSync } from 'node:fs'
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { createToolRegistry } from './registry'
 import { safeFetchResult, type AddressResolver, type SafeFetchOptions } from './safe-fetch'
-import { createWebFetchTool, WEB_FETCH_TOOL_NAME, WEB_FETCH_MAX_BYTES } from './web-fetch'
+import {
+  createWebFetchTool,
+  WEB_FETCH_TOOL_NAME,
+  WEB_FETCH_MAX_BYTES,
+  WEB_FETCH_MAX_RESULT_TOKENS,
+} from './web-fetch'
 import type { PageFetch } from './web-fetch'
 
 /**
@@ -148,6 +154,17 @@ function answering(
   }
 }
 
+/**
+ * A {@link PageFetch} that answers one canned `Response` and opens no socket.
+ *
+ * The guard's own behaviour is proven elsewhere by the loopback servers; what a test wants here
+ * is a response **body and headers** of its own — the bytes of a fixture, a content type with no
+ * charset — to drive the decode and cap paths.
+ */
+function inline(response: Response, url = 'http://page.example/'): PageFetch {
+  return () => Promise.resolve({ response, url })
+}
+
 const ARTICLE = `<!doctype html><html><head><title>The Article</title>
 <style>body { color: red }</style><script>steal()</script></head>
 <body><nav>Home · About</nav>
@@ -211,6 +228,32 @@ describe('web_fetch: the page it returns', () => {
     expect(result.isError).toBe(true)
     expect(result.text).toContain('404')
     expect(result.text).not.toContain('no such page')
+  })
+})
+
+describe('web_fetch: the charset of a page it reads', () => {
+  it('decodes a charset the page states in its own bytes when the response names none', async () => {
+    const bytes = readFileSync(new URL('./fixtures/windows-1255.html', import.meta.url))
+    const page = inline(
+      new Response(bytes, { headers: { 'content-type': 'text/html' } }),
+      'http://page.example/he',
+    )
+    const result = await call(page, { url: 'http://page.example/he' })
+    expect(result.isError).toBe(false)
+    expect(result.text).toContain('שלום עולם')
+    // Decoded as UTF-8 the Hebrew bytes would be replacement characters; they are not.
+    expect(result.text).not.toContain('�')
+  })
+
+  it('still lets a charset the header names win over the page’s own', async () => {
+    const bytes = readFileSync(new URL('./fixtures/windows-1255.html', import.meta.url))
+    // The same bytes, named UTF-8 by the header: the header wins, so the Hebrew mojibakes —
+    // which is the point, the header is the server's statement and it is read first.
+    const page = inline(
+      new Response(bytes, { headers: { 'content-type': 'text/html; charset=utf-8' } }),
+    )
+    const result = await call(page, { url: 'http://page.example/he' })
+    expect(result.text).not.toContain('שלום עולם')
   })
 })
 
@@ -299,14 +342,22 @@ describe('web_fetch: the limits it enforces', () => {
     expect(result.text).toContain('larger than')
   })
 
-  it('caps the output and says where it cut', async () => {
+  it('caps the output and says how much was left out, at the end', async () => {
     const body = 'y'.repeat(500)
     const server = await serving(answering(body, 'text/plain'))
     const result = await call(server.fetcher, { url: server.url }, { maxChars: 100 })
     expect(result.isError).toBe(false)
     expect(result.text).toContain('y'.repeat(100))
     expect(result.text).not.toContain('y'.repeat(101))
-    expect(result.text).toContain('truncated')
+    // The marker names both numbers and comes last — it is about everything above it.
+    expect(result.text).toContain('truncated: 100 of 500 characters shown')
+    expect(result.text.trimEnd().endsWith('the page was longer …]')).toBe(true)
+  })
+
+  it('declares how many tokens of a result a request keeps, and lets a host change it', () => {
+    expect(createWebFetchTool().maxResultTokens).toBe(WEB_FETCH_MAX_RESULT_TOKENS)
+    expect(WEB_FETCH_MAX_RESULT_TOKENS).toBe(16_384)
+    expect(createWebFetchTool({ maxResultTokens: 1_000 }).maxResultTokens).toBe(1_000)
   })
 
   it('is cut short by the call’s deadline, and says so', async () => {

@@ -2,3 +2,6 @@ dist
 coverage
 node_modules
 *.tsbuildinfo
+# Saved pages used by markdown-extraction.test.ts: real markup, read verbatim by the test — and
+# one is encoded windows-1255, which prettier would read as UTF-8 and mangle.
+src/fixtures
