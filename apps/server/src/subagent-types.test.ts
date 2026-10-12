@@ -257,8 +257,9 @@ describe('resolving a subagent type (#342)', () => {
         toolOverride: null,
         // This process's built-ins in the registry's order, with the provider-native
         // `web_search` the settings list beside them (#335). `ask_user` is among them because
-        // this is the type's tool set as a chat resolves it; a *child* is never offered it
-        // (epic #340, S1; #343), which is applied where the child's own turn is built.
+        // this is the type's tool set as a chat resolves it: a *child* is never offered it
+        // (epic #340, S1), which the loop applies from the session's own `interactive` flag —
+        // the child is created with it off, and this resolver does not decide it.
         tools: [
           ASK_USER_TOOL_NAME,
           WEB_FETCH_TOOL_NAME,

@@ -651,11 +651,12 @@ here.
   that patch **applied** to the owner's settings — the set the child really has — for a caller
   that builds the child's turn options itself. Policies are in neither: a policy is the user's
   (E6).
-- **A child is never offered `ask_user`** (epic #340, S1; #343) — a subagent cannot ask the
-  user, and its system prompt says so (`@openharness/brain`'s `SUBAGENT_SYSTEM_PROMPT`). That
-  is applied where the **child's** turn is built, not here: `ask_user` is in a type's tool set
-  because that is the set a chat on the type resolves to, and a deployment whose chat has it
-  has one that a child must not.
+- **A child is never offered `ask_user`** (epic #340, S1) — a subagent cannot ask the user, and
+  its system prompt says so (`@openharness/brain`'s `SUBAGENT_SYSTEM_PROMPT`). That is not this
+  resolver's: the loop reads the session's own `interactive` flag, which the child is created
+  with (`subagents/a1-tree-341`, `withoutAskUser` in `@openharness/brain`), so `ask_user` is in
+  a type's tool set because that is the set a chat on the type resolves to — and a session that
+  may not ask is offered none of it, whatever its type says.
 
 ## Tools and their settings (epic #303; #304; the built-ins: #305; the per-user settings: #307; pausing: #309)
 
