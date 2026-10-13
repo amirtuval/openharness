@@ -301,8 +301,24 @@ export function createSubagentHandlers(context: SubagentHandlerContext): Subagen
       await store.appendEvents(session.id, [
         { type: EVENT_TYPES.sessionTaskStatus, task_id: input.task_id, status: 'stopped' },
       ])
-      if (task.child_session_id !== undefined) {
-        runtime.signal?.(task.child_session_id, 'interrupt')
+      const childId = task.child_session_id
+      if (childId !== undefined) {
+        // The child's own log is where "this turn was stopped" lives (S7; #348), so the interrupt
+        // is written **before** the signal: the turn-end delivery then classifies the turn
+        // `stopped` wherever the abort lands — a request in flight, a tool step, or nothing at
+        // all — and reads exactly what a person's Stop, which appends the same event, reads.
+        //
+        // Only a child with a turn **open** is written to. An interrupt of an idle child claims a
+        // turn of its own that the delivery reads as an ordinary end — its interrupt sits before
+        // the claiming turn's `session.status_running` — so appending one for a helper that had
+        // already reported would answer the parent's `agent_stop` with a second, contradictory
+        // `idle`. The stop is still signalled either way.
+        if (await childTurnOpen(store, childId)) {
+          await ignoreMissing(() =>
+            store.appendEvents(childId, [{ type: EVENT_TYPES.userInterrupt }]),
+          )
+        }
+        runtime.signal?.(childId, 'interrupt')
       }
       return textResult(
         `Stopped ${input.task_id}. It will not run again unless you send it a message with ` +
@@ -407,10 +423,14 @@ export function childTaskParent(
 }
 
 /**
- * What a finished child turn says to its parent (S4), read off the child's own log.
+ * What a finished child turn says to its parent (S4/S7), read off the child's own log.
  *
  * One per turn, keyed by the turn's idle `seq`, and built from the last turn's events alone:
  *
+ * - the turn was **stopped** — a `user.interrupt` is in it, whether a person's Stop in a
+ *   frontend or the one `agent_stop` appends on the model's behalf — so the news is a `result`
+ *   saying so and the status beside it is `stopped`; read as `idle`, a card would show **done**
+ *   and the parent model would believe its helper had finished (S7; #348);
  * - the turn ended in an error — a `session.error` after the last status — so the news is
  *   `failed`, carrying what the provider said;
  * - otherwise the news is `result`, carrying the last reply the turn stored;
@@ -429,12 +449,26 @@ export interface ChildTurnDelivery {
   readonly text: string
   /** The key the append is idempotent on: `<child_session_id>:<idle seq>`. */
   readonly sourceKey: string
-  /** The status the parent's card moves to: `failed` for an errored turn, else `idle`. */
-  readonly status: Extract<TaskStatus, 'idle' | 'failed'>
+  /**
+   * The status the parent's card moves to: `failed` for an errored turn, `stopped` for one that
+   * was stopped, else `idle`.
+   */
+  readonly status: Extract<TaskStatus, 'idle' | 'failed' | 'stopped'>
 }
 
 /** The sentence a turn that ended with nothing to say is announced with. */
 export const EMPTY_TURN_RESULT = 'The helper finished a turn without saying anything.'
+
+/**
+ * The sentence a turn that was stopped is announced with (S7; #348).
+ *
+ * The status a stopped turn moves the card to is `stopped`, and the one word it is not is
+ * `done` — which is exactly what `idle` reads as, so the parent model would take a stopped
+ * helper for one that finished. The wording names the user because the stop is the user's:
+ * `agent_stop` is the model's own tool, but S7 and [`docs/api.md`](../../../docs/api.md) list it
+ * beside a card's Stop, and it is the user's work the model is stopping on their behalf.
+ */
+export const STOPPED_TURN_RESULT = 'The user stopped this subagent before it finished.'
 
 export function childTurnDelivery(
   events: readonly StoredEvent[],
@@ -445,6 +479,27 @@ export function childTurnDelivery(
     return null
   }
   const turn = events.slice(turnStartIndex(events, idle.index), idle.index)
+  const sourceKey = `${session.id}:${idle.seq}`
+  const reply = turn
+    .filter(
+      (event): event is Extract<StoredEvent, { type: 'agent.message' }> =>
+        event.type === EVENT_TYPES.agentMessage,
+    )
+    .at(-1)
+  const text = reply?.content.map((block) => block.text).join('') ?? ''
+  // A stop outranks a retryable failure beside it: the turn ended because it was stopped, which
+  // is the fact the parent has to act on, and whatever error preceded it was being retried.
+  if (turnWasStopped(turn)) {
+    return {
+      kind: 'result',
+      text:
+        text.length > 0
+          ? `${STOPPED_TURN_RESULT} Its partial output: ${text}`
+          : STOPPED_TURN_RESULT,
+      sourceKey,
+      status: 'stopped',
+    }
+  }
   const failed = turn.find(
     (event): event is Extract<StoredEvent, { type: 'session.error' }> =>
       event.type === EVENT_TYPES.sessionError,
@@ -453,23 +508,33 @@ export function childTurnDelivery(
     return {
       kind: 'failed',
       text: failed.error.message,
-      sourceKey: `${session.id}:${idle.seq}`,
+      sourceKey,
       status: 'failed',
     }
   }
-  const reply = turn
-    .filter(
-      (event): event is Extract<StoredEvent, { type: 'agent.message' }> =>
-        event.type === EVENT_TYPES.agentMessage,
-    )
-    .at(-1)
-  const text = reply?.content.map((block) => block.text).join('') ?? ''
   return {
     kind: 'result',
     text: text.length > 0 ? text : EMPTY_TURN_RESULT,
-    sourceKey: `${session.id}:${idle.seq}`,
+    sourceKey,
     status: 'idle',
   }
+}
+
+/**
+ * Whether the ended turn was stopped rather than finished (S7; #348).
+ *
+ * Two shapes and one fact. A `user.interrupt` in the turn is what a person's Stop leaves —
+ * appended by the route that accepts it, or by `agent_stop` on the user's behalf — and it is
+ * claimed by the span end it stopped or by the turn's idle event (P4). An `interrupted` span
+ * end is the same stop when the host aborted the turn with a signal and wrote no event for it
+ * (a hard delete's stopped descendants, a drain).
+ */
+function turnWasStopped(turn: readonly StoredEvent[]): boolean {
+  return turn.some(
+    (event) =>
+      event.type === EVENT_TYPES.userInterrupt ||
+      (event.type === EVENT_TYPES.modelRequestEnd && event.error?.type === 'interrupted'),
+  )
 }
 
 /** The turn-ending idle status a log's newest turn left, or `null` when nothing ended. */
@@ -602,6 +667,42 @@ async function inParent<T>(
 ): Promise<T | false> {
   try {
     return await write()
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return false
+    }
+    throw error
+  }
+}
+
+/**
+ * Write to a session that may have been deleted, and say nothing when it was.
+ *
+ * The same race {@link inParent} tolerates in the other direction: a **child** can be hard
+ * deleted on its own, so a parent-model tool that reaches down to one (`agent_stop`) finds
+ * nothing to talk to rather than failing the parent's turn over it. Any other failure is real
+ * and propagates.
+ */
+async function ignoreMissing(write: () => Promise<unknown>): Promise<void> {
+  try {
+    await write()
+  } catch (error) {
+    if (!(error instanceof SessionNotFoundError)) {
+      throw error
+    }
+  }
+}
+
+/**
+ * Whether a child has a turn open right now, tolerating one that is gone.
+ *
+ * The one question `agent_stop` asks before writing its interrupt into the child (S7; #348): a
+ * child that is idle has no turn for an interrupt to end, and a hard-deleted one has no log to
+ * write to at all.
+ */
+async function childTurnOpen(store: SessionStore, childId: SessionId): Promise<boolean> {
+  try {
+    return (await store.getTurnState(childId)).state !== 'idle'
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
       return false

@@ -359,9 +359,11 @@ W31 is the subagents pass (epic #340, S9; #346): the mock's `__agent__`, `__agen
 through its states — the type, the description and the status, the live line and the tokens the
 child's own stream feeds, the conversations between parent and child inline, the result folding
 in, the child opening as a chat under a breadcrumb, the sidebar nesting it, and Stop interrupting
-a child parked in `__hold__`. It also pins the two things no component test can: Settings → Tools
-lists the five subagent tools against the **real** registry (the fake registers three built-ins
-and no agent tools), and the card holds up in Light, Dim and Dark at 1280 and at 390.
+a child parked in `__hold__` — after which the card reads **stopped**, not `done`, because the
+reader's Stop is a `user.interrupt` and the brain announces that turn as a stop (S7; #348). It
+also pins the two things no component test can: Settings → Tools lists the five subagent tools
+against the **real** registry (the fake registers three built-ins and no agent tools), and the
+card holds up in Light, Dim and Dark at 1280 and at 390.
 
 ### What the pass needs on the stack
 

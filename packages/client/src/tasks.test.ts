@@ -179,10 +179,20 @@ describe('tasksFromEvents (#340, S4; #345)', () => {
     })
   })
 
-  it('is stopped when it was stopped', () => {
+  it('is stopped when it was stopped, result or not', () => {
     const log = [...opened, makeSessionTaskStatus(taskId, 'stopped', { seq: 6 })]
 
     expect(tasksFromEvents(log)[0]?.status).toBe('stopped')
+
+    // The shape a reader's Stop leaves (S7; #348): a `stopped` status **and** the `result` the
+    // brain delivers for the stopped turn. `done` is `idle` + a result alone — a stopped task has
+    // an answer `idle` cannot give, so the result never makes it read as finished.
+    const withNews = [...log, outcome(taskId, 'result', 'The user stopped this subagent.', 7)]
+
+    expect(tasksFromEvents(withNews)[0]).toMatchObject({
+      status: 'stopped',
+      result: { kind: 'result', text: 'The user stopped this subagent.' },
+    })
   })
 
   it('keeps an idle task that has told the parent nothing as running', () => {

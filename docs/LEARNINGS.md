@@ -1412,7 +1412,9 @@ the transcript — its activity line and its cost come from the **child's** stre
 arriving after the parent's log has gone quiet, and the scrollback is write-once (#208), so a
 card that settled early would keep a stale line and a missing cost for the life of the screen.
 That is the trade a running tool call already makes, and it is affordable here only because a
-chat holds a handful of cards (`apps/tui/src/components/transcript-view.tsx`).
+chat holds a handful of cards (`apps/tui/src/components/transcript-view.tsx`). The `stopped` half
+of the gap is closed by [#348](https://github.com/amirtuval/openharness/issues/348), in the brain
+rather than in the card — see the two entries below.
 
 **The reader's Stop on a task has no route that writes `stopped`, so the card says `done` — and
 the honest fix is a server rule, not a client lie.** `agent_stop` is a tool the _parent model_
@@ -1425,6 +1427,27 @@ stopped (its child is not running), so this is one word off rather than a false 
 recorded it instead of inventing a client-side "the reader pressed Stop" memory: the log is the
 state, and a card that disagreed with it would disagree with a reload
 ([#346](https://github.com/amirtuval/openharness/issues/346);
+`packages/brain/src/agents.ts`). [#348](https://github.com/amirtuval/openharness/issues/348) is the
+server rule it pointed at: the delivery reads the turn's own log and announces a stop the turn was
+stopped (see the entry below).
+
+**The stop is the child's own fact, so `agent_stop` has to write it into the child's log — and
+"which turn was stopped" has to be read from the turn, not from the session.** The obvious rule
+for #348 looked like "an interrupted turn delivers `stopped`", and the obvious place to look for
+the interrupt looked like the session's pending user events. Neither survives contact with the two
+ways a child is stopped. A `user.interrupt` that arrives while the child is **idle** is claimed by
+a turn of its own that ends immediately, so the event sits _before_ that turn's
+`session.status_running` — outside `turnStartIndex`'s window — and reading it would flip a card
+that had already finished back to `stopped`. What the delivery reads instead is the ended turn
+itself: a `user.interrupt` inside `[prev status, idle]`, or an `interrupted` span end (the abort a
+host sends with no event for it). That makes the _child's log_ the record of the stop, which is why
+`agent_stop` now appends a `user.interrupt` to the child before it signals — the same event a
+person's Stop appends, which is what makes them one kind of stop and one delivery — and why it
+appends only when the child has a turn **open** (`getTurnState`): an interrupt of an idle child
+claims a turn of its own whose delivery would announce a stop for work that had already finished.
+The notification stays keyed by `<child_session_id>:<idle seq>`, so a person's Stop and an
+`agent_stop` for one turn are one notification and one `stopped` status, and a later `agent_message`
+restarts it as `running` like any turn ([#370](https://github.com/amirtuval/openharness/issues/370);
 `packages/brain/src/agents.ts`).
 
 **A nested list with a count is a read per row, and there is no route that answers in one.** The

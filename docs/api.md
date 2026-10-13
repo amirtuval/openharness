@@ -247,7 +247,7 @@ a mode — the epic's S5):
 | `agent`         | `{ type, description, prompt }` | resolves the type, creates the child, writes `session.task_started` + a `running` status and answers the handle (`task_id`) at once. The tool's description lists the types |
 | `agent_message` | `{ task_id, text }`             | a `user.message` in the child: it steers a running child, and starts another turn on one that has already reported, with its context intact                                 |
 | `agent_wait`    | `{ task_ids?, timeout_s? }`     | the durable wait above                                                                                                                                                      |
-| `agent_stop`    | `{ task_id }`                   | interrupts the child and writes `session.task_status { status: "stopped" }`                                                                                                 |
+| `agent_stop`    | `{ task_id }`                   | writes `session.task_status { status: "stopped" }` and interrupts the child — a `user.interrupt` in its log when it has a turn open, and a signal either way                |
 
 A **child** is offered one more — `message_parent { text }` — which writes a `message`
 notification to its parent without ending its turn. Its final message reaches the parent anyway:
@@ -256,6 +256,17 @@ turn (`<child_session_id>:<idle seq>`), a turn that ended in an error as `failed
 provider's sentence, a turn that said nothing as a `result` saying so, and a turn that _paused_
 (did not end) as nothing at all. The `session.task_status` a card follows is the child's own:
 `running` when its turn opens, `idle`/`failed` with the news, `stopped` when it is stopped.
+
+**A stopped turn is announced as a stop.** A child turn that ended because of a `user.interrupt`
+— a person's Stop in a frontend, `oh`'s `/agents` → `s`, Esc in a child, or the interrupt
+`agent_stop` writes — delivers a `result` whose text says the user stopped the subagent (with
+whatever partial reply the turn had after it) and moves the parent's status to `stopped`, never
+`idle`. Read as `idle` the card would say **done** and the parent model would believe the helper
+finished, which is what S4's `stopped` signal and S7's "a card's Stop, `agent_stop`, or
+interrupting the child itself" are for (#348). The notification is keyed by the turn, so a stop
+and an `agent_stop` for the same turn are **one** notification and one status. A later
+`agent_message` (or a message a person sends the child) restarts it as `running`, as any turn
+does.
 
 - **A type** is one of the owner's modes that carries a `subagent_description`, or the built-in
   `general-purpose` — the parent's own model, effort and tool set in a fresh context. A child
@@ -266,9 +277,10 @@ provider's sentence, a turn that said nothing as a `result` saying so, and a tur
   acts on. A child parked in its own wait still counts as live.
 - **A handle this chat does not have is an `is_error`** — including another session's task id —
   and so is a type the resolver refuses, with a sentence naming what to do instead.
-- **An interrupt of the parent does not stop its children**; a card's Stop (`agent_stop`), the
-  child's own interrupt or a `DELETE` of the parent do. Rewinding past an `agent` call stops the
-  child that call started and drops its news, and deleting a session deletes its whole subtree.
+- **An interrupt of the parent does not stop its children**; a card's Stop, `agent_stop`, the
+  child's own interrupt or a `DELETE` of the parent do — and each of them leaves the child's
+  status `stopped`. Rewinding past an `agent` call stops the child that call started and drops
+  its news, and deleting a session deletes its whole subtree.
 - **`GET /v1/sessions/{session_id}/usage`** covers the tree: see [Usage and cost](#usage-and-cost).
 
 It may carry a `reasoning_effort` (`"low"`, `"medium"` or `"high"`) the same way: the effort

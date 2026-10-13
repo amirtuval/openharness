@@ -135,9 +135,12 @@ test.describe('cli subagents (#340, S9; #347)', () => {
       await terminal.waitFor(new RegExp(`running · ${TYPE}: __slow__`), 15_000)
       await terminal.screenshot(shot, 'a7-07-stop-before')
 
-      // `s` stops the highlighted task: one `user.interrupt` to the child session.
+      // `s` stops the highlighted task: one `user.interrupt` to the child session. The child's
+      // turn-end is then a **stop**, so the row reads `stopped` rather than the `done` an `idle`
+      // delivery would draw (S7; #348) — and the delivery is what the parent's log now holds.
       terminal.send('s')
       await terminal.waitFor(/Stopped general-purpose — its turn ended where it got to\./, 30_000)
+      await terminal.waitFor(new RegExp(`stopped · ${TYPE}: __slow__ think about it`), 30_000)
       await terminal.screenshot(shot, 'a7-08-stop-after')
 
       expectNoErrorNotice(terminal.capture(400))

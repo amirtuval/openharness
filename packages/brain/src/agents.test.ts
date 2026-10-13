@@ -24,6 +24,7 @@ import { z } from 'zod'
 
 import {
   EMPTY_TURN_RESULT,
+  STOPPED_TURN_RESULT,
   childTurnDelivery,
   childTaskParent,
   offeredSubagentTools,
@@ -157,6 +158,35 @@ async function childOf(
 /** Say something to a session, as a client would — a turn with nothing queued is a no-op. */
 async function say(store: InMemorySessionStore, sessionId: SessionId, text: string): Promise<void> {
   await store.appendEvents(sessionId, [message(text)])
+}
+
+/** A child session of `parent`, with a prompt of its own and a task the parent's log names. */
+async function childOfParent(
+  store: InMemorySessionStore,
+  parent: SessionId,
+  prompt = 'do the thing',
+): Promise<{ child: Session; taskId: TaskId }> {
+  const taskId = newTaskId()
+  const child = await store.createSession(null, {
+    ownerId: 'user_brain_tests',
+    interactive: false,
+    parentSessionId: parent,
+    parentTaskId: taskId,
+    model: { id: 'anthropic/claude-haiku-4-5' },
+    system: 'Be a helper.',
+    initial_events: [{ type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: prompt }] }],
+  })
+  await store.appendEvents(parent, [
+    {
+      type: EVENT_TYPES.sessionTaskStarted,
+      task_id: taskId,
+      kind: 'subagent',
+      child_session_id: child.id,
+      description: 'A helper',
+    },
+    { type: EVENT_TYPES.sessionTaskStatus, task_id: taskId, status: 'running' },
+  ])
+  return { child, taskId }
 }
 
 /** A turn on `sessionId`, with a subagent runtime wired and a registry that holds the five. */
@@ -446,37 +476,6 @@ describe('stopping a helper (S5/S7; #344)', () => {
 })
 
 describe('a child reaching its parent (S4/S5; #344)', () => {
-  /** A child session of `parent`, with a prompt of its own, as `agent` would have made one. */
-  async function childOfParent(
-    store: InMemorySessionStore,
-    parent: SessionId,
-    prompt = 'do the thing',
-  ): Promise<{ child: Session; taskId: TaskId }> {
-    const taskId = newTaskId()
-    const child = await store.createSession(null, {
-      ownerId: 'user_brain_tests',
-      interactive: false,
-      parentSessionId: parent,
-      parentTaskId: taskId,
-      model: { id: 'anthropic/claude-haiku-4-5' },
-      system: 'Be a helper.',
-      initial_events: [
-        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: prompt }] },
-      ],
-    })
-    await store.appendEvents(parent, [
-      {
-        type: EVENT_TYPES.sessionTaskStarted,
-        task_id: taskId,
-        kind: 'subagent',
-        child_session_id: child.id,
-        description: 'A helper',
-      },
-      { type: EVENT_TYPES.sessionTaskStatus, task_id: taskId, status: 'running' },
-    ])
-    return { child, taskId }
-  }
-
   it('offers a child message_parent, and runs it as a note the parent is told about', async () => {
     const { store, sessionId } = await newSession([message('start a helper')])
     const { runtime: deployment, signal } = runtime()
@@ -691,6 +690,64 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
     expect(childTurnDelivery([running, reply, paused], child)).toBeNull()
   })
 
+  it('reads a stopped turn as a stop, keeping what it had produced (S7; #348)', () => {
+    // The gap both UI PRs found: read as an ordinary `result`/`idle`, a stopped turn tells the
+    // parent model its helper finished and the card says **done**. The `user.interrupt` in the
+    // turn is the stop — a person's Stop, or the one `agent_stop` writes — and the delivery is
+    // the stopped variant, with whatever the child had said so far still in reach.
+    const child = { id: 'sesn_child' as SessionId }
+    const running = {
+      id: 'sevt_0',
+      type: EVENT_TYPES.sessionStatusRunning,
+      seq: 1,
+      processed_at: null,
+    } as unknown as StoredEvent
+    const reply = {
+      id: 'sevt_2',
+      type: EVENT_TYPES.agentMessage,
+      seq: 2,
+      processed_at: null,
+      content: [{ type: 'text', text: 'Half a report.' }],
+    } as unknown as StoredEvent
+    const idle = {
+      id: 'sevt_1',
+      type: EVENT_TYPES.sessionStatusIdle,
+      seq: 4,
+      processed_at: null,
+      stop_reason: { type: 'end_turn' },
+    } as unknown as StoredEvent
+    const interrupt = {
+      id: 'sevt_i',
+      type: EVENT_TYPES.userInterrupt,
+      seq: 3,
+      processed_at: null,
+    } as unknown as StoredEvent
+
+    expect(childTurnDelivery([running, reply, interrupt, idle], child)).toEqual({
+      kind: 'result',
+      text: `${STOPPED_TURN_RESULT} Its partial output: Half a report.`,
+      sourceKey: 'sesn_child:4',
+      status: 'stopped',
+    })
+
+    // A turn aborted by a signal with no user event written for it — what `agent_stop` sends the
+    // child — records the same stop as an `interrupted` span end.
+    const aborted = {
+      id: 'sevt_s',
+      type: EVENT_TYPES.modelRequestEnd,
+      seq: 3,
+      processed_at: null,
+      error: { type: 'interrupted', message: 'The request was interrupted.' },
+    } as unknown as StoredEvent
+
+    expect(childTurnDelivery([running, aborted, idle], child)).toEqual({
+      kind: 'result',
+      text: STOPPED_TURN_RESULT,
+      sourceKey: 'sesn_child:4',
+      status: 'stopped',
+    })
+  })
+
   it('delivers once: a second turn on an idle child writes nothing more', async () => {
     const { store, sessionId } = await newSession([message('start a helper')])
     const { runtime: deployment } = runtime()
@@ -728,6 +785,103 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
     expect(outcome).toEqual({ outcome: 'noop' })
     expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification)).toHaveLength(1)
     expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus)).toHaveLength(statuses)
+  })
+
+  it('announces a turn a person stopped as stopped, once, and a later message restarts it (S7; #348)', async () => {
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const { child, taskId } = await childOfParent(store, sessionId)
+
+    // A person's Stop while the child's turn is streaming — exactly what the web card's Stop,
+    // `oh`'s `/agents` → `s` and Esc in a child do: the route appends the `user.interrupt` and
+    // signals the abort, and the span end it stopped claims the event (P4).
+    const controller = new AbortController()
+    const stopped = mockModel({
+      text: ['Half a ', 'report.'],
+      onChunk: async (_chunk, index) => {
+        if (index === 0) {
+          await store.appendEvents(child.id, [{ type: EVENT_TYPES.userInterrupt }])
+          controller.abort()
+        }
+      },
+    })
+    const outcome = await runTurn(child.id, {
+      store,
+      model: stopped.factory,
+      resolveCredential: resolveTestCredential,
+      subagents: deployment,
+      signal: controller.signal,
+    })
+    expect(outcome.outcome).toBe('interrupted')
+
+    // One notification **for that turn**, plainly a stop rather than a completion, beside the
+    // status a card follows: `stopped`, which reads as stopped and not as **done** (S9).
+    const notifications = of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification)
+    expect(notifications).toHaveLength(1)
+    expect(notifications[0]).toMatchObject({ task_id: taskId, kind: 'result' })
+    expect(notifications[0]?.text).toContain(STOPPED_TURN_RESULT)
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
+      'stopped',
+    )
+
+    // A second turn on the stopped child — what the store's work scan runs for one whose news had
+    // not landed — delivers the same key again, which the store folds: still one notification, and
+    // no model request, because there is nothing to ask.
+    await turn(store, child.id, [{ text: ['unused'] }], deployment)
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification)).toHaveLength(1)
+
+    // A later message restarts it as usual: the stop is not a tombstone (S7).
+    await say(store, child.id, 'keep going')
+    await turn(store, child.id, [{ text: ['Second wind.'] }], deployment)
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
+      'idle',
+    )
+  })
+
+  it('writes the stop into the child’s log, so `agent_stop` and a person’s Stop are one (S7; #348)', async () => {
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment, signal } = runtime()
+    await turn(store, sessionId, [{ toolCalls: [START] }, { text: ['Started.'] }], deployment)
+    const log = await logOf(store, sessionId)
+    const taskId = of(log, EVENT_TYPES.sessionTaskStarted)[0]?.task_id as TaskId
+    const child = await childOf(store, log, sessionId)
+
+    // The child is working when both stops happen: a person interrupts it, and the parent model
+    // then calls `agent_stop` on the same task.
+    await store.appendEvents(child.id, [
+      { type: EVENT_TYPES.sessionStatusRunning },
+      { type: EVENT_TYPES.userInterrupt },
+    ])
+    await say(store, sessionId, 'stop it')
+    await turn(
+      store,
+      sessionId,
+      [
+        { toolCalls: [{ name: AGENT_STOP_TOOL_NAME, input: { task_id: taskId } }] },
+        { text: ['Stopped.'] },
+      ],
+      deployment,
+    )
+    // The model's stop is written the same way a person's is — a `user.interrupt` in the child's
+    // own log — which is what makes them one kind of stop and one delivery.
+    expect(signal).toHaveBeenCalledWith(child.id, 'interrupt')
+    expect(of(await logOf(store, child.id), EVENT_TYPES.userInterrupt)).toHaveLength(2)
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
+      'stopped',
+    )
+
+    // The child's turn ends on those interrupts, and the parent is told **once**: one stopped
+    // result keyed by the turn, and no second, contradictory status.
+    const { outcome, model } = await turn(store, child.id, [{ text: ['unused'] }], deployment)
+    expect(outcome.outcome).toBe('interrupted')
+    expect(model.calls).toHaveLength(0)
+    const notifications = of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification)
+    expect(notifications).toHaveLength(1)
+    expect(notifications[0]).toMatchObject({ task_id: taskId, kind: 'result' })
+    expect(notifications[0]?.text).toContain(STOPPED_TURN_RESULT)
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
+      'stopped',
+    )
   })
 
   it('is what an idle child with an undelivered turn wakes up for (S4; #344)', async () => {
@@ -776,6 +930,64 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
     const notification = of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification)[0]
     expect(notification).toMatchObject({ task_id: taskId, kind: 'result', text: 'I am done.' })
     expect(signal).toHaveBeenCalledWith(sessionId, 'work')
+  })
+
+  it('delivers the stopped variant when the turn an idle child owes was stopped (S7; #348)', async () => {
+    // The same recovery, one fact different: the turn that ended and was never announced was a
+    // **stopped** turn. The delivery reads the turn's own log, so what a crash between the turn
+    // and its news costs is the stopped announcement the reader and the model would have had —
+    // not an `idle` that says the helper finished.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment, signal } = runtime()
+    const taskId = newTaskId()
+    const child = await store.createSession(null, {
+      ownerId: 'user_brain_tests',
+      interactive: false,
+      parentSessionId: sessionId,
+      parentTaskId: taskId,
+      model: { id: 'anthropic/claude-haiku-4-5' },
+      initial_events: [
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'work' }] },
+      ],
+    })
+    await store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.sessionTaskStarted,
+        task_id: taskId,
+        kind: 'subagent',
+        child_session_id: child.id,
+        description: 'A helper',
+      },
+    ])
+    const promptId = of(await logOf(store, child.id), EVENT_TYPES.userMessage)[0]?.id
+    await store.appendEvents(child.id, [
+      { type: EVENT_TYPES.sessionStatusRunning },
+      { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text: 'Half a report.' }] },
+    ])
+    const [interrupt] = await store.appendEvents(child.id, [{ type: EVENT_TYPES.userInterrupt }])
+    await store.appendEvents(child.id, [
+      {
+        type: EVENT_TYPES.sessionStatusIdle,
+        stop_reason: { type: 'end_turn' },
+        consumes: [promptId as EventId, interrupt?.id as EventId],
+      },
+    ])
+
+    const { outcome, model } = await turn(store, child.id, [{ text: ['unused'] }], deployment)
+    expect(outcome).toEqual({ outcome: 'noop' })
+    expect(model.calls).toHaveLength(0)
+    const notification = of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification)[0]
+    expect(notification).toMatchObject({ task_id: taskId, kind: 'result' })
+    expect(notification?.text).toContain(STOPPED_TURN_RESULT)
+    expect(notification?.text).toContain('Half a report.')
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
+      'stopped',
+    )
+    expect(signal).toHaveBeenCalledWith(sessionId, 'work')
+
+    // Exactly once: a second turn on the child writes the same key again, which the store folds.
+    await turn(store, child.id, [{ text: ['unused'] }], deployment)
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification)).toHaveLength(1)
   })
 })
 

@@ -855,11 +855,13 @@ the web app does, in the transcript, where the `agent` call that started it was.
   reader is about to see on the card anyway.
 - **Stop is one `user.interrupt` to the child session**, which is the only stop a person has —
   `agent_stop` is the parent _model's_ tool and a reader cannot call one. It ends the child's
-  turn where it got to and leaves its chat to be continued from, and the card then says what the
-  log says that turn ended as. **This is a gap in the epic's UX, not a choice** (#347): the
-  child's turn-end delivery is a `result` with status `idle` (the brain writes `stopped` only
-  for its own `agent_stop`), so a task the reader stopped reads **done**, and the parent model is
-  told the helper finished. The card is the log's, and the frontend does not invent a state.
+  turn where it got to and leaves its chat to be continued from, and the card then reads
+  **stopped**: the brain's child-turn delivery announces a turn that ended on an interrupt as a
+  `result` whose text says the user stopped the helper, with `session.task_status { stopped }`
+  beside it (S7; #348). It used to announce every ended turn as `idle`, so a task the reader
+  stopped read **done** and the parent model was told the helper finished — the gap #347 recorded,
+  fixed in the brain rather than in the card, because a card is the log's and a frontend drawing
+  a state the log does not hold would be a lie the next reader inherits.
 - **A child is a full chat.** `oh` opens one as any other session (an `oh -s` away, and reached
   from `/agents`), with the normal composer — typing steers it, as `agent_message` does — and a
   **breadcrumb** line above the input section (`components/breadcrumb.tsx`) naming the chain from

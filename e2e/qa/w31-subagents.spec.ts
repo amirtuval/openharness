@@ -206,14 +206,14 @@ test.describe('W31 subagents', () => {
       await shotOf(card(page), 'w31-06-task-running')
     })
 
-    await test.step('Stop interrupts the child', async () => {
+    await test.step('Stop interrupts the child, and the card reads stopped', async () => {
       await task.locator('[data-slot="task-stop"]').click()
 
-      // The child's turn ends, and the brain announces every ended child turn as a `result` with
-      // `status: idle` — so the card reads **done**. `stopped` is what `agent_stop` writes, a
-      // tool only the parent *model* calls; a reader's Stop has no route that writes it. The
-      // task has really stopped (its child is not running), and #346's PR records the gap.
-      await expect(task.locator('[data-slot="task-status"]')).not.toHaveText('running')
+      // The child's turn ends because of the reader's `user.interrupt`, so the brain announces it
+      // as a **stop** — `status: stopped` and a result that says the user stopped the helper
+      // (S7; #348). Read as `idle`, the card would say **done** and the parent model would believe
+      // the helper finished, which is the gap #346 and #347 both recorded.
+      await expect(task.locator('[data-slot="task-status"]')).toHaveText('stopped')
       await expect(task.locator('[data-slot="task-stop"]')).toHaveCount(0)
       await expectNoErrorBanner(page)
       await shotOf(card(page), 'w31-07-task-stopped')

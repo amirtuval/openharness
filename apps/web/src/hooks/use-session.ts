@@ -179,13 +179,11 @@ export interface SessionView {
    * is the child's `user.interrupt` — which is exactly what a person may do to a non-interactive
    * session (S1).
    *
-   * **What the card reads afterwards is `done`, not `stopped`.** A child's interrupted turn ends
-   * like any other turn ends, and the brain's child-turn delivery announces every ended turn as a
-   * `result` notification with `status: idle` (`packages/brain/src/agents.ts`'s
-   * `childTurnDelivery`) — `stopped` is written by `agent_stop` alone. The task really has stopped
-   * (its child is not running), so the card's status is a word off rather than a wrong fact; the
-   * gap is recorded in this issue's PR rather than papered over here, because closing it means a
-   * server-side rule about what an interrupt of a child means.
+   * **What the card reads afterwards is `stopped`.** A child's interrupted turn ends like any
+   * other turn ends, and the brain's child-turn delivery announces one as a **stop**
+   * (`packages/brain/src/agents.ts`'s `childTurnDelivery`): a `result` saying the user stopped the
+   * helper, with `session.task_status { stopped }` beside it (S7; #348). The card follows the
+   * parent's log through `tasksFromEvents`, so it reads `stopped` with no rule of its own.
    */
   readonly stopTask: (childSessionId: string) => Promise<void>
   /**

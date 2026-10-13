@@ -856,15 +856,16 @@ inline message are called. Nothing is stored twice — a card is the log plus th
   (`TASK_MESSAGE_MAX_LINES`, the same number `oh` uses). The task's latest turn folds in behind a
   disclosure — "Result", or "Failed — what it said" — which is where a card that has finished says
   what came of it.
-- **Stop is the child's interrupt, and the card's status after it is `done`.** `agent_stop` is a
+- **Stop is the child's interrupt, and the card's status after it is `stopped`.** `agent_stop` is a
   tool the _parent model_ calls, and no client may write a `session.task_status`, so the reader's
   Stop is the `user.interrupt` the child's own session takes — which is exactly what a person may
   do to a non-interactive session (S1: "non-interactive" is about the model asking, not about the
-  reader being locked out). A child's interrupted turn then ends like any other, and the brain
-  announces every ended turn as a `result` notification with `status: idle`
-  (`packages/brain/src/agents.ts`'s `childTurnDelivery`) — so the card reads **done**, not
-  `stopped`, which only `agent_stop` writes. The task really has stopped; the word is one off, and
-  the gap is recorded in #346's PR rather than papered over here.
+  reader being locked out). The brain's child-turn delivery announces such a turn as a **stop**
+  (`packages/brain/src/agents.ts`'s `childTurnDelivery`): a `result` whose text says the user
+  stopped the helper, with `session.task_status { stopped }` beside it (S7; #348). It used to
+  announce every ended turn as `idle`, so the card read **done** and the parent model was told the
+  helper finished — the gap #346's PR recorded, closed in the brain rather than in the card,
+  because a card that disagreed with the log would disagree with a reload.
 - **A child opens as a full chat** (`subagent-header.tsx` + the ordinary `ChatView`). A child is a
   real session, so `#/s/<child>` is already a full chat — its own header, transcript and composer,
   which is how a reader steers, interrupts and continues one. What it adds is the strip above the
