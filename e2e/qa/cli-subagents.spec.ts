@@ -1,6 +1,6 @@
 import type { APIRequestContext } from '@playwright/test'
 
-import { ensureDefaultModel, expect, test } from './support'
+import { ensureDefaultModel, expect, shot, test } from './support'
 import { ensureCliSignedIn, expectNoErrorNotice, ohCommand, Terminal } from './tmux'
 
 /**
@@ -151,6 +151,118 @@ test.describe('cli subagents (#340, S9; #347)', () => {
     }
   })
 
+  test('a helper is nested: oh sessions lists the chat, not the child (A12)', async ({
+    context,
+    request,
+  }) => {
+    const terminal = new Terminal('oh-qa-a7d', 120, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+
+    try {
+      const parentHandle = (await startChat(terminal, request)).slice(-6)
+      send(terminal, `__agent__ ${TYPE} | ${PROMPT}`)
+      await terminal.waitFor(new RegExp(`● done · ${TYPE}`), 90_000)
+      const parent = await newestSession(request)
+
+      // The child is a real session, but not a chat of its own: `oh sessions` — which reads
+      // `GET /v1/sessions` with no parent filter — shows the chat that started it and not it
+      // (S3, S12's web half is the sidebar's).
+      const listed = ohSessions(request)
+      expect(await listed).toContain(` ${parentHandle}`)
+      const children = await childrenOf(request, parent)
+      expect(children.length, 'the helper exists as a session').toBe(1)
+      for (const child of children) {
+        expect(await listed, 'the helper is not a top-level chat').not.toContain(child.slice(-6))
+      }
+      await terminal.screenshot(shot, 'a8-01-oh-sessions-nested')
+      expectNoErrorNotice(terminal.capture(400))
+      await quit(terminal)
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
+  test('the two clients agree: a helper started in oh is on the web, and back (A15)', async ({
+    context,
+    request,
+  }) => {
+    const terminal = new Terminal('oh-qa-a7e', 120, 30)
+    const web = await context.newPage()
+    await ensureCliSignedIn(web)
+    terminal.start()
+
+    try {
+      await startChat(terminal, request)
+      send(terminal, `__agent__ ${TYPE} | ${PROMPT}`)
+      await terminal.waitFor(new RegExp(`● done · ${TYPE}`), 90_000)
+      const parent = await newestSession(request)
+      const child = (await childrenOf(request, parent))[0]
+      expect(child, 'oh started a helper').toBeDefined()
+
+      // A helper started from the terminal is a card on the web, and the card opens its child as
+      // a full chat — both clients read the same log, so both show the same thing (S9).
+      await web.goto(`/#/s/${parent}`)
+      const card = web.locator('[data-slot="task-card"]').first()
+      await expect(card).toBeVisible()
+      await expect(card).toHaveAttribute('data-type', TYPE)
+      await expect(card.locator('[data-slot="task-status"]')).toHaveText('done')
+      await shot(web, 'a8-02-web-card-from-oh')
+      await card.getByRole('link', { name: 'Open' }).click()
+      await expect(web).toHaveURL(new RegExp(child ?? ''))
+      await expect(web.locator('[data-slot="subagent-header"]')).toBeVisible()
+      await shot(web, 'a8-03-web-child-from-oh')
+
+      // …and the other way: the same chat, opened in `oh`, draws the same card for it.
+      send(terminal, '/agents')
+      await terminal.waitFor(/Agents/, 15_000)
+      await terminal.waitFor(
+        new RegExp(`done · ${TYPE}: __slow__|done · ${TYPE}: ${PROMPT}`),
+        15_000,
+      )
+      await terminal.screenshot(web, 'a8-04-oh-agents-same-task')
+      expectNoErrorNotice(terminal.capture(400))
+      await quit(terminal)
+    } finally {
+      terminal.kill()
+      await web.close()
+    }
+  })
+
+  test('the card and /agents hold at 120 and at 80 columns (A16)', async ({ context, request }) => {
+    const terminal = new Terminal('oh-qa-a7f', 120, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+
+    try {
+      await startChat(terminal, request)
+      send(terminal, `__agent__ ${TYPE} | ${PROMPT}`)
+      await terminal.waitFor(new RegExp(`● done · ${TYPE}`), 90_000)
+      await terminal.screenshot(shot, 'a8-05-card-120')
+
+      send(terminal, '/agents')
+      await terminal.waitFor(/Agents/, 15_000)
+      await terminal.screenshot(shot, 'a8-06-agents-120')
+
+      // Narrower than the card's own line: it has to wrap rather than be cut off — the card is
+      // chrome the reader still has to be able to read at a small terminal (S9).
+      terminal.resize(80, 30)
+      await terminal.waitFor(/Agents/, 15_000)
+      await terminal.screenshot(shot, 'a8-07-agents-80')
+      terminal.send('Escape')
+      await terminal.waitUntil((screen) => !screen.includes('Esc done'), 10_000)
+      await terminal.screenshot(shot, 'a8-08-card-80')
+      expectNoErrorNotice(terminal.capture(400))
+      await quit(terminal)
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
   test('oh modes marks a subagent type and shows its description', async ({ context, request }) => {
     // Wide enough that the description is one line: a terminal wraps a long line at column 0,
     // which would split the sentence the assertion is about.
@@ -232,6 +344,32 @@ async function quit(terminal: Terminal): Promise<void> {
   terminal.send('C-c')
   await terminal.waitFor(/Resume this session with: oh -s sesn_[A-Z0-9]+/, 15_000)
   await terminal.waitForShellPrompt()
+}
+
+/** The full id of the newest chat — the one `oh` is showing as a shortened handle. */
+async function newestSession(request: APIRequestContext): Promise<string> {
+  const response = await request.get('/v1/sessions', { params: { limit: 1 } })
+  expect(response.status(), await response.text()).toBe(200)
+  const body = (await response.json()) as { data: { id: string }[] }
+  return body.data[0]?.id ?? ''
+}
+
+/** One session's children, through the read the sidebar's nesting makes (S3). */
+async function childrenOf(request: APIRequestContext, parentId: string): Promise<string[]> {
+  const response = await request.get('/v1/sessions', {
+    params: { limit: 100, parent_session_id: parentId },
+  })
+  expect(response.status(), await response.text()).toBe(200)
+  const body = (await response.json()) as { data: { id: string }[] }
+  return body.data.map((session) => session.id)
+}
+
+/** What `oh sessions` would list: every top-level chat, newest first, as shortened handles. */
+async function ohSessions(request: APIRequestContext): Promise<string> {
+  const response = await request.get('/v1/sessions', { params: { limit: 100 } })
+  expect(response.status(), await response.text()).toBe(200)
+  const body = (await response.json()) as { data: { id: string }[] }
+  return body.data.map((session) => ` ${session.id.slice(-6)}`).join(' ')
 }
 
 /** Create a mode that carries a description — a **subagent type** (epic #340, S2; #342). */
