@@ -56,6 +56,7 @@ function fakeContext(session: ChatSession) {
     exits: 0,
     mcp: 0,
     tools: 0,
+    skills: 0,
     notices: [] as { readonly kind: string; readonly text: string }[],
   }
   const context: CommandContext = {
@@ -74,6 +75,9 @@ function fakeContext(session: ChatSession) {
     },
     openToolSettings: () => {
       calls.tools += 1
+    },
+    openSkills: () => {
+      calls.skills += 1
     },
     compact: (instructions) => {
       calls.compactions.push(instructions)
@@ -96,7 +100,7 @@ function fakeContext(session: ChatSession) {
 async function run(name: string, context: CommandContext, args = ''): Promise<void> {
   const command = findCommand(name)
   if (command === undefined) throw new Error(`the registry lost /${name}`)
-  await command.run(context, args)
+  await command.run?.(context, args)
 }
 
 describe('parseChatInput', () => {
