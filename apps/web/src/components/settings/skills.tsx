@@ -124,7 +124,7 @@ export function SkillsCard({ skills }: { skills: SkillsView }) {
 
         {skills.loading ? (
           <p className="text-sm text-muted-foreground">Loading your skills…</p>
-        ) : skills.skills.length === 0 ? (
+        ) : skills.skills.length === 0 && !importing ? (
           <p className="text-sm text-muted-foreground">
             No skills yet. Import one from a public repository —{' '}
             <code className="font-mono">https://github.com/anthropics/skills</code> is a place to

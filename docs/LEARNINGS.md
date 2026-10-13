@@ -1142,6 +1142,41 @@ repositories actually have — a `SKILL.md` at the root beside a `skills/` direc
 every other skill's files twice, or blow the K4 limits doing it
 ([#364](https://github.com/amirtuval/openharness/pull/364)).
 
+**The import route takes `https://` and nothing else, so the repo's own git fixture cannot be imported through it.**
+`createGitFixture` (`@openharness/hands/testing`) serves a real repository over **smart HTTP on
+loopback** — `http://127.0.0.1:<port>/skills.git` — because that is what makes a clone testable
+offline, and `parseGitUrl` refuses any scheme but `https` (K3: "a public `https://` git URL"). A
+hands-on pass against the real server therefore cannot hand the fixture's own URL to the import
+route: it is answered with the 400 `A skill is imported from an \`https://\` git URL.` before a clone
+is ever attempted. The way through is a TLS-terminating proxy in front of the fixture with a
+certificate the server trusts (`NODE_EXTRA_CA_CERTS`) and
+`OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1`, which is what `e2e/qa/w30-skills.spec.ts` does — and
+when that is too much machinery, the pass imports from a real public repository instead and proves
+the real path over the network instead of over loopback
+([#353](https://github.com/amirtuval/openharness/issues/353)).
+
+**A mock stack chats without a key but still shows the first-run screen, so a hands-on pass has to seed a credential.**
+`OPENHARNESS_TEST_MODEL=mock` swaps the model factory and `resolveMockCredential` answers for every
+session, so a turn needs no provider key — but the root route's gate is the **credentials list**, and
+an account that holds none gets "Let's get you chatting ✨" instead of a composer, whatever its
+`default_model` preference says. Saving a key through the API is not an option either: `PUT
+/v1/provider-credentials` validates with one real provider call. The pass writes the row the route
+would write, with the server's own `sealCredential`/`credentialUpsert` and the stack's
+`OPENHARNESS_SECRETS_KEY` — the approach `e2e/src/harness/credentials.ts` already documents, which
+means a QA stack that is going to be driven by browser automation needs its secrets key **fixed** at
+start-up rather than generated per boot
+([#353](https://github.com/amirtuval/openharness/issues/353)).
+
+**A screenshot pass has to set the theme the way the app does, and re-build the view after every reload.**
+Setting `data-theme` (or the `localStorage` cache) from the page looks like it works and does not:
+the app reads the reader's preferences and repaints once they arrive, so the capture races a value
+that is about to be overwritten — and the account's stored theme is the only thing that really
+decides it. Writing it through `PUT /v1/me/preferences` and reloading is both correct and the flow
+a person uses, but the reload drops whatever state the view was showing (an open import preview, a
+refresh diff), so each capture re-establishes the view with a real interaction. Two screenshots of
+the same screen in two themes are otherwise two different screens
+([#353](https://github.com/amirtuval/openharness/issues/353)).
+
 ## The HTTP layer
 
 **A route whose path parameter may hold slashes is written `:path{.+}`, not `*` — Hono 4 does not
