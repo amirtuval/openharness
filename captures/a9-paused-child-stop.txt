@@ -1,0 +1,17 @@
+#373 — a subagent parked in `agent_wait`, stopped three ways (mock stack, AFTER the fix).
+
+agent_stop on a child parked in agent_wait:
+  parent task statuses: ['running', 'running', 'stopped', 'running', 'stopped']   newest: stopped
+  notification(s): [('result', 'The user stopped this subagent before it finished.')]
+  child session: idle  child log tail: ['session.status_running', 'agent.tool_result', 'session.status_idle']
+
+a person's Stop (user.interrupt) on the same child:
+  parent task statuses: ['running', 'running', 'running', 'stopped']   newest: stopped
+  notification(s): [('result', 'The user stopped this subagent before it finished.')]
+  child session: idle  child log tail: ['session.status_running', 'agent.tool_result', 'session.status_idle']
+
+a rewind past the agent call that started it:
+  parent task statuses: ['stopped', 'running', 'stopped']   newest: stopped
+  notification(s): [('result', 'The user stopped this subagent before it finished.')]
+  child session: idle  child log tail: ['session.status_running', 'agent.tool_result', 'session.status_idle']
+

@@ -1,0 +1,15 @@
+A13 hands-on (mock stack), server restarted by SIGKILL + a fresh process.
+
+=== case 1: a kill inside the child's own turn ===
+child is streaming; killing the server now
+   8 session.task_started {"kind": "subagent"}
+   9 session.task_status {"status": "running"}
+   11 session.task_status {"status": "running"}
+   22 session.task_status {"status": "running"}
+   23 session.task_notification {"kind": "result", "text": "part 1/40 part 2/40 part 3/40 part 4/40 part 5/40 part 6/40 part 7/40 pa
+   24 session.task_status {"status": "idle"}
+
+=== case 2: a kill while the parent is parked in agent_wait ===
+parent is waiting (status: idle ); killing the server now
+   wait resolved once: [{"text": "The wait timed out before any of these tasks reported. Still running: none of them. Wait again if you still need them, or carry on without them.", "t
+   results for the wait call: 1
