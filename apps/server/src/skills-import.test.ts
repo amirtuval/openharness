@@ -5,6 +5,7 @@ import {
   SKILL_MD_FILENAME,
   SKILL_MD_MAX_BYTES,
   SkillSchema,
+  skillSettingsOf,
   type ApiErrorBody,
   type GetSkillResponse,
   type RefreshSkillPreviewResponse,
@@ -465,6 +466,45 @@ describe.skipIf(!GIT)('skill import (epic #349, K3)', () => {
     // And the size reported is the byte length of what was stored, not of the file in git.
     const tone = await test.request(`${SKILLS}/${release.id}/files/reference/tone.md`)
     expect((await tone.json()) as unknown).toMatchObject({ path: 'reference/tone.md', size: 10 })
+  })
+
+  it('keeps an argument-hint exactly as the file wrote it, in every spelling (#354)', async () => {
+    // The Agent Skills format and Claude Code both write a bracketed placeholder. `[version]`
+    // is a YAML flow sequence, and `[pr-number] [priority]` is not valid YAML at all — a skill
+    // written for Claude Code has to import unchanged and show the hint as typed.
+    const repo = await fixture({
+      'flow/SKILL.md': '---\nname: flow\ndescription: d\nargument-hint: [version]\n---\n\nB.\n',
+      'two/SKILL.md':
+        '---\nname: two\ndescription: d\nargument-hint: [pr-number] [priority]\n---\n\nB.\n',
+      'quoted/SKILL.md':
+        '---\nname: quoted\ndescription: d\nargument-hint: "[version]"\n---\n\nB.\n',
+      'plain/SKILL.md': '---\nname: plain\ndescription: d\nargument-hint: version\n---\n\nB.\n',
+      'none/SKILL.md': '---\nname: none\ndescription: d\n---\n\nB.\n',
+    })
+    const test = appWith(repo.url)
+    const { body } = await preview(test, { url: 'https://github.com/example/skills' })
+
+    // None of them is a frontmatter a reader has to fix: the bracket spelling is the format's.
+    for (const entry of body.candidates) {
+      expect(entry.problems).toEqual([])
+    }
+
+    const stored = await importSkills(test, {
+      url: 'https://github.com/example/skills',
+      commit_sha: body.commit_sha,
+      names: ['flow', 'two', 'quoted', 'plain', 'none'],
+    })
+    expect(stored.status).toBe(201)
+    const byName = new Map(
+      (stored.body.data ?? []).map((skill) => [skill.name, SkillSchema.parse(skill)]),
+    )
+    const hint = (name: string): string | null => skillSettingsOf(byName.get(name)!).argumentHint
+    expect(hint('flow')).toBe('[version]')
+    expect(hint('two')).toBe('[pr-number] [priority]')
+    // A quoted value is a string YAML answered with, so its own quotes are not the hint.
+    expect(hint('quoted')).toBe('[version]')
+    expect(hint('plain')).toBe('version')
+    expect(hint('none')).toBeNull()
   })
 
   it('refuses an import whose ref moved since the preview, storing nothing', async () => {

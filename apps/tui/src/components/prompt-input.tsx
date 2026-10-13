@@ -1,3 +1,4 @@
+import { slashEnterAction, type SlashMenuRow } from '@openharness/client'
 import { Box, Text, useInput, usePaste } from 'ink'
 import { useRef, useState } from 'react'
 
@@ -130,9 +131,11 @@ export interface PromptInputProps {
  * With a {@link PromptInputProps.commands} registry, a buffer that starts with `/` and has
  * no whitespace in it yet is a command being typed, and the menu appears under the prompt
  * (#207): ↑/↓ highlight — they do not walk the history while it is up — Tab completes the
- * highlighted command into the buffer, Enter runs it, and Esc closes the menu and leaves the
- * text alone. The prompt decides none of what a command *is*: it submits the name, and the
- * screen parses the line against the same registry.
+ * highlighted command into the buffer, Enter does what the client's shared rule says
+ * (`slashEnterAction`, K7; #354) — a built-in the line names in full runs, a skill (or a name
+ * still being typed) is completed to `/name ` so its arguments can follow — and Esc closes the
+ * menu and leaves the text alone. The prompt decides none of what a command *is*: it submits
+ * the name, and the screen parses the line against the same registry.
  */
 export function PromptInput({
   onSubmit,
@@ -207,6 +210,13 @@ export function PromptInput({
   const highlighted = (rows: readonly ChatCommand[]): ChatCommand | undefined =>
     rows[clamp(menuRef.current.index, 0, rows.length - 1)]
 
+  /** The highlighted row as the shared Enter rule reads it, or `undefined` when the menu is not up. */
+  const highlightedRow = (rows: readonly ChatCommand[] | null): SlashMenuRow | undefined => {
+    if (rows === null) return undefined
+    const row = highlighted(rows)
+    return row === undefined ? undefined : slashRow(row)
+  }
+
   /** ↑/↓ in the menu: move the highlight, which stops at both ends. */
   const moveMenu = (delta: number, rows: readonly ChatCommand[]): void => {
     setMenuState({
@@ -256,17 +266,27 @@ export function PromptInput({
   }
 
   const submit = (): void => {
-    const rows = menuRows(bufferRef.current.value, menuRef.current.dismissed)
-    // Enter with the menu up runs what is highlighted rather than what has been typed so
-    // far: `/mo` is not a command, and the list on screen is what the user is choosing from.
-    // The row's name goes, not the row's usage — arguments are the user's to type.
-    const chosen = rows === null ? undefined : highlighted(rows)
-    const text = chosen === undefined ? bufferRef.current.value : `/${chosen.name}`
-    history?.add(text)
+    const value = bufferRef.current.value
+    const rows = menuRows(value, menuRef.current.dismissed)
+    // What Enter means is the client's own rule (`slashEnterAction`, K7; #354), so `oh` and the
+    // web app agree: a built-in the line names **in full** runs now (`/compact`), a skill (or a
+    // name still being typed) fills the buffer with `/name ` for its arguments, and anything
+    // else — `/name args`, or an ordinary message — is sent. `oh`'s rows are its own registry
+    // (`menuCommands`), so they are handed over as the name-and-kind pairs the rule reads.
+    const action =
+      commands === undefined
+        ? ({ kind: 'send' } as const)
+        : slashEnterAction(value, slashRows(commands), highlightedRow(rows))
+    if (action.kind === 'complete') {
+      const text = `/${action.name} `
+      edit(() => ({ value: text, cursor: text.length, collapsed: [] }))
+      return
+    }
+    history?.add(value)
     browsingRef.current = null
     commit(EMPTY, { activity: false })
-    if (text.trim() !== '') {
-      onSubmit(text)
+    if (value.trim() !== '') {
+      onSubmit(value)
     }
   }
 
@@ -472,6 +492,19 @@ export function PromptInput({
 /** Keep a number inside `[low, high]`. */
 function clamp(value: number, low: number, high: number): number {
   return Math.min(Math.max(value, low), high)
+}
+
+/**
+ * One of `oh`'s registry rows as the client's shared Enter rule reads it (#354): a skill row
+ * carries its `SlashCommand` and is completed; every other row is a built-in the client runs.
+ */
+function slashRow(command: ChatCommand): SlashMenuRow {
+  return { name: command.name, kind: command.skill === undefined ? 'builtin' : 'skill' }
+}
+
+/** The whole registry as the shared rule's rows, in the order the menu shows them. */
+function slashRows(commands: readonly ChatCommand[]): readonly SlashMenuRow[] {
+  return commands.map(slashRow)
 }
 
 /** One line of the prompt as it is drawn. */

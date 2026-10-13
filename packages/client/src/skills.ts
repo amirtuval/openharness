@@ -177,6 +177,63 @@ export function filterSlashCommands(
   return commands.filter((command) => command.name.toLowerCase().startsWith(needle))
 }
 
+/** The part of a `/` menu row {@link slashEnterAction} reads: its name and what kind of row it is. */
+export interface SlashMenuRow {
+  /** The name without its slash: what a line's first token is matched against. */
+  readonly name: string
+  /** Whether this row is a client action or one of the reader's skills. */
+  readonly kind: 'builtin' | 'skill'
+}
+
+/** What pressing Enter means for the line in a `/` menu's box. */
+export type SlashEnterAction =
+  /** Run the built-in command now — the line names it in full and has nothing else to type. */
+  | { readonly kind: 'run'; readonly name: string }
+  /** Fill the box with `/name `, so the command's arguments can be typed next. */
+  | { readonly kind: 'complete'; readonly name: string }
+  /** Send the line: it is arguments (`/name args`), an ordinary message, or a miss. */
+  | { readonly kind: 'send' }
+
+/**
+ * Decide what Enter does with the line a reader has typed in a `/` menu's box (K7; #354).
+ *
+ * The one rule both frontends use, so `oh` and the web app cannot disagree about what a keypress
+ * does:
+ *
+ * - a **built-in** the box names **in full** is a command with nothing left to type (`/compact`,
+ *   and `/new`, `/mode` as their rows land), so Enter **runs** it rather than filling the box a
+ *   second time;
+ * - a **skill** is never run from the menu — `/name arguments` is sent as an ordinary message
+ *   carrying `skill` (K7) — so a row the reader is looking at is **completed** to `/name `, which
+ *   is what makes its `argument-hint` the box's placeholder and lets the arguments follow;
+ * - anything else — arguments already typed (`/name args`), a name nothing offers, or an ordinary
+ *   message — is **sent**, the behaviour the box always had.
+ *
+ * A line that only *starts* a name completes to the row the reader is on — the `highlighted`
+ * row, the one the arrows moved to — rather than to the first match.
+ *
+ * @param value the box's current text
+ * @param commands the whole menu, from {@link slashCommands}
+ * @param highlighted the row the menu is on, when it is up
+ */
+export function slashEnterAction(
+  value: string,
+  commands: readonly SlashMenuRow[],
+  highlighted?: SlashMenuRow,
+): SlashEnterAction {
+  const query = slashCommandQuery(value)
+  // Arguments are being typed, or the line is not a command line: Enter sends, as it always has.
+  if (query === null) {
+    return { kind: 'send' }
+  }
+  const exact = commands.find((command) => command.name === query)
+  if (exact !== undefined && exact.kind === 'builtin') {
+    return { kind: 'run', name: exact.name }
+  }
+  const row = highlighted ?? exact
+  return row === undefined ? { kind: 'send' } : { kind: 'complete', name: row.name }
+}
+
 /**
  * A line the reader typed that names one of the commands on offer.
  *

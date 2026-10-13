@@ -150,9 +150,10 @@ export interface SkillSettings {
  *
  * A field is honoured only in the shape the format documents — a real `true` for
  * `disable-model-invocation`, a real `false` for `user-invocable`, a string for `argument-hint`
- * — because the frontmatter is open and untyped ({@link SkillFrontmatterSchema}): a value a
- * hand-written file got wrong is an ignored field rather than a skill that behaves differently
- * from what it says. The lookup is case-sensitive to the field names the format uses.
+ * (or the flow-sequence array the format's own `[version]` spelling parses to, rendered back as
+ * written) — because the frontmatter is open and untyped ({@link SkillFrontmatterSchema}): a
+ * value a hand-written file got wrong is an ignored field rather than a skill that behaves
+ * differently from what it says. The lookup is case-sensitive to the field names the format uses.
  */
 export function skillSettingsOf(skill: Skill): SkillSettings {
   const frontmatter = skill.frontmatter
@@ -163,13 +164,26 @@ export function skillSettingsOf(skill: Skill): SkillSettings {
   }
 }
 
-/** `argument-hint` as a non-empty string, or `null` for a value that is not one. */
+/**
+ * `argument-hint` as the text a `/` menu shows, or `null` for a value that is not one.
+ *
+ * A string is the hint itself, trimmed; an empty one names nothing. An **array** is the
+ * format's own bracket spelling read as YAML — `argument-hint: [version]` is a flow sequence,
+ * not a string — and it is still the hint the file meant, so it is rendered back the way the
+ * line wrote it (`[version]`, `[a, b]`). A snapshot imported since the import keeps the raw
+ * line (see `apps/server`'s discovery), so this half is for one stored before that: the shape
+ * the file has never changes the hint a reader sees.
+ */
 function argumentHintOf(value: unknown): string | null {
-  if (typeof value !== 'string') {
-    return null
+  if (typeof value === 'string') {
+    const hint = value.trim()
+    return hint.length === 0 ? null : hint
   }
-  const hint = value.trim()
-  return hint.length === 0 ? null : hint
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    const items = value.map((item) => item.trim()).filter((item) => item !== '')
+    return items.length === 0 ? null : `[${items.join(', ')}]`
+  }
+  return null
 }
 
 /**
