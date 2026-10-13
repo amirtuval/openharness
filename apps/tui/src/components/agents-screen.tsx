@@ -139,9 +139,15 @@ export function AgentsScreen({
     }
   }, [client, current.parent_session_id])
 
-  // One read per task, once, for the marker that says there is another level under a row. Best
-  // effort by design: a task whose children cannot be listed is a row with no count, never a
-  // screen that fails to open.
+  // One read per task, for the marker that says there is another level under a row. Best effort
+  // by design: a task whose children cannot be listed is a row with no count, never a screen
+  // that fails to open.
+  //
+  // It is re-run when the **number** of tasks changes and at no other time: a chat's history
+  // arrives in the background, so a list opened on `oh -s` can be up before its tasks are — and a
+  // count that only ever loaded at mount would leave those rows without one for as long as the
+  // list stayed open. A task moving between statuses is not a reason for a request.
+  const taskCount = cards.length
   useEffect(() => {
     if (!cards.some((card) => card.childSessionId !== null)) {
       setSubtasks(new Map())
@@ -164,9 +170,7 @@ export function AgentsScreen({
     return () => {
       live = false
     }
-    // Once, when the screen opens: which tasks exist is what the list is for, and re-reading the
-    // tree on every transcript change would be a request per turn.
-  }, [client])
+  }, [client, taskCount])
 
   const rows = agentsRows(cards, parent, subtasks, current)
   const at = Math.min(index, Math.max(rows.length - 1, 0))
