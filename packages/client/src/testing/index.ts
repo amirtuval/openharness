@@ -2497,6 +2497,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         content: [{ type: 'text', text }],
         ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
         ...(messageOptions?.mode === undefined ? {} : { mode: messageOptions.mode }),
+        // A slash invocation rides the message (epic #349, K7; #353): the text is what the
+        // reader typed and the skill is the one it named.
+        ...(messageOptions?.skill === undefined ? {} : { skill: messageOptions.skill }),
       })
       if (!input.success) {
         throw badRequestFor(input.error.issues)

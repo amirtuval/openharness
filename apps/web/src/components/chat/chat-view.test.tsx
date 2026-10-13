@@ -113,6 +113,7 @@ function renderChat(todos: TodoList | null): { readonly container: HTMLElement }
       sessionId="ses_1"
       catalog={CATALOG}
       modes={MODES}
+      skills={[]}
       onDelete={() => Promise.resolve({ ok: true })}
       onDeleted={() => undefined}
     />,

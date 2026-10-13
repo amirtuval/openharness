@@ -1,10 +1,12 @@
-import { newMcpServerId } from '@openharness/protocol'
+import { newMcpServerId, newSkillId } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
 import {
   modeMcpServerChoice,
+  modeSkillChoice,
   modeToolChoice,
   withModeMcpServerChoice,
+  withModeSkillChoice,
   withModeToolChoice,
 } from './tools'
 
@@ -123,6 +125,60 @@ describe('a mode’s MCP server choice (#311; #313)', () => {
   it('folds a patch that names nothing back to null', () => {
     expect(
       withModeMcpServerChoice({ builtin: {}, mcp_servers: { [NOTES]: false } }, NOTES, 'follow'),
+    ).toBeNull()
+  })
+})
+
+describe('a mode’s skill choice (#349, K8; #353)', () => {
+  const NOTES = newSkillId()
+  const CHANGELOG = newSkillId()
+
+  it('reads a missing skill as "follow my settings"', () => {
+    expect(modeSkillChoice(null, NOTES)).toBe('follow')
+    expect(modeSkillChoice({ builtin: {} }, NOTES)).toBe('follow')
+    expect(modeSkillChoice({ builtin: {}, skills: {} }, NOTES)).toBe('follow')
+  })
+
+  it('reads an explicit boolean as on or off', () => {
+    expect(modeSkillChoice({ builtin: {}, skills: { [NOTES]: true } }, NOTES)).toBe('on')
+    expect(modeSkillChoice({ builtin: {}, skills: { [NOTES]: false } }, NOTES)).toBe('off')
+  })
+
+  it('sets one skill without disturbing the tools, the servers or the other skills', () => {
+    const both = {
+      builtin: { web_search: true },
+      mcp_servers: { mcps_notes: false },
+      skills: { [NOTES]: true, [CHANGELOG]: false },
+    }
+    expect(withModeSkillChoice(both, NOTES, 'off')).toEqual({
+      builtin: { web_search: true },
+      mcp_servers: { mcps_notes: false },
+      skills: { [NOTES]: false, [CHANGELOG]: false },
+    })
+    // Back to following is the absence of the id, and every other half is untouched.
+    expect(withModeSkillChoice(both, CHANGELOG, 'follow')).toEqual({
+      builtin: { web_search: true },
+      mcp_servers: { mcps_notes: false },
+      skills: { [NOTES]: true },
+    })
+  })
+
+  it('keeps a mode’s other halves when a built-in tool or a server is set', () => {
+    const patch = { builtin: {}, skills: { [NOTES]: true } }
+    expect(withModeToolChoice(patch, 'web_search', 'on')).toEqual({
+      builtin: { web_search: true },
+      skills: { [NOTES]: true },
+    })
+    expect(withModeMcpServerChoice(patch, 'mcps_notes', 'off')).toEqual({
+      builtin: {},
+      mcp_servers: { mcps_notes: false },
+      skills: { [NOTES]: true },
+    })
+  })
+
+  it('folds a patch that names nothing back to null', () => {
+    expect(
+      withModeSkillChoice({ builtin: {}, skills: { [NOTES]: false } }, NOTES, 'follow'),
     ).toBeNull()
   })
 })

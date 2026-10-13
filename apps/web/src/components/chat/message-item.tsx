@@ -123,6 +123,20 @@ export function MessageItem({
           isUser ? 'bg-secondary text-secondary-foreground' : 'text-foreground',
         )}
       >
+        {message.skill === undefined ? null : (
+          // A slash invocation (epic #349, K7) carries the skill it named beside the text the
+          // reader typed, so the message is drawn as the command it was rather than as words
+          // that happen to open with a slash. The text below stays the log's own record of what
+          // was typed — the arguments are in it — so this is a marker and not a rewrite.
+          <span data-slot="message-skill" className="mb-1 flex items-center gap-1.5">
+            <Badge variant="outline" className="font-mono text-2xs">
+              /{message.skill.name}
+            </Badge>
+            {message.skill.arguments === null ? null : (
+              <span className="text-2xs text-muted-foreground">{message.skill.arguments}</span>
+            )}
+          </span>
+        )}
         {message.parts.map((part, index) => (
           // A part carries no id of its own: its place in the message is its identity.
           <Fragment key={index}>{PART_RENDERERS[part.type]({ part, message })}</Fragment>

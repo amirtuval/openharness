@@ -2,6 +2,9 @@ import {
   CREDENTIAL_TARGETS,
   clearedResultsNotice,
   compactionThreshold,
+  invocationSkill,
+  parseSlashCommand,
+  slashCommands,
   contextMeter,
   mcpFailureNotice,
   modelSupportsTools,
@@ -13,7 +16,7 @@ import {
   truncatedResultsNotice,
 } from '@openharness/client'
 import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
-import type { Mode, UserToolConfirmationEventInput } from '@openharness/protocol'
+import type { Mode, Skill, UserToolConfirmationEventInput } from '@openharness/protocol'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -23,7 +26,6 @@ import type { ModesView } from '../../hooks/use-modes'
 import { useSession } from '../../hooks/use-session'
 import type { ModelsView } from '../../hooks/use-models'
 import { usePreferences } from '../../hooks/use-preferences'
-import { parseComposerInput } from '../../lib/commands'
 import { readTodoPanelCollapsed, writeTodoPanelCollapsed } from '../../lib/todo-panel'
 import { formatCostTotal, shortId, sessionLabel, unpricedExplanation } from '../../lib/format'
 import { providerOf, type ModelNameLookup } from '../../lib/models'
@@ -84,6 +86,7 @@ export function ChatView({
   costOf,
   catalog,
   modes,
+  skills,
   onDelete,
   onDeleted,
 }: {
@@ -100,6 +103,8 @@ export function ChatView({
   catalog: ModelsView
   /** The shell's modes (#245, M6): the presets the composer's selector offers above the models. */
   modes: ModesView
+  /** The shell's skills (#349, K7; #353): the reader's own rows of the composer's `/` menu. */
+  skills: readonly Skill[]
   /** Delete this chat; the shell navigates away when it was the open one. */
   onDelete: (sessionId: string) => Promise<DeleteSessionResult>
   /** This chat was deleted elsewhere: the shell drops its row and leaves it. */
@@ -141,6 +146,11 @@ export function ChatView({
   // drawn. A server that predates the field — or a read that failed — leaves the default.
   const { preferences } = usePreferences(client)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // The `/` menu (epic #349, K7; #353): the built-in commands and the reader's own usable
+  // skills, from the client's one reading of both. Built here rather than in the composer
+  // because the send path parses the same line against the same list — a box that offered a row
+  // the send would not recognize would be a lie.
+  const commands = useMemo(() => slashCommands(skills), [skills])
   // The draft, owned here rather than by the composer (#212): "Edit and resend" puts the
   // reader's own words back in the box, and a screen that wants to put words in the box owns
   // its text (U10) — the composer is the box, not the thing that decides what is in it.
@@ -282,15 +292,20 @@ export function ChatView({
       if (editBlocked) {
         return false
       }
-      // A slash command is not a message (#283): `/compact [instructions]` asks the brain to
-      // summarize the older history instead of sending words, so it never carries a model, a
-      // mode or a rewind — and a line that names no command falls through as an ordinary send.
-      const command = parseComposerInput(text)
-      if (command.kind === 'compact') {
-        setInterrupted(false)
-        // The request is stored and folded into the transcript; the outcome arrives on the
-        // stream. A failure keeps the text in the box, exactly as a failed send does.
-        return await compact(command.instructions)
+      // A slash command is not an ordinary message (#283, and the epic's K7): `/compact
+      // [instructions]` asks the brain to summarize the older history instead of sending words,
+      // so it never carries a model, a mode or a rewind — and a line that names no command
+      // falls through as an ordinary send, exactly as it always did.
+      const invocation = parseSlashCommand(text, commands)
+      if (invocation !== null && invocation.command.kind === 'builtin') {
+        if (invocation.command.name === 'compact') {
+          setInterrupted(false)
+          // The request is stored and folded into the transcript; the outcome arrives on the
+          // stream. A failure keeps the text in the box, exactly as a failed send does.
+          return await compact(invocation.arguments ?? undefined)
+        }
+        // A built-in whose action this build does not have yet is a message like any other,
+        // rather than a row that silently does nothing. There is none today.
       }
       // Sending is the start of a new turn: whatever the last one was stopped short of is no
       // longer what the foot of the transcript is about.
@@ -300,10 +315,15 @@ export function ChatView({
       // away from the mode, and it is what detaches the chat (#245, M6).
       const switching = chosen !== null && (chosen !== sessionModel || currentModeId !== null)
       const switchingMode = pendingMode !== null && pendingMode.id !== sessionModeId
+      // A skill invocation rides the message (K7): the text is what the reader typed, and the
+      // `skill` beside it is what the brain loads the instructions from. A built-in answered
+      // `null` above and is not sent at all.
+      const skill = invocation === null ? null : invocationSkill(invocation)
       const stored = await send(text, {
         ...(switchingMode && pendingMode !== null ? { mode: pendingMode.id } : {}),
         ...(!switchingMode && switching && chosen !== null ? { model: chosen } : {}),
         ...(editing === null ? {} : { rewindTo: editing.seq }),
+        ...(skill === null ? {} : { skill }),
       })
       if (stored) {
         // The edit has been sent (or the message was an ordinary one): either way this is no
@@ -324,7 +344,17 @@ export function ChatView({
       }
       return stored
     },
-    [chosen, compact, editBlocked, editing, pendingMode, sessionModeId, sessionModel, send],
+    [
+      chosen,
+      commands,
+      compact,
+      editBlocked,
+      editing,
+      pendingMode,
+      sessionModeId,
+      sessionModel,
+      send,
+    ],
   )
 
   // Stop, and the word for it (U10): the interrupt request goes out, and the row at the foot
@@ -630,6 +660,7 @@ export function ChatView({
                 onSend={sendFromComposer}
                 onStop={stop}
                 inputRef={inputRef}
+                commands={commands}
                 value={draft}
                 onValueChange={changeDraft}
                 edit={editing === null ? undefined : { blocked: editBlocked, onCancel: cancelEdit }}

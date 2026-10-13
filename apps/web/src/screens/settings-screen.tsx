@@ -7,6 +7,7 @@ import { DefaultModelCard } from '../components/settings/default-model'
 import { McpServersCard } from '../components/settings/mcp-servers'
 import { ModesCard } from '../components/settings/modes'
 import { ProvidersCard } from '../components/settings/providers'
+import { SkillsCard } from '../components/settings/skills'
 import { ToolsCard } from '../components/settings/tools'
 import { UsageCard } from '../components/settings/usage'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
@@ -15,6 +16,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../componen
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import type { ModesView } from '../hooks/use-modes'
+import type { SkillsView } from '../hooks/use-skills'
 import type { ModelsView } from '../hooks/use-models'
 import { useSettings } from '../hooks/use-settings'
 import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
@@ -24,7 +26,8 @@ import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
  *
  * **Providers** — the keys every chat runs on — first, then **Default model**, **Modes** (#245),
  * **Context** (the compaction controls, #282), **Tools** (which tools a chat may use, #303
- * X4/#307) and **MCP servers** (the remote servers a chat may reach, #303 X10/#313), then
+ * X4/#307), **Skills** (the reader's own imported skills, epic #349/#353) and **MCP servers**
+ * (the remote servers a chat may reach, #303 X10/#313), then
  * **Appearance**, then **Usage** (what the month has cost so far, #247), and last **Advanced**,
  * which holds the one developer-facing setting and is collapsed. Before this, the screen opened on a Connection card that only a self-hoster has
  * any use for, with the thing everyone needs — a provider key — below the fold; the order is
@@ -39,7 +42,16 @@ import { SETTINGS_STORAGE_KEY, saveSettings } from '../lib/settings'
  * ({@link AppearanceCard}) are server state too, and the model picker reads the shell's one
  * catalog rather than fetching its own.
  */
-export function SettingsScreen({ catalog, modes }: { catalog: ModelsView; modes: ModesView }) {
+export function SettingsScreen({
+  catalog,
+  modes,
+  skills,
+}: {
+  catalog: ModelsView
+  modes: ModesView
+  /** The shell's skills (#349, K4; #353): the card lists them, and the mode editor patches them. */
+  skills: SkillsView
+}) {
   const settings = useSettings()
   const [serverUrl, setServerUrl] = useState(settings.serverUrl)
   const [saved, setSaved] = useState(false)
@@ -60,11 +72,13 @@ export function SettingsScreen({ catalog, modes }: { catalog: ModelsView; modes:
 
         <DefaultModelCard catalog={catalog} />
 
-        <ModesCard modes={modes} catalog={catalog} />
+        <ModesCard modes={modes} catalog={catalog} skills={skills} />
 
         <ContextCard catalog={catalog} />
 
         <ToolsCard />
+
+        <SkillsCard skills={skills} />
 
         <McpServersCard />
 

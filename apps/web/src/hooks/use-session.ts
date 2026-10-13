@@ -19,6 +19,7 @@ import {
   type TruncatedToolResult,
 } from '@openharness/client'
 import type {
+  MessageSkill,
   ModeId,
   Session,
   SessionStatus,
@@ -149,7 +150,10 @@ export interface SessionView {
    * left without the edit. The answer says whether the message was stored, so a composer can
    * keep the text on a failure — including the 409 a rewind gets while a turn is running.
    */
-  readonly send: (text: string, options?: { model?: string; rewindTo?: number }) => Promise<boolean>
+  readonly send: (
+    text: string,
+    options?: { model?: string; skill?: MessageSkill; rewindTo?: number },
+  ) => Promise<boolean>
   /**
    * Ask the brain to compact the older history now — `/compact [instructions]` (#283).
    *
@@ -306,7 +310,7 @@ export function useSession(client: Client, sessionId: string): SessionView {
   const send = useCallback(
     async (
       text: string,
-      options?: { model?: string; mode?: ModeId | null; rewindTo?: number },
+      options?: { model?: string; mode?: ModeId | null; skill?: MessageSkill; rewindTo?: number },
     ): Promise<boolean> => {
       const body = text.trim()
       if (body === '') {
@@ -319,6 +323,9 @@ export function useSession(client: Client, sessionId: string): SessionView {
           // A mode rides the message the way a model does (#245, M6): the log records the
           // choice, and the session follows the mode from here on. `null` detaches.
           ...(options?.mode === undefined ? {} : { mode: options.mode }),
+          // A slash invocation rides it too (epic #349, K7): the text is what the reader typed
+          // and this is the skill it names, which is what the brain loads the instructions from.
+          ...(options?.skill === undefined ? {} : { skill: options.skill }),
           ...(options?.rewindTo === undefined ? {} : { rewindTo: options.rewindTo }),
         })
         // Show the message at once instead of waiting for the stream to echo it: the client

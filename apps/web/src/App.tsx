@@ -13,6 +13,7 @@ import { ThemePreference } from './components/theme-preference'
 import { Button } from './components/ui/button'
 import { useAuthState } from './hooks/use-auth'
 import { useModes } from './hooks/use-modes'
+import { useSkills } from './hooks/use-skills'
 import { useModels } from './hooks/use-models'
 import { useNotice } from './hooks/use-notice'
 import { useRoute } from './hooks/use-route'
@@ -179,6 +180,10 @@ function AppFrame({
   // The reader's modes (#245, M6), loaded once here beside the catalog: the two model pickers
   // and the chat header all read the same copy, and Settings edits it in place.
   const modes = useModes(client)
+  // The reader's imported skills (#349, K4; #353), loaded once here beside the catalog and the
+  // modes: the composer's `/` menu (K7), the mode editor's skills override (K8) and Settings →
+  // Skills all read the same copy, and every write updates it in place.
+  const skills = useSkills(client)
   const nameOf = useMemo(() => modelNameLookup(catalog.models), [catalog.models])
   // The catalog's prices, for the costs a chat and its replies show (#247). Built beside the
   // names because they come from the same list and change together.
@@ -410,11 +415,12 @@ function AppFrame({
               costOf={costOf}
               catalog={catalog}
               modes={modes}
+              skills={skills.skills}
               onDelete={deleteSession}
               onDeleted={forgetSession}
             />
           ) : route.name === 'settings' ? (
-            <SettingsScreen catalog={catalog} modes={modes} />
+            <SettingsScreen catalog={catalog} modes={modes} skills={skills} />
           ) : route.name === 'device' ? (
             <DeviceScreen userCode={route.userCode} />
           ) : route.name === 'signin' ? (
@@ -425,7 +431,12 @@ function AppFrame({
             // `#/` and `#/new` are the same screen (X5): New chat, or the first-run flow when
             // the account has no provider key. The Home screen is gone, and an old `#/` link —
             // the sidebar's own logo among them — lands where a reader meant to go.
-            <StartScreen createSession={create} catalog={catalog} modes={modes} />
+            <StartScreen
+              createSession={create}
+              catalog={catalog}
+              modes={modes}
+              skills={skills.skills}
+            />
           )}
         </main>
       </div>

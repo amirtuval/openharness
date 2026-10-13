@@ -2285,6 +2285,20 @@ describe('the fake’s skills (#349, K4/K5; #353)', () => {
     }
   })
 
+  it('stores a slash invocation as the message it is, skill and all (K7)', async () => {
+    const fake = createFakeClient({ skills: [makeSkill({ name: 'release-notes' })] })
+
+    await fake.sendMessage(fake.session.id, '/release-notes v1.2', {
+      skill: { name: 'release-notes', arguments: 'v1.2' },
+    })
+
+    const sent = fake.history().find((event) => event.type === EVENT_TYPES.userMessage)
+    expect(sent).toMatchObject({
+      content: [{ type: 'text', text: '/release-notes v1.2' }],
+      skill: { name: 'release-notes', arguments: 'v1.2' },
+    })
+  })
+
   it('answers the 401 while signed out, like every other /v1 route', async () => {
     const fake = createFakeClient({ authenticated: false })
     await expect(fake.skills.list()).rejects.toBeInstanceOf(AuthenticationError)
