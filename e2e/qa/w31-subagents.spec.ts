@@ -1,7 +1,8 @@
 import {
   agentToolResults,
   createChat,
-  createMode,
+  deleteModeNamed,
+  ensureMode,
   deleteChat,
   expect,
   expectNoErrorBanner,
@@ -23,7 +24,6 @@ import {
   taskEvents,
   test,
   transcript,
-  uniqueName,
   updateMode,
   waitForAnswer,
   waitForIdle,
@@ -257,6 +257,7 @@ test.describe('W31 subagents', () => {
 
   test('W31c a described mode is a subagent type, and the agent tools are listed (#342; #346)', async ({
     page,
+    request,
     consoleErrors,
   }) => {
     await page.goto('/#/settings')
@@ -268,9 +269,11 @@ test.describe('W31 subagents', () => {
       await expect(dialog.getByLabel('Subagent description')).toBeVisible()
       await expect(dialog.getByText(/subagent type/)).toBeVisible()
 
-      // A fresh name every run: the stack's account keeps its modes, and a second run of this
-      // spec would otherwise be answered with the 409 a duplicate name gets.
-      const name = uniqueName('researcher')
+      // A **fixed** name, cleared first: the account is the stack's own and keeps its modes, so a
+      // unique name per run would leak one each time and meet the twenty-mode limit (#348's
+      // re-runs did exactly that), while a fixed one reuses the row it made last time.
+      const name = 'qa-mode-field'
+      await deleteModeNamed(request, name)
       await dialog.getByLabel('Name').fill(name)
       await dialog.getByLabel(/My default model/).check()
       await dialog.getByLabel('Subagent description').fill('Reviews a diff for correctness bugs.')
@@ -677,14 +680,21 @@ test.describe('W31 subagents', () => {
     // key at all — so every mode here follows "my default model", the same spelling the CLI
     // spec uses, and the account is given one first.
     await ensureDefaultModel(request)
-    const described = uniqueName('reviewer')
-    const describedMode = await createMode(request, {
+    // Fixed names, brought to the state each case needs: the account is the QA stack's own and a
+    // user holds at most twenty modes, so a spec that created one per run would fail on the
+    // twenty-first (and a re-run would meet its own 409) — `ensureMode` is the re-runnable form.
+    const described = 'qa-reviewer'
+    const describedMode = await ensureMode(request, {
       name: described,
       model: 'my-default-model',
       subagent_description: 'Reviews a diff for correctness bugs.',
     })
-    const plain = uniqueName('preset')
-    await createMode(request, { name: plain, model: 'my-default-model' })
+    const plain = 'qa-preset'
+    await ensureMode(request, {
+      name: plain,
+      model: 'my-default-model',
+      subagent_description: null,
+    })
 
     await test.step('an unknown type is answered with the types that exist', async () => {
       const chat = await createChat(request)
@@ -732,8 +742,12 @@ test.describe('W31 subagents', () => {
       // description is a preset, and the resolver runs per call, so describing one between two
       // `agent` calls makes it a type on the **second** (M6's live-follow, S2; #342).
       const chat = await createChat(request)
-      const late = uniqueName('late-type')
-      const mode = await createMode(request, { name: late, model: 'my-default-model' })
+      const late = 'qa-late-type'
+      const mode = await ensureMode(request, {
+        name: late,
+        model: 'my-default-model',
+        subagent_description: null,
+      })
 
       const firstAsk = await sendMessage(request, chat.id, '__agent__ no-such-type | who is there?')
       await waitForTurnEnd(request, chat.id, firstAsk)
@@ -989,8 +1003,8 @@ test.describe('W31 real model (A1, A4)', () => {
   }) => {
     // A type is a mode with a description, and on a real stack the account has the key its model
     // needs — so this is also A7's "a described mode is startable" case.
-    const name = uniqueName('researcher')
-    await createMode(request, {
+    const name = 'qa-real-researcher'
+    await ensureMode(request, {
       name,
       model: QA_MODEL,
       subagent_description: 'Looks something small up and reports it in one line.',

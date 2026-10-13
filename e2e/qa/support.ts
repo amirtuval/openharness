@@ -964,6 +964,55 @@ export async function createMode(
   return (await response.json()) as { id: string; name: string }
 }
 
+/**
+ * Create a mode, or bring the one with that name to this state — the **re-runnable** form.
+ *
+ * A name is unique per user and a user holds at most twenty modes, and the QA stack's account is
+ * the same one every run touches: a spec that created a mode per run would fail on the twenty-first
+ * (and a second run of the same spec would meet its own 409). A fixed name plus an update is what
+ * the CLI spec's `createSubagentType` does, in one step.
+ */
+export async function ensureMode(
+  request: APIRequestContext,
+  body: { name: string; model: string; subagent_description?: string | null },
+): Promise<{ id: string; name: string }> {
+  const created = await request.post('/v1/me/modes', { data: body })
+  if (created.status() === 201) {
+    return (await created.json()) as { id: string; name: string }
+  }
+  expect(created.status(), await created.text()).toBe(409)
+  const modes = await request.get('/v1/me/modes')
+  expect(modes.status(), await modes.text()).toBe(200)
+  const found = ((await modes.json()) as { data: { id: string; name: string }[] }).data.find(
+    (mode) => mode.name === body.name,
+  )
+  expect(
+    found,
+    `neither created nor found: a 409 that is not a duplicate name means the account is at the ` +
+      `mode limit (a QA stack that has run the suite many times leaks one mode per run)`,
+  ).toBeDefined()
+  const updated = await request.post(`/v1/me/modes/${found?.id ?? ''}`, {
+    data: {
+      model: body.model,
+      subagent_description: body.subagent_description ?? null,
+    },
+  })
+  expect(updated.status(), await updated.text()).toBe(200)
+  return (await updated.json()) as { id: string; name: string }
+}
+
+/** Delete a mode by name, when it is there — the cleanup a re-runnable UI case needs. */
+export async function deleteModeNamed(request: APIRequestContext, name: string): Promise<void> {
+  const modes = await request.get('/v1/me/modes')
+  expect(modes.status(), await modes.text()).toBe(200)
+  for (const mode of ((await modes.json()) as { data: { id: string; name: string }[] }).data) {
+    if (mode.name === name) {
+      const removed = await request.delete(`/v1/me/modes/${mode.id}`)
+      expect(removed.status(), await removed.text()).toBe(204)
+    }
+  }
+}
+
 /** Update a mode — the write that makes "an edit applies to the second start" testable (#342). */
 export async function updateMode(
   request: APIRequestContext,
