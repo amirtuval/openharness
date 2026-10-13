@@ -264,16 +264,20 @@ test.describe('W31 subagents', () => {
     await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
 
     await test.step('the editor asks for a subagent description', async () => {
+      // A **fixed** name, cleared first: the account is the stack's own and keeps its modes, so a
+      // unique name per run would leak one each time and meet the twenty-mode limit (#348's
+      // re-runs did exactly that), while a fixed one reuses the row it made last time. The reload
+      // is for the row this tab still holds: it was deleted through the API, and a person who
+      // deleted from another tab would see the list without it.
+      const name = 'qa-mode-field'
+      await deleteModeNamed(request, name)
+      await page.reload()
+      await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+
       await page.getByRole('button', { name: 'Create mode' }).click()
       const dialog = page.getByRole('dialog')
       await expect(dialog.getByLabel('Subagent description')).toBeVisible()
       await expect(dialog.getByText(/subagent type/)).toBeVisible()
-
-      // A **fixed** name, cleared first: the account is the stack's own and keeps its modes, so a
-      // unique name per run would leak one each time and meet the twenty-mode limit (#348's
-      // re-runs did exactly that), while a fixed one reuses the row it made last time.
-      const name = 'qa-mode-field'
-      await deleteModeNamed(request, name)
       await dialog.getByLabel('Name').fill(name)
       await dialog.getByLabel(/My default model/).check()
       await dialog.getByLabel('Subagent description').fill('Reviews a diff for correctness bugs.')
