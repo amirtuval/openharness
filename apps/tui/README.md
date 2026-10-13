@@ -50,23 +50,27 @@ builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` an
 
 ## Commands
 
-| command                                | what it does                                                              |
-| -------------------------------------- | ------------------------------------------------------------------------- |
-| `oh`                                   | start a new chat on your default model                                    |
-| `oh -c` / `oh -s <id>`                 | resume the most recent session, or a particular one                       |
-| `oh sessions`                          | list your sessions; `oh sessions delete <id>` deletes one (asks first)    |
-| `oh agents`                            | list saved agent presets; start one with `--agent <id\|name>`             |
-| `oh providers`                         | list the model-provider keys you have stored                              |
-| `oh providers add [provider]`          | connect a provider — paste its key into a hidden prompt                   |
-| `oh providers remove <provider>`       | forget a key (asks first; `--yes` skips the question)                     |
-| `oh default-model [provider/model]`    | print or set the model a new chat starts on                               |
-| `oh modes`                             | list your modes; start a chat on one with `--mode <name>`                 |
-| `oh settings`                          | show or set when a long chat is summarized, and by which model            |
-| `oh tools [name]`                      | list the built-in tools, or set one (`--on`/`--off`/`--policy`)           |
-| `oh mcp`                               | your remote MCP servers: add, connect (OAuth), test, set tool permissions |
-| `oh login` / `oh logout` / `oh whoami` | sign in (browser device flow), revoke, who am I                           |
-| `oh update`                            | install the newest published version now                                  |
-| `oh --help`, `oh --version`            | print and stop                                                            |
+| command                                | what it does                                                                   |
+| -------------------------------------- | ------------------------------------------------------------------------------ |
+| `oh`                                   | start a new chat on your default model                                         |
+| `oh -c` / `oh -s <id>`                 | resume the most recent session, or a particular one                            |
+| `oh sessions`                          | list your sessions; `oh sessions delete <id>` deletes one (asks first)         |
+| `oh agents`                            | list saved agent presets; start one with `--agent <id\|name>`                  |
+| `oh providers`                         | list the model-provider keys you have stored                                   |
+| `oh providers add [provider]`          | connect a provider — paste its key into a hidden prompt                        |
+| `oh providers remove <provider>`       | forget a key (asks first; `--yes` skips the question)                          |
+| `oh default-model [provider/model]`    | print or set the model a new chat starts on                                    |
+| `oh modes`                             | list your modes; start a chat on one with `--mode <name>`                      |
+| `oh settings`                          | show or set when a long chat is summarized, and by which model                 |
+| `oh tools [name]`                      | list the built-in tools, or set one (`--on`/`--off`/`--policy`)                |
+| `oh mcp`                               | your remote MCP servers: add, connect (OAuth), test, set tool permissions      |
+| `oh skills`                            | list your imported skills, and switch each on or off                           |
+| `oh skills add <url> [flags]`          | import skills from a public git repository (`--ref`/`--path`/`--all`/`--name`) |
+| `oh skills refresh <name>`             | show what changed upstream and replace the snapshot (asks; `--yes` skips)      |
+| `oh skills remove <name>`              | delete a skill and its snapshot (asks; `--yes` skips)                          |
+| `oh login` / `oh logout` / `oh whoami` | sign in (browser device flow), revoke, who am I                                |
+| `oh update`                            | install the newest published version now                                       |
+| `oh --help`, `oh --version`            | print and stop                                                                 |
 
 Inside a chat: Enter sends (a message sent mid-reply steers it), and Ctrl+J or Alt+Enter
 inserts a newline. Type `/` for the command menu — ↑/↓ choose, Tab completes, Enter runs, Esc
@@ -74,7 +78,11 @@ closes — which holds `/model` (switch models), `/providers` (connect a provide
 the chat), `/new` (start a new chat on the current model), `/compact [instructions]`
 (summarize the older history now, with optional guidance for the summary), `/tools` (turn the
 built-in tools on or off and set what each may do: allow, ask or deny), `/mcp` (your remote MCP
-servers), `/clear` (clear the screen, keeping the session), `/help`, and `/exit`. A message that starts
+servers), `/skills` (list, switch, remove or import a skill), `/clear` (clear the screen,
+keeping the session), `/help`, and `/exit`. The enabled skills that you can invoke are offered
+in that menu too, with their argument hints: `/release-notes v1.2` sends the message and loads
+the skill's instructions into that turn (the transcript shows the invocation as a chip, and
+the `skill` calls the model then makes as `Loaded skill …` lines). A message that starts
 with `//` sends a literal `/`. Ctrl+C interrupts the reply; pressed again when idle, it leaves.
 On the way out, `oh` prints the `oh -s <id>` line that resumes the chat.
 
@@ -92,6 +100,16 @@ from the summary and the recent messages; the transcript keeps the whole convers
 context used") and "Summarizing… 2 of 3" while a summary is being made. `oh settings` changes
 when this happens (a share of the model's context), which model writes the summary, and how many
 passes it may take — the same settings as the web app's Settings → Context.
+
+**Skills** are folders of instructions in the open Agent Skills format, imported from a public
+git repository and stored as a snapshot you review first. `oh skills add <url>` reads the
+repository, prints what it holds — each candidate with its files, its `SKILL.md` and anything
+wrong with it — and then either imports what `--all` or `--name <n>` named, or opens a pick to
+choose from. `oh skills` lists yours, `enable`/`disable` switches one on for your chats,
+`refresh <name>` re-reads its source, shows the diff and replaces the snapshot only when you
+confirm, and `remove <name>` deletes it. A mode may turn particular skills on or off, which
+`oh modes` shows read-only (editing a mode is the web app's Settings → Modes). Everything of
+this is in a chat too, under `/skills`.
 
 The session token is stored per server in `~/.config/openharness/credentials.json` (mode
 `0600`). `oh logout` revokes it server-side and forgets it locally.
