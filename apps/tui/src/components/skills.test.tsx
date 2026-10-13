@@ -80,10 +80,18 @@ describe('SkillsScreen (#354)', () => {
     await waitForFrame(empty.app, 'No skills yet')
     expect(frameOf(empty.app)).toContain('No skills yet')
 
+    // The fake lists a snapshot's skills by `(imported_at, id)`, and two seeded at the same
+    // instant tie on the random half of their ULIDs — so the timestamps are pinned, the way
+    // the client's own list-order test pins its ids, or the row order is a coin toss.
     const fake = createFakeClient({
       skills: [
-        makeSkill({ name: 'release-notes' }),
-        makeSkill({ name: 'helper', enabled: false, frontmatter: { 'user-invocable': false } }),
+        makeSkill({ name: 'release-notes', imported_at: '2026-01-01T00:00:00.000Z' }),
+        makeSkill({
+          name: 'helper',
+          enabled: false,
+          imported_at: '2026-01-02T00:00:00.000Z',
+          frontmatter: { 'user-invocable': false },
+        }),
       ],
     })
     const { app } = renderSkills(fake)
