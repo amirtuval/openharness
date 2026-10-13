@@ -1825,9 +1825,16 @@ and runs the calls itself.
   `session.task_status { stopped }`. Read as `idle` that turn is **done** to a card and a
   finished turn to the parent model, which is the gap both UI PRs found. An `interrupted` span
   end is the same stop for an abort nothing wrote an event for, and the stop outranks a
-  retryable error beside it — the turn ended because it was stopped. `agent_stop` writes the
-  interrupt into the child only when it has a turn **open**: an interrupt of an idle child claims
-  a turn of its own, whose delivery would answer a stop for work that had already finished.
+  retryable error beside it — the turn ended because it was stopped. The stop is read in **two
+  shapes** (#373): a `user.interrupt` _inside_ the turn's window (a running child), and — for a
+  child that was **paused** in a task wait — the `user.interrupt` the ended idle status itself
+  **claims** (`consumes`, P4). Without the second, a person's Stop on a paused helper read as
+  `idle`, which is **done** to a card and a finished turn to the parent model. `agent_stop`
+  writes the interrupt into the child when it has a turn **open or an unanswered task wait**
+  (`childPausedOnTasks`): an interrupt of a child that has already finished claims a turn of its
+  own, whose delivery would answer a stop for work that had already finished — the guard #371
+  added, extended by the one case it missed (a bare _signal_ on a paused child starts a turn that
+  finds the same open wait and pauses again, so the event is what stops it).
 - **A child's turn end is announced by the wrapper, and a stranded one by the next turn.**
   `runTurn` is a thin wrapper over the loop: a turn that **ended** (idle, interrupted, an error)
   gives the parent what it owes, once, and the no-op guard delivers a turn whose announcement
@@ -1837,7 +1844,9 @@ and runs the calls itself.
 - **Rewinding past an `agent` call stops the child it started** (S7). The parent's **children**
   are compared against the tasks its log still names: a child whose `parent_task_id` no visible
   `session.task_started` accounts for is one the reader took back, so the loop writes
-  `task_status { stopped }` and interrupts it. The superseded range is never read — the store
+  `task_status { stopped }` and interrupts it — with a `user.interrupt` written into a child that
+  is **paused** in a task wait, so the orphan really stops rather than re-parking (#373). The
+  superseded range is never read — the store
   holds it, and the difference a reader can see is enough. The news such a child sends afterwards
   is dropped rather than framed (`deliverableNotifications`): a task the log does not name is not
   a task this chat has.
@@ -1912,7 +1921,11 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   child's system prompt carrying `withSubagentPrompt`; the delivery happening exactly once and
   a second turn on an idle child doing nothing; the crash case — a turn on a child whose news
   never landed writes it and makes no request; a rewind stopping the orphan and dropping its
-  news; and the parent state a `general-purpose` start resolves against.
+  news — **and, since #373, the paused child**: the delivery reading a turn the ended idle
+  _claimed_ an interrupt for as a stop (with an unrelated claim as the control), `agent_stop`
+  writing the event into a child parked in a task wait (a finished child as the control that
+  gets none), and the same for a paused orphan a rewind took back; and the parent state a
+  `general-purpose` start resolves against.
 - `subagent.test.ts` — the subagent vocabulary on its own (#342): that the child's system prompt
   says each of S2's four facts — it is a subagent of another chat, it cannot ask the user, its
   final message is what the parent receives, and `message_parent` is how it sends a note — that

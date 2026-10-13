@@ -473,6 +473,82 @@ describe('stopping a helper (S5/S7; #344)', () => {
     )
     expect(signal).toHaveBeenCalledWith(child.id, 'interrupt')
   })
+
+  it('writes the stop into a child parked in a task wait too (S5/S7; #348)', async () => {
+    // The child that is idle **and working**: its pause is a turn end, so the signal alone starts
+    // a turn that finds the same open wait and pauses again — the helper the model stopped keeps
+    // working, and the turn that eventually ends announces `idle` after the `stopped`. The
+    // interrupt has to be in the child's log for that turn to read as a stop.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const taskId = newTaskId()
+    const paused = await store.createSession(null, {
+      ownerId: 'user_brain_tests',
+      interactive: false,
+      parentSessionId: sessionId,
+      parentTaskId: taskId,
+      model: { id: 'anthropic/claude-haiku-4-5' },
+      initial_events: [
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'work' }] },
+      ],
+    })
+    await store.appendEvents(paused.id, [
+      {
+        type: EVENT_TYPES.agentToolUse,
+        name: TASK_WAIT_TOOL_NAME,
+        input: {},
+        evaluated_permission: 'allow',
+      },
+    ])
+    // A helper that has already finished is the control: nothing may be written into it, or a
+    // later turn would answer the stop with a second, contradictory `idle`.
+    const finishedTask = newTaskId()
+    const finished = await store.createSession(null, {
+      ownerId: 'user_brain_tests',
+      interactive: false,
+      parentSessionId: sessionId,
+      parentTaskId: finishedTask,
+      model: { id: 'anthropic/claude-haiku-4-5' },
+      initial_events: [
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'work' }] },
+      ],
+    })
+    await store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.sessionTaskStarted,
+        task_id: taskId,
+        kind: 'subagent',
+        child_session_id: paused.id,
+        description: 'A paused helper',
+      },
+      {
+        type: EVENT_TYPES.sessionTaskStarted,
+        task_id: finishedTask,
+        kind: 'subagent',
+        child_session_id: finished.id,
+        description: 'A finished helper',
+      },
+    ])
+
+    await say(store, sessionId, 'stop both')
+    await turn(
+      store,
+      sessionId,
+      [
+        {
+          toolCalls: [
+            { name: AGENT_STOP_TOOL_NAME, input: { task_id: taskId } },
+            { name: AGENT_STOP_TOOL_NAME, input: { task_id: finishedTask } },
+          ],
+        },
+        { text: ['Stopped.'] },
+      ],
+      deployment,
+    )
+
+    expect(of(await logOf(store, paused.id), EVENT_TYPES.userInterrupt)).toHaveLength(1)
+    expect(of(await logOf(store, finished.id), EVENT_TYPES.userInterrupt)).toHaveLength(0)
+  })
 })
 
 describe('a child reaching its parent (S4/S5; #344)', () => {
@@ -745,6 +821,68 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
       text: STOPPED_TURN_RESULT,
       sourceKey: 'sesn_child:4',
       status: 'stopped',
+    })
+  })
+
+  it('reads a paused child’s stop off the claim, not the window (S5/S7; #348)', () => {
+    // A child parked in a task wait is idle, so the interrupt that ends that wait is appended
+    // **before** the turn the signal starts — outside the window the delivery slices. The idle
+    // event that ends the turn carries the interrupt in its `consumes` (P4), and that is the
+    // record the delivery has to read: without it the parent is told the helper **finished**
+    // after a person stopped it, and the card says done (S7).
+    const child = { id: 'sesn_child' as SessionId }
+    const ev = (id: string, type: string, seq: number, extra: object = {}): StoredEvent =>
+      ({ id, type, seq, processed_at: null, ...extra }) as unknown as StoredEvent
+
+    const log = [
+      ev('sevt_1', EVENT_TYPES.sessionStatusRunning, 1),
+      ev('sevt_w', EVENT_TYPES.agentToolUse, 2, {
+        name: TASK_WAIT_TOOL_NAME,
+        input: {},
+        evaluated_permission: 'allow',
+      }),
+      ev('sevt_p', EVENT_TYPES.sessionStatusIdle, 3, {
+        stop_reason: {
+          type: 'waiting_on_tasks',
+          deadline: '2026-01-01T00:00:00.000Z',
+          task_ids: [],
+        },
+      }),
+      ev('sevt_i', EVENT_TYPES.userInterrupt, 4),
+      ev('sevt_2', EVENT_TYPES.sessionStatusRunning, 5),
+      ev('sevt_r', EVENT_TYPES.agentToolResult, 6, {
+        tool_use_id: 'sevt_w',
+        content: [],
+        is_error: true,
+      }),
+      ev('sevt_3', EVENT_TYPES.sessionStatusIdle, 7, {
+        stop_reason: { type: 'end_turn' },
+        consumes: ['sevt_i'],
+      }),
+    ]
+
+    expect(childTurnDelivery(log, child)).toEqual({
+      kind: 'result',
+      text: STOPPED_TURN_RESULT,
+      sourceKey: 'sesn_child:7',
+      status: 'stopped',
+    })
+
+    // The control: the same turn without the claim is an ordinary end — a log stored before P4
+    // carries no `consumes`, and one whose interrupt belongs to somebody else must not be read as
+    // a stop of this turn.
+    const [start, call, paused, interrupt, running, result, idle] = log
+    const unclaimed = {
+      ...(idle as unknown as { consumes?: string[] }),
+      consumes: ['sevt_other'],
+    } as unknown as StoredEvent
+    expect(
+      childTurnDelivery([start!, call!, paused!, interrupt!, running!, result!, unclaimed], child),
+    ).toEqual({
+      kind: 'result',
+      text: EMPTY_TURN_RESULT,
+      sourceKey: 'sesn_child:7',
+      status: 'idle',
     })
   })
 
@@ -1052,6 +1190,53 @@ describe('a rewind that took an `agent` call back (S7; #344)', () => {
         starts(log),
       ),
     ).toEqual([])
+  })
+
+  it('interrupts a paused orphan with an event, so the card cannot flip back (S7; #348)', async () => {
+    // The same hole as `agent_stop`'s, on the rewind path: a child parked in a task wait is not
+    // stopped by a signal alone, so the turn it eventually ends would announce `idle` after the
+    // `stopped` the rewind wrote — a card reading **done** for work the reader took back.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const taskId = newTaskId()
+    const child = await store.createSession(null, {
+      ownerId: 'user_brain_tests',
+      interactive: false,
+      parentSessionId: sessionId,
+      parentTaskId: taskId,
+      model: { id: 'anthropic/claude-haiku-4-5' },
+      initial_events: [
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'work' }] },
+      ],
+    })
+    await store.appendEvents(child.id, [
+      {
+        type: EVENT_TYPES.agentToolUse,
+        name: TASK_WAIT_TOOL_NAME,
+        input: {},
+        evaluated_permission: 'allow',
+      },
+    ])
+    await store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.sessionTaskStarted,
+        task_id: taskId,
+        kind: 'subagent',
+        child_session_id: child.id,
+        description: 'A helper',
+      },
+    ])
+    await store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.sessionRewind, from_seq: 1 },
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'never mind' }] },
+    ])
+
+    await turn(store, sessionId, [{ text: ['Fine.'] }], deployment)
+
+    expect(of(await logOf(store, child.id), EVENT_TYPES.userInterrupt)).toHaveLength(1)
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
+      'stopped',
+    )
   })
 
   it('finds no orphan when every child’s task is still in the log', async () => {

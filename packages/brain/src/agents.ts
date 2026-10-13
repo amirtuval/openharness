@@ -33,7 +33,7 @@ import {
 import type { SubagentToolHandlers, ToolDefinition, ToolRegistry } from '@openharness/hands'
 
 import { readLog } from './log'
-import { taskStarts, taskStatuses } from './tasks'
+import { awaitingTasks, taskStarts, taskStatuses } from './tasks'
 import type { SubagentParent, SubagentTypeResolver } from './subagent'
 
 /**
@@ -308,12 +308,13 @@ export function createSubagentHandlers(context: SubagentHandlerContext): Subagen
         // `stopped` wherever the abort lands — a request in flight, a tool step, or nothing at
         // all — and reads exactly what a person's Stop, which appends the same event, reads.
         //
-        // Only a child with a turn **open** is written to. An interrupt of an idle child claims a
-        // turn of its own that the delivery reads as an ordinary end — its interrupt sits before
-        // the claiming turn's `session.status_running` — so appending one for a helper that had
-        // already reported would answer the parent's `agent_stop` with a second, contradictory
-        // `idle`. The stop is still signalled either way.
-        if (await childTurnOpen(store, childId)) {
+        // Only a child with work in flight is written to: one with a turn **open**, or one parked
+        // in a task wait, whose pause is what the interrupt ends (S5). An interrupt of a child
+        // that has already reported claims a turn of its own that the delivery reads as an
+        // ordinary end, so appending one for a helper that had finished would answer the parent's
+        // `agent_stop` with a second, contradictory `idle`. The stop is still signalled either
+        // way.
+        if (await childInterruptible(store, childId)) {
           await ignoreMissing(() =>
             store.appendEvents(childId, [{ type: EVENT_TYPES.userInterrupt }]),
           )
@@ -480,6 +481,7 @@ export function childTurnDelivery(
   }
   const turn = events.slice(turnStartIndex(events, idle.index), idle.index)
   const sourceKey = `${session.id}:${idle.seq}`
+  const stopped = turnWasStopped(turn) || stoppedClaimedBy(events, idle.index)
   const reply = turn
     .filter(
       (event): event is Extract<StoredEvent, { type: 'agent.message' }> =>
@@ -489,7 +491,7 @@ export function childTurnDelivery(
   const text = reply?.content.map((block) => block.text).join('') ?? ''
   // A stop outranks a retryable failure beside it: the turn ended because it was stopped, which
   // is the fact the parent has to act on, and whatever error preceded it was being retried.
-  if (turnWasStopped(turn)) {
+  if (stopped) {
     return {
       kind: 'result',
       text:
@@ -534,6 +536,30 @@ function turnWasStopped(turn: readonly StoredEvent[]): boolean {
     (event) =>
       event.type === EVENT_TYPES.userInterrupt ||
       (event.type === EVENT_TYPES.modelRequestEnd && event.error?.type === 'interrupted'),
+  )
+}
+
+/**
+ * Whether the turn's own idle status claims a `user.interrupt` — a stop of a **paused** child
+ * (S5/S7; #348).
+ *
+ * A child parked in a task wait is idle — its pause *is* its turn's end — so the interrupt that
+ * ends that wait is appended **before** the turn the signal starts, and the turn window
+ * {@link turnStartIndex} slices holds none of it. The **claim** is what says the turn ended
+ * because it was stopped: the idle event carries the interrupts it ended on (P4), and this reads
+ * that record rather than the window's shape. It is the same fact {@link turnWasStopped} reads
+ * for a running child, where the interrupt really is inside the window.
+ */
+function stoppedClaimedBy(events: readonly StoredEvent[], idleIndex: number): boolean {
+  const idle = events[idleIndex]
+  const claimed = new Set(
+    (idle?.type === EVENT_TYPES.sessionStatusIdle ? idle.consumes : undefined)?.map(String) ?? [],
+  )
+  if (claimed.size === 0) {
+    return false
+  }
+  return events.some(
+    (event) => event.type === EVENT_TYPES.userInterrupt && claimed.has(String(event.id)),
   )
 }
 
@@ -712,6 +738,34 @@ async function childTurnOpen(store: SessionStore, childId: SessionId): Promise<b
 }
 
 /**
+ * Whether a child is parked in a task wait — idle to {@link childTurnOpen}, still working (S5).
+ *
+ * A child that called `agent_wait` has no open turn and no request in flight: its pause is a turn
+ * end, and a pending `user.interrupt` is one of the things that resolves it (the lifecycle's
+ * TASK WAIT). So a stop has to be written into such a child's log as well, or the interrupt is
+ * only a signal — and a signal on an idle session starts a turn that finds the same open wait and
+ * pauses again, which leaves a helper the model stopped still running, and lets the turn that
+ * eventually ends announce the parent an `idle` after the `stopped`.
+ *
+ * Tolerates a child that is gone, exactly as {@link childTurnOpen} does.
+ */
+async function childPausedOnTasks(store: SessionStore, childId: SessionId): Promise<boolean> {
+  try {
+    return awaitingTasks(await readLog(store, childId)).length > 0
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return false
+    }
+    throw error
+  }
+}
+
+/** Whether an interrupt of this child is one that ends work it is in the middle of (S7). */
+async function childInterruptible(store: SessionStore, childId: SessionId): Promise<boolean> {
+  return (await childTurnOpen(store, childId)) || (await childPausedOnTasks(store, childId))
+}
+
+/**
  * Stop the children a rewind took the parent's `agent` call back from (S7; #344).
  *
  * A rewind is the reader saying "that did not happen", and a helper still working on something
@@ -761,6 +815,15 @@ export async function stopOrphanedTasks(
     })),
   )
   for (const orphan of orphans) {
+    // A helper parked in a task wait is interrupted with an **event** as well: its pause is a
+    // turn end, so the signal alone starts a turn that finds the same open wait and pauses again
+    // — leaving a task the reader took back still working, and letting the turn that eventually
+    // ends announce `idle` after the `stopped` this turn just wrote (S7; #348).
+    if (await childPausedOnTasks(store, orphan.child.id)) {
+      await ignoreMissing(() =>
+        store.appendEvents(orphan.child.id, [{ type: EVENT_TYPES.userInterrupt }]),
+      )
+    }
     runtime.signal?.(orphan.child.id, 'interrupt')
   }
   return orphans.length

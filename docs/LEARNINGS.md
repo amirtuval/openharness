@@ -1212,6 +1212,23 @@ whose task the visible log does not name is not a task of this chat — which is
 check is one comparison against the `taskStarts` map the loop already has
 ([#344](https://github.com/amirtuval/openharness/issues/344)).
 
+**A pause is a turn end, so stopping a paused helper is a _claim_ in the log, not a window of
+events — and a signal is not an event.** A subagent parked in `agent_wait` is `idle` to
+`getTurnState` and still working (S5), and that is the one state S7's stop rules had not been
+written against: `agent_stop` wrote its `user.interrupt` into the child only when the child had
+a turn **open** (#371's guard), so a paused child got a bare `interrupt` **signal** — and a
+signal on an idle session starts a turn that finds the same open wait and pauses again. The
+helper the model stopped kept working, the parent's card went `stopped` → `running` → `idle`
+(the caveat #371 recorded, reproduced deterministically by the #348 pass with a child whose
+`agent_wait` had an 8 s deadline), and a **person's** Stop on the same child read as **done**,
+because the interrupt the ended turn claimed sits _before_ the claiming turn's
+`session.status_running` — outside the window `turnStartIndex` slices. The fix is two readings
+of the same fact (`packages/brain/src/agents.ts`): the delivery accepts the ended idle's own
+**claim** (`consumes`, P4) as the stop beside the in-window check, and a stop writes the event
+itself — not just the signal — for a child with a turn open **or** an unanswered task wait
+(`childPausedOnTasks`), which is the same predicate `stopOrphanedTasks` now uses
+([#373](https://github.com/amirtuval/openharness/issues/373)).
+
 ## Frontends: the web app and the TUI
 
 **A 401 is the only "am I signed in?" signal, and it replaces the whole screen — with exactly two
