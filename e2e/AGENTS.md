@@ -372,9 +372,11 @@ continuing a child (A5), an `ask` tool denied in a child with no prompt anywhere
 on offer with an unknown one and an edit between two starts (A7), nesting to the depth cap and
 the live-task cap (A8), a stopped parent that leaves its helpers running and a rewind that stops
 one (A9, A10), a delete over the whole tree and a chat's usage including its descendants
-(A11, A14), a chat that never used subagents (A17), and — since the pass found it — a helper
+(A11, A14), a chat that never used subagents (A17), and — both found by the pass — a helper
 parked in a task wait whose Stop reads **stopped** rather than the `done` an `idle` delivery
-draws ([#373](https://github.com/amirtuval/openharness/issues/373)). `cli-subagents.spec.ts`
+draws ([#373](https://github.com/amirtuval/openharness/issues/373)), and a sidebar group that
+stops claiming work is running once its helpers have finished
+([#374](https://github.com/amirtuval/openharness/issues/374)). `cli-subagents.spec.ts`
 adds the terminal's half of the nesting (A12), the two clients agreeing on one task (A15) and
 the card and `/agents` at 120 and 80 columns (A16); `w31-restart.spec.ts` is A13 — a kill
 between a child's turn and its news, opt-in with `QA_ALLOW_SERVER_RESTART=1` like `w14`. The

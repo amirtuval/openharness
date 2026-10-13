@@ -1480,6 +1480,17 @@ is a count on the session resource or a whole-tree read, not a client that asks 
 ([#346](https://github.com/amirtuval/openharness/issues/346);
 `apps/web/src/hooks/use-session-tree.ts`).
 
+**A report keyed on "how many" is not a report on "what state" — and a stale glance is still a
+lie.** The sidebar's group under a chat draws both a count and how many of its helpers are
+working, and the shell was told to re-read a chat's children when its **task count** moved. A
+helper _finishing_ moves no count, so the group kept the status the last read answered with: a
+chat whose helper had finished still said "1 running", and kept saying it, while the server's own
+read said `idle` and the card said `done` (found by the #348 pass). The fix is one dependency
+(`apps/web/src/components/chat/chat-view.tsx` reports each task's **id and status**, not
+`tasks.length`; [#374](https://github.com/amirtuval/openharness/issues/374)) and the lesson is
+about what an effect is keyed on: the thing the reader sees is the status, and a count is only
+ever a proxy for it that happens to be wrong exactly when work stops.
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take

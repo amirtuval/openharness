@@ -884,7 +884,9 @@ inline message are called. Nothing is stored twice — a card is the log plus th
   that answers for a whole list, so each of the newest `CHILD_PROBE_LIMIT` (20) chats is asked once
   for its children, a read that could not be answered is remembered as "none" rather than retried,
   and the open chat is asked again **when it is opened and whenever its tasks move**
-  (`onTasksChanged`) — which is what puts a helper under its row while the reader is still in the
+  (`onTasksChanged` — keyed on each task's id **and status**, because a helper finishing changes
+  the status the group draws and not how many there are: #374) — which is what puts a helper under
+  its row while the reader is still in the
   chat. A chat below the limit is nested as soon as it is opened or the list is reloaded, and a
   chat nobody has asked about draws no group rather than an empty one.
 - **The header names what the whole tree spent** (#344, S8). The number beside the chat's cost is

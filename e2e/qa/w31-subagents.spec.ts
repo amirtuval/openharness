@@ -413,10 +413,16 @@ test.describe('W31 subagents', () => {
       await shot(page, 'w31-15-two-helpers-done')
     })
 
-    await test.step('the sidebar counts both under the chat', async () => {
+    await test.step('the sidebar counts both under the chat, and settles', async () => {
       const group = sidebarGroup(page)
       await expect(group).toBeVisible()
       await expect(group.getByRole('button')).toHaveText(/2 subagents/)
+      // Both helpers have finished, so nothing is working: the group's running count and its coral
+      // dot have to move with the cards, or the sidebar claims work is in flight when none is
+      // (#374 — the report the shell hears was keyed on how *many* tasks there are, so a helper
+      // finishing changed nothing it could see).
+      await expect(group.getByRole('button')).toHaveText(/^2 subagents$/)
+      await expect(group.locator('[data-slot="chat-children-running"]')).toHaveCount(0)
       await expectNoErrorBanner(page)
     })
 
