@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-12._
+_Last updated: 2026-10-13._
 
 ## Where we are
 
@@ -50,6 +50,14 @@ _Last updated: 2026-10-12._
   with a mode override, pausing for approval and `ask_user`, provider-opaque content replayed
   (reasoning signatures, DeepSeek `reasoning_content`), and remote MCP servers with OAuth 2.1 —
   on the web and in `oh`, hand-tested on staging.
+- **Skills** ([epic #349](https://github.com/amirtuval/openharness/issues/349)) are done
+  (2026-10-13, the stack #360 → #364 → #366 → #375 → #372 → #376 and the QA pass #355): a skill
+  is a folder of instructions imported from a public git repository, previewed and reviewed
+  before anything is stored, and then read by the model (`skill`/`skill_read`) or run by the
+  reader (`/name arguments`) — on the web and in `oh`, with per-user on/off, a mode's override
+  and a hand-driven refresh. **Skills replace the custom slash commands that used to be on this
+  roadmap** (decided 2026-10-12): `/name` is a skill invocation and the menu's remaining rows are
+  this build's own commands, so there is one mechanism rather than two.
 
 ## Order
 
@@ -61,7 +69,8 @@ _Last updated: 2026-10-12._
    followed by context compaction ([epic #277](https://github.com/amirtuval/openharness/issues/277)) — done
 6. Tools: the loop, pausing for the user and remote MCP ([epic #303](https://github.com/amirtuval/openharness/issues/303)) — done
 7. Extensibility and multiple agents: subagents ([epic #340](https://github.com/amirtuval/openharness/issues/340)) and
-   skills ([epic #349](https://github.com/amirtuval/openharness/issues/349), which also replace custom slash commands), then sandboxed tools
+   skills ([epic #349](https://github.com/amirtuval/openharness/issues/349) — done, and it replaces
+   the custom slash commands this list used to carry), then sandboxed tools
 
 **Why this order:** identity and a running deployment are the foundations. Every later feature
 needs to know who owns what. The features that cost money or can act on the world (paid model

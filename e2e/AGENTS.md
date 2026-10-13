@@ -354,34 +354,50 @@ chat the send creates. W1b is the same key form opened from inside an open chat,
 must not navigate. W17 covers Settings → Providers and the dialog's refusing, adding, replacing
 and deleting.
 
-### The skills pass (#353)
+### The skills pass (#353, #355)
 
-`w30-skills.spec.ts` is the hands-on pass for the skills screens (epic #349; issue #353), and it
-is also where that issue's screenshots come from: four views — Settings → Skills, the import
-preview, the refresh diff and the `/` menu — captured in the three themes at 1280 and ~400 wide,
-written to `QA_SHOT_DIR`.
+Two specs cover skills (epic #349), and they cover the same ground in the two clients:
 
-It drives the real thing: an import from a **`git` repository on loopback**, cloned by the real
-`isomorphic-git`/`safeFetch` path, then a push to that repository and the refresh diff that
-follows; a `/release-notes v1.2` line typed into the `/` menu and stored as the message it is;
-and — when the network allows — a second import from `https://github.com/anthropics/skills`
-(`QA_SKILLS_URL` overrides it), which is the only part that needs the internet. Two things the
-stack must be told:
+- **`w30-skills.spec.ts`** (Playwright) — S1, S2, S3, S6, S8, S9, S10, S11 and S14: the screens,
+  the `/` menu, the import preview's problems, the refresh diff, the mode override, and the four
+  screenshots (`Settings → Skills`, the import preview, the refresh diff, the `/` menu), captured
+  in the three themes at 1280 and ~400 wide into `QA_SHOT_DIR`.
+- **`cli-skills.spec.ts`** (tmux, `QA_WITH_CLI=1`) — the same cases through the built `oh`
+  binary: `oh skills`, `oh skills add <url>` (the printed preview, then the interactive pick, then
+  `--name` and `--all`), `oh skills refresh|enable|disable|remove`, and the `/` menu and the
+  invocation inside a real chat.
 
-- **The fixture is served over `https` on loopback, and the server has to trust it.** The import
-  route takes an `https://` URL and nothing else (K3) while `createGitFixture` serves plain HTTP,
-  so the spec puts a TLS-terminating proxy in front of it with a certificate from
-  `QA_SKILLS_FIXTURE_TLS` (a directory holding `cert.pem` and `key.pem`), and the stack must
-  start with `NODE_EXTRA_CA_CERTS` naming that certificate (plus the deployment's own CA, if it
-  has one — `cat` them into one file) and `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1`. Without
-  `QA_SKILLS_FIXTURE_TLS` the fixture half skips and only the real repository is imported.
-- **The account needs a provider credential for a composer to exist.** A mock stack chats
-  without a key, but the root route shows the first-run screen until the account holds one, so a
-  pass that wants a chat seeds one the way `e2e/src/harness/credentials.ts` does — the row the
-  `PUT` route would write, sealed with the stack's own `OPENHARNESS_SECRETS_KEY`.
+Both drive the real thing: the same **collection repository** on loopback, cloned by the real
+`isomorphic-git`/`safeFetch` path, moved by a push and re-read by a refresh. `qa/skills-fixture.ts`
+is the one copy of it — six candidates (two valid, one of them with a `references/` and a
+`scripts/` folder, one `disable-model-invocation`, one `user-invocable: false`, one invalid, one
+oversized), a browse-ready `/org/skills.git` URL, and the TLS front in front of it. **Real-model
+cases** (S4, S7 — the model loads a skill on its own, reads a reference file, and never claims to
+have run a script) skip unless `QA_MODEL` (or `OPENHARNESS_QA_MODEL`) names a real model, and then
+the stack must run **without** `OPENHARNESS_TEST_MODEL` — the mock answers every turn whatever
+model the session names.
 
-The pass cleans up after itself and its predecessors: it deletes the account's skills and chats
-before it starts, because a QA stack is shared and long-lived.
+Two things the stack must be told, both about the fixture:
+
+- **It is served over `https` on loopback, and the server has to trust it.** The import route
+  takes an `https://` URL and nothing else (K3) while `createGitFixture` serves plain HTTP, so
+  the specs put a TLS-terminating proxy in front of it with the committed throwaway certificate
+  in `e2e/fixtures/skills-https/` (`QA_SKILLS_FIXTURE_TLS` overrides the directory), and the
+  stack starts with `NODE_EXTRA_CA_CERTS` naming **that CA and the deployment's own CA `cat`-ed
+  into one file** — naming only the fixture's throws the deployment's away, and a stack behind an
+  egress proxy then cannot reach a provider at all. `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1`
+  is the other half: without it every import is refused before it is attempted, which is what S5
+  checks.
+- **Nothing else.** The root route is the only thing gated on a stored provider credential, and
+  every chat these specs open is a session created through the API and opened at `#/s/<id>`, so
+  a mock pass needs no credential at all. The one scenario that does is S11, because a chat may
+  not start on a mode whose model has no credential; it skips, saying so, on a stack that holds
+  none.
+
+Each scenario puts the account into the state it describes — no skills, no chats, no modes, then
+its own imports — rather than inheriting it, because Playwright **restarts the worker after a
+failed test** and a fresh worker re-runs its `beforeAll`. A scenario that moves the fixture's
+branch resets it first, for the same reason.
 
 ### What the pass needs on the stack
 

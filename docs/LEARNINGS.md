@@ -1159,6 +1159,18 @@ and is what a public-repo smoke can use — but only a **fixture** can move a br
 diff is the half that needs the terminator
 ([#354](https://github.com/amirtuval/openharness/issues/354)).
 
+**A loopback browse URL has to carry `owner/repo` before its `/tree/…`, so the pass's TLS front answers under `/org/skills.git` and not at `/skills.git`.**
+`parseGitUrl` only reads a browse URL's `tree` (or GitLab's `-`) separator from the **third** path
+segment on — a marker with no `owner/repo` in front of it is a repository's own name
+(`https://github.com/tree/main` names the repository `tree`) — so
+`https://127.0.0.1:<port>/skills.git/tree/main/skills/release-notes`, which is the shape the
+fixture's own URL has, is read as a clone URL for a repository called
+`skills.git/tree/main/skills/release-notes` and never split. `e2e/qa/skills-fixture.ts` therefore
+mounts the front at `https://127.0.0.1:<port>/org/skills.git` and drops the `/org` when it proxies:
+the separator now has two segments in front of it, S2's browse-URL split runs on the loopback
+fixture with no network at all, and `repositoryName` still answers `skills`
+([#355](https://github.com/amirtuval/openharness/issues/355)).
+
 **A mock stack chats without a key but still shows the first-run screen, so a hands-on pass has to seed a credential.**
 `OPENHARNESS_TEST_MODEL=mock` swaps the model factory and `resolveMockCredential` answers for every
 session, so a turn needs no provider key — but the root route's gate is the **credentials list**, and
@@ -1170,6 +1182,16 @@ would write, with the server's own `sealCredential`/`credentialUpsert` and the s
 means a QA stack that is going to be driven by browser automation needs its secrets key **fixed** at
 start-up rather than generated per boot
 ([#353](https://github.com/amirtuval/openharness/issues/353)).
+
+**The credentials gate is the root route's alone, so a pass can drive a whole chat without one.**
+`#/` and `#/new` render the first-run flow for an account with no provider key; `#/s/<id>` does
+not — a chat opened at its own route gets its transcript and its composer whatever the account
+holds, and the mock answers its turns either way. So the #355 specs need no credential at all: the
+one case that does is S11, because `requireUsableMode` refuses a chat on a mode whose model has no
+stored credential (422 `mode_unavailable_error`) — a check about the **mode**, not about chatting —
+and that scenario skips with that reason when the stack holds none. It is the cheaper answer than
+seeding a sealed row: no database access, no fixed secrets key, and a spec that runs against any
+deployment ([#355](https://github.com/amirtuval/openharness/issues/355)).
 
 **A screenshot pass has to set the theme the way the app does, and re-build the view after every reload.**
 Setting `data-theme` (or the `localStorage` cache) from the page looks like it works and does not:
@@ -1379,6 +1401,45 @@ uses ([`e2e/AGENTS.md`](../e2e/AGENTS.md)).
 ([#79](https://github.com/amirtuval/openharness/issues/79)) and once again through environment
 inheritance, which is the general lesson — an escape hatch meant for a test runner leaks into
 anything the test spawns.
+
+**Playwright restarts the worker after a failed test, so a `beforeAll` that cleans the account silently empties the run after the first failure.**
+`fullyParallel: false` with `workers: 1` runs a file's tests in order in one worker — but Playwright
+discards that worker when a test fails, and a fresh worker re-runs its `beforeAll`. A skills pass
+whose `beforeAll` deleted the account's imported skills therefore failed one case and then reported
+every later case against an empty account, which reads as "the settings screen stopped rendering
+skills" rather than "the fixture was cleaned" — five failures for one cause
+([#355](https://github.com/amirtuval/openharness/issues/355)). The rule the specs now follow is that
+**each scenario establishes its own state** (`ensureSkills(request, names)`) instead of inheriting
+it, so order and a failure's fallout cannot matter.
+
+**A fixture served from the test process cannot answer while that process is blocked in `execFileSync`.**
+The skills pass's git fixture listens **in the Playwright worker** and the server under test clones
+from it — so every `oh` the CLI spec ran with the synchronous runner (`execFileSync`, `stdio:
+'ignore'`) froze the worker's event loop for the length of the command, the fixture's listeners
+stopped accepting, and the clone reached the server as `fetch failed` and the reader as a 422
+`The repository could not be reached.` The same `oh skills add` worked from a shell, which is what
+made it look like a server problem. `e2e/qa/tmux.ts` gained `ohAsync` (a `spawn`, with stdin still
+ignored so a confirm question reads end-of-file) for exactly this: a scenario that serves something
+to the stack under test has to let its own loop turn ([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**`waitForIdle` passes vacuously between two sends on one session, because the idle a finished turn wrote is already the log's last status.**
+"Wait until the session is idle" is true the instant the second message is appended and the new
+turn has not started — the new turn's `session.status_running` has not been written yet — so a
+scenario that waited that way read the log before the brain had loaded the skill it was asserting
+on, and reported no `session.skill_loaded` at all. The fix is to wait for the thing that really
+changed (`waitForLoaded`: the count of `session.skill_loaded` events) rather than for a state the
+previous turn had already left behind — the same "a wait anchored on nothing returns immediately on
+an empty state" trap the e2e harness documents for `afterSeq`
+([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**The fixture's TLS certificate and the sandbox's egress proxy are two CAs, and `NODE_EXTRA_CA_CERTS` names one file.**
+A QA stack started with `NODE_EXTRA_CA_CERTS=<skills fixture ca>.pem` **replaces** whatever the
+environment already had — so a container behind an egress proxy lost the proxy's CA with it, and
+every provider call the stack made came back `fetch failed` while `curl` from the same shell worked.
+The skills pass's stack therefore starts with both `cat`-ed into one bundle (the fixture's
+`e2e/fixtures/skills-https/README.md` says so in as many words), which is the same instruction
+`e2e/AGENTS.md` already gave for a deployment with a CA of its own
+([#353](https://github.com/amirtuval/openharness/issues/353), [#355](https://github.com/amirtuval/openharness/issues/355)).
 
 **An assertion that cannot fail is worse than no assertion, because it is counted as coverage.** A
 test review of every package found them everywhere: `expect(p.partitionOf(id)).toBe(p.partitionOf(id))`,
