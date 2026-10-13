@@ -7,6 +7,7 @@ import { render, screen, type RenderResult } from '@testing-library/react'
 import type userEvent from '@testing-library/user-event'
 
 import { App } from '../App'
+import { honourSessionTree } from './session-tree'
 
 /**
  * Render the app against a fake server.
@@ -26,7 +27,10 @@ export function renderApp(
 ): RenderResult {
   const hash = options.hash ?? `#/s/${fake.session.id}`
   window.history.replaceState(null, '', `${options.search ?? ''}${hash}`)
-  return render(<App client={fake} fakeClient={options.fakeClient} />)
+  // The sidebar nests each chat's subagents, and it asks for them the way the server is asked
+  // (#346): the fake answers the whole list to any filter, so it is taught the one query it does
+  // not model — see `test-support/session-tree.ts`.
+  return render(<App client={honourSessionTree(fake)} fakeClient={options.fakeClient} />)
 }
 
 /**
@@ -38,7 +42,7 @@ export function renderApp(
  * point.
  */
 export function makeFake(options: FakeClientOptions = {}): FakeClient {
-  return createFakeClient(options)
+  return honourSessionTree(createFakeClient(options))
 }
 
 /**
@@ -59,6 +63,13 @@ export async function signInFake(fake: FakeClient): Promise<void> {
 export interface ListRequest {
   readonly limit: number | undefined
   readonly page: string | undefined
+  /**
+   * The parent a child read names, or `undefined` for a chat-list read.
+   *
+   * The sidebar asks each of the newest chats for its children since #346, so the recorded
+   * requests hold both kinds; a test about the chat list's paging filters these out.
+   */
+  readonly parentSessionId: string | undefined
 }
 
 /**
@@ -115,7 +126,11 @@ export function recordListRequests(fake: FakeClient): { readonly sessions: ListR
   const listSessions = fake.sessions.list.bind(fake.sessions)
 
   fake.sessions.list = (params, options) => {
-    sessions.push({ limit: params?.limit, page: params?.page })
+    sessions.push({
+      limit: params?.limit,
+      page: params?.page,
+      parentSessionId: params?.parent_session_id,
+    })
     return listSessions(params, options)
   }
 

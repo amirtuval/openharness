@@ -55,6 +55,9 @@ vi.mock('../../hooks/use-session', () => ({
       truncation: null,
       toolCalls: [],
       todos: hookState.todos,
+      // No task was started here: the screen draws no card, reads no subtree usage and watches no
+      // child (#346). The cards themselves are `task-card.test.tsx`'s and `message-list`'s.
+      tasks: [],
       truncatedToolResults: [],
       clearedToolResults: null,
       confirmations: [],
@@ -73,6 +76,7 @@ vi.mock('../../hooks/use-session', () => ({
       send: () => Promise.resolve(true),
       compact: () => Promise.resolve(true),
       interrupt: () => Promise.resolve(undefined),
+      stopTask: () => Promise.resolve(undefined),
       respond: () => Promise.resolve(undefined),
       dismissError: () => undefined,
     }) as unknown as SessionView,
