@@ -16,6 +16,7 @@ import {
   makeProviderCredential,
   makeSession,
   makeSessionCompact,
+  makeSkill,
   makeUser,
   makeUserMessage,
   makeGetPreferencesResponse,
@@ -915,6 +916,133 @@ describe('remote MCP servers (#303, X10; #313)', () => {
   })
 })
 
+describe('skills (#349, K4/K5; #353)', () => {
+  it('lists, reads one with its SKILL.md, and reads one file by path', async () => {
+    const skill = makeSkill()
+    const { client, mock } = clientWith((_request, call) =>
+      call === 0
+        ? jsonResponse({ data: [skill] })
+        : call === 1
+          ? jsonResponse({ ...skill, content: '---\nname: release-notes\n---\n\nWrite them.' })
+          : jsonResponse({ path: 'reference/tone.md', size: 380, content: 'Be plain.' }),
+    )
+
+    expect(await client.skills.list()).toEqual({ data: [skill] })
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/skills`)
+
+    const one = await client.skills.get(skill.id)
+    expect(one.content).toContain('Write them.')
+    expect(mock.urlOf(1)).toBe(`${BASE_URL}/v1/me/skills/${skill.id}`)
+
+    // A path with a slash in it stays a path: the route takes the whole thing in one parameter,
+    // and a file name with a space or a `#` arrives as itself.
+    const file = await client.skills.file(skill.id, 'reference/tone.md')
+    expect(file).toMatchObject({ path: 'reference/tone.md', content: 'Be plain.' })
+    expect(mock.urlOf(2)).toBe(`${BASE_URL}/v1/me/skills/${skill.id}/files/reference/tone.md`)
+
+    const encoded = clientWith(() => jsonResponse({ path: 'a b#c.md', size: 1, content: 'x' }))
+    await encoded.client.skills.file(skill.id, 'a b#c.md')
+    expect(encoded.mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/skills/${skill.id}/files/a%20b%23c.md`)
+  })
+
+  it('switches a skill on or off and deletes it', async () => {
+    const skill = makeSkill({ enabled: false })
+    const { client, mock } = clientWith((_request, call) =>
+      call === 0 ? jsonResponse(skill) : new Response(null, { status: 204 }),
+    )
+
+    expect(await client.skills.update(skill.id, { enabled: false })).toEqual(skill)
+    expect(mock.requests[0]?.init?.method).toBe('POST')
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/skills/${skill.id}`)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({ enabled: false })
+
+    expect(await client.skills.delete(skill.id)).toBeUndefined()
+    expect(mock.requests[1]?.init?.method).toBe('DELETE')
+  })
+
+  it('previews an import and then imports the names at the previewed commit', async () => {
+    const preview = {
+      url: 'https://github.com/example/skills',
+      ref: 'main',
+      path: null,
+      commit_sha: '9f2c1b4',
+      candidates: [],
+    }
+    const skill = makeSkill()
+    const { client, mock } = clientWith((_request, call) =>
+      call === 0 ? jsonResponse(preview) : jsonResponse({ data: [skill] }, 201),
+    )
+
+    expect(await client.skills.previewImport({ url: 'https://github.com/example/skills' })).toEqual(
+      preview,
+    )
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/skills/import/preview`)
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      url: 'https://github.com/example/skills',
+    })
+
+    const imported = await client.skills.import({
+      url: 'https://github.com/example/skills',
+      commit_sha: '9f2c1b4',
+      names: ['release-notes'],
+    })
+    expect(imported).toEqual({ data: [skill] })
+    expect(mock.urlOf(1)).toBe(`${BASE_URL}/v1/me/skills/import`)
+    expect(bodyOf(mock.requests[1]?.init)).toEqual({
+      url: 'https://github.com/example/skills',
+      commit_sha: '9f2c1b4',
+      names: ['release-notes'],
+    })
+  })
+
+  it('previews a refresh and confirms it at the commit it resolved', async () => {
+    const skill = makeSkill()
+    const preview = {
+      commit_sha: 'a1b2c3d',
+      changed: true,
+      files_added: [],
+      files_removed: [],
+      files_changed: ['SKILL.md'],
+      skill_md_diff: '--- a/SKILL.md\n+++ b/SKILL.md',
+      problems: [],
+    }
+    const { client, mock } = clientWith((_request, call) =>
+      call === 0 ? jsonResponse(preview) : jsonResponse(skill),
+    )
+
+    expect(await client.skills.previewRefresh(skill.id)).toEqual(preview)
+    expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/skills/${skill.id}/refresh/preview`)
+    expect(mock.requests[0]?.init?.method).toBe('POST')
+
+    expect(await client.skills.refresh(skill.id, { commit_sha: 'a1b2c3d' })).toEqual(skill)
+    expect(mock.urlOf(1)).toBe(`${BASE_URL}/v1/me/skills/${skill.id}/refresh`)
+    expect(bodyOf(mock.requests[1]?.init)).toEqual({ commit_sha: 'a1b2c3d' })
+  })
+
+  it('maps the import refusals to the protocol’s own types', async () => {
+    const broken = clientWith(() =>
+      errorResponse(422, 'skill_import_error', 'That folder holds no SKILL.md.'),
+    )
+    const failure = await broken.client.skills
+      .previewImport({ url: 'https://github.com/example/empty' })
+      .catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).type).toBe('skill_import_error')
+
+    const taken = clientWith(() =>
+      errorResponse(409, 'conflict_error', 'a skill named release-notes already exists'),
+    )
+    const conflict = await taken.client.skills
+      .import({ url: 'https://github.com/example/skills', commit_sha: 'abc', names: ['x'] })
+      .catch((error: unknown) => error)
+    expect((conflict as ApiError).type).toBe('conflict_error')
+
+    // A listing that is not the protocol's shape is a validation failure, not a half-typed row.
+    const bad = clientWith(() => jsonResponse({ data: [{ id: 'skl_1' }] }))
+    await expect(bad.client.skills.list()).rejects.toBeInstanceOf(ResponseValidationError)
+  })
+})
+
 describe('helpers', () => {
   it('sendMessage posts one text block and returns the stored event', async () => {
     const stored = makeUserMessage('Hello agent', { seq: 7 })
@@ -926,6 +1054,31 @@ describe('helpers', () => {
     expect(mock.urlOf(0)).toBe(`${BASE_URL}/v1/sessions/sesn_1/events`)
     expect(bodyOf(mock.requests[0]?.init)).toEqual({
       events: [{ type: 'user.message', content: [{ type: 'text', text: 'Hello agent' }] }],
+    })
+  })
+
+  it('sendMessage rides the skill a slash invocation names (K7)', async () => {
+    const stored = makeUserMessage('/release-notes v1.2', {
+      seq: 7,
+      skill: { name: 'release-notes', arguments: 'v1.2' },
+    })
+    const { client, mock } = clientWith(() => jsonResponse({ data: [stored] }))
+
+    const message = await client.sendMessage('sesn_1', '/release-notes v1.2', {
+      skill: { name: 'release-notes', arguments: 'v1.2' },
+    })
+
+    expect(message).toEqual(stored)
+    // The text is what the reader typed, with the skill beside it — the shape the brain loads
+    // the skill's instructions from.
+    expect(bodyOf(mock.requests[0]?.init)).toEqual({
+      events: [
+        {
+          type: 'user.message',
+          content: [{ type: 'text', text: '/release-notes v1.2' }],
+          skill: { name: 'release-notes', arguments: 'v1.2' },
+        },
+      ],
     })
   })
 

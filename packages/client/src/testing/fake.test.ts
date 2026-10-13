@@ -9,9 +9,11 @@ import {
   UpdateAgentRequestSchema,
   UserMessageEventInputSchema,
   MODE_DEFAULT_MODEL,
+  SKILL_IMPORT_MESSAGES,
   isStoredEvent,
   newAgentId,
   newModeId,
+  newSkillId,
 } from '@openharness/protocol'
 import type {
   AgentToolUseEvent,
@@ -27,6 +29,7 @@ import {
   makeModelEntry,
   makeProviderCredential,
   makeSession,
+  makeSkill,
   makeUserPreferences,
 } from '@openharness/protocol/fixtures'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -35,7 +38,13 @@ import { createClient, type SendMessageOptions } from '../client'
 import { ApiError, AuthenticationError } from '../errors'
 import { initialTranscriptState, reduceTranscriptAll, type TranscriptState } from '../transcript'
 import { createMockFetch, sseLines, sseResponse } from '../test-support/mock-fetch'
-import { FAKE_MODEL_USAGE, FAKE_SESSION_TOKEN, createFakeClient, type FakeClient } from './index'
+import {
+  FAKE_MODEL_USAGE,
+  FAKE_SESSION_TOKEN,
+  FAKE_SKILL_COMMIT,
+  createFakeClient,
+  type FakeClient,
+} from './index'
 
 afterEach(() => {
   // The device-flow timing test runs on fake timers; nothing else may inherit them.
@@ -2064,6 +2073,221 @@ describe('the fake’s manual compaction (#283)', () => {
   it('is behind the 401 when the fake is signed out', async () => {
     const fake = createFakeClient({ authenticated: false })
     await expect(fake.sessions.compact(fake.session.id)).rejects.toBeInstanceOf(AuthenticationError)
+  })
+})
+
+describe('the fake’s skills (#349, K4/K5; #353)', () => {
+  /** A candidate the fake's clone finds, with nothing wrong with it. */
+  function candidate(name: string, overrides: Record<string, unknown> = {}) {
+    return {
+      name,
+      folder: name,
+      description: `${name} does a thing.`,
+      files: [{ path: 'SKILL.md', size: 120 }],
+      skill_md: `---\nname: ${name}\ndescription: ${name} does a thing.\n---\n\n# ${name}\n`,
+      problems: [],
+      name_taken: false,
+      ...overrides,
+    }
+  }
+
+  it('lists, reads one with its SKILL.md, reads a file, and switches one off', async () => {
+    const skill = makeSkill({
+      name: 'release-notes',
+      files: [
+        { path: 'SKILL.md', size: 120 },
+        { path: 'reference.md', size: 40 },
+      ],
+    })
+    const fake = createFakeClient({
+      skills: [skill],
+      skillContents: { [skill.id]: { 'reference.md': 'Be plain.' } },
+    })
+
+    expect((await fake.skills.list()).data).toEqual([skill])
+    const one = await fake.skills.get(skill.id)
+    expect(one.content).toContain('name: release-notes')
+
+    const file = await fake.skills.file(skill.id, 'reference.md')
+    expect(file).toMatchObject({ path: 'reference.md', content: 'Be plain.', size: 9 })
+    await expect(fake.skills.file(skill.id, 'nope.md')).rejects.toMatchObject({
+      status: 404,
+      type: 'not_found_error',
+    })
+
+    const off = await fake.skills.update(skill.id, { enabled: false })
+    expect(off.enabled).toBe(false)
+    expect((await fake.skills.list()).data[0]?.enabled).toBe(false)
+
+    await fake.skills.delete(skill.id)
+    expect((await fake.skills.list()).data).toEqual([])
+    await expect(fake.skills.get(skill.id)).rejects.toMatchObject({
+      status: 404,
+      type: 'not_found_error',
+    })
+  })
+
+  it('previews an import and stores the candidates it names', async () => {
+    const fake = createFakeClient({
+      skillImport: { candidates: [candidate('release-notes'), candidate('changelog')] },
+    })
+
+    const preview = await fake.skills.previewImport({ url: 'https://github.com/example/skills' })
+    expect(preview).toMatchObject({
+      url: 'https://github.com/example/skills',
+      ref: null,
+      path: null,
+      commit_sha: FAKE_SKILL_COMMIT,
+    })
+    expect(preview.candidates.map((each) => each.name)).toEqual(['release-notes', 'changelog'])
+
+    const imported = await fake.skills.import({
+      url: 'https://github.com/example/skills',
+      commit_sha: preview.commit_sha,
+      names: ['release-notes'],
+    })
+    expect(imported.data).toHaveLength(1)
+    expect(imported.data[0]).toMatchObject({
+      name: 'release-notes',
+      enabled: true,
+      source: {
+        url: 'https://github.com/example/skills',
+        commit_sha: FAKE_SKILL_COMMIT,
+      },
+    })
+    // The preview's own SKILL.md is the snapshot's, so an imported skill is readable.
+    expect((await fake.skills.get(imported.data[0]!.id)).content).toContain('name: release-notes')
+    expect((await fake.skills.list()).data).toHaveLength(1)
+  })
+
+  it('refuses what the import route refuses', async () => {
+    const fake = createFakeClient({
+      skillImport: {
+        candidates: [
+          candidate('broken', {
+            problems: [{ code: 'name-mismatch', message: 'not the folder’s' }],
+          }),
+          candidate('taken', { name_taken: true }),
+        ],
+      },
+    })
+
+    // A name the preview did not offer is the 400 the route gives.
+    await expect(
+      fake.skills.import({
+        url: 'https://github.com/example/skills',
+        commit_sha: 'abc',
+        names: ['nope'],
+      }),
+    ).rejects.toMatchObject({ status: 400, type: 'invalid_request_error' })
+
+    // A candidate that cannot be imported is the 422 with its own problems.
+    const refused = await fake.skills
+      .import({ url: 'https://github.com/example/skills', commit_sha: 'abc', names: ['broken'] })
+      .catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(ApiError)
+    expect((refused as ApiError).type).toBe('skill_import_error')
+
+    // A name the reader already has — the preview said so — is the 409.
+    await expect(
+      fake.skills.import({
+        url: 'https://github.com/example/skills',
+        commit_sha: 'abc',
+        names: ['taken'],
+      }),
+    ).rejects.toMatchObject({ status: 409, type: 'conflict_error' })
+
+    // Nothing was stored by any of them.
+    expect((await fake.skills.list()).data).toEqual([])
+  })
+
+  it('answers an import failure with the protocol’s sentence for the code', async () => {
+    const fake = createFakeClient({ skillImport: { candidates: [], failure: 'no_skills_found' } })
+
+    const failure = await fake.skills
+      .previewImport({ url: 'https://github.com/example/empty' })
+      .catch((error: unknown) => error)
+
+    expect((failure as ApiError).type).toBe('skill_import_error')
+    expect((failure as ApiError).message).toBe(SKILL_IMPORT_MESSAGES.no_skills_found)
+  })
+
+  it('previews a refresh and confirms it, or says the snapshot is unchanged', async () => {
+    const skill = makeSkill({
+      source: {
+        url: 'https://github.com/example/skills',
+        ref: 'main',
+        path: 'release-notes',
+        commit_sha: '9f2c1b4e5a6d7c8b9a0f1e2d3c4b5a69788796a5',
+      },
+    })
+    const changed = {
+      commit_sha: 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0',
+      changed: true,
+      files_added: ['new.md'],
+      files_removed: [],
+      files_changed: ['SKILL.md'],
+      skill_md_diff: '--- a/SKILL.md\n+++ b/SKILL.md\n',
+      problems: [],
+    }
+    const fake = createFakeClient({
+      skills: [skill],
+      skillImport: { candidates: [], refresh: { [skill.id]: changed } },
+    })
+
+    expect(await fake.skills.previewRefresh(skill.id)).toEqual(changed)
+    const refreshed = await fake.skills.refresh(skill.id, { commit_sha: changed.commit_sha })
+    expect(refreshed.source.commit_sha).toBe(changed.commit_sha)
+    expect(refreshed.refreshed_at).not.toBe(skill.refreshed_at)
+
+    // A skill the test staged nothing for is unchanged — and still a commit, so a confirm works.
+    const other = makeSkill({ name: 'other', id: newSkillId() })
+    const quiet = createFakeClient({ skills: [other] })
+    const preview = await quiet.skills.previewRefresh(other.id)
+    expect(preview).toMatchObject({ changed: false, files_added: [], skill_md_diff: null })
+  })
+
+  it('refuses a refresh whose snapshot has problems, and an unknown skill everywhere', async () => {
+    const skill = makeSkill()
+    const broken = createFakeClient({
+      skills: [skill],
+      skillImport: {
+        candidates: [],
+        refresh: {
+          [skill.id]: {
+            commit_sha: 'abc',
+            changed: true,
+            files_added: [],
+            files_removed: [],
+            files_changed: ['SKILL.md'],
+            skill_md_diff: 'diff',
+            problems: [{ code: 'over-limit', message: 'SKILL.md is too big' }],
+          },
+        },
+      },
+    })
+
+    await expect(broken.skills.refresh(skill.id, { commit_sha: 'abc' })).rejects.toMatchObject({
+      status: 422,
+      type: 'skill_import_error',
+    })
+
+    const fake = createFakeClient()
+    for (const call of [
+      () => fake.skills.get('skl_missing'),
+      () => fake.skills.file('skl_missing', 'SKILL.md'),
+      () => fake.skills.update('skl_missing', { enabled: false }),
+      () => fake.skills.delete('skl_missing'),
+      () => fake.skills.previewRefresh('skl_missing'),
+      () => fake.skills.refresh('skl_missing', { commit_sha: 'abc' }),
+    ]) {
+      await expect(call()).rejects.toMatchObject({ status: 404, type: 'not_found_error' })
+    }
+  })
+
+  it('answers the 401 while signed out, like every other /v1 route', async () => {
+    const fake = createFakeClient({ authenticated: false })
+    await expect(fake.skills.list()).rejects.toBeInstanceOf(AuthenticationError)
   })
 })
 

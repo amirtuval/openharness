@@ -151,6 +151,35 @@ describe('reduceTranscript', () => {
     expect(messageById(picked, queued.id).pending).toBe(false)
   })
 
+  it('keeps the skill a slash invocation named, live and replayed (K7, #353)', () => {
+    const invoked = makeUserMessage('/release-notes v1.2', {
+      seq: 1,
+      processed_at: fixtureTimestamp(1),
+      id: idA,
+      skill: { name: 'release-notes', arguments: 'v1.2' },
+    })
+    const bare = makeUserMessage('/release-notes', {
+      seq: 2,
+      processed_at: null,
+      id: idB,
+      skill: { name: 'release-notes' },
+    })
+
+    const state = reduceEvents([invoked, bare])
+
+    // The field is the stored event's own, so a replay reads it the same way a live fold did.
+    expect(messageById(state, invoked.id).skill).toEqual({
+      name: 'release-notes',
+      arguments: 'v1.2',
+    })
+    expect(messageById(state, bare.id).skill).toEqual({ name: 'release-notes', arguments: null })
+    // The text stays what the reader typed.
+    expect(messageById(state, invoked.id).text).toBe('/release-notes v1.2')
+    // A message that merely looks like a command carries no skill: the parse is not the rule.
+    const plain = makeUserMessage('/compact', { seq: 1, id: idC })
+    expect(messageById(reduceEvents([plain]), idC).skill).toBeUndefined()
+  })
+
   it('keeps a steering message where it arrived', () => {
     const first = makeUserMessage('start', { seq: 1, processed_at: fixtureTimestamp(1), id: idA })
     const start = makeModelRequestStart({ seq: 2, id: idB })
