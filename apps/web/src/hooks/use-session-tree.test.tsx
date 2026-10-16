@@ -1,6 +1,7 @@
 import type { Session } from '@openharness/protocol'
 import { makeChildSession, makeSession } from '@openharness/protocol/fixtures'
 import { render, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ClientProvider, useClient } from '../components/client-provider'
@@ -137,5 +138,30 @@ describe('the session tree (#346)', () => {
       expect(document.querySelectorAll('[data-chat]')).toHaveLength(1)
     })
     expect(childrenText(parent.id)).toBe('')
+  })
+
+  it('still nests under StrictMode, whose double-invoked effect used to silence it (#369)', async () => {
+    // `apps/web/src/main.tsx` wraps the app in `<StrictMode>`, so every development build runs
+    // React's mount → cleanup → mount again on every effect. The hook's `mounted` ref was left
+    // `false` by that second pass — its cleanup runs and nothing set it back — so `probe` dropped
+    // every answer and this group never appeared in `yarn dev` while every non-StrictMode test
+    // passed. Nothing else in the suite renders the app this way, which is exactly why the bug
+    // survived the hands-on pass.
+    const fake = makeFake()
+    const parent = makeSession({ title: 'Release notes' })
+    const child = makeChildSession(parent, { title: 'Check the changelog' })
+    fake.addSession(child)
+
+    render(
+      <StrictMode>
+        <ClientProvider client={fake}>
+          <TreeProbe sessions={[parent]} />
+        </ClientProvider>
+      </StrictMode>,
+    )
+
+    await waitFor(() => {
+      expect(childrenText(parent.id)).toBe(child.id)
+    })
   })
 })

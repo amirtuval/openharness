@@ -1397,6 +1397,21 @@ the window it computed for the old size until some other state changes, which re
 stays short in a maximised window; `oh` subscribes in one hook (`useTerminalRows`), so every list
 gets the redraw.
 
+**A `mounted` ref has to be set back to `true` in its effect's body, or StrictMode makes it `false`
+for the component's whole life.** The web app's sidebar-nesting hook kept `const mounted =
+useRef(true)` with an effect whose body was _only_ the cleanup, and `main.tsx` wraps the app in
+`<StrictMode>` — so React mounted the effect, ran its cleanup, then ran the effect again, and the
+second pass left the flag `false` for the life of the component. Every answer the hook's `probe`
+received was dropped by `if (!mounted.current) return`: the requests were still made, `childrenOf`
+always answered `[]`, and the sidebar simply never nested a helper under the chat that started it,
+in `yarn dev` and in any development build. It is invisible in two directions at once — StrictMode
+is development-only, and the QA stack serves a production build, while the unit tests render their
+components without a `<StrictMode>` wrapper — which is why it survived a hands-on pass and a green
+suite. Its sibling hooks (`use-models.ts`, `use-modes.ts`) write the flag the correct way, as
+`mounted.current = true` in the effect body with the cleanup beside it; the test that would have
+caught it renders the hook inside `<StrictMode>`, and is now the first thing in the file
+([#369](https://github.com/amirtuval/openharness/issues/369)).
+
 **A list that can outgrow the screen has to be windowed against the terminal's height, and the
 selected row has to be marked with a glyph.** The `/mcp` tools face drew every tool of the server,
 so on a server with sixty of them the reader saw the end of the list and nothing about what was
