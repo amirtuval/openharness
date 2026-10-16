@@ -24,6 +24,7 @@ import type {
   StreamEvent,
   TaskId,
   TaskNotificationKind,
+  TaskStatus,
   Timestamp,
   UpdateAgentRequest,
   UpdateModeRequest,
@@ -742,6 +743,15 @@ export interface SessionStore {
    * notice it. No fence is needed, for the same reason a user event needs none: the event is
    * durable the moment it is stored, and the owner's brain is what claims it.
    *
+   * **A `status` lands with it, in the same append** (epic #340, S4; #363). A child's turn end
+   * owes its parent two facts — the news, and the `session.task_status` that moves the card —
+   * and writing them as two appends left a window no recovery could repair: a crash (or a fence)
+   * between them delivered the news and nothing else, the parent's card stayed `running` for the
+   * rest of the session, and the child was not "work" for the scan because its news had landed.
+   * One append keyed by the same `sourceKey` is what makes them land together: a second call
+   * naming that key stores **neither**, so the status is written exactly once, by the one writer
+   * that also wrote the notification.
+   *
    * @returns the stored notification, and whether this call is the one that wrote it
    * @throws SessionNotFoundError when the session does not exist
    * @throws RangeError when the input is not a notification the protocol would accept
@@ -1312,7 +1322,24 @@ export interface TaskNotificationInput {
    * nothing.
    */
   readonly sourceKey: string
+  /**
+   * The status this news moves the task's card to, appended **with** the notification (#363).
+   *
+   * Optional because not every notification moves a card (`message_parent`'s notes, and the
+   * inbox's own `notify`, carry news and no status), and narrow because only a finished turn's
+   * delivery has one to write: `running` belongs to the child's own turn start, and `stopped`
+   * written by an `agent_stop` is the tool's fact, not a delivery's.
+   */
+  readonly status?: TaskDeliveryStatus
 }
+
+/**
+ * The statuses a **delivery** moves a task's card to (epic #340, S4/S7; #363): a turn that
+ * ended, errored, or was stopped. `running` is not one — it is the child's own turn start — and
+ * neither is a `stopped` an `agent_stop` wrote before the child's turn ended.
+ */
+export type TaskDeliveryStatus = Extract<TaskStatus, 'idle' | 'failed' | 'stopped'>
+
 
 /** What {@link SessionStore.appendTaskNotification} wrote — or found already written. */
 export interface TaskNotificationAppend {

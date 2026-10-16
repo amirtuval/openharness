@@ -346,3 +346,32 @@ export function taskNotificationEvent(input: TaskNotificationInput): AppendableE
     source_key: input.sourceKey,
   }
 }
+
+/**
+ * The batch {@link SessionStore.appendTaskNotification} appends: the notification, and — when
+ * the caller named one — the `session.task_status` it moves the card to (#363).
+ *
+ * Two facts about one turn, written as **one** append. As two appends there was a window no
+ * recovery could repair: a crash (or a fence) between them delivered the news and lost the
+ * status, so the card stayed `running` for the rest of the session, the parent model acted on a
+ * result whose task looked unfinished, and the scan saw nothing to repair because the news had
+ * landed. The store's own idempotency (one append per `sourceKey`) then makes the status
+ * exactly-once by construction, which is why the pair lives here rather than at the caller.
+ *
+ * The status goes **after** the notification in the batch, so the log reads news-then-move and
+ * "the newest status for this task" is the delivery's.
+ */
+export function taskNotificationEvents(input: TaskNotificationInput): AppendableEvent[] {
+  return [
+    taskNotificationEvent(input),
+    ...(input.status === undefined
+      ? []
+      : [
+          {
+            type: EVENT_TYPES.sessionTaskStatus,
+            task_id: input.taskId,
+            status: input.status,
+          } satisfies AppendableEvent,
+        ]),
+  ]
+}
