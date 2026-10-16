@@ -315,7 +315,10 @@ describe('TaskCardView (#347)', () => {
     // no reason to hold an SSE connection — with the server's keepalive — open for as long as the
     // transcript holds the card. `taskIsLive` is the client's own rule, and the web card was
     // already passing it to its watcher; `oh`'s card opened one for every card, always.
-    const log = { iterate: vi.fn(logOf([]).iterate), stream: vi.fn(logOf([]).stream) }
+    // Spies with no behaviour: the assertion is that they are never reached at all.
+    const iterate = vi.fn(() => asyncOf([]) as AsyncIterable<never>)
+    const stream = vi.fn(() => asyncOf([]) as AsyncIterable<never>)
+    const log: TaskActivityLog = { iterate, stream }
     const view = render(
       <ThemeProvider theme={DARK}>
         <TaskCardView
@@ -331,8 +334,8 @@ describe('TaskCardView (#347)', () => {
     )
 
     expect(view.lastFrame() ?? '').toContain('● done')
-    expect(log.iterate).not.toHaveBeenCalled()
-    expect(log.stream).not.toHaveBeenCalled()
+    expect(iterate).not.toHaveBeenCalled()
+    expect(stream).not.toHaveBeenCalled()
   })
 
   it('closes the follower when the card goes away (#368)', async () => {
