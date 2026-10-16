@@ -66,8 +66,8 @@ const NOTHING = { text: [] as readonly string[] }
  */
 const SUBAGENTS: SubagentRuntime = {
   types: {
-    list: async () => [],
-    resolve: async () => ({ ok: false, message: 'This deployment starts no helpers.' }),
+    list: () => Promise.resolve([]),
+    resolve: () => Promise.resolve({ ok: false, message: 'This deployment starts no helpers.' }),
   },
   maxDepth: 3,
   maxLiveTasks: 10,

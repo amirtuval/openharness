@@ -1314,7 +1314,7 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
     const controller = new AbortController()
     const drained = mockModel({
       text: ['Half a ', 'report.'],
-      onChunk: async (_chunk, index) => {
+      onChunk: (_chunk, index) => {
         // After the first chunk has streamed, so there is partial output to keep.
         if (index === 1) {
           controller.abort()
@@ -1384,7 +1384,7 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
     // only, so the answer to the prompt the parent actually wrote would be lost for good.
     const { store, sessionId } = await newSession([message('start a helper')])
     const { runtime: deployment } = runtime()
-    const { child, taskId } = await childOfParent(store, sessionId)
+    const { child } = await childOfParent(store, sessionId)
     const promptId = of(await logOf(store, child.id), EVENT_TYPES.userMessage)[0]?.id
     await store.appendEvents(child.id, [
       { type: EVENT_TYPES.sessionStatusRunning },

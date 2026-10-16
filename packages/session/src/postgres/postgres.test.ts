@@ -256,7 +256,9 @@ if (target === null) {
       // route that would ever list or cascade to it again. `createSession` now **locks the
       // parent row it reads** (`for share`), which the delete's tree lock excludes, so the two
       // serialize instead of interleaving.
-      const { store, clock, session: parent } = await seeded()
+      // The seeded store is not used: the child is created through a **second** store, so the
+      // pool connection that holds the parent row is not the one the create runs on.
+      const { clock, session: parent } = await seeded()
       const other = track(createPostgresSessionStore({ pool }, { now: clock.now }))
       const client = await pool.connect()
       try {

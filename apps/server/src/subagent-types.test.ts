@@ -7,16 +7,9 @@ import {
 } from '@openharness/brain'
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
 import {
-  AGENT_MESSAGE_TOOL_NAME,
-  AGENT_STOP_TOOL_NAME,
-  AGENT_TOOL_NAME,
   API_VERSION_PREFIX,
-  ASK_USER_TOOL_NAME,
-  MESSAGE_PARENT_TOOL_NAME,
   ModeSchema,
-  TASK_WAIT_TOOL_NAME,
   TODO_WRITE_TOOL_NAME,
-  WEB_SEARCH_TOOL_NAME,
   type Mode,
   type ModeToolOverride,
   type UserId,
