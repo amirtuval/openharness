@@ -1340,7 +1340,6 @@ export interface TaskNotificationInput {
  */
 export type TaskDeliveryStatus = Extract<TaskStatus, 'idle' | 'failed' | 'stopped'>
 
-
 /** What {@link SessionStore.appendTaskNotification} wrote — or found already written. */
 export interface TaskNotificationAppend {
   /** The notification in the log: the one this call wrote, or the one the key already named. */
@@ -1362,6 +1361,24 @@ export interface PartitionFence {
   /** The epoch the writer's lease gave it. */
   readonly epoch: number
 }
+
+/**
+ * How deep the tree walks go before they stop: the ceiling on a session tree's depth (#361).
+ *
+ * `listDescendants`, `countLiveDescendants` and the delete cascade all walk `parent_session_id`
+ * recursively, and the Postgres store bounds the walk so a table somebody hand-edited into a
+ * cycle terminates rather than looping (SQL has no cheap cycle check, and a `with recursive`
+ * that loops hangs the connection rather than failing). It is **not** meant to be reached: the
+ * deployment's own nesting limit is `OPENHARNESS_MAX_AGENT_DEPTH`, whose default is 3 and whose
+ * maximum the server bounds with this number, so a tree the API can build never comes near it.
+ *
+ * It lives here, in the contract, rather than in the Postgres store, precisely because the
+ * server's configuration has to know it: a nesting limit above this would let a tree be built
+ * whose bottom a walk cannot see, and a delete would leave descendants behind. The in-memory
+ * store needs no bound of its own for a tree this shape — it walks with a `seen` set that
+ * terminates on a cycle — and the configuration is what keeps the two stores' answers identical.
+ */
+export const MAX_DESCENDANT_DEPTH = 64
 
 /** A lease on a partition: who holds it, at which epoch, until when. */
 export interface PartitionLease {

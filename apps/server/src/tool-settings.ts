@@ -178,7 +178,7 @@ export function effectiveTools(
       .map((name) => ({
         name,
         source: 'builtin' as const,
-        enabled: override?.builtin[name]?.enabled ?? stored.builtin[name]?.enabled ?? true,
+        enabled: override?.builtin[name] ?? stored.builtin[name]?.enabled ?? true,
         policy:
           (stored.builtin[name]?.policy ?? 'deny') === 'ask' && cannotAskForApproval(name)
             ? 'allow'

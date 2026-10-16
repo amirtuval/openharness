@@ -30,6 +30,7 @@ import {
   DuplicateMcpServerNameError,
   FencedError,
   isFencedError,
+  SessionNotFoundError,
 } from '../errors'
 import type { AppendableEvent } from '../store'
 import { timestampAt } from '../clock'
@@ -246,6 +247,43 @@ if (target === null) {
         ...(await second.listEventsUnscoped(other.id)).data,
       ]
       expect(stored.map((event) => event.id)).toEqual([id])
+    })
+
+    it('refuses a child of a session whose delete committed first, and waits for one in flight (#361)', async () => {
+      // The one hole the cascade had: `deleteSession` collects the subtree and then locks and
+      // deletes exactly those ids, and `parent_session_id` carries no foreign key — so a child
+      // inserted between the walk and the delete used to survive a parent that is gone, with no
+      // route that would ever list or cascade to it again. `createSession` now **locks the
+      // parent row it reads** (`for share`), which the delete's tree lock excludes, so the two
+      // serialize instead of interleaving.
+      const { store, clock, session: parent } = await seeded()
+      const other = track(createPostgresSessionStore({ pool }, { now: clock.now }))
+      const client = await pool.connect()
+      try {
+        // A second connection holds the parent's row as the delete's tree lock does, and the
+        // create is left waiting for it rather than reading a snapshot and inserting.
+        await client.query('begin')
+        await client.query('select id from sessions where id = $1 for update', [parent.id])
+        const creating = other.createSession(null, {
+          ownerId: OWNER_A,
+          parentSessionId: parent.id,
+          model: { id: 'anthropic/claude-haiku-4-5' },
+        })
+        const first = await Promise.race([
+          creating.then(() => 'settled' as const),
+          new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 150)),
+        ])
+        expect(first).toBe('waiting')
+
+        // The delete commits: the parent is gone, so the create is the parent it looked up —
+        // `SessionNotFoundError`, nothing created, and no session left pointing at a session
+        // that is not there.
+        await client.query('delete from sessions where id = $1', [parent.id])
+        await client.query('commit')
+        await expect(creating).rejects.toBeInstanceOf(SessionNotFoundError)
+      } finally {
+        client.release()
+      }
     })
 
     it('fences a stale epoch across stores, and accepts the current one', async () => {
@@ -574,6 +612,10 @@ if (target === null) {
       // let the second append through.
       expect(files).toContain('0033_mode_subagent_description.sql')
       expect(files).toContain('0034_task_notifications.sql')
+      // #361's file drops the `root_session_id` index `0032` created for a query that does not
+      // exist: every tree read is a recursion over `parent_session_id`. It is written as
+      // `if exists`, so the re-run below leaves the schema exactly as it was.
+      expect(files).toContain('0035_drop_sessions_root_idx.sql')
       expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
         files.indexOf('0027_tool_settings.sql'),
       )
@@ -597,6 +639,9 @@ if (target === null) {
       )
       expect(files.indexOf('0033_mode_subagent_description.sql')).toBeLessThan(
         files.indexOf('0034_task_notifications.sql'),
+      )
+      expect(files.indexOf('0034_task_notifications.sql')).toBeLessThan(
+        files.indexOf('0035_drop_sessions_root_idx.sql'),
       )
       expect(await migrate(db)).toEqual(files)
 

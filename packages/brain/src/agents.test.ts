@@ -289,6 +289,31 @@ describe('the tools a session is offered (S5/S6; #344)', () => {
 })
 
 describe('starting a helper (S3/S4/S5; #344)', () => {
+  it('runs an `agent` call a stored `ask` policy would pause on (#363)', async () => {
+    // No client renders a subagent tool call — the parent's transcript draws a task **card**, and
+    // a child's transcript is the child's own — so an `ask` on one could never be answered. The
+    // loop reads a stored one as `allow`, exactly as #335 reads one on a provider-native search:
+    // the call runs, and the log records the permission it really ran under.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const model = mockModel({ toolCalls: [START] }, { text: ['Started it.'] })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: model.factory,
+      resolveCredential: resolveTestCredential,
+      subagents: deployment,
+      toolSettings: () => ({ [AGENT_TOOL_NAME]: { enabled: true, permission: 'ask' } }),
+    })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    const log = await logOf(store, sessionId)
+    expect(of(log, EVENT_TYPES.agentToolUse)[0]).toMatchObject({
+      name: AGENT_TOOL_NAME,
+      evaluated_permission: 'allow',
+    })
+    expect(starts(log).size).toBe(1)
+  })
+
   it('creates a child session and answers its handle at once', async () => {
     const { store, sessionId } = await newSession([message('start a helper')])
     const { runtime: deployment, signal } = runtime()
@@ -450,9 +475,7 @@ describe('starting a helper (S3/S4/S5; #344)', () => {
       sessionId,
       [
         {
-          toolCalls: [
-            { name: AGENT_TOOL_NAME, input: { ...START.input, description: ' \n\t ' } },
-          ],
+          toolCalls: [{ name: AGENT_TOOL_NAME, input: { ...START.input, description: ' \n\t ' } }],
         },
         { text: ['Started it.'] },
       ],
@@ -1349,7 +1372,9 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
     // The interrupt is not left queued either: the turn claimed it (P4), so nothing will wake
     // this child again for it.
     expect(await store.getPendingUserEvents(child.id)).toEqual([])
-    expect(of(await logOf(store, child.id), EVENT_TYPES.userInterrupt)[0]?.processed_at).not.toBeNull()
+    expect(
+      of(await logOf(store, child.id), EVENT_TYPES.userInterrupt)[0]?.processed_at,
+    ).not.toBeNull()
   })
 
   it('delivers an undelivered turn before starting a new one, with a message queued (#365)', async () => {

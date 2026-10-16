@@ -852,9 +852,9 @@ describe('a pause and the rest of the chat', () => {
     expect(idleOf(log).stop_reason).toEqual({ type: 'requires_action', event_ids: [callId] })
     // The news is still queued, unclaimed: the turn the user's answer starts is the one that
     // folds it in, as steering.
-    expect((await store.getPendingTaskNotifications(sessionId)).map((event) => event.id)).toHaveLength(
-      1,
-    )
+    expect(
+      (await store.getPendingTaskNotifications(sessionId)).map((event) => event.id),
+    ).toHaveLength(1)
     // No request was made: the turn ended where it paused.
     expect(model.calls).toHaveLength(1)
   })

@@ -6,7 +6,6 @@ import {
   type SubagentTypeResolver,
 } from '@openharness/brain'
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
-import type { ToolRegistry } from '@openharness/hands'
 import {
   AGENT_MESSAGE_TOOL_NAME,
   AGENT_STOP_TOOL_NAME,
@@ -25,7 +24,6 @@ import {
 import { describe, expect, it } from 'vitest'
 
 import { createSubagentTypeResolver } from './subagent-types'
-import { createTurnRegistry } from './tools'
 import { createTestApp, postJson, postJsonAs, type TestContext } from './test-support'
 
 /**
@@ -39,17 +37,15 @@ import { createTestApp, postJson, postJsonAs, type TestContext } from './test-su
  *
  * The resolver is called directly rather than through a route, because no route serves it yet:
  * it is the seam #344's tool closes over, built here exactly as `main.ts` would build it.
- * Everything it reads is real — the in-memory store the app runs on, the credential rows saved
- * through the credential route, this process's own tool registry — so what these tests assert
- * is what a chat with a parent would get.
+ * Everything it reads is real — the in-memory store the app runs on and the credential rows
+ * saved through the credential route — so what these tests assert is what a chat with a parent
+ * would get. Nothing about tools: a type carries the **override** and the mode a child is
+ * created on, and the loop resolves the tools for the child's own requests (#365).
  */
 
 const MODES = `${API_VERSION_PREFIX}/me/modes`
 const CREDENTIALS = `${API_VERSION_PREFIX}/provider-credentials`
 const PREFERENCES = `${API_VERSION_PREFIX}/me/preferences`
-
-/** The tools a deployment registers, for the tests that read the resolved tool set. */
-const TURN_TOOLS = createTurnRegistry({ kind: 'provider' })
 
 /** What the parent chat looks like when the tool asks: this request's model, effort and mode. */
 const PARENT: SubagentParent = {
@@ -99,24 +95,14 @@ async function readMode(test: TestContext, modeId: string): Promise<Mode> {
 }
 
 /**
- * The resolver as the server would build it: over the app's own store and credential store, and
- * the tools this process registers.
+ * The resolver as the server would build it: over the app's own store and credential store.
+ *
+ * Nothing about tools: a resolved type carries the **override** and the mode to create the child
+ * on, and the tools a child really has are the ones the loop resolves for each of its requests
+ * (#365).
  */
 function resolver(test: TestContext): SubagentTypeResolver {
-  return makeResolver(test, TURN_TOOLS)
-}
-
-/** The same, for a deployment that registers no tools at all. */
-function resolverWithoutTools(test: TestContext): SubagentTypeResolver {
-  return makeResolver(test, undefined)
-}
-
-function makeResolver(test: TestContext, tools: ToolRegistry | undefined): SubagentTypeResolver {
-  return createSubagentTypeResolver({
-    store: test.store,
-    credentials: test.credentials,
-    tools,
-  })
+  return createSubagentTypeResolver({ store: test.store, credentials: test.credentials })
 }
 
 /** The message of a refusal, asserting the resolution really was one. */
@@ -232,19 +218,52 @@ describe('the subagent type list (#342)', () => {
     expect(asThem.map((type) => type.name)).toEqual([GENERAL_PURPOSE_TYPE, 'secret'])
   })
 
-  it('offers only general-purpose to a deployment with no tools, and resolves it to none', async () => {
+  it('offers a mode named after the built-in exactly once — the built-in (#362)', async () => {
     const test = createTestApp()
-    const bare = resolverWithoutTools(test)
+    // Mode names are free text, so a user can describe a mode called `general-purpose`. The name
+    // must then mean **one** thing: the list a model chooses from holds it once, and `resolve`
+    // answers the built-in for it — the mode is a preset, not a type, and the model is never
+    // shown a name whose choice it could not get.
+    await createMode(test, {
+      name: GENERAL_PURPOSE_TYPE,
+      model: 'anthropic/claude-sonnet-5',
+      subagent_description: 'This name is the built-in’s, and is not offered twice.',
+    })
     const caller = await callerOf(test)
-    expect((await bare.list(caller)).map((type) => type.name)).toEqual([GENERAL_PURPOSE_TYPE])
-    const resolution = await bare.resolve(caller, GENERAL_PURPOSE_TYPE, PARENT)
-    expect(resolution.ok && resolution.type.tools).toEqual([])
-    expect(resolution.ok && resolution.type.mcpServers).toEqual([])
+
+    expect((await resolver(test).list(caller)).map((type) => type.name)).toEqual([
+      GENERAL_PURPOSE_TYPE,
+    ])
+    const resolution = await resolver(test).resolve(caller, GENERAL_PURPOSE_TYPE, PARENT)
+    expect(resolution.ok && resolution.type.description).toBe(GENERAL_PURPOSE_DESCRIPTION)
+    // The mode itself is untouched — it is still the user's preset, with everything a preset has.
+    const modes = await test.store.listModes({ ownerId: caller })
+    expect(modes.map((mode) => mode.name)).toEqual([GENERAL_PURPOSE_TYPE])
+    expect(modes[0]?.subagent_description).not.toBeNull()
+  })
+
+  it('offers the built-in alone when no mode is described, and carries no tool set of its own (#365)', async () => {
+    const test = createTestApp()
+    const caller = await callerOf(test)
+    expect((await resolver(test).list(caller)).map((type) => type.name)).toEqual([
+      GENERAL_PURPOSE_TYPE,
+    ])
+    const resolution = await resolver(test).resolve(caller, GENERAL_PURPOSE_TYPE, PARENT)
+    // What a child starts with is the parent's configuration and the mode it is created **on**
+    // — its tools are the loop's answer for the child's own requests, computed the same way a
+    // chat's are, so the resolution does not spell them a second time.
+    expect(resolution.ok && resolution.type).toMatchObject({
+      model: PARENT.model,
+      reasoningEffort: PARENT.reasoningEffort,
+      modeId: PARENT.modeId,
+      toolOverride: PARENT.toolOverride,
+      description: GENERAL_PURPOSE_DESCRIPTION,
+    })
   })
 })
 
 describe('resolving a subagent type (#342)', () => {
-  it('resolves general-purpose to the parent’s own model, effort and tools', async () => {
+  it('resolves general-purpose to the parent’s own configuration, and the mode to start on', async () => {
     const test = createTestApp()
     await putKey(test, 'anthropic')
     const resolution = await resolver(test).resolve(
@@ -252,6 +271,11 @@ describe('resolving a subagent type (#342)', () => {
       GENERAL_PURPOSE_TYPE,
       PARENT,
     )
+    // Exactly the parent's configuration and the mode a child is created **on** — and no tool
+    // set: the tools a child really has are the ones the loop resolves for its every request,
+    // the same `effectiveTools`/`listMcpServersInForce` a chat's request goes through (#365).
+    // `ask_user`'s absence from a *child* is the loop's too, applied from the session's own
+    // `interactive` flag (epic #340, S1).
     expect(resolution).toEqual({
       ok: true,
       type: {
@@ -264,24 +288,6 @@ describe('resolving a subagent type (#342)', () => {
         // The parent continues, and the parent follows no mode — so the child starts on a plain
         // session rather than on one (#344).
         modeId: null,
-        // This process's built-ins in the registry's order, with the provider-native
-        // `web_search` the settings list beside them (#335) and the subagent tools every
-        // deployment registers (#344). `ask_user` is among them because this is the type's tool
-        // set as a chat resolves it: a *child* is never offered it (epic #340, S1), which the
-        // loop applies from the session's own `interactive` flag — the child is created with it
-        // off, and this resolver does not decide it.
-        tools: [
-          ASK_USER_TOOL_NAME,
-          AGENT_TOOL_NAME,
-          AGENT_MESSAGE_TOOL_NAME,
-          TASK_WAIT_TOOL_NAME,
-          AGENT_STOP_TOOL_NAME,
-          MESSAGE_PARENT_TOOL_NAME,
-          WEB_FETCH_TOOL_NAME,
-          TODO_WRITE_TOOL_NAME,
-          WEB_SEARCH_TOOL_NAME,
-        ],
-        mcpServers: [],
       },
     })
   })
@@ -296,19 +302,11 @@ describe('resolving a subagent type (#342)', () => {
       ...PARENT,
       toolOverride,
     })
+    // The override is the patch a child created on the mode follows live — the parent's own in
+    // the one spelling a mode has for one (#344) — and the mode id is what makes it real: the
+    // loop applies it for the child's every request exactly as it does for the parent's.
     expect(resolution.ok && resolution.type.toolOverride).toEqual(toolOverride)
-    // The override is a patch over the owner's settings — the same answer the loop computes for
-    // the parent's own request — so the tool it turned off is absent and the rest are there.
-    expect(resolution.ok && resolution.type.tools).toEqual([
-      ASK_USER_TOOL_NAME,
-      AGENT_TOOL_NAME,
-      AGENT_MESSAGE_TOOL_NAME,
-      TASK_WAIT_TOOL_NAME,
-      AGENT_STOP_TOOL_NAME,
-      MESSAGE_PARENT_TOOL_NAME,
-      TODO_WRITE_TOOL_NAME,
-      WEB_SEARCH_TOOL_NAME,
-    ])
+    expect(resolution.ok && resolution.type.modeId).toBe(PARENT.modeId)
   })
 
   it('resolves a mode type to exactly what a chat on that mode runs', async () => {
@@ -332,19 +330,9 @@ describe('resolving a subagent type (#342)', () => {
         systemPromptAddition: 'Be terse.',
         toolOverride: mode.tools,
         // The child is created **on** the mode (#344): it follows it live, so the tool and MCP
-        // override above is applied by the mode resolver rather than restated on a session.
+        // override above is applied by the mode resolver for every request the child makes —
+        // which is also why no tool set is spelled here (#365).
         modeId: mode.id,
-        tools: [
-          ASK_USER_TOOL_NAME,
-          AGENT_TOOL_NAME,
-          AGENT_MESSAGE_TOOL_NAME,
-          TASK_WAIT_TOOL_NAME,
-          AGENT_STOP_TOOL_NAME,
-          MESSAGE_PARENT_TOOL_NAME,
-          WEB_FETCH_TOOL_NAME,
-          WEB_SEARCH_TOOL_NAME,
-        ],
-        mcpServers: [],
       },
     })
   })
@@ -458,16 +446,10 @@ describe('resolving a subagent type (#342)', () => {
       description: 'Second description.',
       model: 'openai/gpt-4.1-mini',
       reasoningEffort: 'low',
-      tools: [
-        ASK_USER_TOOL_NAME,
-        AGENT_TOOL_NAME,
-        AGENT_MESSAGE_TOOL_NAME,
-        TASK_WAIT_TOOL_NAME,
-        AGENT_STOP_TOOL_NAME,
-        MESSAGE_PARENT_TOOL_NAME,
-        TODO_WRITE_TOOL_NAME,
-        WEB_SEARCH_TOOL_NAME,
-      ],
+      // The edited override, and the mode the child is created on: the loop applies it for the
+      // child's own requests, which is what makes the edit reach a helper (#365).
+      toolOverride: { builtin: { [WEB_FETCH_TOOL_NAME]: false } },
+      modeId: mode.id,
     })
   })
 })

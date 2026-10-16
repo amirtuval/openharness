@@ -118,6 +118,7 @@ import type {
   Unsubscribe,
   UpdateSessionRequest,
 } from '../store'
+import { MAX_DESCENDANT_DEPTH } from '../store'
 import { ListenConnection } from './listen'
 import {
   instant,
@@ -484,6 +485,17 @@ export class PostgresSessionStore implements SessionStore {
       // Where it sits in the tree (epic #340, S3): the parent, when there is one, is read
       // owner-scoped inside this transaction, so a session cannot be hung off one the caller
       // cannot see — the same "not found" an id nothing has gets (A4).
+      //
+      // The read **locks the parent row** (`for share`), and that lock is what closes the one
+      // hole in the delete cascade (#361): `deleteSession` collects the subtree with a recursive
+      // walk and then locks and deletes exactly those ids, so a child inserted after the walk
+      // would survive a parent that is gone — unreachable (`GET /v1/sessions` lists no child)
+      // and never cascaded to again, the invariant `SessionStore` states ("Nothing is left
+      // pointing at a session that is gone"). `parent_session_id` deliberately carries no
+      // foreign key, so nothing else blocks the insert. Sharing the row is enough: the delete
+      // takes it exclusive, so the two serialize — whichever gets there first, the other sees a
+      // committed parent or none at all, and a child of a session that is being deleted is
+      // refused rather than orphaned.
       const parent =
         options.parentSessionId === undefined
           ? undefined
@@ -492,6 +504,7 @@ export class PostgresSessionStore implements SessionStore {
               .selectAll()
               .where('id', '=', options.parentSessionId)
               .where('owner_id', '=', options.ownerId)
+              .forShare()
               .executeTakeFirst()
       const tree = sessionTree(
         id,
@@ -2538,17 +2551,6 @@ function suppliedIdsOf(events: readonly AppendableEvent[]): EventId[] {
 
 /** Postgres's SQLSTATE for a unique-constraint violation. */
 const UNIQUE_VIOLATION = '23505'
-
-/**
- * How deep the recursive walk over `parent_session_id` may go before it stops.
- *
- * A tree the store built is finite and shallow — S6's own nesting limit defaults to 3 — so
- * this is not a limit on a real tree: it is what makes the walk provably terminate on a table
- * somebody hand-edited into a cycle, which SQL has no cheap way to detect (and a `with
- * recursive` that loops would hang the connection rather than fail). It is deliberately far
- * above any tree a caller would build.
- */
-const MAX_DESCENDANT_DEPTH = 64
 
 /**
  * The constraints a duplicate event id can be reported under: the primary key on `events.id`
