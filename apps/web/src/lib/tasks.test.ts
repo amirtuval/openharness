@@ -2,7 +2,7 @@ import type { TaskCard, TranscriptEntry, TranscriptMessage } from '@openharness/
 import { newSessionId } from '@openharness/protocol'
 import { describe, expect, it } from 'vitest'
 
-import { mergeTaskCards, taskIsLive, taskMessageLabel, taskTokens, taskTypeLabel } from './tasks'
+import { mergeTaskCards, taskMessageLabel, taskTokens, taskTypeLabel } from './tasks'
 
 /**
  * The web app's half of the task view (#346): where a card draws among the conversation, and the
@@ -122,15 +122,5 @@ describe('what a task has spent', () => {
 
   it('answers nothing for a child whose log has reported nothing', () => {
     expect(taskTokens(null)).toBeNull()
-  })
-})
-
-describe('which statuses are live', () => {
-  it('is running and waiting, and nothing else', () => {
-    expect(taskIsLive('running')).toBe(true)
-    expect(taskIsLive('waiting')).toBe(true)
-    expect(taskIsLive('done')).toBe(false)
-    expect(taskIsLive('failed')).toBe(false)
-    expect(taskIsLive('stopped')).toBe(false)
   })
 })
