@@ -319,7 +319,10 @@ describe('TaskCardView (#347)', () => {
     const view = render(
       <ThemeProvider theme={DARK}>
         <TaskCardView
-          card={card({ status: 'done', result: { text: 'One assertion was flaky.' } })}
+          card={card({
+            status: 'done',
+            result: { kind: 'result', text: 'One assertion was flaky.', seq: 9 },
+          })}
           log={log}
           prices={PRICES}
           width={80}

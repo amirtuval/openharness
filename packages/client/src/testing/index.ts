@@ -1213,10 +1213,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         // list here is what made the web app carry a shim re-implementing this filter
         // (`apps/web/src/test-support/session-tree.ts`, now deleted) — a test double that
         // disagrees with the server is a test that lies in the direction of green.
-        .filter(
-          (session) =>
-            session.parent_session_id === (params?.parent_session_id ?? null),
-        )
+        .filter((session) => session.parent_session_id === (params?.parent_session_id ?? null))
         // A model-first session has no agent and no agent id to match (issue #93).
         .filter(
           (session) => params?.agent_id === undefined || session.agent?.id === params.agent_id,

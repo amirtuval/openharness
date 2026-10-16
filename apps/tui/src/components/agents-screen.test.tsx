@@ -74,10 +74,15 @@ function subagentLog(): StoredEvent[] {
 
 /** The same chat, with a task that has no child session — the shape the protocol allows. */
 function childlessLog(): StoredEvent[] {
-  const events = subagentLog()
-  return events.map((event) =>
-    event.type === 'session.task_started' ? { ...event, child_session_id: null } : event,
-  )
+  return subagentLog().map((event) => {
+    if (event.type !== 'session.task_started') {
+      return event
+    }
+    // `child_session_id` is **optional** in the protocol, and absent is the childless shape — the
+    // task kind that starts no session, which is why `stop()` guards it too.
+    const { child_session_id: _omitted, ...childless } = event
+    return childless
+  })
 }
 
 /** The same chat, with its one task finished: the result delivered and the status moved. */
