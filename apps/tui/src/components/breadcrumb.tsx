@@ -1,5 +1,5 @@
 import type { Session } from '@openharness/protocol'
-import { Box, Text } from 'ink'
+import { Box, Text, useStdout } from 'ink'
 
 import { PALETTE, paint } from '../markdown/theme'
 import { truncateSpans, type Span } from '../markdown/text'
@@ -28,14 +28,22 @@ export function BreadcrumbLine({
   readonly width?: number | undefined
 }) {
   const theme = useTerminalTheme()
+  const { stdout } = useStdout()
+  // The terminal's own width, and not a fixed 80 (issue #368): the chain `root › helper › helper`
+  // is cut at its **tail**, which is the chat the reader is in — the one part the line exists to
+  // place — so on a 120-column terminal a default of 80 threw away exactly what it was drawn for.
+  // `task-card.tsx`, `status-line.tsx` and `message-view.tsx` all read `stdout.columns`; this is
+  // the one that did not, and the caller passes no width.
   return (
     <Box flexDirection="column">
       <Text>
-        {truncateSpans(breadcrumbSpans(chain, theme), width ?? 80).map((span, at) => (
-          <Text key={at} color={span.color} dimColor={span.dim}>
-            {span.text}
-          </Text>
-        ))}
+        {truncateSpans(breadcrumbSpans(chain, theme), width ?? stdout.columns ?? 80).map(
+          (span, at) => (
+            <Text key={at} color={span.color} dimColor={span.dim}>
+              {span.text}
+            </Text>
+          ),
+        )}
       </Text>
     </Box>
   )
