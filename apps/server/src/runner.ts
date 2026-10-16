@@ -8,6 +8,7 @@ import {
   type TurnOutcome,
   runTurn,
 } from '@openharness/brain'
+import { EVENT_TYPES } from '@openharness/protocol'
 import type { SessionId } from '@openharness/protocol'
 import { SessionNotFoundError, type PartitionFence, type SessionStore } from '@openharness/session'
 
@@ -476,7 +477,13 @@ export class SessionRunner {
         return true
       }
       const notifications = await this.#store.getPendingTaskNotifications(sessionId)
-      if (notifications.length > 0) {
+      // A task's news is work — the parent reacts on its own (epic #340, S4; #343) — **unless
+      // the turn that just ended left the session paused on the user**: the news answers no
+      // question, so another turn would find the same `ask_user`/`ask` call waiting, pause
+      // again with the news still pending, and this pass would loop for ever. The rule is the
+      // store's `findSessionsNeedingWork`'s, read here too, or a single pass would spin where
+      // recovery would not.
+      if (notifications.length > 0 && !(await this.#pausedOnUser(sessionId))) {
         return true
       }
       const turn = await this.#store.getTurnState(sessionId)
@@ -484,6 +491,41 @@ export class SessionRunner {
     } catch (error) {
       if (error instanceof SessionNotFoundError) {
         // Deleted while this pass was between two turns (U5): there is no more work, ever.
+        return false
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Whether the session's newest turn ended paused on the user (#309).
+   *
+   * The one thing a pending notification does **not** answer: a turn woken for the news would
+   * find the same waiting call and pause again, so a notification is only more work for a
+   * session that is not sitting on a question. It is the same answer the store's work scan
+   * makes (`findSessionsNeedingWork`), and it is read the same cheap way the brain reads a
+   * pause: the newest status event is `session.status_idle` with a `requires_action` stop
+   * reason. A session that vanished reads as not paused, so the caller's own tolerance for a
+   * deleted session is unchanged.
+   */
+  async #pausedOnUser(sessionId: SessionId): Promise<boolean> {
+    try {
+      const page = await this.#store.listEventsUnscoped(sessionId, {
+        types: [
+          EVENT_TYPES.sessionStatusRunning,
+          EVENT_TYPES.sessionStatusIdle,
+          EVENT_TYPES.sessionStatusRescheduled,
+        ],
+        order: 'desc',
+        limit: 1,
+      })
+      const newest = page.data[0]
+      return (
+        newest?.type === EVENT_TYPES.sessionStatusIdle &&
+        newest.stop_reason.type === 'requires_action'
+      )
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
         return false
       }
       throw error

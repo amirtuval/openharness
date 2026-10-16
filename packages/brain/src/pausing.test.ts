@@ -7,7 +7,12 @@ import type {
   StoredEvent,
   StoredEventType,
 } from '@openharness/protocol'
-import { ASK_USER_TOOL_NAME, AskUserInputSchema, EVENT_TYPES } from '@openharness/protocol'
+import {
+  ASK_USER_TOOL_NAME,
+  AskUserInputSchema,
+  EVENT_TYPES,
+  newTaskId,
+} from '@openharness/protocol'
 import type { InMemorySessionStore } from '@openharness/session'
 import {
   makeAgentToolUse,
@@ -812,6 +817,46 @@ describe('a pause and the rest of the chat', () => {
     const log = await logOf(store, sessionId)
     expect(of(log, EVENT_TYPES.agentToolResult)).toEqual([])
     expect(idleOf(log).stop_reason).toMatchObject({ type: 'requires_action' })
+  })
+
+  it('does not answer a question with a background task’s news (#363)', async () => {
+    const { store, sessionId, run, model, callId } = await paused()
+
+    // A helper finishing writes news into this session's log — a queued event, exactly as a
+    // message is. It is news for the **model**, not the reader moving on: answering the waiting
+    // call with "The user sent a message instead." would tell the model the user spoke when they
+    // did not, drop the question the client is drawing, and refuse an answer the user had already
+    // clicked (`apps/server`'s route checks the call is still waiting).
+    const taskId = newTaskId()
+    await store.appendTaskNotification(sessionId, {
+      taskId,
+      kind: 'result',
+      text: 'The helper found it.',
+      sourceKey: `${taskId}:1`,
+    })
+
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: model.factory,
+      resolveCredential: resolveTestCredential,
+      tools: createToolRegistry([{ ...echo().tool, name: 'echo' }]),
+      toolSettings: () => ({ echo: { enabled: true, permission: 'ask' } }),
+    })
+
+    // The pause stands: the turn ends on the same `requires_action`, nothing ran, and the
+    // question has no result.
+    expect(outcome).toEqual({ outcome: 'paused' })
+    expect(run).not.toHaveBeenCalled()
+    const log = await logOf(store, sessionId)
+    expect(of(log, EVENT_TYPES.agentToolResult)).toEqual([])
+    expect(idleOf(log).stop_reason).toEqual({ type: 'requires_action', event_ids: [callId] })
+    // The news is still queued, unclaimed: the turn the user's answer starts is the one that
+    // folds it in, as steering.
+    expect((await store.getPendingTaskNotifications(sessionId)).map((event) => event.id)).toHaveLength(
+      1,
+    )
+    // No request was made: the turn ended where it paused.
+    expect(model.calls).toHaveLength(1)
   })
 
   it('answers a call approved but never finished as an execution that was lost', async () => {

@@ -22,12 +22,14 @@ import {
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
+import type { SubagentRuntime } from './agents'
 import { RESOLVED_BY_MESSAGE, awaitingUser } from './pausing'
 import {
   awaitingTasks,
   notificationText,
   pendingNotifications,
   settleTaskWait,
+  settleTaskWaits,
   stillRunning,
   taskStatuses,
   taskStarts,
@@ -53,6 +55,23 @@ import type { TurnOutcome } from './turn'
 
 /** A script with nothing in it: a request that says nothing and calls nothing. */
 const NOTHING = { text: [] as readonly string[] }
+
+/**
+ * The runtime a deployment that **has** subagents wires (epic #340, S6; #344).
+ *
+ * Every turn in this suite drives `agent_wait`, and since #365 the five subagent tools are
+ * offered only to a deployment that wired a runtime — a host without one offers nobody a tool
+ * that could only answer "the harness answers this", and rides on the loop recognising
+ * `agent_wait` by name. Nothing here starts a helper, so the resolver offers no types.
+ */
+const SUBAGENTS: SubagentRuntime = {
+  types: {
+    list: async () => [],
+    resolve: async () => ({ ok: false, message: 'This deployment starts no helpers.' }),
+  },
+  maxDepth: 3,
+  maxLiveTasks: 10,
+}
 
 /** The `agent_wait` tool, as a deployment registers it: nothing runs a call to it. */
 function waitTool(): {
@@ -355,6 +374,55 @@ describe('what the log says about tasks and their news', () => {
     ).toEqual({ kind: 'waiting', deadlineMs: 1_000 + 60_000 })
   })
 
+  it('gives one notification to one wait when several are open (#363)', () => {
+    const first = newTaskId()
+    const second = newTaskId()
+    const notificationFor = (id: TaskId): SessionTaskNotificationEvent =>
+      ({ id: `sevt_${id}`, task_id: id }) as unknown as SessionTaskNotificationEvent
+    const callTo = (taskId: TaskId): never =>
+      ({ name: TASK_WAIT_TOOL_NAME, input: { task_ids: [taskId] } }) as never
+    const options = { endedByMessage: false, recordedDeadline: () => null, nowMs: 1_000 }
+
+    // The wait that named the task gets the news; the other keeps waiting. Handing it to both
+    // would put one notification id in two results' `consumes`, an append the store refuses
+    // whole — the wedge #363 fixes.
+    expect(
+      settleTaskWaits({
+        ...options,
+        calls: [callTo(first), callTo(second)],
+        notifications: [notificationFor(second)],
+      }),
+    ).toEqual([
+      { kind: 'waiting', deadlineMs: 1_000 + TASK_WAIT_DEFAULT_TIMEOUT_MS },
+      { kind: 'notified', notifications: [notificationFor(second)] },
+    ])
+
+    // Two notifications, two waits: each takes its own.
+    expect(
+      settleTaskWaits({
+        ...options,
+        calls: [callTo(first), callTo(second)],
+        notifications: [notificationFor(first), notificationFor(second)],
+      }),
+    ).toEqual([
+      { kind: 'notified', notifications: [notificationFor(first)] },
+      { kind: 'notified', notifications: [notificationFor(second)] },
+    ])
+
+    // A wait that named nothing takes what nothing else claimed, and the **first** of two such
+    // waits is the one that gets it.
+    expect(
+      settleTaskWaits({
+        ...options,
+        calls: [{ name: TASK_WAIT_TOOL_NAME, input: {} } as never, callTo(second)],
+        notifications: [notificationFor(first)],
+      }),
+    ).toEqual([
+      { kind: 'notified', notifications: [notificationFor(first)] },
+      { kind: 'waiting', deadlineMs: 1_000 + TASK_WAIT_DEFAULT_TIMEOUT_MS },
+    ])
+  })
+
   it('says which tasks a timed-out wait still has running', () => {
     const running = newTaskId()
     const done = newTaskId()
@@ -391,6 +459,7 @@ describe('a task’s news reaches the parent model', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([echo(), waitTool().tool]),
     })
     expect(outcome).toEqual({ outcome: 'idle' })
@@ -554,12 +623,17 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([tool]),
       now: clock.now,
     })
     expect(outcome).toMatchObject({ outcome: 'waiting' })
-    // Nothing ran the call: a wait is not something a tool executes.
-    expect(run).not.toHaveBeenCalled()
+    // Nothing ran the call: a wait is not something a tool executes, so the log holds the call
+    // with no answer at all. (The registry's own `run` is not the evidence: a deployment that
+    // wired a runtime is offered the harness's `agent_wait`, which replaces this one — see the
+    // suite's `SUBAGENTS`.)
+    const stored = await logOf(store, sessionId)
+    expect(stored.some((event) => event.type === EVENT_TYPES.agentToolResult)).toBe(false)
     return { store, sessionId, clock, taskId, model, run }
   }
 
@@ -591,6 +665,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
       now: clock.now,
     })
@@ -614,6 +689,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
       now: clock.now,
     })
@@ -650,6 +726,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
       now: clock.now,
     })
@@ -670,6 +747,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
       now: clock.now,
     })
@@ -687,6 +765,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
       now: clock.now,
     })
@@ -711,6 +790,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
     })
     expect(outcome).toEqual({ outcome: 'idle' })
@@ -731,6 +811,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
       toolSettings: () => ({ [TASK_WAIT_TOOL_NAME]: { enabled: true, permission: 'deny' } }),
     })
@@ -761,6 +842,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
       now: clock.now,
     })
@@ -779,6 +861,7 @@ describe('the durable wait for background tasks', () => {
       store,
       model: mockModel({ text: ['Read it.'] }).factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([waitTool().tool]),
       now: clock.now,
     })
@@ -801,6 +884,7 @@ describe('the durable wait for background tasks', () => {
         store,
         model: model.factory,
         resolveCredential: resolveTestCredential,
+        subagents: SUBAGENTS,
         tools: createToolRegistry([waitTool().tool]),
         now: clock.now,
       }),
@@ -812,6 +896,7 @@ describe('the durable wait for background tasks', () => {
         store,
         model: model.factory,
         resolveCredential: resolveTestCredential,
+        subagents: SUBAGENTS,
         tools: createToolRegistry([waitTool().tool]),
         now: clock.now,
       }),
@@ -820,6 +905,119 @@ describe('the durable wait for background tasks', () => {
       notification.id,
     ])
     expect(TASK_WAIT_DEFAULT_TIMEOUT_MS).toBe(600_000)
+  })
+
+  it('resumes two open waits with one notification, claiming it once (#363)', async () => {
+    // A model that made **two** `agent_wait` calls in one step — not one call naming both tasks.
+    // Both are open when the first news arrives, and a result naming that notification twice is
+    // an append the store refuses whole (`ClaimConflictError`), so the news was never delivered
+    // and every later wake retried the same refused append: the turn was wedged.
+    const clock = createTestClock()
+    const { store, sessionId } = await newSession([message('wait for both')], { clock })
+    const first = newTaskId()
+    const second = newTaskId()
+    await store.appendEvents(sessionId, [
+      startTask(first),
+      taskStatus(first, 'running'),
+      startTask(second),
+      taskStatus(second, 'running'),
+    ])
+    const model = mockModel(
+      {
+        toolCalls: [
+          { name: TASK_WAIT_TOOL_NAME, input: { task_ids: [first], timeout_s: 60 } },
+          { name: TASK_WAIT_TOOL_NAME, input: { task_ids: [second], timeout_s: 60 } },
+        ],
+      },
+      { text: ['Carrying on.'] },
+    )
+    const options = {
+      store,
+      model: model.factory,
+      resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
+      tools: createToolRegistry([waitTool().tool]),
+      now: clock.now,
+    }
+    expect(await runTurn(sessionId, options)).toMatchObject({ outcome: 'waiting' })
+
+    // The **second** task reports: its wait is the one that named it, so it is the one answered —
+    // and the append lands (no `ClaimConflictError`), which is the whole fix.
+    const news = await notify(store, sessionId, second, { text: 'Second is done.' })
+    expect(await runTurn(sessionId, options)).toMatchObject({ outcome: 'waiting' })
+    let results = of(await logOf(store, sessionId), EVENT_TYPES.agentToolResult)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.consumes).toEqual([news.id])
+    expect(resultText(results[0])).toContain('Second is done.')
+    // The news was told to the parent **once**: it is claimed, so it is not pending any more.
+    expect(await store.getPendingTaskNotifications(sessionId)).toHaveLength(0)
+    // The turn is paused again on a wait: the one that asked for the still-quiet task is open,
+    // and what is still missing is its result. (The pause names the union of the open calls'
+    // tasks, so the resolved one is in the list too — the open call is the sharper reading.)
+    const log = await logOf(store, sessionId)
+    expect(idleOf(log).stop_reason).toMatchObject({ type: 'waiting_on_tasks' })
+    const open = awaitingTasks(log)
+    expect(open).toHaveLength(1)
+    expect(taskWaitOf({ name: open[0]?.name ?? '', input: open[0]?.input })).toMatchObject({
+      taskIds: [first],
+    })
+
+    // The first task reports too: the other wait is answered, and the turn carries on.
+    await notify(store, sessionId, first, { text: 'First is done.' })
+    expect(await runTurn(sessionId, options)).toEqual({ outcome: 'idle' })
+    results = of(await logOf(store, sessionId), EVENT_TYPES.agentToolResult)
+    expect(results).toHaveLength(2)
+    expect(results.map((result) => result.consumes?.length)).toEqual([1, 1])
+    // The request that follows carries both answers (one `tool` message holds every result of
+    // the step): `promptAt` cannot read a result's body, and the assertions above say what each
+    // one holds.
+    expect(model.calls).toHaveLength(2)
+    expect(promptAt(model, 1).some((entry) => entry.role === 'tool')).toBe(true)
+  })
+
+  it('answers two open waits from two notifications, one each (#363)', async () => {
+    const clock = createTestClock()
+    const { store, sessionId } = await newSession([message('wait for both')], { clock })
+    const first = newTaskId()
+    const second = newTaskId()
+    await store.appendEvents(sessionId, [
+      startTask(first),
+      taskStatus(first, 'running'),
+      startTask(second),
+      taskStatus(second, 'running'),
+    ])
+    const model = mockModel(
+      {
+        toolCalls: [
+          { name: TASK_WAIT_TOOL_NAME, input: { task_ids: [first], timeout_s: 60 } },
+          { name: TASK_WAIT_TOOL_NAME, input: { task_ids: [second], timeout_s: 60 } },
+        ],
+      },
+      { text: ['Both reported.'] },
+    )
+    const options = {
+      store,
+      model: model.factory,
+      resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
+      tools: createToolRegistry([waitTool().tool]),
+      now: clock.now,
+    }
+    expect(await runTurn(sessionId, options)).toMatchObject({ outcome: 'waiting' })
+
+    const firstNews = await notify(store, sessionId, first, { text: 'First is done.' })
+    const secondNews = await notify(store, sessionId, second, { text: 'Second is done.' })
+    expect(await runTurn(sessionId, options)).toEqual({ outcome: 'idle' })
+
+    // Each wait claimed its own task's news, once: two results, two distinct claims, and a
+    // request that reads both.
+    const results = of(await logOf(store, sessionId), EVENT_TYPES.agentToolResult)
+    expect(results.map((result) => result.consumes)).toEqual([[firstNews.id], [secondNews.id]])
+    expect(await store.getPendingTaskNotifications(sessionId)).toHaveLength(0)
+    // Both results reached the request that followed, so the model really was told — and told
+    // once each: the claims are what keep the news out of the same request as steering.
+    expect(model.calls).toHaveLength(2)
+    expect(promptAt(model, 1).some((entry) => entry.role === 'tool')).toBe(true)
   })
 })
 
@@ -841,6 +1039,7 @@ describe('the news stays out of a tool call’s way', () => {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
+      subagents: SUBAGENTS,
       tools: createToolRegistry([reporting, waitTool().tool]),
     })
 
