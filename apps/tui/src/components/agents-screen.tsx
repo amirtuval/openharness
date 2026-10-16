@@ -1,4 +1,4 @@
-import { listChildren, selectTasks } from '@openharness/client'
+import { listChildren, selectTasks, taskIsLive } from '@openharness/client'
 import type { Client, TaskCard, TaskCardStatus } from '@openharness/client'
 import type { Session } from '@openharness/protocol'
 import { Box, Text, useInput, useStdout } from 'ink'
@@ -187,15 +187,20 @@ export function AgentsScreen({
   /** Open the highlighted row in place of this chat: a task's own session, or the parent's. */
   const open = useCallback(
     async (row: AgentsRow): Promise<void> => {
+      // A **task** row opens its child session, and nothing else (issue #368). Falling back to
+      // `row.id` when `child_session_id` is missing asked the server for a `task_…` id — a 404
+      // drawn as a generic error notice — and `child_session_id` is optional in the protocol,
+      // which is why `stop()` guards the same null. The two verbs now agree.
+      const sessionId = row.kind === 'back' ? row.id : (row.card?.childSessionId ?? null)
+      if (sessionId === null) {
+        setNote(`${row.name} has no chat of its own to open.`)
+        return
+      }
       busyRef.current = true
       setBusy(true)
       setError(null)
       try {
-        onOpen(
-          await client.sessions.get(
-            row.kind === 'back' ? row.id : (row.card?.childSessionId ?? row.id),
-          ),
-        )
+        onOpen(await client.sessions.get(sessionId))
       } catch (failure) {
         setError(describeError(failure, context).message)
       } finally {
@@ -211,6 +216,17 @@ export function AgentsScreen({
     async (row: AgentsRow): Promise<void> => {
       const childSessionId = row.card?.childSessionId ?? null
       if (row.kind !== 'task' || childSessionId === null) return
+      // **Only a task that is still working can be stopped** (issue #368; the guard the web
+      // already has, where Stop is drawn only for a live task). An interrupt of a child that has
+      // already reported claims a turn of its own that ends on nothing: the delivery reads it as
+      // a stop, so the parent's log gains a `result` saying the *user* stopped a helper that had
+      // finished — the card flips **done → stopped** and the parent model is told the opposite of
+      // what happened. `agent_stop` guards the same case with `childInterruptible` (the brain's
+      // cheap half, #371); this is the frontend's.
+      if (row.status === null || !taskIsLive(row.status)) {
+        setNote(`${row.name} is ${row.status ?? 'done'} — there is nothing left to stop.`)
+        return
+      }
       busyRef.current = true
       setBusy(true)
       setError(null)
