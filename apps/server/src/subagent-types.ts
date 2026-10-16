@@ -5,14 +5,10 @@ import type {
   SubagentTypeSummary,
 } from '@openharness/brain'
 import { GENERAL_PURPOSE_DESCRIPTION, GENERAL_PURPOSE_TYPE } from '@openharness/brain'
-import type { ToolRegistry } from '@openharness/hands'
-import type { McpServerId, Mode, UserId } from '@openharness/protocol'
+import type { Mode, UserId } from '@openharness/protocol'
 import type { CredentialStore, SessionStore } from '@openharness/session'
 
-import { listMcpServersInForce } from './mcp/in-force'
-import type { McpServerService } from './mcp/service'
 import { usableModeModel } from './modes'
-import { effectiveTools } from './tool-settings'
 
 /**
  * Subagent types, server-side (epic #340, decision S2; issue #342): the types a parent model
@@ -41,18 +37,10 @@ import { effectiveTools } from './tool-settings'
 
 /** What resolving a subagent type needs, beyond the mode itself. */
 export interface SubagentTypeDeps {
-  /** The caller's modes — the types — and the two per-user settings resolution reads. */
-  readonly store: Pick<SessionStore, 'listModes' | 'getPreferences' | 'getToolSettings'>
+  /** The caller's modes — the types — and the preferences the availability check reads. */
+  readonly store: Pick<SessionStore, 'listModes' | 'getPreferences'>
   /** The caller's own provider credentials: what decides whether a mode's model can be used. */
   readonly credentials: Pick<CredentialStore, 'list'>
-  /** The tools this process registers, or `undefined` for a deployment with none. */
-  readonly tools: ToolRegistry | undefined
-  /**
-   * The user's remote MCP servers (epic #303, X10), or `undefined` for a deployment with no MCP
-   * at all. Only `list` is used, exactly as the tool settings read uses it: which servers a
-   * type's child has is a question about the resource, never about a server's schema.
-   */
-  readonly mcpServers?: Pick<McpServerService, 'list'>
 }
 
 /**
@@ -63,12 +51,19 @@ export interface SubagentTypeDeps {
  * are not read at all ({@link SubagentTypeResolver.list} is owner-scoped). Nothing here checks
  * whether a type's model can be used: the list is what a model chooses from, and the choice is
  * where usability decides.
+ *
+ * A mode **named after the built-in** is left out too (#362): mode names are free text, so a
+ * user can describe a mode called `general-purpose`, and the name would then be offered twice —
+ * twice in the list a model chooses from, and unreachable as a type, because {@link
+ * SubagentTypeResolver.resolve} answers the built-in first. One name, one type: the user's mode
+ * keeps working as a **preset** and is simply not a type (`resolve` answers the built-in for
+ * that name, exactly as `list` says).
  */
 function summariesOf(modes: readonly Mode[]): SubagentTypeSummary[] {
   return [
     { name: GENERAL_PURPOSE_TYPE, description: GENERAL_PURPOSE_DESCRIPTION },
     ...modes.flatMap((mode) =>
-      mode.subagent_description === null
+      mode.subagent_description === null || mode.name === GENERAL_PURPOSE_TYPE
         ? []
         : [{ name: mode.name, description: mode.subagent_description }],
     ),
@@ -105,38 +100,6 @@ function unavailableTypeMessage(mode: Mode): string {
     `The "${mode.name}" subagent type cannot be started: the mode's model is not available ` +
     'to this account. Start a different type, or do the work in this chat instead.'
   )
-}
-
-/**
- * The built-in and remote tools in force, in the two spellings a resolved type carries: the
- * built-in tools by name, and the remote servers by id.
- *
- * It is `effectiveTools`/`listMcpServersInForce` — the loop's own answer, applied to the same
- * override a chat on the type would apply — so "the tools this child has" is the same reading
- * the request that follows offers. A tool the settings leave off is absent, and a remote
- * server the mode turned off is absent with its tools; a permission is never touched, because
- * a policy is the user's (E6) and not a type's.
- */
-async function toolsInForce(
-  deps: SubagentTypeDeps,
-  ownerId: UserId,
-  override: Mode['tools'],
-): Promise<{ readonly tools: readonly string[]; readonly mcpServers: readonly McpServerId[] }> {
-  const stored = await deps.store.getToolSettings(ownerId)
-  const servers =
-    deps.mcpServers === undefined
-      ? []
-      : await listMcpServersInForce({ mcpServers: deps.mcpServers }, ownerId, override)
-  const entries = effectiveTools(deps.tools, stored, override, servers)
-  return {
-    // A provider-native tool (`web_search`, #335) is a built-in as far as the settings are
-    // concerned and is listed with them, which is exactly how the request that follows will
-    // treat it: it is offered where the model has it, and the settings are what withhold it.
-    tools: entries
-      .filter((entry) => entry.source === 'builtin' && entry.enabled)
-      .map((entry) => entry.name),
-    mcpServers: servers.map((server) => server.id),
-  }
 }
 
 /**
@@ -180,7 +143,6 @@ export function createSubagentTypeResolver(deps: SubagentTypeDeps): SubagentType
             // resolves exactly as its parent's next request does (#344). `null` means the child
             // is a plain session on the parent's model.
             modeId: parent.modeId,
-            ...(await toolsInForce(deps, ownerId, parent.toolOverride)),
           },
         }
       }
@@ -212,7 +174,6 @@ export function createSubagentTypeResolver(deps: SubagentTypeDeps): SubagentType
           // mode retunes the helper, and the override above is applied by the mode resolver
           // rather than restated on a session that could go stale.
           modeId: mode.id,
-          ...(await toolsInForce(deps, ownerId, mode.tools)),
         },
       }
     },

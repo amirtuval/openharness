@@ -420,12 +420,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
           // same store, credentials and registry, and the signals the scheduler below receives.
           ...(options.subagents === true
             ? {
-                subagents: createSubagentTypeResolver({
-                  store,
-                  credentials,
-                  tools: options.tools,
-                  mcpServers,
-                }),
+                subagents: createSubagentTypeResolver({ store, credentials }),
                 signal: (sessionId, kind) => signalToScheduler(sessionId, kind),
               }
             : {}),

@@ -164,9 +164,11 @@ description, at creation — which is why the derivation lives in `@openharness/
 in a server route; see "Subagents" below.
 
 **A session tree is not answerable by a root column: a subtree needs recursion, and "what is
-live" needs the log rather than the status projection.** `root_session_id` makes "every
-descendant of a root" one indexed query, but it cannot answer "every descendant of _this_
-session" — the branch under a middle child — so `listDescendants` is a `with recursive` walk over
+live" needs the log rather than the status projection.** `root_session_id` says which tree a
+session belongs to and is the id a cap is asked **from**, but as a filter it can answer nothing:
+it cannot say "every descendant of _this_ session" — the branch under a middle child — and no
+query in this repo filters on it, so the index `0032` built for it was written on every child and
+read by nobody, until `0035` dropped it (#361). `listDescendants` is a `with recursive` walk over
 `parent_session_id` in Postgres and a level-by-level filter in the fake, and the two have to agree
 on the order (level by level, `(created_at, id)` inside a level) or the conformance suite fails.
 The delete cascade uses the same walk, and it has to stop **every** descendant's turn before the
@@ -330,7 +332,8 @@ what pointed at the SQL rather than at the rule. The fix is an explicit cast on 
 (`…::timestamptz <= $1::timestamptz`); the lesson is that a comparison against a `jsonb` field
 needs its type spelled out, because there is no column type to infer it from
 ([#343](https://github.com/amirtuval/openharness/issues/343)).
-, and because every file
+
+**A migration must never be edited once it has been applied anywhere, and because every file
 re-runs, a data-changing one needs a guard on the state it changes.** The migrator re-runs every
 file on every `migrate()` call and there is no ledger table, so editing an applied file is silently
 ignored on existing databases and applied on new ones — the two drift apart with no error.
@@ -352,6 +355,30 @@ database's `now()` fails the lease and `processed_at` tests and makes short-leas
 `id` columns are `text collate "C"`, which is exactly what the protocol's keyset cursors encode and
 what the in-memory store compares with `<`, so a cursor taken from one store seeks identically in
 the other whatever the database's locale.
+
+**A missing foreign key is a deliberate hole, and a row lock is what closes the one it leaves open.**
+`parent_session_id` carries no foreign key on purpose: a cascade would delete a child behind
+`deleteSession`'s owner check and end nobody's stream, and a restrict would make deleting a parent
+fail. So the cascade collects the subtree with a recursive walk and then locks and deletes exactly
+those ids — and a child inserted _between_ the walk and the delete was blocked by nothing: its read
+was an MVCC snapshot and its `INSERT` conflicted with no row, so it committed and survived a parent
+that was gone. That is the worst shape a leaked row can have — a session no route lists (`GET
+/v1/sessions` answers top-level chats), no cascade reaches again, and whose count arithmetic then
+throws `SessionNotFoundError` for a root id that no longer exists. `createSession` therefore takes
+`for share` on the parent row it reads, which the delete's `for update` excludes: the two serialize,
+and whichever loses finds the parent gone and refuses the child. The lesson is that "no foreign key"
+is a decision about _which_ rule you want, and the rule you picked still needs the lock
+([#361](https://github.com/amirtuval/openharness/issues/361)).
+
+**Two limits that have to agree belong in one place, and the place is a boot failure.** Every tree
+walk stops at `MAX_DESCENDANT_DEPTH` (64), while `OPENHARNESS_MAX_AGENT_DEPTH` had no upper bound —
+so a deployment that set it higher could build a tree whose bottom a walk cannot see, and a delete
+would leave descendants behind. The in-memory store (which walks with a `seen` set and no depth
+bound) and Postgres would then disagree about an orphaned child: one answers "not live", the other
+reports it as needing work for ever, waking a no-op turn on every sweep. The constant moved into the
+contract (`@openharness/session`) and the server's configuration reads it as the variable's `max`,
+so the coupling refuses to boot with the variable named rather than living in a comment nobody
+reads ([#361](https://github.com/amirtuval/openharness/issues/361)).
 
 **Postgres decides several shapes, and each reason is the failure you get otherwise.** `NOTIFY`
 payloads are `{"seq": n}` and never the event, because a payload is capped at 8 kB and an event is
@@ -1264,6 +1291,74 @@ of the same fact (`packages/brain/src/agents.ts`): the delivery accepts the ende
 itself — not just the signal — for a child with a turn open **or** an unanswered task wait
 (`childPausedOnTasks`), which is the same predicate `stopOrphanedTasks` now uses
 ([#373](https://github.com/amirtuval/openharness/issues/373)).
+
+**A pause is answered by the thing it is waiting for, and the recovery scan has to agree with the
+turn — or the session spins.** The turn loop reads the pending task notifications into the same
+`claims` list it reads the user's messages into, because a running turn folds both in as steering
+— and the user's pause was then gated on `claims.length === 0`, so a helper finishing answered a
+question nobody had answered with "The user sent a message instead." (#363). Fixing the gate is
+half the change: the notification is still **work** for `findSessionsNeedingWork`, so a turn that
+re-paused would be woken again, pause again and be woken again — the scan is where "this is not
+work yet" has to be said, in both stores and in `SessionRunner.#hasMoreWork`, and the delivery
+happens in the turn the user's own answer starts. The generalisation is worth keeping: whenever a
+queued event's meaning is "work" for one kind of pause, check what the other kinds do with it, and
+check the store's scan, which is a second implementation of the same judgement
+(`packages/brain/src/turn.ts`, `packages/session/src/memory.ts`, `postgres/store.ts`).
+
+**A claim names a queued event once, so two results cannot both say they answered the same news.**
+`settleTaskWait` decided one `agent_wait` call in isolation against every pending notification, so
+two open waits resolved by one notification each wrote it into `consumes` — and the store refuses
+an append whose batch names an event twice (`ClaimConflictError`), so the whole append failed,
+nothing was written, and every later wake retried the same refused write with the turn stuck
+(#363). The fix shares the news out **before** any wait is decided: a notification goes to the
+wait that named its task, and to the first wait when none did. The shape to remember is that a
+loop over independent decisions cannot claim a shared resource idempotently — the claiming has to
+happen once, before the decisions
+(`packages/brain/src/tasks.ts`, `settleTaskWaits`).
+
+**Two appends where one fact lives is a crash window nothing repairs.** A child's turn end owed
+its parent a notification and a `session.task_status`, written as two appends with the status
+guarded on "was the notification new" — and a crash (or a fence) between them delivered the news
+and lost the status, leaving the card `running` for the rest of the session while the parent model
+acted on a result for a task that looked unfinished. Nothing repaired it: the next delivery
+answered `appended: false` and wrote nothing, and the child was not "work" because its news had
+landed. The fix moved the status into the store's idempotent append (`appendTaskNotification`),
+keyed by the same `sourceKey`, so the pair is one transaction and the status is exactly-once by
+construction — the same reasoning that makes a reply's chunks and their `agent.message` one
+identity (#365; `packages/session/src/events.ts`).
+
+**An abort is not a stop: only a claimed `user.interrupt` is the user's.** A drain ends the turns
+in flight by aborting them, exactly as a person's Stop does, and both leave an `interrupted` span
+end — so a delivery that read "interrupted" as "the user stopped this" told the parent model its
+helper had been stopped by the user during a rolling restart, and moved the card to stopped. The
+log records **no human intent** for an abort, and the two are told apart by the event: a
+`user.interrupt` in the turn's window (or claimed by the ended idle, for a child that was paused)
+is the user's stop; an abort with no event is the server's, and the news says so and says the
+helper can be continued with `agent_message` (#371, #378;
+`packages/brain/src/agents.ts`'s `turnStop`).
+
+**A turn that claims an interrupt and does nothing is not a turn that ended — and "did nothing"
+has to mean the same thing to the delivery and to the scan.** A person's Stop on a helper that has
+already reported opens a turn of its own (the interrupt is queued, so the no-op guard is skipped)
+which the loop's first check ends with nothing in flight: read as an ordinary end, it announced a
+stop for work that had finished and flipped the card done → stopped. The discriminator is the
+**window**: a turn whose window is empty and whose idle claims nothing but the interrupt did
+nothing, while a turn the child was really in the middle of leaves something in it (a reply, a
+call, the result that ends a wait). The store's undelivered-turn scan has to read the same rule —
+otherwise it keeps waking the child for news the delivery refuses to write — and the child must
+not announce `session.task_status { running }` for a turn that is only there to claim an
+interrupt, or the card flips anyway (#371; `packages/brain/src/agents.ts`,
+`packages/session/src/memory.ts`).
+
+**A tool whose call nobody can see is a tool that cannot be set to `ask`.** #335 established the
+rule for a provider-executed search: `ask` is a pause a client renders, and a search that runs
+inside the request has no moment to be held. The four subagent tools are the same impossibility
+for a different reason — the parent's transcript draws a task **card**, and a child's transcript
+is the child's own, so nothing shows the call and a pause on one could never be answered. So
+`PUT /v1/me/tools` refuses `ask` on them and both the settings listing and the loop read a stored
+one as `allow`, exactly as `web_search`'s does; `agent_wait` is deliberately not among them,
+because its pause is a task wait that a notification or a deadline resolves
+(`packages/hands/src/subagent-tools.ts`'s `SUBAGENT_TOOLS_WITHOUT_ASK`).
 
 ## Frontends: the web app and the TUI
 

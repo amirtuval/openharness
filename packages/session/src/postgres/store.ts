@@ -71,8 +71,8 @@ import {
   isEventSeq,
   isUserEventType,
   REWIND_KIND,
-  taskNotificationEvent,
   supersessionsOf,
+  taskNotificationEvents,
   type AppendedEvent,
   type RewindTarget,
   type SupersessionRecord,
@@ -118,6 +118,7 @@ import type {
   Unsubscribe,
   UpdateSessionRequest,
 } from '../store'
+import { MAX_DESCENDANT_DEPTH } from '../store'
 import { ListenConnection } from './listen'
 import {
   instant,
@@ -484,6 +485,17 @@ export class PostgresSessionStore implements SessionStore {
       // Where it sits in the tree (epic #340, S3): the parent, when there is one, is read
       // owner-scoped inside this transaction, so a session cannot be hung off one the caller
       // cannot see — the same "not found" an id nothing has gets (A4).
+      //
+      // The read **locks the parent row** (`for share`), and that lock is what closes the one
+      // hole in the delete cascade (#361): `deleteSession` collects the subtree with a recursive
+      // walk and then locks and deletes exactly those ids, so a child inserted after the walk
+      // would survive a parent that is gone — unreachable (`GET /v1/sessions` lists no child)
+      // and never cascaded to again, the invariant `SessionStore` states ("Nothing is left
+      // pointing at a session that is gone"). `parent_session_id` deliberately carries no
+      // foreign key, so nothing else blocks the insert. Sharing the row is enough: the delete
+      // takes it exclusive, so the two serialize — whichever gets there first, the other sees a
+      // committed parent or none at all, and a child of a session that is being deleted is
+      // refused rather than orphaned.
       const parent =
         options.parentSessionId === undefined
           ? undefined
@@ -492,6 +504,7 @@ export class PostgresSessionStore implements SessionStore {
               .selectAll()
               .where('id', '=', options.parentSessionId)
               .where('owner_id', '=', options.ownerId)
+              .forShare()
               .executeTakeFirst()
       const tree = sessionTree(
         id,
@@ -1051,7 +1064,11 @@ export class PostgresSessionStore implements SessionStore {
       return { event: existing, appended: false }
     }
     try {
-      const stored = await this.appendEvents(sessionId, [taskNotificationEvent(input)])
+      // The notification and the status it carries, in **one** append (#363): the store's own
+      // idempotency is per `sourceKey`, so writing the pair together is what makes the status
+      // exactly-once too. Two appends left a window in which the news landed and the status
+      // never did — a card stuck `running` with nothing for the scan to repair.
+      const stored = await this.appendEvents(sessionId, taskNotificationEvents(input))
       const [event] = stored
       if (event === undefined || !isTaskNotification(event)) {
         throw new Error('the store did not return the notification it was asked to append')
@@ -1393,6 +1410,33 @@ export class PostgresSessionStore implements SessionStore {
                      and x.kind = ${REWIND_KIND}
                      and e.seq between x.from_seq and x.to_seq
                 )
+                -- A task's news is work — the parent reacts on its own (S4) — but **not** while
+                -- the session is paused on the user: a notification answers no question, so the
+                -- turn it started would find the same ask_user / ask-policy call waiting and
+                -- pause again, leaving the news pending and this scan finding work again — a
+                -- spin. The pause stands until the user answers, and the turn their answer
+                -- starts is the one that folds the news in. A wait on **tasks** is not this:
+                -- nothing about it waits for a person, and the notification resolves it.
+                and (
+                  e.type <> ${EVENT_TYPES.sessionTaskNotification}
+                  or not exists (
+                    select 1
+                      from events st
+                     where st.session_id = s.id
+                       and st.type = ${EVENT_TYPES.sessionStatusIdle}
+                       and st.seq = (
+                         select max(e5.seq)
+                           from events e5
+                          where e5.session_id = s.id
+                            and e5.type in (
+                              ${EVENT_TYPES.sessionStatusRunning},
+                              ${EVENT_TYPES.sessionStatusIdle},
+                              ${EVENT_TYPES.sessionStatusRescheduled}
+                            )
+                       )
+                       and st.payload -> 'stop_reason' ->> 'type' = 'requires_action'
+                  )
+                )
            )
            -- An open turn: the last status event is not session.status_idle. A log with no
            -- status event at all is idle, which is what the coalesce supplies.
@@ -1507,6 +1551,45 @@ export class PostgresSessionStore implements SessionStore {
                        )
                   )
                   and st.payload -> 'stop_reason' ->> 'type' = 'end_turn'
+                  -- A turn that **did nothing** is not one whose end owes the parent an
+                  -- announcement (#371): an interrupt written into an idle child — a person's
+                  -- Stop on a helper that has already reported — opens and immediately ends a
+                  -- turn of its own, and its window (the events between the status before it and
+                  -- this idle) holds nothing while the idle claims nothing but that interrupt.
+                  -- The delivery writes no news for it, so a scan that reported it would keep
+                  -- waking the child for news that does not exist.
+                  and (
+                    exists (
+                      select 1
+                        from events w
+                       where w.session_id = s.id
+                         and w.seq < st.seq
+                         and w.seq > coalesce((
+                           select max(e6.seq)
+                             from events e6
+                            where e6.session_id = s.id
+                              and e6.seq < st.seq
+                              and e6.type in (
+                                ${EVENT_TYPES.sessionStatusRunning},
+                                ${EVENT_TYPES.sessionStatusIdle},
+                                ${EVENT_TYPES.sessionStatusRescheduled}
+                              )
+                         ), 0)
+                    )
+                    or exists (
+                      -- Something the turn answered: a message or a task's news claimed by the
+                      -- idle itself, which a turn with an empty window can still have done
+                      -- (a prompt claimed by the idle that ends its own turn).
+                      select 1
+                        from events m
+                       where m.session_id = s.id
+                         and m.type in (
+                           ${EVENT_TYPES.userMessage},
+                           ${EVENT_TYPES.sessionTaskNotification}
+                         )
+                         and m.id in (select jsonb_array_elements_text(st.payload -> 'consumes'))
+                    )
+                  )
              )
              and not exists (
                select 1
@@ -2468,17 +2551,6 @@ function suppliedIdsOf(events: readonly AppendableEvent[]): EventId[] {
 
 /** Postgres's SQLSTATE for a unique-constraint violation. */
 const UNIQUE_VIOLATION = '23505'
-
-/**
- * How deep the recursive walk over `parent_session_id` may go before it stops.
- *
- * A tree the store built is finite and shallow — S6's own nesting limit defaults to 3 — so
- * this is not a limit on a real tree: it is what makes the walk provably terminate on a table
- * somebody hand-edited into a cycle, which SQL has no cheap way to detect (and a `with
- * recursive` that loops would hang the connection rather than fail). It is deliberately far
- * above any tree a caller would build.
- */
-const MAX_DESCENDANT_DEPTH = 64
 
 /**
  * The constraints a duplicate event id can be reported under: the primary key on `events.id`
