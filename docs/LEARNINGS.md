@@ -158,7 +158,10 @@ non-empty line of the first `user.message`, collapses whitespace and truncates w
 `SESSION_TITLE_MAX_LENGTH`; a title supplied at creation, or one an earlier message produced, is
 never overwritten. There is no `session.updated` event, so a loaded client is never told the title
 changed and has to re-read — the reason the web app does exactly one re-read per session instead
-of polling ([#29](https://github.com/amirtuval/openharness/issues/29)).
+of polling ([#29](https://github.com/amirtuval/openharness/issues/29)). The rule has a **second
+naming site** since epic #340 — a subagent's child is titled by the brain from its task's
+description, at creation — which is why the derivation lives in `@openharness/protocol` and not
+in a server route; see "Subagents" below.
 
 **A session tree is not answerable by a root column: a subtree needs recursion, and "what is
 live" needs the log rather than the status projection.** `root_session_id` makes "every
@@ -1211,6 +1214,39 @@ then. The news it sends afterwards is dropped by the same rule as it is read —
 whose task the visible log does not name is not a task of this chat — which is also why the
 check is one comparison against the `taskStarts` map the loop already has
 ([#344](https://github.com/amirtuval/openharness/issues/344)).
+
+**A naming rule that lives at a route is a rule only route-created resources get.** A chat is
+named from its first `user.message` by `nameSessionFromFirstMessage`, and that function is called
+from two places, both routes (`apps/server/src/titles.ts`, `routes/events.ts`,
+`routes/sessions.ts`, #29). A subagent's child session is created by the **brain**, straight
+through `SessionStore.createSession` ([#344](https://github.com/amirtuval/openharness/issues/344)),
+so no route ever saw one and every child was stored with `title: null` — and a client with no
+title falls back to the model's display name, which is how the sidebar came to read "DeepSeek V4
+Pro" where the maintainer expected the description the parent model wrote in its `agent` call.
+The fix is one option at the creation site (`deriveSessionTitle(input.description)`) plus moving
+the derivation into `@openharness/protocol`, where the server and the brain read one rule rather
+than two that could disagree about what a title is.
+
+**A child's title has one safe source and the frontends cannot reach the other, which is why the
+fix is in the brain and not in a component.** The obvious second half — let a client label an
+untitled child with its task's description — has nothing to read: the description lives in the
+**parent's** `session.task_started` event, and no surface a frontend has for a child ever loads
+that log. The web sidebar's `ChildChats` is handed the sessions `GET /v1/sessions?parent_session_id=`
+answered (no task field on a `Session`), the child chat's banner and the TUI breadcrumb walk
+ancestors with `sessions.get`, and the TUI's `/agents` rows are the one place it does work —
+they are built from the parent's own transcript, which is why that screen already said the
+description while the sidebar did not. Reaching it elsewhere would be one events read per child
+row, so the title the brain stores (`packages/brain/src/agents.ts`) is the whole fix, and a
+frontend needs no fallback at all: the same description arrives on the session.
+
+**A bound two schemas already enforce can make a defensive branch unreachable — write that down
+where the branch is.** A description is capped at `TASK_DESCRIPTION_MAX_LENGTH` by the `agent`
+tool's schema and again by `session.task_started`, and `SESSION_TITLE_MAX_LENGTH` is the same
+500 — so the truncation half of `deriveSessionTitle` can never fire on a child's title, and the
+normalising half (one line, whitespace collapsed) is the only part a description really exercises
+(`packages/brain/src/agents.test.ts` says so at the test that pins it). The call site keeps the
+full derivation anyway, because the two limits are independent constants and the day one moves
+the cut has to be there; what it must not do is look like dead code someone can delete.
 
 **A pause is a turn end, so stopping a paused helper is a _claim_ in the log, not a window of
 events — and a signal is not an event.** A subagent parked in `agent_wait` is `idle` to

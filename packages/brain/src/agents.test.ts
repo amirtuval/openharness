@@ -6,6 +6,7 @@ import {
   AGENT_TOOL_NAME,
   EVENT_TYPES,
   MESSAGE_PARENT_TOOL_NAME,
+  SESSION_TITLE_MAX_LENGTH,
   TASK_WAIT_TOOL_NAME,
   newTaskId,
   ulid,
@@ -376,6 +377,74 @@ describe('starting a helper (S3/S4/S5; #344)', () => {
     expect(await store.listDescendants(sessionId, { ownerId: 'user_brain_tests' })).toEqual([
       first.id,
     ])
+  })
+
+  it('titles the child with the description its parent gave it (epic #340)', async () => {
+    // The bug the sidebar showed: a child was created with no title at all, so a list of chats
+    // had nothing to label it with but its **model's** name. The description the parent model
+    // wrote in its `agent` call is the name of the work, which is what the row should say.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    await turn(store, sessionId, [{ toolCalls: [START] }, { text: ['Started it.'] }], deployment)
+
+    const log = await logOf(store, sessionId)
+    const child = await childOf(store, log, sessionId)
+    expect(child.title).toBe('Check the rewind path')
+  })
+
+  it('normalises the description the way a first message is (epic #340)', async () => {
+    // A description is free text a model wrote: it may open with blank lines, wrap, and be
+    // padded with tabs. One clean line is what a title is, so the derivation the server uses
+    // for a chat's first message is the one a child gets.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    await turn(
+      store,
+      sessionId,
+      [
+        {
+          toolCalls: [
+            {
+              name: AGENT_TOOL_NAME,
+              input: {
+                ...START.input,
+                description: '\n  \nCheck\t\tthe   rewind path\nand say what it did  ',
+              },
+            },
+          ],
+        },
+        { text: ['Started it.'] },
+      ],
+      deployment,
+    )
+
+    const log = await logOf(store, sessionId)
+    const child = await childOf(store, log, sessionId)
+    expect(child.title).toBe('Check the rewind path')
+  })
+
+  it('takes a description at the protocol’s own bound whole (epic #340)', async () => {
+    // A description can never be *longer* than a title may be: the tool's schema caps it at
+    // `TASK_DESCRIPTION_MAX_LENGTH` and `session.task_started` enforces the same 500, both of
+    // which are `SESSION_TITLE_MAX_LENGTH` — so the longest one a model can give is exactly a
+    // title's length and is kept whole (the cut itself is asserted where the rule lives,
+    // `@openharness/protocol`'s `titles.test.ts`).
+    const description = 'y'.repeat(SESSION_TITLE_MAX_LENGTH)
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    await turn(
+      store,
+      sessionId,
+      [
+        { toolCalls: [{ name: AGENT_TOOL_NAME, input: { ...START.input, description } }] },
+        { text: ['Started.'] },
+      ],
+      deployment,
+    )
+
+    const log = await logOf(store, sessionId)
+    const child = await childOf(store, log, sessionId)
+    expect(child.title).toBe(description)
   })
 })
 

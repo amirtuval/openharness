@@ -5,6 +5,7 @@ import {
   EVENT_TYPES,
   MESSAGE_PARENT_TOOL_NAME,
   TASK_WAIT_TOOL_NAME,
+  deriveSessionTitle,
   newTaskId,
   ulid,
 } from '@openharness/protocol'
@@ -244,6 +245,14 @@ export function createSubagentHandlers(context: SubagentHandlerContext): Subagen
         parentSessionId: session.id,
         parentTaskId: taskId,
         model: { id: type.model },
+        // The name the parent model gave this piece of work, as the child's title (epic #340).
+        // A child is created here, straight through the store, so the server's route-level
+        // auto-titling (`nameSessionFromFirstMessage`, which only ever sees a client's first
+        // message) never runs for it — and a child whose title stays `null` is a row a client
+        // can only label with its **model's** name, which is what the sidebar showed instead of
+        // the description. Normalised by the same rule a chat's first message is, so a
+        // multi-line or over-long description still becomes one bounded line.
+        title: deriveSessionTitle(input.description),
         // The prompt a chat on this type would run with: the parent's own system prompt with the
         // type's addition after it. The subagent prompt itself is appended per request, by the
         // loop — every child runs with it, including one created before this issue existed.

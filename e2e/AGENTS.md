@@ -358,7 +358,9 @@ W31 is the subagents pass (epic #340, S9; #346): the mock's `__agent__`, `__agen
 `__message_parent__` markers drive a chat that starts a helper, and the scenario follows the card
 through its states — the type, the description and the status, the live line and the tokens the
 child's own stream feeds, the conversations between parent and child inline, the result folding
-in, the child opening as a chat under a breadcrumb, the sidebar nesting it, and Stop interrupting
+in, the child opening as a chat under a breadcrumb, the sidebar nesting it — where the nested
+row is labelled with the **description the parent model gave**, which is the child's title (epic
+#340) — and Stop interrupting
 a child parked in `__hold__` — after which the card reads **stopped**, not `done`, because the
 reader's Stop is a `user.interrupt` and the brain announces that turn as a stop (S7; #348). It
 also pins the two things no component test can: Settings → Tools lists the five subagent tools

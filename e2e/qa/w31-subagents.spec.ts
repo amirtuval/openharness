@@ -138,6 +138,9 @@ test.describe('W31 subagents', () => {
 
       await group.getByRole('button').click()
       await expect(group.getByRole('link')).toHaveCount(1)
+      // The row is labelled with the description the parent model gave — which is the child's
+      // title (epic #340) — and not with the model it runs.
+      await expect(group.getByRole('link')).toHaveText(DESCRIPTION)
       await expectNoErrorBanner(page)
     })
 

@@ -1284,9 +1284,14 @@ the API depends on the window, and a client never needs to know whether compacti
 A session is named after the first `user.message` it is sent: `POST …/events`, and the
 `initial_events` of `POST /v1/sessions`, derive a title from it and set it, in the same request
 that stores the message — the creation response carries the title it just set. The rule is
-`deriveSessionTitle` in `titles.ts`: the first non-empty line, whitespace collapsed, trimmed
-and cut to the protocol's `SESSION_TITLE_MAX_LENGTH` with an ellipsis. It is written **once**:
-a title supplied at creation, and one an earlier message produced, is never replaced, and a
+`deriveSessionTitle`, which lives in **`@openharness/protocol`** since epic #340: the first
+non-empty line, whitespace collapsed, trimmed and cut to the protocol's
+`SESSION_TITLE_MAX_LENGTH` with an ellipsis. It is there rather than in `titles.ts` because it
+has a second caller the server never sees — the brain titles a **child** session from the
+description its parent model gave when it starts one (`packages/brain/src/agents.ts`), straight
+through the store, so no route of this package is involved. `titles.ts` keeps the write path,
+`nameSessionFromFirstMessage`. A title is written **once**: a title supplied at creation (a
+child's, from its description) and one an earlier message produced are never replaced, and a
 message with no text leaves the title `null`.
 
 ### The session tree, and a session that cannot ask (epic #340, S1/S3/S7; #341)
@@ -2071,7 +2076,9 @@ src/
   pass-queue.ts         PassQueue: the queue and the concurrency limit, shared by both
   partition-scheduler.ts PostgresPartitionScheduler: leases, epochs, signals, recovery (#11)
   sse.ts                the SSE body of a stream request
-  titles.ts             naming a session after its first message (#29)
+  titles.ts             naming a session after its first message (#29) — the write path only;
+                        the derivation is `@openharness/protocol`'s `deriveSessionTitle`,
+                        which the brain reads too (epic #340)
   static.ts             serving a built web app from OPENHARNESS_WEB_DIR
   types.ts              AppEnv (the Hono environment) and the Logger seam
   observability/
@@ -2219,7 +2226,9 @@ parallel with each other.
 - `subagents.test.ts` (epic #340, S5/S6/S7; #344) — the whole subagent path over HTTP, with the
   subagent runtime wired into the harness and the mock model driving the calls: `__agent__`
   starting a helper (the handle comes back at once, the child is a **real** session with the
-  parent, the task, depth 1 and `interactive: false`, its log holding nothing but the prompt, and
+  parent, the task, depth 1 and `interactive: false`, the description as its **title** — read
+  back through `GET /v1/sessions/{id}` and the parent-filtered list, and never replaced by a
+  message a person later sends the child — its log holding nothing but the prompt, and
   its result reaching the parent as a notification keyed by the turn — claimed by the request
   that folds it in), two helpers started and reporting in parallel, an unknown type answered with
   the resolver's sentence and nothing started, a start past `OPENHARNESS_MAX_LIVE_TASKS` refused

@@ -191,6 +191,23 @@ describe('agentsRows (#347)', () => {
       'done · researcher: Check the flaky test · 1 note · has a result · › 2 subtasks',
     )
   })
+
+  it('names a task by the description its parent gave, not by its model', () => {
+    // The row the maintainer read on staging: a helper is listed under the words it was started
+    // with — the description of the `agent` call — and never under the model it runs (epic
+    // #340). Unlike the web sidebar this screen needs no title off the session: the card is
+    // built from the **parent's** log, which is where the description is.
+    const rows = agentsRows(
+      [card({ description: 'Check the changelog' })],
+      null,
+      new Map(),
+      makeSession(),
+    )
+    const label = agentRowLabel(rows[0]!)
+
+    expect(label).toContain('Check the changelog')
+    expect(label).not.toContain('deepseek')
+  })
 })
 
 describe('AgentsScreen (#347)', () => {

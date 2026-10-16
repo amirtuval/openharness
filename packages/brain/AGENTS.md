@@ -1807,7 +1807,12 @@ and runs the calls itself.
   description, #345) and a `running` status — then
   signals the child. The handle it answers with is the `task_` id. The child is created **on the
   type's mode** when it has one (`modeId`), so it follows it live exactly as a chat does: that is
-  what makes the type's tool and MCP-server override real without a second configuration.
+  what makes the type's tool and MCP-server override real without a second configuration. It is
+  also created with a **title** — `deriveSessionTitle(input.description)`, the same normalisation
+  a chat's first `user.message` is named with — because nothing else ever names a child: the
+  server's auto-titling runs on its routes, and a child is created here, through the store. A
+  child left `title: null` is a row a frontend can only label with its **model's** display name
+  (epic #340's follow-up), and the description the parent model wrote is the name of the work.
 - **The child writes its own status and its own result.** `childTurnStart` writes
   `session.task_status { running }` into the parent's log when a child's turn opens, and
   `deliverChildTurn` writes what the turn owes when it **ends**: a `result` carrying the turn's
@@ -1912,7 +1917,11 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   session is offered (the parent side under the depth cap, `message_parent` to a child, a host
   with no runtime left alone), the `agent` description listing the resolver's types; a start
   creating a child session with its parent, task, root, depth, `interactive: false` and the
-  prompt as its whole log, answering the handle and signalling the child; an unknown type and a
+  prompt as its whole log, answering the handle and signalling the child — and its **title**:
+  the description the model gave, normalised to one line the way a first message is, and kept
+  whole at the protocol's own bound (a longer one cannot reach here — the tool's schema and the
+  event's both cap it at `SESSION_TITLE_MAX_LENGTH`, so the cut is asserted where the rule
+  lives); an unknown type and a
   chat at its live cap refused with an `is_error` and nothing started; a message reaching a
   child as a `user.message` with its context intact; a stop marking the task and interrupting
   the child; a child's `message_parent` note reaching the parent's log; a finished turn

@@ -71,7 +71,9 @@ then — becomes the message's first non-empty line, whitespace collapsed and cu
 `SESSION_TITLE_MAX_LENGTH`, so a list of chats shows what each one is about rather than the
 agent's name. That happens once. A title passed to `POST /v1/sessions`, and one an earlier
 message produced, is never overwritten; a session created with `initial_events` is named the
-same way, in the same request.
+same way, in the same request. A **child** is created with its title already set (epic #340):
+the brain titles it with the description the parent model gave in its `agent` call, normalised
+by the same rule, because no route ever sees a child's first message.
 
 A session is **interactive** unless the request asks for one that is not (`interactive: false`):
 a non-interactive session's model cannot stop to ask the user anything — `ask_user` is never
