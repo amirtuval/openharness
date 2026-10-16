@@ -310,6 +310,15 @@ test.describe('W31 subagents', () => {
         const row = tools.locator(`[data-slot="tool-row"][data-tool="${name}"]`)
         await expect(row).toHaveCount(1)
         await expect(row.locator('[data-slot="tool-default"]')).toContainText('allow')
+        // **And no "Ask me first" for four of the five** (#368). A call to them is kept out of
+        // the transcript's tool calls — a card stands in for the `agent` call — so an `ask`
+        // would pause the parent's turn with no prompt any client could draw; the server
+        // refuses the write, and the card does not offer the value. `agent_wait` is the
+        // control: its own pause outranks the permission, so `ask` is a value it can take.
+        const options = await row.locator(`#tool-policy-${name} option`).allTextContents()
+        expect(options).toEqual(
+          name === 'agent_wait' ? ['Allow', 'Ask me first', 'Deny'] : ['Allow', 'Deny'],
+        )
       }
       await shot(page, 'w31-10-settings-tools-agent')
     })
