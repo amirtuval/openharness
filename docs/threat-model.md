@@ -195,6 +195,20 @@ this build did not have before, so what it may carry is worth stating.
   side's `source_key` and the claim is the model's having been told, so a crash, a recovery scan
   and a re-delivery cannot make the model act on the same output twice — and cannot silently
   swallow it either.
+- **Terminal rendering is sanitised, because a terminal executes what it is printed** (#368). The
+  same text is also drawn for the **reader** — a task's description, its activity line, what it
+  said and its result, on the parent's card — and a terminal acts on escape sequences in it:
+  `ESC ] 52 ; c ; … BEL` writes the reader's clipboard, `ESC ] 0 ; … BEL` retitles their window,
+  `ESC [ 2 J` clears the screen, and the C1 spellings (`\x9b…`) do the same on a terminal in
+  8-bit mode. A helper that summarised a page, or answered from an MCP server, is enough to
+  carry one. `oh`'s span layer therefore strips a control out of every string on its way to a
+  rendered line (`apps/tui/src/markdown/text.ts`'s `sanitizeText`, applied by `textSpans`,
+  `wrapSpans`, `truncateSpans` and `splitToWidth`): every C0 control but `\n` and `\t`, every C1
+  control, and each whole `ESC`/C1-introduced CSI, OSC, DCS, SOS, PM and APC sequence. This is
+  the rendering half of the rule above: the model is told a task's output is data, and the reader
+  is shown it as text. The web app needs no equivalent — it renders into DOM text nodes, never
+  `dangerouslySetInnerHTML` — and a child's output is _not_ sanitised on its way into the log,
+  because the log records what was said.
 
 ## What this build does and does not have yet
 
