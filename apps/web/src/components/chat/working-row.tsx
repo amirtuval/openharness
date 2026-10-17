@@ -40,6 +40,22 @@ export type WorkingState =
   | { readonly kind: 'compacting' }
   /** The brain hit a retryable error and is trying again, with the server's reason. */
   | { readonly kind: 'retrying'; readonly detail: string }
+  /**
+   * The event stream is reconnecting (#378, P4).
+   *
+   * The client's stream loop normally reconnects silently and resumes by `seq`; this is the
+   * one moment it knows the connection is gone, and the reader is told rather than left with a
+   * frozen reply.
+   */
+  | { readonly kind: 'reconnecting' }
+  /**
+   * The turn is running but no event has arrived for the quiet window (#378, P4).
+   *
+   * A crash's stall — the owner died and a peer will take over after its lease lapses — looks
+   * exactly like a slow model from the client's side. The row says the honest thing: the
+   * screen is still waiting for the server, not pretending a reply is being written.
+   */
+  | { readonly kind: 'waiting' }
   /** The reader pressed Stop; the turn is over and this is what says so. */
   | { readonly kind: 'interrupted' }
 
@@ -67,6 +83,13 @@ export interface WorkingRowInput {
    * a request" rule, so a client that reconnects mid-wait shows the same state.
    */
   readonly compacting?: boolean | undefined
+  /**
+   * Whether a running turn has gone quiet for the client's stall window (#378, P4). From
+   * `stallState` over the hook's own arrival clock — the reducer stays pure.
+   */
+  readonly stalled?: boolean | undefined
+  /** Whether the event stream is reconnecting (#378, P4); outranks {@link stalled}. */
+  readonly reconnecting?: boolean | undefined
 }
 
 /**
@@ -85,6 +108,11 @@ export function workingState(input: WorkingRowInput): WorkingState | null {
   if (input.status !== 'running') {
     return null
   }
+  if (input.reconnecting === true) {
+    // The client knows the connection is gone. That is a different fact from a quiet stream,
+    // and it is true even while a summary or a retry would otherwise be what the row says.
+    return { kind: 'reconnecting' }
+  }
   if (input.summarizing !== null && input.summarizing !== undefined) {
     return { kind: 'summarizing', pass: input.summarizing.pass, passes: input.summarizing.passes }
   }
@@ -96,6 +124,11 @@ export function workingState(input: WorkingRowInput): WorkingState | null {
   }
   if (input.retrying) {
     return { kind: 'retrying', detail: input.retryReason ?? 'the model request failed' }
+  }
+  if (input.stalled === true) {
+    // Nothing has arrived for the stall window. This is shown even when text arrived earlier:
+    // a reply that stops mid-stream and then goes silent is the case the row exists for.
+    return { kind: 'waiting' }
   }
   return input.hasReplyText ? null : { kind: 'working' }
 }
@@ -138,7 +171,11 @@ export function WorkingRow({ state }: { state: WorkingState }) {
       data-state={state.kind}
       className="flex items-center gap-inline text-sm text-muted-foreground"
     >
-      {state.kind === 'working' || state.kind === 'summarizing' || state.kind === 'compacting' ? (
+      {state.kind === 'working' ||
+      state.kind === 'summarizing' ||
+      state.kind === 'compacting' ||
+      state.kind === 'reconnecting' ||
+      state.kind === 'waiting' ? (
         <Loader2 aria-hidden="true" className="size-3.5 shrink-0 animate-spin text-coral" />
       ) : state.kind === 'retrying' ? (
         <span aria-hidden="true" className="size-2 shrink-0 animate-pulse rounded-full bg-coral" />
@@ -179,6 +216,10 @@ function rowLabel(state: WorkingState): string {
       return COMPACTING_LABEL
     case 'retrying':
       return 'Retrying…'
+    case 'reconnecting':
+      return 'Reconnecting…'
+    case 'waiting':
+      return 'Waiting for the server…'
     case 'interrupted':
       return 'Interrupted'
   }

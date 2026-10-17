@@ -1,8 +1,10 @@
 import {
   createTranscript,
+  DEFAULT_STALL_MS,
   searchCount,
   selectMcpFailure,
   selectSessionUsage,
+  stallState,
   type Client,
   type ClearedToolResults,
   type SessionUsage,
@@ -33,6 +35,7 @@ import {
   useLayoutEffect,
   useMemo,
   useReducer,
+  useRef,
   useState,
 } from 'react'
 
@@ -117,6 +120,16 @@ export interface SessionView {
   readonly manualCompaction: TranscriptManualCompaction | null
   /** Whether the agent is working. */
   readonly status: SessionStatus
+  /**
+   * Whether a running turn has gone quiet for {@link DEFAULT_STALL_MS} (#378, P4).
+   *
+   * A crash's stall is otherwise indistinguishable from a slow model. The rule is the client's
+   * `stallState`, over this hook's own arrival clock; the indicator disappears when an event
+   * arrives or the turn ends.
+   */
+  readonly stalled: boolean
+  /** Whether the event stream is reconnecting (#378, P4); outranks {@link stalled}. */
+  readonly reconnecting: boolean
   /** The latest `session.error` in the log, until a reply supersedes it. */
   readonly lastError: TranscriptError | null
   /**
@@ -243,6 +256,38 @@ export function useSession(client: Client, sessionId: string): SessionView {
     return unsubscribe
   }, [transcript, state])
 
+  // Whether the event stream is reconnecting (#378, P4), reported by the client's stream loop.
+  // Beside the transcript rather than in it: it is a fact about the connection, not the log, and
+  // a replay of the same events has no way to know it.
+  const [reconnecting, setReconnecting] = useState(false)
+  // When the last **streamed** event arrived, in epoch milliseconds. History and this tab's own
+  // writes do not count: the indicator asks whether the server has said anything lately. The
+  // clock ticks once a second while a turn runs, which is what re-evaluates the quiet window
+  // without putting wall-clock time into the pure reducer.
+  const lastEventAt = useRef<number>(Date.now())
+  const [clock, setClock] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (state.status !== 'running') {
+      return undefined
+    }
+    const timer = setInterval(() => {
+      setClock(Date.now())
+    }, 1_000)
+    return () => {
+      clearInterval(timer)
+    }
+  }, [state.status])
+
+  const stall = stallState({
+    status: state.status,
+    lastEventAt: lastEventAt.current,
+    now: clock,
+    // The reconnect is reported as it happens, so it outranks the quiet window.
+    reconnecting,
+    thresholdMs: DEFAULT_STALL_MS,
+  })
+
   const [loaded, setLoaded] = useState<Session | null>(null)
   const [loadingHistory, setLoadingHistory] = useState(true)
   const [requestError, setRequestError] = useState<string | null>(null)
@@ -299,7 +344,19 @@ export function useSession(client: Client, sessionId: string): SessionView {
           deltas: true,
           afterSeq: transcript.getState().lastSeq,
           signal: controller.signal,
+          onConnection: (connection) => {
+            // A fresh connection starts a fresh quiet window (and clears "Reconnecting…"); a
+            // dropped one is reported before the backoff, so the indicator appears at once.
+            if (controller.signal.aborted) {
+              return
+            }
+            lastEventAt.current = Date.now()
+            setReconnecting(connection.state === 'reconnecting')
+          },
         })) {
+          // Only streamed events count for the stall indicator: a local echo of this tab's own
+          // send is not the server saying anything.
+          lastEventAt.current = Date.now()
           transcript.apply(event)
         }
       } catch (caught) {
@@ -454,6 +511,8 @@ export function useSession(client: Client, sessionId: string): SessionView {
     searches: searchCount(state.toolCalls),
     usage: selectSessionUsage(state),
     status: state.status,
+    stalled: stall === 'stalled',
+    reconnecting: stall === 'reconnecting',
     lastError: state.lastError,
     mcpFailure: selectMcpFailure(state),
     lastSeq: state.lastSeq,
