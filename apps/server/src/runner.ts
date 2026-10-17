@@ -7,6 +7,7 @@ import {
   type RetryPolicy,
   type TurnOutcome,
   TurnHandoff,
+  type TurnHandoffCause,
   runTurn,
 } from '@openharness/brain'
 import { EVENT_TYPES } from '@openharness/protocol'
@@ -113,6 +114,14 @@ export interface RunSessionOptions {
    * `findSessionsNeedingWork`.
    */
   readonly signal?: AbortSignal
+  /**
+   * A **soft** stop for this pass (#378, P2): finish the step in flight, then stop instead of
+   * starting another turn. The runner also carries its own per-pass drain controller, so a
+   * scheduler that owns a partition can ask for one after the pass began
+   * ({@link SessionRunner.drain}); this option is how a pass *starting* in a partition that is
+   * already being given up learns it must write nothing.
+   */
+  readonly drain?: AbortSignal
 }
 
 /** The outcome of a pass that found nothing to do. */
@@ -128,6 +137,15 @@ export type { TurnOutcome }
 interface TurnHandle {
   /** Aborting this ends the turn in flight at its next safe point. */
   controller: AbortController
+  /**
+   * Aborting this is the **soft** stop (#378, P2): the turn finishes the request or tool step
+   * in flight and then stops at the next boundary instead of starting another request. It is
+   * separate from {@link controller} so a scheduler can drain a pass long before it needs the
+   * hard handoff.
+   */
+  drain: AbortController
+  /** The external drain signal, if the pass was started under one. */
+  drainSignal: AbortSignal | undefined
   /** Resolves when the whole pass — every turn it ran — has finished. */
   pass: Promise<TurnOutcome> | null
   /** Set when someone asked for another look at the log before the pass ends. */
@@ -255,6 +273,81 @@ export class SessionRunner {
   }
 
   /**
+   * Ask the pass in flight for `sessionId` to **drain** (#378, P2): let the model request or
+   * tool step in flight finish and store its result, then stop instead of starting another
+   * request. It differs from {@link abort} in that it aborts nothing and writes nothing; the
+   * turn decides at its next step boundary, so a reply already streaming reaches the log.
+   *
+   * A pass that has not started a turn yet sees the drain at `runTurn`'s own start and writes
+   * nothing, which is what makes a session queued just before a partition was given up
+   * harmless.
+   *
+   * @returns whether a pass was in flight — `false` means there is nothing to drain
+   */
+  drain(sessionId: SessionId): boolean {
+    const handle = this.#turns.get(sessionId)
+    if (handle === undefined) {
+      return false
+    }
+    handle.drain.abort()
+    return true
+  }
+
+  /** Drain every pass in flight, and answer the sessions that were running. */
+  drainAll(): SessionId[] {
+    const running = this.runningSessions()
+    for (const sessionId of running) {
+      this.drain(sessionId)
+    }
+    return running
+  }
+
+  /**
+   * Hand the turn in flight for `sessionId` off **now** — abort it with a
+   * {@link TurnHandoff} reason, so the brain writes nothing more and leaves the turn open.
+   *
+   * This is the hard half of a drain (#378, P2), reached when a step did not finish inside the
+   * drain timeout. It is not {@link abort}: that one is a person's interrupt, and ends the turn.
+   *
+   * @returns whether a pass was in flight
+   */
+  handOff(sessionId: SessionId, cause: TurnHandoffCause = 'shutdown'): boolean {
+    const handle = this.#turns.get(sessionId)
+    if (handle === undefined) {
+      return false
+    }
+    handle.drain.abort()
+    handle.controller.abort(new TurnHandoff(cause))
+    return true
+  }
+
+  /**
+   * Wait for the passes for `sessionIds` to end, or for `timeoutMs` — whichever comes first.
+   * A pass that rejects is as settled as one that resolves; the caller of `run` owns the
+   * rejection.
+   */
+  async waitFor(sessionIds: readonly SessionId[], timeoutMs: number): Promise<void> {
+    const passes = sessionIds.flatMap((sessionId) => {
+      const pass = this.#turns.get(sessionId)?.pass
+      return pass === null || pass === undefined
+        ? []
+        : [
+            pass.then(
+              () => undefined,
+              () => undefined,
+            ),
+          ]
+    })
+    if (passes.length === 0) {
+      return
+    }
+    await withTimeout(
+      Promise.all(passes).then(() => undefined),
+      timeoutMs,
+    )
+  }
+
+  /**
    * Stop the pass in flight for `sessionId` — abort its turn, do not start another — and wait
    * (bounded by `drainTimeoutMs`) for it to finish writing.
    *
@@ -289,7 +382,7 @@ export class SessionRunner {
           () => undefined,
           () => undefined,
         ),
-        options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
+        options.drainTimeoutMs ?? DEFAULT_STOP_SESSION_TIMEOUT_MS,
       )
     }
     return true
@@ -324,10 +417,15 @@ export class SessionRunner {
       if (options.signal !== undefined) {
         existing.signal = options.signal
       }
+      if (options.drain !== undefined) {
+        existing.drainSignal = options.drain
+      }
       return existing.pass ?? Promise.resolve(NOOP)
     }
     const handle: TurnHandle = {
       controller: new AbortController(),
+      drain: new AbortController(),
+      drainSignal: options.drain,
       pass: null,
       woken: false,
       stopRequested: false,
@@ -343,36 +441,28 @@ export class SessionRunner {
   }
 
   /**
-   * Stop: no pass starts after this, every turn in flight is **handed off**, and the passes
-   * already running are given `drainTimeoutMs` to reach their next safe point.
+   * Stop: no pass starts after this, every turn in flight **drains** (finishes the step it is
+   * in) for `drainTimeoutMs`, and whatever is left at the deadline is **handed off**.
    *
-   * The abort carries a {@link TurnHandoff} reason (#378, P1): a shutdown is not the user's
-   * interrupt, so the brain writes nothing more and leaves the turn open. The next owner of
-   * the partition — or a `LocalScheduler` started against the same store in the next process —
-   * finds it with `findSessionsNeedingWork` and finishes it. The timeout is the ceiling: a pass
-   * that does not reach a safe point in time is left behind, which is safe because its writes
-   * are fenced and the log still holds the open turn.
+   * Both halves are deliberate (#378, P2). The soft half is what makes a rolling restart
+   * invisible: a request already streaming finishes and stores its reply, so the next owner
+   * usually has nothing to re-issue. The hard half is the ceiling, and its abort carries a
+   * {@link TurnHandoff} reason (#378, P1), so the brain writes nothing more and leaves the
+   * turn open — the next owner finds it with `findSessionsNeedingWork` and finishes it. A pass
+   * that does not even reach a safe point after that is left behind, which is safe because its
+   * writes are fenced and the log still holds the open turn.
    *
-   * @param options.drainTimeoutMs how long to wait for the passes in flight; defaults to 5000
+   * @param options.drainTimeoutMs how long to wait for the steps in flight; defaults to 40000
    */
   async stop(options: { drainTimeoutMs?: number } = {}): Promise<void> {
     this.#stopped = true
-    const passes: Promise<TurnOutcome>[] = []
-    for (const sessionId of this.runningSessions()) {
-      const handle = this.#turns.get(sessionId)
-      if (handle === undefined) {
-        continue
-      }
-      handle.controller.abort(new TurnHandoff('shutdown'))
-      if (handle.pass !== null) {
-        passes.push(handle.pass)
-      }
+    const running = this.drainAll()
+    await this.waitFor(running, options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS)
+    const still = running.filter((sessionId) => this.isRunning(sessionId))
+    for (const sessionId of still) {
+      this.handOff(sessionId, 'shutdown')
     }
-    if (passes.length === 0) {
-      return
-    }
-    const drained = Promise.allSettled(passes).then(() => undefined)
-    await withTimeout(drained, options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS)
+    await this.waitFor(still, DEFAULT_HANDOFF_SETTLE_MS)
   }
 
   /**
@@ -410,6 +500,7 @@ export class SessionRunner {
             // known, so the credential lookup is the owner's own key for this session (A5).
             resolveCredential: (provider) => this.#resolveCredential(sessionId, provider),
             signal: abortSignalFor(handle),
+            drain: drainSignalFor(handle),
             ...(handle.fence === undefined ? {} : { fence: handle.fence }),
             ...(this.#retry === undefined ? {} : { retry: this.#retry }),
             ...(this.#contextStrategy === undefined
@@ -475,7 +566,15 @@ export class SessionRunner {
    * aborted signal would interrupt its way round the loop forever.
    */
   #stopping(handle: TurnHandle): boolean {
-    return this.#stopped || handle.stopRequested || handle.signal?.aborted === true
+    return (
+      this.#stopped ||
+      handle.stopRequested ||
+      handle.signal?.aborted === true ||
+      // A drain stops the pass after the turn in flight, not the turn itself (#378, P2): the
+      // turn decides at its next boundary, and `runTurn`'s outcome ends the loop here.
+      handle.drain.signal.aborted ||
+      handle.drainSignal?.aborted === true
+    )
   }
 
   /**
@@ -548,8 +647,30 @@ export class SessionRunner {
   }
 }
 
-/** How long {@link SessionRunner.stop} waits for the passes in flight by default. */
-export const DEFAULT_DRAIN_TIMEOUT_MS = 5000
+/**
+ * How long a graceful stop (or a partition given up) lets the step in flight finish before it
+ * reaches for the hard handoff (#378, P2).
+ *
+ * Forty seconds is the deployment's budget: a pod has a 60 s grace period, the load balancer
+ * keeps draining for 45 s, and the remaining 20 s covers closing the listener, settling the
+ * hard handoffs and closing the store. The value is also `OPENHARNESS_DRAIN_TIMEOUT_MS`'s
+ * default; the chart documents the three numbers together.
+ */
+export const DEFAULT_DRAIN_TIMEOUT_MS = 40_000
+
+/**
+ * How long a stop waits for a hard-handed-off pass to settle before releasing its lease.
+ *
+ * The abort is cooperative and observed between appends, so this is only the time one append
+ * may still take; it is not part of the soft budget.
+ */
+export const DEFAULT_HANDOFF_SETTLE_MS = 1000
+
+/**
+ * How long {@link SessionRunner.stopSession} waits by default — the delete/rewind path, which
+ * is a user's stop and not a deploy's (#378, P2 keeps the two budgets apart).
+ */
+export const DEFAULT_STOP_SESSION_TIMEOUT_MS = 5000
 
 /** The interrupt signal and the external one, as the single signal `runTurn` takes. */
 function abortSignalFor(handle: TurnHandle): AbortSignal {
@@ -557,6 +678,14 @@ function abortSignalFor(handle: TurnHandle): AbortSignal {
     return handle.controller.signal
   }
   return AbortSignal.any([handle.controller.signal, handle.signal])
+}
+
+/** The runner's own drain and an external one, as the single soft signal `runTurn` takes. */
+function drainSignalFor(handle: TurnHandle): AbortSignal {
+  if (handle.drainSignal === undefined) {
+    return handle.drain.signal
+  }
+  return AbortSignal.any([handle.drain.signal, handle.drainSignal])
 }
 
 /**

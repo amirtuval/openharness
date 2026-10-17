@@ -53,7 +53,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_TRUSTED_PROXY_HOPS`    | how many proxies append to `x-forwarded-for`; `0` trusts none (#151) |
  * | `OPENHARNESS_CORS_ORIGINS`          | comma-separated origins to allow; unset means no CORS at all     |
  * | `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | how many sessions may run at once; `32` by default              |
- * | `OPENHARNESS_DRAIN_TIMEOUT_MS`      | how long shutdown waits for a turn in flight; `5000` by default  |
+ * | `OPENHARNESS_DRAIN_TIMEOUT_MS`      | how long a shutdown/rebalance lets the step in flight finish before the hard handoff; `40000` by default |
  * | `OPENHARNESS_INSTANCE_ID`           | this server's id in the lease table; `host-pid-random` by default |
  * | `OPENHARNESS_PARTITIONS`            | how many partitions the session space has; protocol's `64`       |
  * | `OPENHARNESS_LEASE_TTL_MS`          | how long a partition lease lasts; `30000` by default             |
@@ -191,7 +191,11 @@ export interface ServerConfig {
   readonly corsOrigins: readonly string[]
   /** How many sessions may run at once. */
   readonly maxConcurrentSessions: number
-  /** How long a shutdown waits for the turns in flight. */
+  /**
+   * How long a shutdown (or a partition being given up) lets the step in flight finish before
+   * it reaches for the hard handoff (#378, P2). It must fit inside the pod's grace period and
+   * the load balancer's connection draining; the chart documents the three numbers together.
+   */
   readonly drainTimeoutMs: number
   /** This instance's id in the lease table; unique among the servers sharing a database. */
   readonly instanceId: string

@@ -161,7 +161,7 @@ itself is a `session.context_summary` with reason `manual`.
 | `OPENHARNESS_TRUSTED_PROXY_HOPS`          | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)                                                                                                                                                                                                                    |
 | `OPENHARNESS_CORS_ORIGINS`                | —                                | comma-separated origins to allow; unset means no CORS headers                                                                                                                                                                                                                                                      |
 | `OPENHARNESS_MAX_CONCURRENT_SESSIONS`     | `32`                             | how many sessions may be running at once                                                                                                                                                                                                                                                                           |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `5000`                           | how long shutdown waits for a turn in flight                                                                                                                                                                                                                                                                       |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `40000`                          | how long a shutdown or a partition give-up lets the step in flight finish (soft drain) before the hard `TurnHandoff` abort; must fit inside the pod's grace period and the chart's `backend.drainingTimeoutSec` (#378, P2)                                                                                         |
 | `OPENHARNESS_INSTANCE_ID`                 | hostname + pid + random suffix   | this instance's id in the lease table                                                                                                                                                                                                                                                                              |
 | `OPENHARNESS_PARTITIONS`                  | `64` (the protocol's)            | how many partitions the session space has                                                                                                                                                                                                                                                                          |
 | `OPENHARNESS_LEASE_TTL_MS`                | `30000`                          | how long a partition lease lasts before it must be renewed                                                                                                                                                                                                                                                         |
@@ -1441,8 +1441,10 @@ the pass already running for it; `interrupt`
 aborts that pass's turn, and _starts a turn if none was running_, because a queued
 `user.interrupt` still has to be claimed (the turn's idle event carries the claim, P4). At
 most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait their turn.
-`stop()` accepts nothing more, **hands the turns in flight off** (#378, P1 — the shutdown abort
-leaves them open for the next process) and gives them the drain timeout to reach that point.
+`stop()` accepts nothing more and gives the step in flight the drain timeout to **finish**
+(#378, P2 — a request that completes stores its reply, so the next process has nothing to
+re-issue); whatever is still running at the deadline is **handed off** with a `TurnHandoff`
+(#378, P1 — it leaves the turn open for the next process).
 
 #### Named credentials, Azure OpenAI, custom endpoints, Amazon Bedrock and Google Vertex (epic #245, A3a/A3b/A3c/A3d)
 
@@ -1631,7 +1633,7 @@ new PostgresPartitionScheduler({
   heartbeatMs = 10000, // renew held leases, take free ones, give up surplus
   sweepMs = 60000, // re-scan owned partitions for work no signal mentioned
   maxConcurrentSessions = 32,
-  drainTimeoutMs = 5000,
+  drainTimeoutMs = 40000, // soft drain first; the hard handoff follows at this deadline
   retry,
   contextStrategy,
   compaction, // one configuration, or the per-owner resolver (#279; C3, #282)
@@ -1656,12 +1658,18 @@ only while it holds that partition's lease, writing every turn under `fence: {pa
   row in `scheduler_instances` (`heartbeatInstance`) and reads the members seen within one
   lease TTL back (`listLiveInstances`), so **share = `ceil(partitions / live members)`** and a
   scan takes free or expired partitions — never a live one — up to that share. An instance
-  holding more than its share gives the surplus up, **handing its turns off** (a
-  `TurnHandoff('partition_released')` abort) and then releasing. There is **no periodic idle
+  holding more than its share **starts** a give-up per partition (#378, P2): the step in
+  flight finishes, whatever remains at the drain deadline is **handed off** (a
+  `TurnHandoff('partition_released')` abort), and the lease is released **as soon as that
+  partition's passes are done** — an idle partition goes back at once. The give-up runs in the
+  background, never inside the heartbeat: a draining partition is renewed like every other
+  lease, so the TTL does not have to outlast the drain. There is **no periodic idle
   release**: an instance whose membership is only
   itself has the whole space as its share and keeps it; a newcomer is visible the moment it
-  heartbeats, so the holder's next heartbeat releases the surplus for it — a release, not a
-  steal, and never more than the share.
+  heartbeats, so the holder's next heartbeat starts the surplus release for it — a release,
+  not a steal, and never more than the share. A draining partition starts no new pass and
+  serves no signal (the next owner's acquire scan reads the log); it is not counted in the
+  share's kept set, so the instance can take what its new membership entitles it to.
 - **The membership ages out with the leases** — both windows are one lease TTL: a crashed
   instance stops heartbeating, so after a TTL it is out of every peer's count at the instant
   its leases stop being renewed, and the survivors' shares grow back to the whole space.
@@ -1674,13 +1682,17 @@ only while it holds that partition's lease, writing every turn under `fence: {pa
   stalled or a round trip was slow costs an instance nothing. Without that rule an instance
   would drop every partition it held on one late cycle — handing the turns in them off — for
   no reason, since no peer ever wanted them.
-- **`stop()`** drains the turns in flight — **handing them off**, not interrupting them
-  (`TurnHandoff('shutdown')`), so the next owner finishes each request (#378, P1) — deletes the
-  membership row (so peers stop counting the instance at once) and then releases every lease,
-  so the next instance takes over at its next heartbeat instead of waiting out the TTL. A
-  lease whose acquire was in flight when the stop began is released too, as soon as the scan
-  sees the instance stopped — a stop never leaves a live lease (and so a stranded, unserved
-  partition) behind.
+- **`stop()`** stops starting passes, deletes the membership row (so peers stop counting the
+  instance at once) and then releases each partition **on its own** (#378, P2): an idle one at
+  once, a busy one the moment its last pass has finished or **handed off**
+  (`TurnHandoff('shutdown')`) — so a user message to an idle session in a released partition
+  is served by a peer while the rest of the drain runs. A step that finishes inside
+  `OPENHARNESS_DRAIN_TIMEOUT_MS` is kept, not re-issued; only what the deadline catches is
+  aborted, and the release waits for those passes to settle so a deliberate handoff is not also
+  a fenced write (#378, P1). The next instance takes over at its next heartbeat instead of
+  waiting out the TTL. A lease whose acquire was in flight when the stop began is released
+  too, as soon as the scan sees the instance stopped — a stop never leaves a live lease (and
+  so a stranded, unserved partition) behind.
 - **`pause()`/`resume()`** stop and restart the timers without giving anything up: what a
   wedged process looks like from the outside, and what the zombie tests use.
 - **`heldPartitions()`** is what an instance owns right now.
@@ -1692,11 +1704,17 @@ signals, balancing, crashes and shutdown.
 class SessionRunner {
   run(
     sessionId: SessionId,
-    options?: { fence?: PartitionFence; signal?: AbortSignal },
+    options?: { fence?: PartitionFence; signal?: AbortSignal; drain?: AbortSignal },
   ): Promise<TurnOutcome>
   isRunning(sessionId: SessionId): boolean
   wake(sessionId: SessionId): boolean
   abort(sessionId: SessionId): boolean
+  /** Soft stop: finish the step in flight, then start no more turns (#378, P2). */
+  drain(sessionId: SessionId): boolean
+  drainAll(): SessionId[]
+  /** Hard stop: abort the turn with a `TurnHandoff` reason, leaving it open (#378, P1). */
+  handOff(sessionId: SessionId, cause?: TurnHandoffCause): boolean
+  waitFor(sessionIds: readonly SessionId[], timeoutMs: number): Promise<void>
   runningSessions(): SessionId[]
   stop(options?: { drainTimeoutMs?: number }): Promise<void>
 }
@@ -1710,6 +1728,13 @@ arrived during that `noop` turn is honored first, because the brain reads the lo
 decides and a signal for an event appended in that window would otherwise be lost. Calling
 `run()` while a pass is in flight does not start a second one: it wakes the pass and answers
 with its outcome.
+
+`drain()` is the soft half and `handOff()` the hard one (#378, P2). A drain aborts a **second**
+signal, not the turn's — `runTurn` receives it as `drain` and finishes the request or tool step
+in flight, then writes nothing at the next boundary and answers `handed_off`. `handOff()` is
+what the deadline reaches for: it aborts the turn's own signal with a `TurnHandoff` reason, the
+write-nothing path of #378 P1. `stop()` runs both, soft then hard, which is how a single-process
+shutdown gets P2's behaviour.
 
 A pending task notification is work — the parent reacts on its own — **except** while the
 session's last turn ended `requires_action` (#363): a notification answers no question, so another
@@ -1950,14 +1975,19 @@ cannot trace is still a server. `shutdown` flushes the tracer last of all, after
 
 ## Shutdown
 
-`SIGTERM` / `SIGINT` shut down in a fixed order: stop accepting requests, drain the scheduler
-(the turns in flight are **handed off** — aborting them with a `TurnHandoff` reason, so they
-are left open for the next owner instead of ending as interrupted — and given
-`OPENHARNESS_DRAIN_TIMEOUT_MS` to reach that point), drop the connections still open —
-including SSE streams, which would otherwise never end — and close the store. A second signal
-is ignored rather than allowed to interrupt the drain. The drain starts the instant
-`shutdown()` is called — before the listener closes — and `GET /ready` answers 503 from that
-moment, so a load balancer stops sending traffic before the instance stops serving it (#151).
+`SIGTERM` / `SIGINT` shut down in a fixed order: stop accepting requests, drain the scheduler,
+drop the connections still open — including SSE streams, which would otherwise never end — and
+close the store. The drain is **soft, then hard** (#378, P2): the scheduler stops starting
+passes, deletes its membership row, and releases each partition as its own passes finish; a
+turn in flight finishes its model request or tool step and stores the result, and only a step
+that outlives `OPENHARNESS_DRAIN_TIMEOUT_MS` is **handed off** — aborted with a `TurnHandoff`
+reason, so it is left open for the next owner instead of ending as interrupted (#378, P1). An
+idle partition is released at once, so a peer can take over a user message while the rest of
+the drain runs. The default drain is 40 s: inside the pod's 60 s grace period and under the
+chart's 45 s `backend.drainingTimeoutSec`. A second signal is ignored rather than allowed to
+interrupt the drain. The drain starts the instant `shutdown()` is called — before the listener
+closes — and `GET /ready` answers 503 from that moment, so a load balancer stops sending
+traffic before the instance stops serving it (#151).
 
 ## Public API
 

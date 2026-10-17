@@ -48,8 +48,9 @@ export interface SessionScheduler {
   start(): Promise<void>
 
   /**
-   * Stop: accept no new work, abort the turns in flight, and let them finish writing (up to a
-   * drain timeout) before returning.
+   * Stop: accept no new work, **drain** the turns in flight (finish the step in flight and
+   * store its result), and re-hand only what does not finish inside the drain timeout off to
+   * the next owner before returning (#378, P2).
    */
   stop(options?: StopSchedulerOptions): Promise<void>
 
@@ -83,7 +84,11 @@ export interface StopSessionOptions {
 
 /** Options of {@link SessionScheduler.stop}. */
 export interface StopSchedulerOptions {
-  /** How long a turn in flight is given to write its last events; defaults to 5000 ms. */
+  /**
+   * How long a step in flight is given to finish before it is hard-handed off; defaults to
+   * 40000 ms (`DEFAULT_DRAIN_TIMEOUT_MS`). A step that finishes inside it is kept — the whole
+   * point of #378, P2.
+   */
   readonly drainTimeoutMs?: number
 }
 
@@ -106,7 +111,7 @@ export interface LocalSchedulerOptions {
   /** How many sessions may have a turn in flight at once; defaults to
    * {@link DEFAULT_MAX_CONCURRENT_SESSIONS}. */
   readonly maxConcurrentSessions?: number
-  /** How long `stop()` waits for a turn in flight by default; defaults to 5000 ms. */
+  /** How long `stop()` lets the step in flight finish by default; defaults to 40000 ms. */
   readonly drainTimeoutMs?: number
   /** How model failures are retried, passed to every turn. */
   readonly retry?: RetryPolicy

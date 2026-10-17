@@ -738,9 +738,11 @@ async function listening(server: ReturnType<typeof serve>): Promise<void> {
  * and release the store.
  *
  * The order matters. Closing the listener first stops new work arriving; the compaction job is
- * then stopped — it deletes, so it must not outlive the store — and the scheduler drained (its
- * turns are aborted, and given a timeout to write their last events); only then are the
- * remaining connections — the SSE streams, which would otherwise never end — cut off. The
+ * then stopped — it deletes, so it must not outlive the store — and the scheduler drained. The
+ * drain is soft first (#378, P2): a model request or tool step in flight finishes and stores its
+ * result for up to `OPENHARNESS_DRAIN_TIMEOUT_MS`, and only what the deadline catches is
+ * handed off to the next owner. The SSE streams are deliberately left open through that drain —
+ * they are how a reader sees the reply that is finishing — and are cut off only after it. The
  * store is closed last, because everything above it may still be writing to it. The tracer is
  * shut down after everything else, so the spans this process opened are flushed to Cloud Trace
  * before it exits (#158).
