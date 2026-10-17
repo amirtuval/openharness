@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   API_VERSION_PREFIX,
+  SKILL_MD_FILENAME,
   ApiErrorBodySchema,
   EVENT_TYPES,
   type Agent,
@@ -8,9 +9,12 @@ import {
   type ListAgentsResponse,
   type ListModesResponse,
   type ListProviderCredentialsResponse,
+  type GetSkillResponse,
+  type ListSkillsResponse,
   type ListSessionsResponse,
   type Mode,
   type Session,
+  type Skill,
 } from '@openharness/protocol'
 
 import {
@@ -45,6 +49,7 @@ interface Fixture {
     readonly agent: Agent
     readonly session: Session
     readonly mode: Mode
+    readonly skill: Skill
   }
   /** User B: the bearer token. */
   readonly b: { readonly token: string }
@@ -70,8 +75,27 @@ async function twoUsers(): Promise<Fixture> {
   })
   expect(createdMode.status).toBe(201)
   const mode = (await createdMode.json()) as Mode
+  // A skill, so B's skill routes have something of A's to be kept away from (#349, K4). Import
+  // is #351's, so A's skill is seeded through the store the app runs on — the same store the
+  // routes read — rather than through a route.
+  const skill = await test.skills.create({
+    ownerId: (await test.currentUser()).id,
+    name: 'release-notes',
+    description: 'Writes the release notes for a version.',
+    frontmatter: { 'argument-hint': '[version]' },
+    source: {
+      url: 'https://github.com/example/skills',
+      ref: 'main',
+      path: 'release-notes',
+      commit_sha: '9f2c1b4e5a6d7c8b9a0f1e2d3c4b5a69788796a5',
+    },
+    enabled: true,
+    files: [
+      { path: SKILL_MD_FILENAME, content: '---\nname: release-notes\n---\n\na private skill.\n' },
+    ],
+  })
 
-  return { test, a: { token: a.token, agent, session, mode }, b: { token: b.token } }
+  return { test, a: { token: a.token, agent, session, mode, skill }, b: { token: b.token } }
 }
 
 /** A request as one user, with a JSON body where there is one. */
@@ -137,6 +161,12 @@ describe('user isolation (A4)', () => {
       // The tool settings read may be asked for a chat's mode, so A's mode is not a mode B can
       // read their own settings through (#307).
       ['GET', `${API_VERSION_PREFIX}/me/tools?mode_id=${a.mode.id}`],
+      // A skill is a per-user resource too (#349, K4): every verb answers the same 404 — and so
+      // does a file of it, which is why a path B asks for cannot be used to probe one.
+      ['GET', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}`],
+      ['GET', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}/files/${SKILL_MD_FILENAME}`],
+      ['POST', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}`, { enabled: false }],
+      ['DELETE', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}`],
     ]
 
     for (const [method, path, request] of routes) {
@@ -148,7 +178,15 @@ describe('user isolation (A4)', () => {
       expect(refusal.error.type).toBe('not_found_error')
       expect(JSON.stringify(refusal)).not.toContain('A’s agent')
       expect(JSON.stringify(refusal)).not.toContain('a private thought')
+      expect(JSON.stringify(refusal)).not.toContain('a private skill')
     }
+
+    // A's skill is untouched by the attempted switch either (#349, K4).
+    const skillForA = (await (
+      await call(test, a.token, 'GET', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}`)
+    ).json()) as GetSkillResponse
+    expect(skillForA.enabled).toBe(true)
+    expect(skillForA.content).toContain('a private skill')
 
     // A's mode is untouched by the attempted rename either.
     const modeForA = (await (
@@ -197,9 +235,14 @@ describe('user isolation (A4)', () => {
       await call(test, b.token, 'GET', `${API_VERSION_PREFIX}/me/modes`)
     ).json()) as ListModesResponse
 
+    const skillsForB = (await (
+      await call(test, b.token, 'GET', `${API_VERSION_PREFIX}/me/skills`)
+    ).json()) as ListSkillsResponse
+
     expect(agentsForB.data.map((agent) => agent.id)).toEqual([bAgent.id])
     expect(sessionsForB.data.map((session) => session.id)).toEqual([bSession.id])
     expect(modesForB.data).toEqual([])
+    expect(skillsForB.data).toEqual([])
 
     // And A still sees exactly their own.
     const agentsForA = (await (
@@ -210,6 +253,10 @@ describe('user isolation (A4)', () => {
       await call(test, a.token, 'GET', `${API_VERSION_PREFIX}/me/modes`)
     ).json()) as ListModesResponse
     expect(modesForA.data.map((mode) => mode.id)).toEqual([a.mode.id])
+    const skillsForA = (await (
+      await call(test, a.token, 'GET', `${API_VERSION_PREFIX}/me/skills`)
+    ).json()) as ListSkillsResponse
+    expect(skillsForA.data.map((skill) => skill.id)).toEqual([a.skill.id])
   })
 
   it('keeps provider credentials apart, both the list and the writes', async () => {

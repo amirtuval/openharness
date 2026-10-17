@@ -138,6 +138,11 @@ the only way an event is ever removed together with its session.
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                                                                                                                                                                  |
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                                                                                                                                                                     |
 | `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                                                                                                                                     |
+| `GET`    | `/v1/me/skills`                                 | list the caller's imported skills, oldest first (no cursor: at most 50)                                                                                                                                                                          |
+| `GET`    | `/v1/me/skills/{skill_id}`                      | read one skill, with its `SKILL.md`'s content                                                                                                                                                                                                    |
+| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill, with its content and size                                                                                                                                                                                              |
+| `POST`   | `/v1/me/skills/{skill_id}`                      | switch a skill on or off (`enabled`); the snapshot itself is not editable                                                                                                                                                                        |
+| `DELETE` | `/v1/me/skills/{skill_id}`                      | delete a skill and its whole snapshot; `204`                                                                                                                                                                                                     |
 | `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                                                                                                                                                                          |
 | `GET`    | `/v1/sessions/{session_id}/usage`               | what one session **and its descendants** spent: totals, cost, the per-model breakdown, and the subtree's own share as `descendants` (epic #340, S8; #344)                                                                                        |
 | `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day                                                                                                                                                           |
@@ -146,8 +151,8 @@ Every `/v1` resource belongs to the caller and is scoped to them.
 
 Paginated lists answer `{ data, next_page }` — `next_page` is an opaque cursor handed back as
 `page`, and `null` means there is nothing more. The credential list and the model catalog have
-no cursor: `/v1/provider-credentials`, `/v1/me/modes` and `/v1/me/mcp_servers` answer
-`{ data }` and `/v1/models` `{ data, providers }`, all bounded by the caller's own rows.
+no cursor: `/v1/provider-credentials`, `/v1/me/modes`, `/v1/me/mcp_servers` and `/v1/me/skills`
+answer `{ data }` and `/v1/models` `{ data, providers }`, all bounded by the caller's own rows.
 
 ## Events
 
@@ -1205,12 +1210,14 @@ it (`POST /v1/sessions`) or continuing one (`POST …/events`) is the `422`
 stored. A mode is stored even when its model is not usable yet: the key may come later.
 
 **A mode may also carry a tool override.** `Mode.tools` is
-`{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false } }` or `null`: an on/off
-patch applied over the user's own choices, so a `deep` mode can insist on `web_search`, do
-without `todo_write`, and leave `notes` (a remote MCP server) out of every chat that follows it.
-It decides **which** tools and **which MCP servers** a chat has, never what a call to one may do
-— permissions are the user's (see
-[Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)).
+`{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false }, "skills": { "<skl_…>":
+true } }` or `null`: an on/off patch applied over the user's own choices, so a `deep` mode can
+insist on `web_search`, do without `todo_write`, leave `notes` (a remote MCP server) out of
+every chat that follows it, and bring its own `release-notes` skill with it. It decides **which**
+tools, **which MCP servers** and **which skills** a chat has, never what a call to one may do —
+permissions are the user's (see
+[Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)) — and never what a
+skill is.
 
 - **`builtin`** is keyed by tool name and patches the user's `/v1/me/tools` choices.
 - **`mcp_servers`** (epic #303, X10; #311) is a sibling key, keyed by a remote MCP server's
@@ -1219,11 +1226,14 @@ It decides **which** tools and **which MCP servers** a chat has, never what a ca
   follow it, live, from the next request on. It is **server granularity, never per MCP tool**:
   which of a server's tools a request offers, and under which permission, is the server's own
   listing and the user's settings, not a mode's.
-- **A mode naming a server the caller no longer has is simply ignored.** The mode routes store
-  the map as written and do not check the id against the servers present, so deleting an MCP
-  server neither fails nor rewrites the modes that named it — the entry just matches nothing.
-  The servers in force for a request are resolved as _the user's `enabled`, overridden by the
-  mode_, per request.
+- **`skills`** (epic #349, K8) is the third sibling key, keyed by a skill's `skl_` id, and
+  patches the skill's own `enabled` field. A subagent type (epic #340) is a mode, so this is
+  what gives one its own skills.
+- **A mode naming a server or a skill the caller no longer has is simply ignored.** The mode
+  routes store the maps as written and do not check the ids against what is present, so deleting
+  an MCP server or a skill neither fails nor rewrites the modes that named it — the entry just
+  matches nothing. The servers and skills in force for a request are resolved as _the user's
+  `enabled`, overridden by the mode_, per request.
 
 **A mode with a description is a subagent type.** `Mode.subagent_description` (epic #340, S2;
 #342) is one short sentence — at most 500 characters — saying what the mode is **good for**, or
@@ -1456,6 +1466,78 @@ curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
   therefore the caller's `enabled` ones with the mode's patch over them; a mode that names a
   server the caller no longer has is ignored rather than refused, so deleting a server leaves
   such a mode untroubled. See [Modes](#modes).
+
+### Skills
+
+A **skill** (epic #349, decision K1) is a folder of instructions in the open
+[Agent Skills](https://agentskills.io) format: a `SKILL.md` — YAML frontmatter with a `name`
+and a `description`, then a Markdown body — plus any other files the folder holds. A user
+**imports** one from a public git repository and reviews it before it is stored (K3), and from
+then on it is a **snapshot**: nothing is read from git again, so a skill a chat loaded cannot
+change under it and a chat never depends on a git host being up. Import and refresh — the two
+routes that write a snapshot — are #351; these are the routes over a skill a caller already
+has.
+
+The routes are `/v1/me/skills`, owner-scoped like the rest of `/v1/me`: another user's skill is
+a `404`, never a `403`, and so is a file of one — the same answer an unknown path gets, so a
+path cannot be used to probe for a skill.
+
+```bash
+curl localhost:3000/v1/me/skills -H "Authorization: Bearer $TOKEN"
+# → 200 {"data":[
+#      {"id":"skl_01J…","type":"skill","name":"release-notes",
+#       "description":"Writes the release notes for a version from the commits since the last tag.",
+#       "frontmatter":{"argument-hint":"[version]","license":"MIT"},
+#       "source":{"url":"https://github.com/example/skills","ref":"main","path":"release-notes",
+#                 "commit_sha":"9f2c1b4…"},
+#       "files":[{"path":"SKILL.md","size":1240},{"path":"reference/tone.md","size":380}],
+#       "enabled":true,"imported_at":"2026-10-12T09:00:00Z","refreshed_at":"2026-10-12T09:00:00Z"}
+#    ]}
+
+# The one read that carries a file's content without a second request: the SKILL.md itself.
+curl localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN"
+# → 200 { …the resource…, "content":"---\nname: release-notes\n---\n\nWrite them.\n" }
+
+# Any other file, by its path — which may hold slashes.
+curl localhost:3000/v1/me/skills/skl_01J…/files/reference/tone.md -H "Authorization: Bearer $TOKEN"
+# → 200 {"path":"reference/tone.md","size":380,"content":"Be terse.\n"}
+
+# On or off. The snapshot is not editable: a new one comes from a refresh.
+curl -X POST localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"enabled":false}'
+# → 200 { …the resource…, "enabled":false }
+
+curl -X DELETE localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN"
+# → 204
+```
+
+**A listing never carries a file's content.** `files` is a path and a size each; the `SKILL.md`
+comes with the single-skill read and any other file with its own. That keeps a listing of fifty
+skills one small answer whatever the snapshots hold, and it keeps the contents free to move to
+object storage later (K4) without a resource changing shape.
+
+**The format's three optional fields are honoured**, and the rest are stored and shown and
+otherwise ignored: `disable-model-invocation: true` is a command only the user runs,
+`user-invocable: false` one only the model uses, and `argument-hint` is shown in the `/` menu.
+They ride in `frontmatter` beside `license`, `metadata` and everything else the file said.
+
+**The limits** are what an import refuses on (K4): `SKILL.md` at most 20 KB, any one file at
+most 256 KB, a skill at most 2 MB and 100 files, a caller at most 50 skills, and a clone at
+most 20 MB. A `SKILL.md` over 20 KB and a file over 256 KB are the same kind of refusal, and a
+caller's fifty-first skill is the `409` a mode's and an MCP server's are — a store rule, so two
+imports racing for the last slot cannot both land.
+
+**A skill's name is unique among the caller's own**, and it is what the skill is run by: the
+format requires it to match the folder's name, and a built-in slash command's name is
+**reserved** — `compact`, `new`, `model`, `mode`, `agents`, `skills` — because a built-in is a
+client action and never a skill (K7). A skill cannot be called `compact`.
+
+**A skill is on when it is imported, and a mode may override which are on** (K8):
+`Mode.tools.skills` is an on/off map keyed by skill id, a sibling of `builtin` and
+`mcp_servers`, and it decides which skills a request has — never what a skill is. The skills
+**in force for a request** are the caller's `enabled` ones with the mode's patch over them, and
+a mode naming a skill the caller no longer has is ignored rather than refused. See
+[Modes](#modes).
 
 ## The model catalog
 

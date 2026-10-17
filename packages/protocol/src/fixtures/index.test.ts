@@ -12,6 +12,7 @@ import {
   SendEventsResponseSchema,
   SessionEventSchema,
   SessionSchema,
+  SkillSchema,
   StoredEventDeltaSchema,
   StoredEventSchema,
   ListToolSettingsResponseSchema,
@@ -41,6 +42,7 @@ import {
   makeSessionAgent,
   makeSessionError,
   makeSessionUsage,
+  makeSkill,
   makeStatusIdle,
   makeStatusRescheduled,
   makeStatusRunning,
@@ -139,6 +141,21 @@ describe('fixture builders', () => {
     expect(makeMode({ name: 'fast', model: 'openai/gpt-4.1-mini' })).toMatchObject({
       name: 'fast',
       model: 'openai/gpt-4.1-mini',
+    })
+  })
+
+  it('builds an imported skill that parses, files as a listing (#349)', () => {
+    const skill = makeSkill()
+    expect(SkillSchema.safeParse(skill).success).toBe(true)
+    expect(skill).toMatchObject({ name: 'release-notes', type: 'skill', enabled: true })
+    expect(skill.files.map((file) => file.path)).toEqual(['SKILL.md', 'reference/tone.md'])
+    // A listing carries no file's content, and the fixture is a listing.
+    expect(JSON.stringify(skill.files)).not.toContain('content')
+    // The frontmatter carries the honoured key beside one nothing reads.
+    expect(skill.frontmatter).toMatchObject({ 'argument-hint': '[version]' })
+    expect(makeSkill({ name: 'pdf-tools', enabled: false })).toMatchObject({
+      name: 'pdf-tools',
+      enabled: false,
     })
   })
 

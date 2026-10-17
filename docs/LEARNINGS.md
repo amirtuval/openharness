@@ -1157,6 +1157,17 @@ different decision from allowing their own `web_fetch`, and two servers' `search
 else on the line" ([#313](https://github.com/amirtuval/openharness/issues/313),
 [#327](https://github.com/amirtuval/openharness/pull/327)).
 
+## The HTTP layer
+
+**A route whose path parameter may hold slashes is written `:path{.+}`, not `*` — Hono 4 does not
+expose a wildcard's matched text as a parameter.** Serving a skill's files needs the rest of the URL
+(`/v1/me/skills/{id}/files/reference/tone.md`), because a skill's paths are relative and nested, and
+`app.get('/…/files/*', c => c.req.param('*'))` answers `undefined` in hono 4.13.9: `c.req.param()`
+carries only the named parameters. `:path{.+}` is the spelling that works, and Hono **decodes** it —
+`a%20b.md` reaches the handler as `a b.md` — while leaving a malformed escape (`%zz`) as it is rather
+than throwing, so a lookup by that path is simply a 404 and the handler needs no `try`
+(`apps/server/src/routes/skills.ts`, epic #349).
+
 ## Subagents (epic #340)
 
 **A required-but-nullable field on a resource reaches packages the issue does not name, because

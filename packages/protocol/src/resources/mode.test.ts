@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { newMcpServerId, newModeId } from '../ids'
+import { newMcpServerId, newModeId, newSkillId } from '../ids'
 import {
   CreateModeRequestSchema,
   ListModesResponseSchema,
@@ -206,6 +206,32 @@ describe('mode request schemas', () => {
       tools: override,
     })
     expect(ModeSchema.parse({ ...mode, tools: override }).tools).toEqual(override)
+  })
+
+  it('carries the skills half of the override, a third sibling of `builtin` (#349, K8)', () => {
+    const skill = newSkillId()
+    const gone = newSkillId()
+    const override = {
+      builtin: { web_search: true },
+      skills: { [skill]: false, [gone]: true },
+    }
+    expect(ModeToolOverrideSchema.parse(override)).toEqual(override)
+    // A mode may override only the skills: a map naming a skill the user no longer has is
+    // stored as given, which is what leaves a deleted skill's modes alone.
+    expect(ModeToolOverrideSchema.parse({ builtin: {}, skills: { [gone]: true } })).toEqual({
+      builtin: {},
+      skills: { [gone]: true },
+    })
+    expect(ModeSchema.parse({ ...mode, tools: override }).tools).toEqual(override)
+  })
+
+  it('refuses a skill map whose key is not a skill id', () => {
+    expect(ModeToolOverrideSchema.safeParse({ builtin: {}, skills: { deep: true } }).success).toBe(
+      false,
+    )
+    expect(
+      ModeToolOverrideSchema.safeParse({ builtin: {}, skills: { [newSkillId()]: 'on' } }).success,
+    ).toBe(false)
   })
 
   it('treats a missing `mcp_servers` map as a mode that says nothing about servers', () => {

@@ -1,6 +1,6 @@
 /**
  * `@openharness/session/postgres` — the durable stores, on Postgres: the `SessionStore`, the
- * `CredentialStore` and the `McpServerStore`, from the same migrations.
+ * `CredentialStore`, the `McpServerStore` and the `SkillStore`, from the same migrations.
  *
  * This subpath is separate from the main entry point on purpose: `@openharness/session` is
  * imported by code that only ever needs the contracts and the in-memory fakes, and it must not
@@ -27,6 +27,8 @@ export { PostgresCredentialStore, createPostgresCredentialStore } from './creden
 export type { PostgresCredentialStoreConfig, PostgresCredentialStoreOptions } from './credentials'
 export { PostgresMcpServerStore, createPostgresMcpServerStore } from './mcp-servers'
 export type { PostgresMcpServerStoreConfig, PostgresMcpServerStoreOptions } from './mcp-servers'
+export { PostgresSkillStore, createPostgresSkillStore } from './skills'
+export type { PostgresSkillStoreConfig, PostgresSkillStoreOptions } from './skills'
 export { migrate } from './migrate'
 export type { MigrateOptions } from './migrate'
 export type {
@@ -48,5 +50,9 @@ export type {
   ProviderCredentialsTable,
   SchedulerInstancesTable,
   SessionsTable,
+  SkillFileRow,
+  SkillFilesTable,
+  SkillRow,
+  SkillsTable,
   UserPreferencesTable,
 } from './schema'

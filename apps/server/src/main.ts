@@ -16,14 +16,17 @@ import {
   InMemoryCredentialStore,
   InMemorySessionStore,
   InMemoryMcpServerStore,
+  InMemorySkillStore,
   type CredentialStore,
   type McpServerStore,
+  type SkillStore,
   type SessionStore,
 } from '@openharness/session'
 import {
   type PostgresSchema,
   createPostgresCredentialStore,
   createPostgresMcpServerStore,
+  createPostgresSkillStore,
   createPostgresSessionStore,
   migrate,
 } from '@openharness/session/postgres'
@@ -117,6 +120,12 @@ export interface StartServerOptions {
   /** Store sealed credentials here instead of in the store the config built. */
   readonly credentials?: CredentialStore
   /**
+   * Store imported skills here instead of in the store the config built (epic #349, K4). A
+   * test that seeds one through a store it can reach passes its own; there is no route that
+   * writes a snapshot yet (#351).
+   */
+  readonly skills?: SkillStore
+  /**
    * Run Better Auth against this database instead of the one the config built.
    *
    * A host that supplies its own `store` — a test with a Postgres store, say — points sign-in
@@ -209,6 +218,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // listener is gone.
   let draining = false
   const credentials = options.credentials ?? opened.credentials
+  const skills = options.skills ?? opened.skills
   // The vault the configuration asks for (#150): the environment key, or Cloud KMS. Either
   // way it is built here, once, and shared by the credential routes, the per-request resolver
   // and the model catalogue — one cache of unwrapped data keys, not three.
@@ -387,6 +397,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     // The remote-MCP-server resource (epic #303, X10): the same instance the turn options were
     // built with, so a server a route changes is the one a chat lists.
     mcpServers: { service: mcpServers },
+    // Where users' imported skills live (epic #349, K4): the routes over `/v1/me/skills` read
+    // them, and so does the settings resolver a turn is handed (#352).
+    skills,
     credentialRoutes: {
       credentials,
       vault,
@@ -614,6 +627,7 @@ async function openStore(
   store: SessionStore
   credentials: CredentialStore
   mcpServers: McpServerStore
+  skills: SkillStore
   authDatabase: AuthDatabase
   checkReady: () => Promise<boolean>
   close: () => Promise<void>
@@ -623,6 +637,7 @@ async function openStore(
       store: options.store,
       credentials: new InMemoryCredentialStore(),
       mcpServers: new InMemoryMcpServerStore(),
+      skills: new InMemorySkillStore(),
       // A caller that supplies its own store is a test: sign-in runs on the memory adapter
       // unless the caller says otherwise (`authDatabase`), which is what a test against a
       // Postgres store has to do — its `user` rows are the foreign keys `owner_id` needs.
@@ -642,6 +657,7 @@ async function openStore(
       store: new InMemorySessionStore({ partitionCount: config.partitions }),
       credentials: new InMemoryCredentialStore(),
       mcpServers: new InMemoryMcpServerStore(),
+      skills: new InMemorySkillStore(),
       authDatabase: { kind: 'memory', db: emptyAuthTables() },
       // Nothing to check: the in-memory store is this process, and it is up whenever the
       // process is (#151).
@@ -659,10 +675,12 @@ async function openStore(
   const store = createPostgresSessionStore({ pool }, { partitionCount: config.partitions })
   const credentials = createPostgresCredentialStore({ pool })
   const mcpServers = createPostgresMcpServerStore({ pool })
+  const skills = createPostgresSkillStore({ pool })
   return {
     store,
     credentials,
     mcpServers,
+    skills,
     authDatabase: { kind: 'postgres', db },
     checkReady: () => checkDatabase(pool),
     close: async () => {
@@ -671,6 +689,7 @@ async function openStore(
       await store.close()
       await credentials.close()
       await mcpServers.close()
+      await skills.close()
       await db.destroy()
     },
   }

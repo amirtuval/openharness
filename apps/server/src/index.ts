@@ -301,6 +301,15 @@ export {
   type TurnToolsOptions,
 } from './tools'
 export { askUserTool, withAlwaysApprovals } from './pausing'
+// The skills in force for a request (epic #349, K8): the owner's own `enabled`, overridden by
+// the mode's `skills` map — the settings answer the brain reads (#352).
+export {
+  createSkillSettingsResolver,
+  listSkillsInForce,
+  skillsInForce,
+  type SkillSettingsDeps,
+  type SkillSettingsResolver,
+} from './skills'
 export {
   createTaskNotifier,
   taskDescription,
