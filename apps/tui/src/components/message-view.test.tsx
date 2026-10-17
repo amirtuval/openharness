@@ -369,3 +369,33 @@ describe('copy-safety (#229)', () => {
     expect(text(DARK)).toEqual(['one two three four', 'five six seven'])
   })
 })
+
+describe('the slash-invocation chip (#349, K7; #354)', () => {
+  it('draws the skill a user message ran, and its arguments, above the text', () => {
+    const lines = layoutText(
+      message('/release-notes v1.2', 'user', {
+        skill: { name: 'release-notes', arguments: 'v1.2' },
+      }),
+      40,
+    )
+
+    // The chip is the message's own first line, inside its band; the text the reader typed
+    // follows it exactly as typed.
+    expect(lines[0]?.trimEnd()).toBe('⟡ release-notes v1.2')
+    expect(lines[1]?.trimEnd()).toBe('/release-notes v1.2')
+  })
+
+  it('leaves the arguments off when the invocation carried none', () => {
+    const lines = layoutText(
+      message('/release-notes', 'user', { skill: { name: 'release-notes', arguments: null } }),
+      40,
+    )
+    expect(lines[0]?.trimEnd()).toBe('⟡ release-notes')
+  })
+
+  it('draws nothing extra for a message that was not an invocation', () => {
+    const lines = layoutText(message('/release-notes v1.2', 'user'), 40)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]?.trimEnd()).toBe('/release-notes v1.2')
+  })
+})

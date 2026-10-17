@@ -14,6 +14,7 @@ import { runDefaultModel } from './commands/preferences'
 import { mountProvidersAdd, runProvidersList, runProvidersRemove } from './commands/providers'
 import { runMcp } from './commands/mcp'
 import { runSettings } from './commands/settings'
+import { runSkills } from './commands/skills'
 import { runTools } from './commands/tools'
 import { createNpmPort, runUpdate } from './commands/update'
 import { modelLabel } from './components/status-line'
@@ -213,6 +214,21 @@ export async function run(argv: readonly string[], options: RunOptions = {}): Pr
           connected.client,
           { stdout: out, stderr: err, context },
           command.patch,
+        )
+      case 'skills':
+        // `oh skills` (#354): the listing, and the flows that read a repository, pick from a
+        // preview and confirm a refresh. The pick and the refresh confirm need a terminal —
+        // the command itself refuses when there is none rather than importing something
+        // nobody chose.
+        return await runSkills(
+          connected.client,
+          { stdout: out, stderr: err, context },
+          command.action,
+          {
+            stdin,
+            stdout,
+            stderr,
+          },
         )
       case 'mcp':
         // The servers screen, or — piped — the listing. `openUrl` is the same browser the

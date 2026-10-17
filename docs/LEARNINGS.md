@@ -1280,7 +1280,11 @@ certificate the server trusts (`NODE_EXTRA_CA_CERTS`) and
 `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1`, which is what `e2e/qa/w30-skills.spec.ts` does — and
 when that is too much machinery, the pass imports from a real public repository instead and proves
 the real path over the network instead of over loopback
-([#353](https://github.com/amirtuval/openharness/issues/353)).
+([#353](https://github.com/amirtuval/openharness/issues/353)). Importing a real public repository
+(`https://github.com/anthropics/skills`, 5.7 MB, well under the 20 MB clone cap) works unchanged
+and is what a public-repo smoke can use — but only a **fixture** can move a branch, so a refresh
+diff is the half that needs the terminator
+([#354](https://github.com/amirtuval/openharness/issues/354)).
 
 **A mock stack chats without a key but still shows the first-run screen, so a hands-on pass has to seed a credential.**
 `OPENHARNESS_TEST_MODEL=mock` swaps the model factory and `resolveMockCredential` answers for every
@@ -1689,6 +1693,17 @@ cannot get out of step when a read shortens the list underneath it, and PgUp/PgD
 rows an arrow key should not have to walk. Colour is never the selection: the marker is a `❯`, which
 is the one thing that survives `NO_COLOR`, and a test per screen asserts the frame carries it
 ([#335](https://github.com/amirtuval/openharness/issues/335)).
+
+**`argument-hint: [version]` — the spelling the Agent Skills docs use — is a YAML flow sequence, so the
+honoured field is not a string and the `/` menu silently shows no hint.** The protocol reads the field
+through one helper (`skillSettingsOf`/`argumentHintOf`) which honours a real string and ignores anything
+else, on purpose: the frontmatter is open and untyped, so a hand-written file that got a field wrong is
+an ignored field rather than a skill that behaves differently from what it says. The consequence is that
+a skill following the format's own bracket convention (`argument-hint: [version]`, brackets meaning
+"this is the placeholder") is offered as a bare `/release-notes` while `argument-hint: version` shows
+`/release-notes <version>`. It cost a hands-on run to notice, because nothing errors — which is the kind
+of thing the `/` menu is exactly the wrong place to be quiet about
+([#354](https://github.com/amirtuval/openharness/issues/354)).
 
 **A tool call and the thing it started were not linked by an id, so the client's join had to be a
 heuristic — and a heuristic keyed on the wrong field is a bug that waits for a second matching

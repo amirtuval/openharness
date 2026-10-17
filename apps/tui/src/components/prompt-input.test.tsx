@@ -1,7 +1,8 @@
+import { makeSkill } from '@openharness/protocol/fixtures'
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import type { ChatCommand } from '../chat/commands'
+import { menuCommands, parseChatInput, type ChatCommand } from '../chat/commands'
 import type { PromptHistory } from '../history'
 import {
   frameOf,
@@ -783,5 +784,83 @@ describe('PromptInput with the keyboard taken (#310)', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(frameOf(instance)).not.toContain('pasted')
     expect(submitted).toEqual([])
+  })
+})
+
+describe('PromptInput command menu with skills (#349, K7; #354)', () => {
+  /** The reader's skills as the chat screen passes them: the chat's commands, then the skills. */
+  const SKILLS = [
+    makeSkill({ name: 'release-notes', frontmatter: { 'argument-hint': 'version' } }),
+    makeSkill({
+      name: 'helper',
+      description: 'Helps with things.',
+      enabled: false,
+      frontmatter: {},
+    }),
+  ]
+
+  it('offers the reader’s enabled, user-invocable skills with their argument hint', async () => {
+    const prompt = renderPrompt(undefined, menuCommands(SKILLS))
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+
+    const frame = frameOf(prompt)
+    // The built-in first, then the skill, with the hint the client's own menu spells (K7).
+    expect(frame).toContain('/release-notes <version>')
+    expect(frame).toContain('Writes the release notes')
+    // A skill that is off is not offered (K8), and the menu's filter finds either by name.
+    expect(frame).not.toContain('/helper')
+  })
+
+  it('filters a skill by name and submits it on Enter', async () => {
+    const prompt = renderPrompt(undefined, menuCommands(SKILLS))
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+    typeText(prompt, 'release')
+
+    await waitForFrame(prompt, '❯ /release-notes')
+    await waitFor(() => !frameOf(prompt).includes('pick a model'), {
+      describe: () => frameOf(prompt),
+    })
+
+    pressKey(prompt, 'enter')
+    // The prompt hands the name to the screen, which parses it as a skill invocation and sends
+    // the message with `skill` (#354) — the menu's part is just the name.
+    expect(prompt.submitted).toEqual(['/release-notes'])
+  })
+
+  it('completes a skill into the buffer with a space for its arguments', async () => {
+    const prompt = renderPrompt(undefined, menuCommands(SKILLS))
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+    typeText(prompt, 'release')
+    await waitForFrame(prompt, '❯ /release-notes')
+
+    // Tab completes the name and leaves a space after it (the skill names an `argument-hint`),
+    // so the arguments land separated from the name rather than glued to it: the buffer is
+    // `/release-notes `, which closes the menu (a space ends the command word).
+    pressKey(prompt, 'tab')
+    await waitFor(() => !frameOf(prompt).includes('Tab to complete'), {
+      describe: () => frameOf(prompt),
+    })
+    typeText(prompt, 'v1.2')
+    pressKey(prompt, 'enter')
+    expect(prompt.submitted).toEqual(['/release-notes v1.2'])
+  })
+
+  it('lists a skill’s name among the ones “did you mean” may suggest', () => {
+    // A near miss of a skill name suggests the skill: `parseChatInput` is given the whole menu,
+    // so a typo is corrected by name rather than sent to the model.
+    const parsed = parseChatInput('/release-nots', menuCommands(SKILLS))
+    expect(parsed.kind).toBe('unknown')
+    if (parsed.kind === 'unknown') {
+      expect(parsed.suggestion?.name).toBe('release-notes')
+    }
   })
 })
