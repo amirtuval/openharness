@@ -18,7 +18,12 @@ import { MAX_DESCENDANT_DEPTH } from '@openharness/session'
 import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
-import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
+import {
+  DEFAULT_BALANCE_STABILITY_MS,
+  DEFAULT_HEARTBEAT_MS,
+  DEFAULT_LEASE_TTL_MS,
+  DEFAULT_SWEEP_MS,
+} from './partition-scheduler'
 
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
@@ -97,6 +102,7 @@ describe('readServerConfig', () => {
       leaseTtlMs: DEFAULT_LEASE_TTL_MS,
       heartbeatMs: DEFAULT_HEARTBEAT_MS,
       sweepMs: DEFAULT_SWEEP_MS,
+      balanceStabilityMs: DEFAULT_BALANCE_STABILITY_MS,
       deltaRetentionMs: DEFAULT_DELTA_RETENTION_MS,
       compactIntervalMs: DEFAULT_COMPACT_INTERVAL_MS,
       compactionThreshold: DEFAULT_COMPACTION_THRESHOLD,
@@ -145,6 +151,7 @@ describe('readServerConfig', () => {
         OPENHARNESS_LEASE_TTL_MS: '900',
         OPENHARNESS_HEARTBEAT_MS: '300',
         OPENHARNESS_SWEEP_MS: '450',
+        OPENHARNESS_BALANCE_STABILITY_MS: '1200',
         OPENHARNESS_DELTA_RETENTION_MS: '120000',
         OPENHARNESS_COMPACT_INTERVAL_MS: '60000',
         OPENHARNESS_KEY_PROVIDER: 'local',
@@ -185,6 +192,7 @@ describe('readServerConfig', () => {
       leaseTtlMs: 900,
       heartbeatMs: 300,
       sweepMs: 450,
+      balanceStabilityMs: 1_200,
       deltaRetentionMs: 120_000,
       compactIntervalMs: 60_000,
       compactionThreshold: 0.7,
@@ -331,6 +339,19 @@ describe('readServerConfig', () => {
     for (const value of ['-1', 'one', '1.5']) {
       expect(() => readServerConfig(env({ OPENHARNESS_TRUSTED_PROXY_HOPS: value }))).toThrow(
         /OPENHARNESS_TRUSTED_PROXY_HOPS/,
+      )
+    }
+  })
+
+  it('defaults the balance-stability window, and treats zero as "release at once" (#378, P3)', () => {
+    expect(readServerConfig(env()).balanceStabilityMs).toBe(DEFAULT_BALANCE_STABILITY_MS)
+    // Zero is a value, not an absence: the pre-P3 release on the next heartbeat.
+    expect(
+      readServerConfig(env({ OPENHARNESS_BALANCE_STABILITY_MS: '0' })).balanceStabilityMs,
+    ).toBe(0)
+    for (const value of ['-1', 'one', '1.5']) {
+      expect(() => readServerConfig(env({ OPENHARNESS_BALANCE_STABILITY_MS: value }))).toThrow(
+        /OPENHARNESS_BALANCE_STABILITY_MS/,
       )
     }
   })
@@ -819,6 +840,7 @@ describe('describeConfig', () => {
           OPENHARNESS_LEASE_TTL_MS: '900',
           OPENHARNESS_HEARTBEAT_MS: '300',
           OPENHARNESS_SWEEP_MS: '450',
+          OPENHARNESS_BALANCE_STABILITY_MS: '1200',
         }),
       ),
     )
@@ -829,6 +851,7 @@ describe('describeConfig', () => {
     expect(line).toContain('lease 900ms')
     expect(line).toContain('heartbeat 300ms')
     expect(line).toContain('sweep 450ms')
+    expect(line).toContain('balance stability 1200ms')
   })
 
   it('says how often superseded chunks are compacted, and when that is off', () => {

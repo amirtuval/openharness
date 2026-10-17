@@ -566,6 +566,7 @@ function createScheduler(
       ttlMs: config.leaseTtlMs,
       heartbeatMs: config.heartbeatMs,
       sweepMs: config.sweepMs,
+      balanceStabilityMs: config.balanceStabilityMs,
       maxConcurrentSessions: config.maxConcurrentSessions,
       drainTimeoutMs: config.drainTimeoutMs,
       onError,
