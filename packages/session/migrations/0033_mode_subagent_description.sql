@@ -1,0 +1,21 @@
+-- 0033_mode_subagent_description.sql — the *subagent description* a mode may carry (epic #340,
+-- decision S2; issue #342).
+--
+-- A mode is a user's own named preset (0024): a model, a reasoning effort, a system-prompt
+-- addition and, since 0027, an override of which tools a chat on it has. Since #342 it may also
+-- say what it is **good for** — one short description a parent model reads when it chooses what
+-- kind of helper to start. A mode that carries one is offered to a parent as a **subagent
+-- type**; a mode that carries none is not offered at all, which is what `NULL` means here.
+--
+-- **Every existing row takes NULL**, which is not a guess: modes had no such field before this
+-- migration, so no mode was ever meant to be a subagent type, and each one stays exactly what
+-- it was — a preset a chat may follow, and nothing the parent model is offered. There is
+-- therefore nothing to backfill.
+--
+-- Nothing here bounds the text: the protocol's `ModeSchema` caps a description at 500
+-- characters on the wire, and this package stores what it is given, like every other mode
+-- field. `add column if not exists` makes the statement idempotent, so the runner can re-run
+-- the file — and a server that has not re-migrated (or the in-memory store) reads a mode as
+-- having no description rather than failing.
+
+alter table modes add column if not exists subagent_description text;

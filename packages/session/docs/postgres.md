@@ -98,19 +98,29 @@ references "user" (id) on delete cascade`, written once at creation and never up
 - **`events` has `unique (session_id, seq)`** — the ordering key is unique per session — an
   explicit index on `(session_id, seq)`, and a partial index
   `(session_id, seq) where processed_at is null and type in ('user.message', 'user.interrupt')`
-  for the queued events the brain reads on every iteration. The unique constraint already
+  for the queued events the brain reads on every iteration. Since #343 there is a second partial
+  index on the log's _type_ — `(session_id) where type = 'session.task_notification'` — because
+  the pending-notification read and the work scan ask "does this session hold one nobody has
+  claimed?", which `(session_id, seq)` seeks by position rather than by type. The unique constraint already
   provides the `(session_id, seq)` access path; the explicit index is kept because the schema
   documents it as part of the contract.
 - **`events.id` is unique across the whole table** — an event id identifies one event for the
   whole store, because it is what a reply's chunks share with the message they become (see
   [caller-supplied ids](#caller-supplied-ids)). The primary key already enforces it, and
   `0005_events_id_unique.sql` declares a `unique` index named `events_id_key` beside it.
+- **A notification's `source_key` is unique per session** (`0034`, #343). Delivery is exactly
+  once (S4), so `appendTaskNotification` is idempotent on the key the task side chooses, and a
+  **partial unique index** over `(session_id, payload->>'source_key') where type =
+'session.task_notification'` is what makes that true for two instances racing rather than only
+  for one writer's read-then-insert. The expression is exactly the JSON path the store reads the
+  key from, and it constrains nothing else in the log.
 - **`event_claims.event_id` is the primary key** — claiming is `insert … on conflict do
 nothing`, so two writers racing for the same event cannot both win, and nothing here is ever
   written a second time or deleted (see [claims](#claims-are-rows-not-columns)). A claim names
   the user event it takes and the event whose `consumes` made it — a
-  `span.model_request_start`, a `span.model_request_end` or a `session.status_idle`; the
-  column is nullable only on pre-P4 rows.
+  `span.model_request_start`, a `span.model_request_end`, a `session.status_idle` or — since
+  #343 — an `agent.tool_result` whose content _is_ the notifications a task wait was resolved
+  by; the column is nullable only on pre-P4 rows.
 - **`event_supersessions` is insert-only too**, and `by_event_id` is its primary key: one
   event carries one range. `check (to_seq >= from_seq)`, `check (kind in ('chunks', 'rewind'))`
   (#238) and `check (by_seq >
@@ -125,10 +135,11 @@ to_seq)` are the range rules in the schema's own words (see
   provide that on their own.
 - **`sessions.partition`** is `partitionOf(sessionId)` — stored, not recomputed, so
   `findSessionsNeedingWork` is an index range scan per partition.
-- **`events.processed_at` is never written for a user event** (P4): a user event is queued,
-  the column is left out of the insert, and the `processed_at` a read reports comes from the
-  claim row alone. It is still written for every other event type, and rows written before
-  the change keep whatever they carry.
+- **`events.processed_at` is never written for a queued event** (P4; #343): a user event, and a
+  background task's notification, are queued, the column is left out of the insert (the insert
+  type spells `undefined` for it), and the `processed_at` a read reports comes from the claim row
+  alone. It is still written for every other event type, and rows written before the change keep
+  whatever they carry.
 - **`partition_leases.owner is null` means free**, and a `check` keeps owner and `expires_at`
   in step: an owned lease always has an expiry, a free one has neither.
 
@@ -166,39 +177,38 @@ consequence is that **a migration file must never be edited once it has been app
 anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
 databases while applying to new ones. Add a new file instead.
 
-| file                                   | what it creates                                                                                                                         |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `0001_agents.sql`                      | `agents`, and the `(created_at, id)` index the agent list pages through                                                                 |
-| `0002_sessions.sql`                    | `sessions`, plus the indexes for the three ways sessions are queried                                                                    |
-| `0003_events.sql`                      | `events`, its uniqueness constraint and its two secondary indexes                                                                       |
-| `0004_partition_leases.sql`            | `partition_leases`                                                                                                                      |
-| `0005_events_id_unique.sql`            | the `unique` index that states the id guarantee (`events_id_key`) by name                                                               |
-| `0006_session_previews.sql`            | a previews table, dropped again by `0010` before release                                                                                |
-| `0007_event_claims.sql`                | `event_claims`, the insert-only record of which events a turn claimed (D9)                                                              |
-| `0008_event_claims_backfill.sql`       | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                                              |
-| `0009_event_supersessions.sql`         | `event_supersessions`, the insert-only record of the ranges events replace                                                              |
-| `0020_rewind_supersessions.sql`        | `event_supersessions.kind` (`chunks` / `rewind`, #238) and its check                                                                    |
-| `0010_drop_session_previews.sql`       | drops `session_previews`; the chunks of a reply are rows of `events` since D9                                                           |
-| `0011_better_auth.sql`                 | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                                         |
-| `0012_ownership.sql`                   | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                                     |
-| `0013_provider_credentials.sql`        | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                                            |
-| `0014_auth_session_revocation.sql`     | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                                         |
-| `0015_session_model.sql`               | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93)                   |
-| `0016_user_preferences.sql`            | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                                        |
-| `0017_scheduler_instances.sql`         | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                                           |
-| `0018_credential_key_provider.sql`     | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                                         |
-| `0021_model_request_end_usage.sql`     | the partial index behind `listModelRequests`: `(session_id, processed_at)` where the type is a request end (#247)                       |
-| `0022_credential_name.sql`             | `provider_credentials.provider` renamed to `name`, unique per `(user_id, name)` (#248)                                                  |
-| `0023_credential_details.sql`          | `details jsonb` on `provider_credentials`: the non-secret facts a credential's type publishes (#249, #250, #251)                        |
-| `0025_user_preferences_compaction.sql` | the compaction controls on `user_preferences`: `compaction_threshold`, `summary_model`, `summary_max_passes` (#282)                     |
-| `0024_modes.sql`                       | `modes`, a user's named presets, and `sessions.mode`, the mode a chat follows (#245, M6)                                                |
-| `0026_agent_tool_use_usage.sql`        | the partial index behind `listToolUses`: `(session_id, processed_at)` where the type is a tool call (#305)                              |
-| `0027_tool_settings.sql`               | `user_tool_settings`, one row per user's tool choices, and `modes.tools`, a mode's tool override (#307)                                 |
-| `0028_paused_confirmation_work.sql`    | the partial index behind the paused-confirmation work scan: `(session_id)` where the type is a tool confirmation (#309)                 |
-| `0029_mcp_servers.sql`                 | `mcp_servers` and `mcp_oauth_states`: a user's remote MCP servers, with their sealed secrets, and their pending OAuth flows (#303, X10) |
-| `0030_mcp_oauth_state_client.sql`      | `mcp_oauth_states.client`, where a pending flow was started — `web` or `cli` (#311)                                                     |
-| `0031_mcp_tool_policies.sql`           | `user_tool_settings.mcp`, the per-tool policies a user set for remote MCP tools (#312)                                                  |
-| `0032_skills.sql`                      | `skills` and `skill_files`: a user's imported skills in the Agent Skills format, and the files of each snapshot (#349, K4; #350)        |
+| file                                   | what it creates                                                                                                                                                              |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0001_agents.sql`                      | `agents`, and the `(created_at, id)` index the agent list pages through                                                                                                      |
+| `0002_sessions.sql`                    | `sessions`, plus the indexes for the three ways sessions are queried                                                                                                         |
+| `0003_events.sql`                      | `events`, its uniqueness constraint and its two secondary indexes                                                                                                            |
+| `0004_partition_leases.sql`            | `partition_leases`                                                                                                                                                           |
+| `0005_events_id_unique.sql`            | the `unique` index that states the id guarantee (`events_id_key`) by name                                                                                                    |
+| `0006_session_previews.sql`            | a previews table, dropped again by `0010` before release                                                                                                                     |
+| `0007_event_claims.sql`                | `event_claims`, the insert-only record of which events a turn claimed (D9)                                                                                                   |
+| `0008_event_claims_backfill.sql`       | the one-time copy of the pre-D9 `processed_at` values into claim rows (D9)                                                                                                   |
+| `0009_event_supersessions.sql`         | `event_supersessions`, the insert-only record of the ranges events replace                                                                                                   |
+| `0020_rewind_supersessions.sql`        | `event_supersessions.kind` (`chunks` / `rewind`, #238) and its check                                                                                                         |
+| `0010_drop_session_previews.sql`       | drops `session_previews`; the chunks of a reply are rows of `events` since D9                                                                                                |
+| `0011_better_auth.sql`                 | Better Auth's tables: `user`, `session`, `account`, `verification`, `deviceCode` (epic #65, A1)                                                                              |
+| `0012_ownership.sql`                   | deletes the v1 data once, then `owner_id` on `agents` and `sessions` and the per-owner indexes (A4)                                                                          |
+| `0013_provider_credentials.sql`        | `provider_credentials`, the sealed-blob table (epic #65, A5)                                                                                                                 |
+| `0014_auth_session_revocation.sql`     | the `after delete` trigger on `"session"` that announces revoked sessions (#76)                                                                                              |
+| `0015_session_model.sql`               | the effective `model`/`system` on `sessions`, backfilled from the agent snapshot; the snapshot becomes nullable (#93)                                                        |
+| `0016_user_preferences.sql`            | `user_preferences`, one row per user: the stored `default_model`, or NULL (#111)                                                                                             |
+| `0017_scheduler_instances.sql`         | `scheduler_instances`, one row per live scheduler instance: `instance_id`, `last_seen` (#122)                                                                                |
+| `0018_credential_key_provider.sql`     | `key_provider` on `provider_credentials`: which provider wrapped a credential's data key (#150)                                                                              |
+| `0021_model_request_end_usage.sql`     | the partial index behind `listModelRequests`: `(session_id, processed_at)` where the type is a request end (#247)                                                            |
+| `0022_credential_name.sql`             | `provider_credentials.provider` renamed to `name`, unique per `(user_id, name)` (#248)                                                                                       |
+| `0023_credential_details.sql`          | `details jsonb` on `provider_credentials`: the non-secret facts a credential's type publishes (#249, #250, #251)                                                             |
+| `0025_user_preferences_compaction.sql` | the compaction controls on `user_preferences`: `compaction_threshold`, `summary_model`, `summary_max_passes` (#282)                                                          |
+| `0024_modes.sql`                       | `modes`, a user's named presets, and `sessions.mode`, the mode a chat follows (#245, M6)                                                                                     |
+| `0026_agent_tool_use_usage.sql`        | the partial index behind `listToolUses`: `(session_id, processed_at)` where the type is a tool call (#305)                                                                   |
+| `0027_tool_settings.sql`               | `user_tool_settings`, one row per user's tool choices, and `modes.tools`, a mode's tool override (#307)                                                                      |
+| `0028_paused_confirmation_work.sql`    | the partial index behind the paused-confirmation work scan: `(session_id)` where the type is a tool confirmation (#309)                                                      |
+| `0031_mcp_tool_policies.sql`           | `user_tool_settings.mcp`, the per-tool policies a user set for remote MCP tools (#312)                                                                                       |
+| `0034_task_notifications.sql`          | the indexes behind background-task notifications: `(session_id)` where the type is a notification, and the **unique** `(session_id, payload->>'source_key')` under it (#343) |
+| `0036_skills.sql`                      | `skills` and `skill_files`: a user's imported skills in the Agent Skills format, and the files of each snapshot (#349, K4; #350)                                             |
 
 To run them outside an application:
 
@@ -411,13 +421,24 @@ what it answers, so an id the insert produces no row for — foreign, non-user, 
 or named twice in one batch — fails the store's check, the append throws `ClaimConflictError`,
 and the transaction rolls back with the events it had already written.
 
-**Reading `processed_at`.** Every read that can return a user event joins the claim:
-`listEvents` and the subscription fetch `left join event_claims`; `getPendingUserEvents` is
-the anti-join — `left join … where c.event_id is null` — which is what "queued" means now,
-still in `seq` order. The `events.processed_at` column is never written for a user event (P4)
-and not read for one; `0008_event_claims_backfill.sql` copied every pre-D9 value into a claim
-row, so logs written before the change read exactly as they did. The column stays for the
-other event types.
+**Reading `processed_at`.** Every read that can return a **queued** event joins the claim:
+`listEvents` and the subscription fetch `left join event_claims`; `getPendingUserEvents` and
+`getPendingTaskNotifications` (#343) are the anti-join — `left join … where c.event_id is null`
+— which is what "queued" means now, still in `seq` order. The `events.processed_at` column is
+never written for a queued event (P4) and not read for one; `0008_event_claims_backfill.sql`
+copied every pre-D9 value into a claim row, so logs written before the change read exactly as
+they did. The column stays for the other event types, and `eventFromRow` is the one place that
+decides which of the two it reads.
+
+**Appending a notification from outside the session** (#343). `appendTaskNotification` reads
+the key, and if the log holds nothing under it calls the ordinary append path with one
+`session.task_notification` — the event goes through the same transaction, the same `seq`
+assignment under the session row lock, and the same `pg_notify` as any other. The **partial
+unique index** is the guarantee: a second writer's insert violates it, its transaction rolls
+back whole (nothing of that append is stored, and no `seq` is consumed), and the store catches
+the named violation, re-reads the key and answers the notification that committed. A violation
+of any _other_ constraint is not caught — `isUniqueViolation` takes the index's name — so an
+unrelated collision surfaces as itself.
 
 ## Supersession and compaction
 

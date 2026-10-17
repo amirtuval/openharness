@@ -237,6 +237,9 @@ export {
   createMockModelFactory,
   MOCK_ASK_ANSWERS,
   MOCK_ASK_INPUT,
+  MOCK_AGENT_MARKER,
+  MOCK_AGENT_MESSAGE_MARKER,
+  MOCK_AGENT_STOP_MARKER,
   MOCK_ASK_MARKER,
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
@@ -248,9 +251,18 @@ export {
   MOCK_SLOW_CHUNKS,
   MOCK_SLOW_MARKER,
   MOCK_SLOW_TOTAL_MS,
+  MOCK_TASK_MARKER,
   MOCK_TERMINAL_MARKER,
   MOCK_TOOL_MARKER,
+  MOCK_WAIT_MARKER,
+  MESSAGE_PARENT_MARKER,
+  agentInputOf,
+  agentMessageInputOf,
+  agentStopInputOf,
+  messageParentInputOf,
   planFor,
+  testTaskInputOf,
+  testWaitInputOf,
 } from './mock-model'
 export {
   MOCK_CREDENTIAL,
@@ -313,6 +325,27 @@ export {
   type SkillImportService,
 } from './skills-import'
 export { diffSnapshots, skillMdDiff, type DiffableFile, type SnapshotDiff } from './skills-diff'
+export {
+  createTaskNotifier,
+  taskDescription,
+  type NotifyTaskInput,
+  type StartTaskInput,
+  type TaskNotifier,
+  type TaskNotifierDeps,
+} from './tasks'
+export { createSubagentTypeResolver, type SubagentTypeDeps } from './subagent-types'
+export {
+  TEST_TASK_DELAY_MS,
+  TEST_TASK_RESULT,
+  TEST_TASK_TOOL_DESCRIPTION,
+  TEST_TASK_TOOL_NAME,
+  TestTaskInputSchema,
+  testTaskTool,
+  testTaskWaitTool,
+  withTestBackgroundTasks,
+  type TestBackgroundTasksOptions,
+  type TestTaskInput,
+} from './test-tasks'
 export {
   createToolSettingsResolver,
   effectiveTools,
