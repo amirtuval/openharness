@@ -103,7 +103,8 @@ export interface LocalSchedulerOptions {
    * `resolveCredential`; #11 passes a runner it shares with its own partition logic.
    */
   readonly runner?: SessionRunner
-  /** How many sessions may have a turn in flight at once; defaults to 4. */
+  /** How many sessions may have a turn in flight at once; defaults to
+   * {@link DEFAULT_MAX_CONCURRENT_SESSIONS}. */
   readonly maxConcurrentSessions?: number
   /** How long `stop()` waits for a turn in flight by default; defaults to 5000 ms. */
   readonly drainTimeoutMs?: number
@@ -143,7 +144,7 @@ export const DEFAULT_MAX_CONCURRENT_SESSIONS = DEFAULT_MAX_CONCURRENT_PASSES
  * The scheduler for a server that owns every partition: a session needs work, so this process
  * runs it.
  *
- * It is a small queue. `H` sessions run at once (`maxConcurrentSessions`, 4 by default) and
+ * It is one queue. `H` sessions run at once (`maxConcurrentSessions`, 32 by default) and
  * the rest wait their turn; a session that is already running is not queued but *woken*, so
  * the running pass looks at the log again before it finishes. `signal` never blocks and never
  * throws: it is called from a request handler that has already answered the user, and a

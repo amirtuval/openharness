@@ -52,7 +52,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | `1` lets a **custom OpenAI-compatible** credential reach a private address (e.g. Ollama on localhost); off by default, never Azure (#249, M4) |
  * | `OPENHARNESS_TRUSTED_PROXY_HOPS`    | how many proxies append to `x-forwarded-for`; `0` trusts none (#151) |
  * | `OPENHARNESS_CORS_ORIGINS`          | comma-separated origins to allow; unset means no CORS at all     |
- * | `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | how many sessions may run at once; `4` by default               |
+ * | `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | how many sessions may run at once; `32` by default              |
  * | `OPENHARNESS_DRAIN_TIMEOUT_MS`      | how long shutdown waits for a turn in flight; `5000` by default  |
  * | `OPENHARNESS_INSTANCE_ID`           | this server's id in the lease table; `host-pid-random` by default |
  * | `OPENHARNESS_PARTITIONS`            | how many partitions the session space has; protocol's `64`       |

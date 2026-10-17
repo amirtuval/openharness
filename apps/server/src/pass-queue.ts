@@ -41,7 +41,8 @@ export interface PassContext {
 export interface PassQueueOptions {
   /** The runner that owns the per-session turn loop. */
   readonly runner: SessionRunner
-  /** How many sessions may have a pass in flight at once; defaults to 4. */
+  /** How many sessions may have a pass in flight at once; defaults to
+   * {@link DEFAULT_MAX_CONCURRENT_PASSES}. */
   readonly maxConcurrentSessions?: number
   /** How long {@link PassQueue.stop} waits for the passes in flight; defaults to 5000 ms. */
   readonly drainTimeoutMs?: number
@@ -59,8 +60,18 @@ export interface PassQueueOptions {
   readonly contextFor?: (sessionId: SessionId) => PassContext
 }
 
-/** How many sessions run at once when the caller does not say. */
-export const DEFAULT_MAX_CONCURRENT_PASSES = 4
+/**
+ * How many sessions run at once when the caller does not say.
+ *
+ * A turn is mostly waiting on model and tool I/O rather than using the CPU — a pod's 250m CPU
+ * request is not what limits it — so the old default of 4 was far below what one process can
+ * carry, and with hundreds of sessions over a few pods every other session waited behind a
+ * handful of long turns. 32 is high enough that a few slow turns cannot starve the rest of a
+ * pod's sessions, and low enough that a process is not holding more concurrent context and
+ * streams than its 512Mi memory limit comfortably covers. It is a per-process limit: the
+ * chart's 2–4 replicas carry 64–128 turns between them.
+ */
+export const DEFAULT_MAX_CONCURRENT_PASSES = 32
 
 /**
  * The queue of sessions waiting for a slot, and the passes in flight.
