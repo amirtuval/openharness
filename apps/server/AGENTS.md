@@ -833,6 +833,15 @@ answer is the **effective** state of each tool:
 - **Called once per process, and read twice.** `main.ts` builds the registry once and hands the
   same instance to the turn options and to the app, so "available" and "a chat can call it" are
   one fact rather than two that could drift.
+- **The mode's override has three section defaults too** (epic #349, B8). `builtin_default`,
+  `mcp_servers_default` and `skills_default` are read by `builtinToolInForce`,
+  `mcpServerInForce` and the protocol's `skillInForce` — one rule per kind, applying an
+  explicit map entry first, then `off` (an allowlist), `on` (everything except the map's off
+  entries, even for items the user turned off) or `follow` (the user's own setting, which is
+  what an absent field means). The server's `effectiveTools`, `mcp/in-force.ts` and `skills.ts`
+  all call those functions, so the listing, the in-force servers/skills and the brain's
+  per-request answer cannot disagree. A hard rule still wins: `withoutAskUser` and the
+  structural subagent tool set are applied outside the override.
 - **The mode's override has an MCP half too** (#311). The same `Mode.tools` carries
   `mcp_servers`, an on/off patch over the user's remote MCP servers by id — a sibling of
   `builtin`, at **server** granularity and never per MCP tool. `tool-settings.ts` handles only

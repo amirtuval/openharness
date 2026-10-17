@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest'
 
 import {
   modeMcpServerChoice,
+  modeSectionDefault,
   modeSkillChoice,
   modeToolChoice,
   withModeMcpServerChoice,
+  withModeSectionDefault,
   withModeSkillChoice,
   withModeToolChoice,
 } from './tools'
@@ -67,7 +69,6 @@ describe('a mode’s MCP server patch is carried through a save (#311, #312)', (
     // The patch is not empty while it names a server: dropping it here would silently undo a
     // choice this editor does not offer yet (#313).
     expect(withModeToolChoice(PATCH, 'web_search', 'follow')).toEqual({
-      builtin: {},
       mcp_servers: { mcps_notes: false },
     })
   })
@@ -111,10 +112,9 @@ describe('a mode’s MCP server choice (#311; #313)', () => {
   })
 
   it('leaves the builtin map in place, even when it names nothing', () => {
-    // `builtin` is the wire's one required field of an override: a mode that says something
-    // about servers only is `{ builtin: {}, mcp_servers: { … } }`.
+    // `builtin` is optional since B8, so a mode that says something about servers only is
+    // `{ mcp_servers: { … } }` — the smallest patch that says it.
     expect(withModeMcpServerChoice(null, NOTES, 'off')).toEqual({
-      builtin: {},
       mcp_servers: { [NOTES]: false },
     })
     expect(withModeMcpServerChoice(PATCH, NOTES, 'follow')).toEqual({
@@ -170,7 +170,6 @@ describe('a mode’s skill choice (#349, K8; #353)', () => {
       skills: { [NOTES]: true },
     })
     expect(withModeMcpServerChoice(patch, 'mcps_notes', 'off')).toEqual({
-      builtin: {},
       mcp_servers: { mcps_notes: false },
       skills: { [NOTES]: true },
     })
@@ -179,6 +178,40 @@ describe('a mode’s skill choice (#349, K8; #353)', () => {
   it('folds a patch that names nothing back to null', () => {
     expect(
       withModeSkillChoice({ builtin: {}, skills: { [NOTES]: false } }, NOTES, 'follow'),
+    ).toBeNull()
+  })
+})
+
+describe('a mode’s section defaults (B8)', () => {
+  it('reads an absent default as follow, for all three sections', () => {
+    expect(modeSectionDefault(null, 'builtin')).toBe('follow')
+    expect(modeSectionDefault(null, 'mcp_servers')).toBe('follow')
+    expect(modeSectionDefault(null, 'skills')).toBe('follow')
+    expect(modeSectionDefault({ skills_default: 'off' }, 'skills')).toBe('off')
+    expect(modeSectionDefault({ skills_default: 'off' }, 'builtin')).toBe('follow')
+  })
+
+  it('writes one default without disturbing the maps or the others', () => {
+    const patch = {
+      builtin: { web_search: false },
+      mcp_servers: { mcps_notes: true },
+      skills: { [newSkillId()]: true },
+      skills_default: 'on' as const,
+    }
+    expect(withModeSectionDefault(patch, 'builtin', 'off')).toEqual({
+      ...patch,
+      builtin_default: 'off',
+    })
+    // Back to follow is the absence of the key, not a stored `'follow'`.
+    expect(
+      withModeSectionDefault({ ...patch, builtin_default: 'off' as const }, 'builtin', 'follow'),
+    ).toEqual(patch)
+    // A default alone is a mode that says something, not `null`.
+    expect(withModeSectionDefault(null, 'mcp_servers', 'off')).toEqual({
+      mcp_servers_default: 'off',
+    })
+    expect(
+      withModeSectionDefault({ mcp_servers_default: 'off' }, 'mcp_servers', 'follow'),
     ).toBeNull()
   })
 })
