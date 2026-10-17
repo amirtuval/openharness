@@ -227,6 +227,21 @@ staging registry, and **fails if it does not**: production never builds an image
 is always the same — a commit reaches `main`, CI passes, `deploy-staging` builds and deploys
 it, you check staging, and only then do you point the tag at it.
 
+### Migrations on boot
+
+Every pod runs `@openharness/session`'s `migrate()` before it starts serving. Since #378
+(PR 3/6) a `schema_migrations` ledger records the files already applied, so a surge pod booting
+during a rollout runs no migration statement at all and takes no lock on the application
+tables — the servers still appending are not stalled or deadlocked. A database migrated by an
+older build has every table and an empty ledger: its **first** new boot re-runs the idempotent
+files once under the advisory lock and records them. That is one boot per database; if you can,
+avoid overlapping it with a heavy write burst. A migration that genuinely needs a strong lock
+runs with a `lock_timeout` and retries with backoff, so it cannot wait behind a live append
+forever; if the lock never clears the new pod fails to boot and, with `maxUnavailable: 0`, the
+rollout keeps the old replicas serving. Files are applied in name order and follow the
+expand/contract rules in `packages/session/src/postgres/migrate.ts`; a file that has been
+applied anywhere is never edited — add a new one.
+
 ### Rolling back
 
 Re-point the tag at the commit that was good:

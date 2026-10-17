@@ -359,32 +359,41 @@ what pointed at the SQL rather than at the rule. The fix is an explicit cast on 
 needs its type spelled out, because there is no column type to infer it from
 ([#343](https://github.com/amirtuval/openharness/issues/343)).
 
-**A migration must never be edited once it has been applied anywhere, and because every file
-re-runs, a data-changing one needs a guard on the state it changes.** The migrator re-runs every
-file on every `migrate()` call and there is no ledger table, so editing an applied file is silently
-ignored on existing databases and applied on new ones — the two drift apart with no error.
-`0012_ownership.sql` deletes all v1 data **wrapped in a check for the absence of the `owner_id`
-column it introduces**, without which a server restart months later would empty every log in the
-database. The same asymmetry is why `0012` may delete where `0015` has to backfill
-(`update … where model is null`, a no-op on re-run). Migrations run in one transaction under
-`pg_advisory_xact_lock(hashtext('@openharness/session migrations'))`, so a half-way failure leaves
-the schema as it was and two instances booting together cannot interleave DDL. Better Auth's own
-SQL is generated verbatim from its CLI with its migrator disabled, and a plugin list that changes
-without a matching migration is a runtime failure rather than a startup one — a Postgres test
-asserting Better Auth's schema check passes on the migrated database is the only thing that catches
-it ([`packages/session/docs/postgres.md`](../packages/session/docs/postgres.md)).
+**A migration must never be edited once it has been applied anywhere, and a data-changing one
+needs a guard on the state it changes.** The `schema_migrations` ledger records a file by name,
+so an edited file is silently ignored on an existing database and applied on a fresh one — the
+two drift apart with no error. Add a new file. `0012_ownership.sql` deletes all v1 data
+**wrapped in a check for the absence of the `owner_id` column it introduces**, which is what
+keeps the one-time bootstrap re-run (below) from emptying every log in the database; the same
+asymmetry is why `0012` may delete where `0015` has to backfill (`update … where model is
+null`, a no-op on a re-run). Each file's statements and its ledger row are one transaction
+under `pg_advisory_xact_lock(hashtext('@openharness/session migrations'))`, so a half-way
+failure leaves the schema and the ledger as they were, and two instances cannot interleave
+DDL. Better Auth's own SQL is generated verbatim from its CLI with its migrator disabled, and a
+plugin list that changes without a matching migration is a runtime failure rather than a
+startup one — a Postgres test asserting Better Auth's schema check passes on the migrated
+database is the only thing that catches it
+([`packages/session/docs/postgres.md`](../packages/session/docs/postgres.md)).
 
-**Re-running idempotent DDL on every boot is not free: it deadlocks with a live log write.**
-Because the migrator has no ledger, a pod that boots during a rolling update re-executes every
-migration — including `create index if not exists` (a `SHARE` lock on `events`) and
-`drop table if exists` (`ACCESS EXCLUSIVE`) — in one transaction, while the old pods are
-streaming `insert into events`. Observed while building the rolling-restart e2e: Postgres
-reported `deadlock detected`, and the loser was either the boot (the replacement never came up)
-or the turn (a chunk's append surfaced as `unknown_error`). The transaction and the advisory
-lock only serialize migrations against each other; nothing serializes DDL against writes.
-Starting the surge replicas before the turns makes an e2e reproducible; a deployment that boots
-replicas mid-load needs a migration ledger (or DDL that does not take conflicting locks) — a
-follow-up, not something the scheduler can fix ([#378](https://github.com/amirtuval/openharness/issues/378),
+**Idempotent DDL still takes its locks: a boot-time migration runner needs a ledger.**
+`alter table … add column if not exists` takes `ACCESS EXCLUSIVE` on the table even when the
+column is already there, and `create index if not exists` takes a `SHARE` lock; `drop table if
+exists` is `ACCESS EXCLUSIVE` too. A migrator that re-runs every file on every boot therefore
+holds those locks against the live servers' appends. Observed while building the rolling-restart
+e2e (#378): a replacement pod booting mid-turn deadlocked with a live `insert into events`,
+and Postgres aborted either the boot (the replacement never came up) or the turn (a chunk's
+append surfaced as `unknown_error`). The advisory lock and the transaction only serialize
+migrations against each other — nothing about them serializes DDL against writes. The fix
+(PR 3/6) is a `schema_migrations` ledger: a boot whose ledger names every file runs no
+statement at all and takes no application-table lock; the rare boot that has files to run sets
+`lock_timeout` and retries the transaction with bounded backoff, so a real migration cannot
+wait behind a live append forever. A database from the old runner has every table and an empty
+ledger, and its first new boot runs the idempotent files once more and records them — preferred
+to guessing from the schema that they were applied, because a wrong "already applied" is silent
+and permanent while the re-run is correct by construction. The e2e test now starts each
+replacement **while the turns stream**, in the order Kubernetes does
+([#378](https://github.com/amirtuval/openharness/issues/378),
+[`packages/session/src/postgres/migrate.ts`](../packages/session/src/postgres/migrate.ts),
 [`e2e/src/rolling-restart.test.ts`](../e2e/src/rolling-restart.test.ts)).
 
 **Never read `now()` in the store; take a `Clock`, and make ids compare byte-for-byte.** Every
