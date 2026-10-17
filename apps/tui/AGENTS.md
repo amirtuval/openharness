@@ -370,9 +370,11 @@ with the Ctrl+L mechanism and keeps the session, `/help` prints the commands and
 the prompt, and `/exit` (alias `/quit`) leaves — the same leave as the second idle Ctrl+C.
 
 **The reader's skills are rows in that menu** (`menuCommands`, #349, K7). The rows come from the
-client's own `slashCommands(skills)` — which already knows that a skill is offered when it is
-**on** (K8) and **user-invocable**, spells its usage `/name <argument-hint>`, and keeps the
-API's order — re-wrapped as registry entries so a skill is filtered, completed and corrected
+client's own `slashCommands(skills, override)` — the **effective** on/off set of K8 (the
+protocol's `skillsInForce` applied to the chat's current or pending mode, so a row the server
+would refuse is not offered and one it would accept is), **user-invocable** only, with the usage
+`/name <argument-hint>` and the API's order — re-wrapped as registry entries so a skill is
+filtered, completed and corrected
 exactly as `/compact` is, and a typo near a skill name is suggested by name rather than sent to
 the model. The screen reads `client.skills.list()` once in the background (a failed read leaves
 the menu with the chat's own commands) and re-reads it when `/skills` closes, because a skill

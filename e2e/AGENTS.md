@@ -373,9 +373,14 @@ Two specs cover skills (epic #349), and they cover the same ground in the two cl
 
 Both drive the real thing: the same **collection repository** on loopback, cloned by the real
 `isomorphic-git`/`safeFetch` path, moved by a push and re-read by a refresh. `qa/skills-fixture.ts`
-is the one copy of it — six candidates (two valid, one of them with a `references/` and a
-`scripts/` folder, one `disable-model-invocation`, one `user-invocable: false`, one invalid, one
-oversized), a browse-ready `/org/skills.git` URL, and the TLS front in front of it. **Real-model
+is the one copy of it — six candidates (two valid, one of them with `references/`, `scripts/`
+and `assets/icon.png` — a real binary `Uint8Array` the import must store as base64, since its
+bytes are not UTF-8 and hold a NUL — one `disable-model-invocation`, one `user-invocable: false`,
+one invalid, one oversized), a browse-ready `/org/skills.git` URL, and the TLS front in front of
+it. S1 asserts the binary file is imported, listed at its real byte size and served with
+`encoding: "base64"`, and the mode scenario (S11, and `cli-skills.spec.ts`'s CS6b) asserts the
+`/` menu follows the mode in both directions: a stored-on skill the mode turns off is gone, and a
+stored-off one it turns on is offered. **Real-model
 cases** (S4, S7 — the model loads a skill on its own, reads a reference file, and never claims to
 have run a script) skip unless `QA_MODEL` (or `OPENHARNESS_QA_MODEL`) names a real model, and then
 the stack must run **without** `OPENHARNESS_TEST_MODEL` — the mock answers every turn whatever

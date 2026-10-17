@@ -490,6 +490,74 @@ test.describe('cli skills scenarios', () => {
     }
   })
 
+  test('CS6b a chat’s mode decides what the `/` menu offers', async ({ context, request }) => {
+    test.skip(!(await skillsFixtureAvailable()), 'needs a `git` executable for the fixture')
+    test.setTimeout(240_000)
+    await cleanAccount(request)
+    const url = (await ensureRepo()).url
+    expect((await ohAsync(['skills', 'add', url, '--name', 'release-notes'])).status).toBe(0)
+    expect((await ohAsync(['skills', 'add', url, '--name', 'summarize-thread'])).status).toBe(0)
+
+    // The mode needs a model whose provider has a credential (`requireUsableMode`), exactly as
+    // S11 does; the mock answers it whatever the id says.
+    const credentials = await request.get('/v1/provider-credentials')
+    const providers = ((await credentials.json()) as { data: { name: string }[] }).data
+    test.skip(
+      providers.length === 0,
+      'a mode whose model has no credential cannot start a chat — this stack has none',
+    )
+    const provider = providers[0]?.name ?? 'custom'
+    const listing = await request.get('/v1/me/skills')
+    const byName = new Map(
+      ((await listing.json()) as { data: { id: string; name: string }[] }).data.map((skill) => [
+        skill.name,
+        skill.id,
+      ]),
+    )
+    const release = byName.get('release-notes') ?? ''
+    const summarize = byName.get('summarize-thread') ?? ''
+
+    // Stored off, the mode turns it on; stored on, the mode turns it off. The menu must follow
+    // the mode in both directions (K8) — a row the server would refuse must not be offered, and
+    // one it would accept must not be hidden.
+    expect(
+      (await request.post(`/v1/me/skills/${release}`, { data: { enabled: false } })).status(),
+    ).toBe(200)
+    expect(
+      (
+        await request.post('/v1/me/modes', {
+          data: {
+            name: 'menu-mode',
+            model: `${provider}/a-mode-model`,
+            tools: { builtin: {}, skills: { [release]: true, [summarize]: false } },
+          },
+        })
+      ).status(),
+    ).toBe(201)
+
+    const terminal = new Terminal('oh-qa-skills-mode-menu', 100, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+    try {
+      terminal.run(ohCommand('--mode', 'menu-mode'))
+      await terminal.waitFor(/sesn_/, 30_000)
+      await terminal.waitForIdle()
+
+      terminal.type('/')
+      await terminal.waitFor(/\/release-notes/)
+      const screen = terminal.capture()
+      expect(screen).toContain('/release-notes')
+      // The mode turned it off, so it is not a row even though the user's own switch is on.
+      expect(screen).not.toContain('/summarize-thread')
+      await terminal.screenshot(shot, 'cs6b-01-mode-menu')
+      expectNoErrorNotice(screen)
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
   test('CS11 `oh modes` shows a mode’s skill override read-only', async ({ request }) => {
     test.skip(!(await skillsFixtureAvailable()), 'needs a `git` executable for the fixture')
     test.setTimeout(120_000)

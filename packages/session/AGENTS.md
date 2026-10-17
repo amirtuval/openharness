@@ -114,7 +114,8 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                           read and the unique `(session, source_key)` that makes the append
                           idempotent (#343),
                         0035 drops the unique index on a root session's id (#340),
-                        0036 a user's imported skills and the files of each snapshot (#349, K4;
+                        0036 a user's imported skills and the files of each snapshot, each with
+                          its `utf8`/`base64` encoding (#349, K4;
                           #350)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
@@ -137,7 +138,7 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | `UnscopedListEventsOptions`                                                                                                                                                                                                                                                                                                                                            | the filters of `listEventsUnscoped`, the brain's replay                                                                                                                                                                                                                                                                                                   |
 | `CredentialStore`                                                                                                                                                                                                                                                                                                                                                      | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                                                                                                                                                                                                                                           |
 | `SkillStore`                                                                                                                                                                                                                                                                                                                                                           | the storage contract for a user's imported skills (epic #349, K4): a snapshot's metadata and every file of it in and out, a listing that never reads a file's content, and a snapshot replaced whole in one transaction; see [The SkillStore](#the-skillstore-epic-349-k4)                                                                                |
-| `CreateSkillInput`, `SkillSnapshotInput`, `SkillFileInput`                                                                                                                                                                                                                                                                                                             | the vocabulary of the skill writes: what a create adds to a snapshot (an id, the owner, the name and `enabled`), what a refresh replaces (description, frontmatter, source and every file), and one file as a caller writes it (a path and a content)                                                                                                     |
+| `CreateSkillInput`, `SkillSnapshotInput`, `SkillFileInput`                                                                                                                                                                                                                                                                                                             | the vocabulary of the skill writes: what a create adds to a snapshot (an id, the owner, the name and `enabled`), what a refresh replaces (description, frontmatter, source and every file), and one file as a caller writes it — a path, a content, and an optional `encoding` (`utf8`, the default, or `base64` for a binary file)                       |
 | `assertSkillSnapshot()`                                                                                                                                                                                                                                                                                                                                                | the rule K1 makes structural: a snapshot with no `SKILL.md`, or two files at one path, is a `RangeError` in both stores                                                                                                                                                                                                                                   |
 | `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                                                                                                                                                                                                                                         | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns                                                                                                                                                                                                                                              |
 | `UpdateSessionRequest`                                                                                                                                                                                                                                                                                                                                                 | what `updateSession()` changes: the title, or nothing                                                                                                                                                                                                                                                                                                     |
@@ -798,9 +799,15 @@ here and nothing is parsed here: the store keeps what an import produced, which 
   cannot be one either. Both are refused by `assertSkillSnapshot` with a `RangeError`, in both
   stores — structural rather than a limit, which is why the store owns them: the Postgres table
   is keyed by `(skill_id, path)`, and a folder with no `SKILL.md` is not a skill to store.
-- **Sizes are the store's.** A file's `size` is the byte length of the content the store was
-  handed (`skillFileSize` in the protocol), computed on the way in rather than passed beside it,
-  so a size can never disagree with what is stored.
+- **Sizes are the store's.** A file's `size` is the byte length of the file the store was
+  handed (`skillFileSize` in the protocol, which decodes a base64 spelling back to its original
+  byte length), computed on the way in rather than passed beside it, so a size can never
+  disagree with what is stored.
+- **A binary file is stored losslessly.** `SkillFileInput.encoding` says whether `content` is
+  the file's text (`utf8`) or its bytes base64-encoded (`base64`); `getFile` answers the same
+  `encoding` beside the content and the original `size`. A snapshot gives a file one spelling —
+  the store does not re-detect it — and the Postgres `skill_files.encoding` column defaults to
+  `utf8`, so a caller that predates the field stores exactly what it stored before.
 - **A listing never reads a content.** `list` and `get` answer the protocol's `Skill`, whose
   `files` is paths and sizes; the Postgres queries do not select the `content` column at all
   (`SkillFileMetadataRow` is what they select). That is what keeps a listing of fifty skills
@@ -817,7 +824,7 @@ here and nothing is parsed here: the store keeps what an import produced, which 
 
 Both implementations pass `runSkillStoreConformance`: `InMemorySkillStore` (in `memory.ts`) and
 `PostgresSkillStore` (`@openharness/session/postgres`, on the `skills` and `skill_files` tables,
-`0032`).
+`0036`).
 
 ## The Postgres store
 
@@ -853,8 +860,9 @@ carries it), `partition_leases` (`partition`, `owner`, `epoch`, `expires_at`),
 `SKILL.md` in `name`/`description`/`frontmatter jsonb`, the source's URL, ref, path and commit,
 `enabled`, and the two instants of the snapshot — `imported_at` and `refreshed_at`, which are a
 skill's whole timestamp pair; unique `(owner_id, name)`; #349, K4) and `skill_files` (the files
-of a snapshot, one row per `(skill_id, path)`: the content and its byte size, cascading from
-`skills`; #349, K4), `provider_credentials` (a sealed credential per
+of a snapshot, one row per `(skill_id, path)`: the content, its `encoding` (`utf8`/`base64` —
+base64 is what makes a NUL-bearing or non-UTF-8 file storable, since Postgres `text` refuses
+`0x00`) and its original byte size, cascading from `skills`; #349, K4), `provider_credentials` (a sealed credential per
 `(user_id, name)`, with the key provider that wrapped its data key — NULL meaning `local` — and
 the public `details jsonb` its type publishes — NULL meaning none; see `0013`, `0018` and
 `0023`), `mcp_servers` (a user's remote MCP servers, each with the sealed `sealed_headers`,

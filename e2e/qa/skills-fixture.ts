@@ -48,6 +48,46 @@ import type { GitFixture, GitFileMap } from '@openharness/hands/testing'
  * no network, so S2 runs on the fixture like every other case.
  */
 
+/**
+ * A tiny PNG, as bytes (the import's binary case, K4).
+ *
+ * It has to be a `Uint8Array`: the bytes below are not valid UTF-8 and include a NUL, which is
+ * exactly what Postgres `text` refuses and what the import must store as base64 rather than
+ * decode into a broken string. A JavaScript string could not carry it — `writeFile('utf8')`
+ * would replace what it cannot encode.
+ */
+export const SKILLS_BINARY_ICON = Uint8Array.from([
+  0x89,
+  0x50,
+  0x4e,
+  0x47,
+  0x0d,
+  0x0a,
+  0x1a,
+  0x0a, // the PNG signature
+  0x00,
+  0x00,
+  0x00,
+  0x0d,
+  0x49,
+  0x48,
+  0x44,
+  0x52, // IHDR, with a NUL in the length
+  0x00,
+  0x00,
+  0x00,
+  0x01,
+  0x00,
+  0x00,
+  0x00,
+  0x01,
+  0x08,
+  0x06,
+  0x00,
+  0x00,
+  0x00,
+])
+
 /** The repository the fixture serves: the collection above, one folder per candidate. */
 export const SKILLS_FILES: GitFileMap = {
   'skills/release-notes/SKILL.md': [
@@ -69,6 +109,9 @@ export const SKILLS_FILES: GitFileMap = {
     '# Tone\n\nPlain words, no marketing. One short paragraph per change.\n',
   'skills/release-notes/scripts/publish.sh':
     '#!/bin/sh\n# Publishes the notes. This build never runs it (K2).\necho publishing\n',
+  // A binary file beside the instructions: the import stores it losslessly (base64), and the
+  // Postgres-backed stack must be able to hold it (K4).
+  'skills/release-notes/assets/icon.png': SKILLS_BINARY_ICON,
   'skills/summarize-thread/SKILL.md': [
     '---',
     'name: summarize-thread',
