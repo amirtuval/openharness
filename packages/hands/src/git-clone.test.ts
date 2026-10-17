@@ -1,6 +1,11 @@
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { open } from 'node:fs/promises'
+import { join } from 'node:path'
+import { promisify } from 'node:util'
 
 import { afterEach, describe, expect, it } from 'vitest'
+
+import { SKILL_INFLATE_MAX_BYTES } from '@openharness/protocol'
 
 import {
   DEFAULT_CLONE_MAX_BYTES,
@@ -65,6 +70,23 @@ async function fixture(files: Record<string, string> = REPOSITORY): Promise<GitF
   const created = await createGitFixture({ files })
   fixtures.push(created)
   return created
+}
+
+const execFileAsync = promisify(execFile)
+
+/** Run one git command in a fixture's directory — for a file too large to hold in the map. */
+async function gitIn(directory: string, args: readonly string[]): Promise<void> {
+  await execFileAsync('git', [
+    '-C',
+    directory,
+    '-c',
+    'commit.gpgsign=false',
+    '-c',
+    'user.name=openharness test',
+    '-c',
+    'user.email=test@example.com',
+    ...args,
+  ])
 }
 
 /** What a clone did: its answer, or the code it was refused with. */
@@ -258,6 +280,59 @@ describe.skipIf(!GIT)('cloneRepository', () => {
       maxInflatedBytes: 64 * 1024,
     })
     expect(clone).toEqual({ ok: false, code: 'over_limit' })
+  })
+
+  it('refuses one highly compressible blob past the cap without inflating it whole', async () => {
+    // A sparse 101 MiB file of zeros compresses to about a hundred kilobytes and inflates
+    // past the protocol's 100 MiB unpacked cap. Both places a clone could inflate it are
+    // bounded before it is materialised: the pack scan refuses the entry from its header
+    // (indexing would otherwise read every object to compute its id), and the read itself
+    // has its own size check. `arrayBuffers` is where `Buffer` allocations show up, so the
+    // growth bound is what tells an early refusal from a 100 MiB allocation.
+    const repo = await fixture({
+      'skills/release-notes/SKILL.md': '---\nname: release-notes\n---\n\nWrite them.\n',
+    })
+    const huge = join(repo.directory, 'skills/release-notes/huge.bin')
+    const handle = await open(huge, 'w')
+    await handle.truncate(SKILL_INFLATE_MAX_BYTES + 1024 * 1024)
+    await handle.close()
+    await gitIn(repo.directory, ['add', 'skills/release-notes/huge.bin'])
+    await gitIn(repo.directory, ['commit', '-q', '-m', 'a highly compressible file'])
+
+    const before = process.memoryUsage().arrayBuffers
+    const clone = await attempt({
+      url: repo.url,
+      allowPrivate: true,
+      path: 'skills/release-notes',
+      maxInflatedBytes: 4 * 1024,
+    })
+    const growth = process.memoryUsage().arrayBuffers - before
+    expect(clone).toEqual({ ok: false, code: 'over_limit' })
+    expect(growth).toBeLessThan(32 * 1024 * 1024)
+  })
+
+  it('reads blobs the server packed as deltas against one another', async () => {
+    // Two large, almost identical files make `upload-pack` delta one against the other, so
+    // this is the path where the size has to come from the delta's own header rather than
+    // from a plain entry.
+    const base = 'a line of the same text\n'.repeat(50_000)
+    const repo = await fixture({
+      'skills/release-notes/SKILL.md': '---\nname: release-notes\n---\n\nWrite them.\n',
+      'skills/release-notes/reference/a.txt': base,
+      'skills/release-notes/reference/b.txt': `${base}and one more line\n`,
+    })
+    const clone = await attempt({
+      url: repo.url,
+      allowPrivate: true,
+      path: 'skills/release-notes',
+      maxInflatedBytes: 4 * 1024 * 1024,
+    })
+    expect(clone.ok).toBe(true)
+    if (!clone.ok) {
+      return
+    }
+    expect(clone.files['skills/release-notes/reference/a.txt']).toBe(base)
+    expect(clone.files['skills/release-notes/reference/b.txt']).toBe(`${base}and one more line\n`)
   })
 
   it('refuses a ref the repository does not have', async () => {

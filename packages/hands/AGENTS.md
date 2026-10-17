@@ -427,13 +427,22 @@ It is deliberately the narrowest thing that can do that.
   each hop's socket pinned to the addresses that were checked. No auth callback is installed, so
   a repository that wants credentials ends the clone as `authentication_required` rather than
   opening a prompt.
-- **Bounded, twice.** A running total over every **downloaded** byte — the cap K4 names is the
-  clone, not one response — and one deadline for the whole thing. A download cap says nothing
-  about what a pack unpacks to, so the blobs the clone really reads are also capped in total
-  (`SKILL_INFLATE_MAX_BYTES`, `maxInflatedBytes`, failing `over_limit` past it). A `path` the
-  caller names restricts the read to the blobs under it; without one (the root-`SKILL.md` case)
-  the whole tree is read. A git tree entry carries no size, so a single oversized blob cannot
-  be skipped before inflating it — the cumulative cap is what bounds the process.
+- **Bounded, twice — and per object, before it inflates.** A running total over every
+  **downloaded** byte — the cap K4 names is the clone, not one response — and one deadline for
+  the whole thing. A download cap says nothing about what a pack unpacks to, so the blobs the
+  clone really reads are also capped in total (`SKILL_INFLATE_MAX_BYTES`, `maxInflatedBytes`,
+  failing `over_limit` past it). A `path` the caller names restricts the read to the blobs under
+  it; without one (the root-`SKILL.md` case) the whole tree is read. A git tree entry carries no
+  size, so a single oversized blob cannot be skipped from the tree alone — but the pack's own
+  index and entry headers carry it, and `git-pack.ts` reads them: an ordinary blob is inflated
+  with Node's zlib `maxOutputLength` set to what is left of the cap, a delta's result size is
+  read from its (small) instruction stream, and a pack holding an object past the protocol's
+  unpacked cap is refused while its response is still buffered — **before** `isomorphic-git`
+  indexes it, because indexing reads every object to compute its id and would otherwise
+  materialise the one entry the cap cannot afford (`#349`, `#390`). The indexing ceiling is
+  `SKILL_INFLATE_MAX_BYTES` (or a larger caller-chosen read cap), not the read cap itself, so a
+  test may lower `maxInflatedBytes` without refusing a repository that merely holds a large
+  unrelated file.
 - **A failure a caller can act on.** `GitCloneError` carries one of the protocol's own codes
   (`unreachable`, `not_a_repository`, `authentication_required`, `ref_not_found`, `over_limit`,
   `refused_address`), so the sentence a user reads is the protocol's and this module's job is
@@ -594,7 +603,10 @@ dependency table.
   submodule entry skipped rather than failing the clone, a ref that is not there, a loopback
   address refused unless the flag allows it (the same option on and off), something that is not a
   repository, an unreachable host, a redirect that lands on a private address refused, the byte
-  cap and the deadline — and that two clones of one repository share no buffer.
+  cap and the deadline, a blob outside the requested path never read, the cumulative unpacked
+  cap, and one highly compressible 101 MiB blob refused before it is inflated (its `Buffer`
+  allocation is what the test's memory bound rules out) — and that two clones of one repository
+  share no buffer.
 - `git-clone-network.test.ts` is the **opt-in** half (`OPENHARNESS_TEST_NETWORK=1`), because it
   needs the internet: it clones `https://github.com/anthropics/skills` through the guard and
   checks the ref that is not there is answered `ref_not_found`. It leaves the egress proxy alone —
