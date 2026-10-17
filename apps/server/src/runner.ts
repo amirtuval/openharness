@@ -6,6 +6,7 @@ import {
   type ReasoningSupportFor,
   type RetryPolicy,
   type TurnOutcome,
+  TurnHandoff,
   runTurn,
 } from '@openharness/brain'
 import { EVENT_TYPES } from '@openharness/protocol'
@@ -234,11 +235,13 @@ export class SessionRunner {
   }
 
   /**
-   * Abort the turn in flight for `sessionId`.
+   * Abort the turn in flight for `sessionId` — the **user's** interrupt.
    *
    * The turn ends the way an interrupt does — partial text stored, span closed, session
    * idle — because the brain is handed an aborted `AbortSignal`, not because the runner
-   * writes anything itself.
+   * writes anything itself. This abort deliberately carries **no** `TurnHandoff` reason: it is
+   * what a `user.interrupt` signal and `agent_stop` produce, and ending the turn is exactly
+   * what the user asked for (#378, P1).
    *
    * @returns whether a pass was in flight — `false` means there was nothing to abort
    */
@@ -261,6 +264,10 @@ export class SessionRunner {
    * gone. Here the pass stops after the aborted turn, so once this resolves nothing more will
    * be written for the session — which is what lets the caller delete it (`store.deleteSession`)
    * knowing the log is quiet. A session with no pass in flight resolves at once.
+   *
+   * Like {@link SessionRunner.abort}, this abort carries **no** handoff reason (#378, P1): a
+   * delete and a rewind's stop are the user's, and the turn must end (and write its partial
+   * reply and idle) before the rows go.
    *
    * @returns whether a pass was in flight — `false` means there was nothing to stop
    */
@@ -336,13 +343,15 @@ export class SessionRunner {
   }
 
   /**
-   * Stop: no pass starts after this, every turn in flight is aborted, and the passes already
-   * running are given `drainTimeoutMs` to write their last events.
+   * Stop: no pass starts after this, every turn in flight is **handed off**, and the passes
+   * already running are given `drainTimeoutMs` to reach their next safe point.
    *
-   * The abort is what makes a drain quick — a model request is cut short, and the brain
-   * stores what the user needs to see (the partial reply, a closed span, `session.status_idle`)
-   * before it stops. The timeout is the ceiling: a pass that does not finish in time is left
-   * behind, because a shutdown that cannot finish is worse than a turn that does not.
+   * The abort carries a {@link TurnHandoff} reason (#378, P1): a shutdown is not the user's
+   * interrupt, so the brain writes nothing more and leaves the turn open. The next owner of
+   * the partition — or a `LocalScheduler` started against the same store in the next process —
+   * finds it with `findSessionsNeedingWork` and finishes it. The timeout is the ceiling: a pass
+   * that does not reach a safe point in time is left behind, which is safe because its writes
+   * are fenced and the log still holds the open turn.
    *
    * @param options.drainTimeoutMs how long to wait for the passes in flight; defaults to 5000
    */
@@ -354,7 +363,7 @@ export class SessionRunner {
       if (handle === undefined) {
         continue
       }
-      handle.controller.abort()
+      handle.controller.abort(new TurnHandoff('shutdown'))
       if (handle.pass !== null) {
         passes.push(handle.pass)
       }
@@ -431,6 +440,12 @@ export class SessionRunner {
         // (the brain reads the log before it decides) is exactly the case the flag exists for,
         // and dropping it would leave the work unclaimed until the process restarted.
         if (outcome.outcome === 'noop' && !handle.woken) {
+          break
+        }
+        // A handoff ends the pass **here**, whatever the log says: the turn is open on
+        // purpose, so `#hasMoreWork` would answer yes and this process would start another
+        // local turn for work it has just given away (#378, P1). The next owner runs it.
+        if (outcome.outcome === 'handed_off') {
           break
         }
         // Read the log first, then the flag: a `wake` that lands during the read is seen by

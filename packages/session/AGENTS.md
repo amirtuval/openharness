@@ -466,6 +466,15 @@ turn again. `findSessionsNeedingWork` treats both open states as work — and, b
 user events, a third case: a session whose last turn ended `requires_action` and which holds a
 `user.tool_confirmation` answering one of the calls it waits on (epic #303, X6; #309).
 
+**`findSessionsWaiting(partitions)`** is the future half of the task-wait case (#378, P1). A
+session whose last turn ended `waiting_on_tasks` is not work until its deadline passes, so the
+work scan leaves it alone; but the timer that would wake it at the deadline lived in the
+process that ran the turn. This read answers `SessionTaskWait[]` — the session and the instant
+the log recorded — for the waits still ahead of their time, so a scheduler that has just
+acquired the partition can arm the same timer. It reads only the newest status event and skips
+a wait a rewind covered, exactly as the passed-deadline case does. The conformance suite asks
+both stores for the future and the answered case.
+
 **Usage reads** (#247) are the one place the contract asks a question of many sessions at
 once, and the reason it is a method rather than a caller's loop. `listModelRequests({ ownerId,
 from, to })` answers the model requests one **owner's** sessions recorded in a half-open UTC

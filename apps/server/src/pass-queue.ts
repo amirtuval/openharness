@@ -1,4 +1,4 @@
-import type { SessionId } from '@openharness/protocol'
+import type { SessionId, Timestamp } from '@openharness/protocol'
 import type { PartitionFence } from '@openharness/session'
 
 import { DEFAULT_DRAIN_TIMEOUT_MS, withTimeout } from './runner'
@@ -233,24 +233,34 @@ export class PassQueue {
   }
 
   /**
-   * What a finished pass leaves behind: a timer, if it ended waiting on background tasks.
+   * Arm (or re-arm) the timer for a session waiting on background tasks (#343).
    *
    * A wait holds nothing — no lease, no slot, no open request (S5) — so the only thing that
-   * resumes it on time is a clock somewhere, and this is where the process's is. The timer asks
-   * the queue for another pass at the deadline, and that turn answers the wait as timed out (or
-   * finds it already answered, and does nothing). A later pass for the same session replaces
-   * the timer rather than stacking one behind it, and a queue that is stopping arms nothing.
+   * resumes it on time is a clock somewhere. The timer asks the queue for another pass at the
+   * deadline, and that turn answers the wait as timed out (or finds it already answered, and
+   * does nothing). One timer per session: a later arm replaces the earlier one rather than
+   * stacking behind it, and a queue that is stopping arms nothing.
+   *
+   * A scheduler calls this when it **acquires** a partition whose sessions are already waiting
+   * (#378, P1): the process that ran the turn and armed the original timer may be gone, and
+   * without this the wait would sit until the next sweep — `OPENHARNESS_SWEEP_MS`, a minute —
+   * rather than waking at its own deadline. The deadline is the log's
+   * (`session.status_idle.stop_reason.deadline`), so the new owner arms exactly what the old
+   * one would have.
+   *
+   * @param deadline the instant the log recorded, as an ISO timestamp
    */
-  #afterPass(sessionId: SessionId, outcome: TurnOutcome): void {
-    const existing = this.#waits.get(sessionId)
-    if (existing !== undefined) {
-      clearTimeout(existing)
-      this.#waits.delete(sessionId)
-    }
-    if (this.#stopped || outcome.waiting === undefined) {
+  armWait(sessionId: SessionId, deadline: Timestamp): void {
+    if (this.#stopped) {
       return
     }
-    const delayMs = Math.max(0, Date.parse(outcome.waiting.deadline) - Date.now())
+    this.#clearWait(sessionId)
+    const delayMs = Math.max(0, Date.parse(deadline) - Date.now())
+    if (!Number.isFinite(delayMs)) {
+      // A deadline the log cannot be read as an instant is not one this process can arm; the
+      // sweep's passed-deadline scan is the safety net either way.
+      return
+    }
     const timer = setTimeout(() => {
       this.#waits.delete(sessionId)
       this.request(sessionId)
@@ -259,6 +269,29 @@ export class PassQueue {
     // a deadline an hour away is a process that should be able to exit.
     timer.unref?.()
     this.#waits.set(sessionId, timer)
+  }
+
+  /**
+   * What a finished pass leaves behind: a timer, if it ended waiting on background tasks.
+   *
+   * A turn that ended any other way has no wait left, so the timer for the session is cleared
+   * — a stale one would wake a session nobody is waiting on.
+   */
+  #afterPass(sessionId: SessionId, outcome: TurnOutcome): void {
+    if (this.#stopped || outcome.waiting === undefined) {
+      this.#clearWait(sessionId)
+      return
+    }
+    this.armWait(sessionId, outcome.waiting.deadline)
+  }
+
+  /** Drop the deadline timer for a session, if it has one. */
+  #clearWait(sessionId: SessionId): void {
+    const existing = this.#waits.get(sessionId)
+    if (existing !== undefined) {
+      clearTimeout(existing)
+      this.#waits.delete(sessionId)
+    }
   }
 
   /** Report a failed pass without ever letting it escape: the reporter is the only listener. */

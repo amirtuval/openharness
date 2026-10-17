@@ -859,7 +859,12 @@ append path, and the **wake**, so a chat reacts on its own instead of waiting fo
   handed out (`TurnOutcome.waiting`), and that timer asks the queue for one more pass. A wait
   that outlives the process is recovered by `findSessionsNeedingWork`, which reports a
   `waiting_on_tasks` session whose deadline has passed (#343) — the two paths are the same turn
-  as far as the brain is concerned.
+  as far as the brain is concerned. Since #378, a wait whose partition **moves** before its
+  deadline is armed by the new owner too: `SessionStore.findSessionsWaiting` reports the waits
+  still ahead of their time (the future half of that scan), and both `LocalScheduler.start()`
+  and the partition scheduler's acquire/sweep arm each through `PassQueue.armWait`. Without it
+  the timer was the old process's and the wait would resume only at the sweep after it was due
+  — up to a minute late.
 - **A deployment that wired no subagent runtime offers the five to nobody** (#365). The loop
   takes them out of the offer whatever its registry carries: four of them could only answer
   `HARNESS_ANSWERED`, and an offered `agent_wait` would park a turn for its whole deadline with no
@@ -1433,8 +1438,8 @@ the pass already running for it; `interrupt`
 aborts that pass's turn, and _starts a turn if none was running_, because a queued
 `user.interrupt` still has to be claimed (the turn's idle event carries the claim, P4). At
 most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait their turn.
-`stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
-write their last events.
+`stop()` accepts nothing more, **hands the turns in flight off** (#378, P1 — the shutdown abort
+leaves them open for the next process) and gives them the drain timeout to reach that point.
 
 #### Named credentials, Azure OpenAI, custom endpoints, Amazon Bedrock and Google Vertex (epic #245, A3a/A3b/A3c/A3d)
 
@@ -1648,27 +1653,31 @@ only while it holds that partition's lease, writing every turn under `fence: {pa
   row in `scheduler_instances` (`heartbeatInstance`) and reads the members seen within one
   lease TTL back (`listLiveInstances`), so **share = `ceil(partitions / live members)`** and a
   scan takes free or expired partitions — never a live one — up to that share. An instance
-  holding more than its share gives the surplus up, finishing the turns in it first and then
-  releasing. There is **no periodic idle release**: an instance whose membership is only
+  holding more than its share gives the surplus up, **handing its turns off** (a
+  `TurnHandoff('partition_released')` abort) and then releasing. There is **no periodic idle
+  release**: an instance whose membership is only
   itself has the whole space as its share and keeps it; a newcomer is visible the moment it
   heartbeats, so the holder's next heartbeat releases the surplus for it — a release, not a
   steal, and never more than the share.
 - **The membership ages out with the leases** — both windows are one lease TTL: a crashed
   instance stops heartbeating, so after a TTL it is out of every peer's count at the instant
   its leases stop being renewed, and the survivors' shares grow back to the whole space.
-- **Losing a lease** — a refused renewal, or a `FencedError` out of a turn — aborts that
-  partition's turns, ends its subscription and stops it running work for it. It never crashes
-  the process. A refusal means the partition is **somebody else's** now: a lease that merely
+- **Losing a lease** — a refused renewal, or a `FencedError` out of a turn — **hands that
+  partition's turns off** (a `TurnHandoff('lease_lost')` abort leaves them open for whoever
+  owns it now), ends its subscription and stops it running work for it. It never crashes the
+  process. A refusal means the partition is **somebody else's** now: a lease that merely
   lapsed, with nobody taking it over, is renewable and kept (a lapse is stealable, not lost —
   see `@openharness/session`), so a refresh cycle that runs past the TTL because the process
   stalled or a round trip was slow costs an instance nothing. Without that rule an instance
-  would drop every partition it held on one late cycle — aborting and re-running the turns in
-  them — for no reason, since no peer ever wanted them.
-- **`stop()`** drains the turns in flight, deletes the membership row (so peers stop counting
-  the instance at once) and then releases every lease, so the next instance takes over at its
-  next heartbeat instead of waiting out the TTL. A lease whose acquire was in flight when the
-  stop began is released too, as soon as the scan sees the instance stopped — a stop never
-  leaves a live lease (and so a stranded, unserved partition) behind.
+  would drop every partition it held on one late cycle — handing the turns in them off — for
+  no reason, since no peer ever wanted them.
+- **`stop()`** drains the turns in flight — **handing them off**, not interrupting them
+  (`TurnHandoff('shutdown')`), so the next owner finishes each request (#378, P1) — deletes the
+  membership row (so peers stop counting the instance at once) and then releases every lease,
+  so the next instance takes over at its next heartbeat instead of waiting out the TTL. A
+  lease whose acquire was in flight when the stop began is released too, as soon as the scan
+  sees the instance stopped — a stop never leaves a live lease (and so a stranded, unserved
+  partition) behind.
 - **`pause()`/`resume()`** stop and restart the timers without giving anything up: what a
   wedged process looks like from the outside, and what the zombie tests use.
 - **`heldPartitions()`** is what an instance owns right now.
@@ -1712,10 +1721,13 @@ partition leases, listens with `onPartitionSignal`, and calls the same
 scheduler above decides _which_ sessions are owned; the runner decides _how_ they are run.
 
 `run`'s optional `signal` is the other half of that: "this process should not be running this
-session any more" — a shutdown, or a lease given up. A pass whose signal is already aborted
-writes nothing and answers `noop`; one aborted mid-turn lets the turn end the way an interrupt
-does and then stops instead of looking for more work. Nothing is lost either way: the work is in
-the log, and the next owner finds it with `findSessionsNeedingWork`.
+session any more" — a shutdown, or a lease given up. The schedulers abort it with a
+`TurnHandoff` reason (#378, P1), so an abort mid-turn **hands the turn off**: the brain writes
+nothing more and leaves it open, the pass stops instead of looking for more work, and the
+partition's next owner finishes the turn with the inherited-turn machinery a crash uses. (The
+runner's `stopSession` and `abort` carry no such reason — a delete, a rewind and a user's
+interrupt are still interruptions.) Nothing is lost either way: the work is in the log, and the
+next owner finds it with `findSessionsNeedingWork`.
 
 **A session that vanishes is not a failure** (U5). A hard delete removes the session while a
 pass may still be running for it, so the runner treats `SessionNotFoundError` as an answer
@@ -1936,12 +1948,13 @@ cannot trace is still a server. `shutdown` flushes the tracer last of all, after
 ## Shutdown
 
 `SIGTERM` / `SIGINT` shut down in a fixed order: stop accepting requests, drain the scheduler
-(abort the turns in flight, give them `OPENHARNESS_DRAIN_TIMEOUT_MS` to write their last
-events), drop the connections still open — including SSE streams, which would otherwise never
-end — and close the store. A second signal is ignored rather than allowed to interrupt the
-drain. The drain starts the instant `shutdown()` is called — before the listener closes —
-and `GET /ready` answers 503 from that moment, so a load balancer stops sending traffic
-before the instance stops serving it (#151).
+(the turns in flight are **handed off** — aborting them with a `TurnHandoff` reason, so they
+are left open for the next owner instead of ending as interrupted — and given
+`OPENHARNESS_DRAIN_TIMEOUT_MS` to reach that point), drop the connections still open —
+including SSE streams, which would otherwise never end — and close the store. A second signal
+is ignored rather than allowed to interrupt the drain. The drain starts the instant
+`shutdown()` is called — before the listener closes — and `GET /ready` answers 503 from that
+moment, so a load balancer stops sending traffic before the instance stops serving it (#151).
 
 ## Public API
 

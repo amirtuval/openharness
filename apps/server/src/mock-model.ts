@@ -38,6 +38,8 @@ import { TEST_TOOL_NAME } from './tools'
  * | anything else            | the message echoed back in {@link MOCK_ECHO_CHUNKS} chunks, one delay each        |
  * | `__slow__`               | {@link MOCK_SLOW_CHUNKS} chunks over about {@link MOCK_SLOW_TOTAL_MS}, so a turn  |
  * |                          | can be interrupted, killed and resumed mid-stream                                 |
+ * | `__slow_tool__`          | the same slow reply, then a call to the test `echo` tool (#378): one turn long    |
+ * |                          | enough to span a rolling restart **and** with a tool step in it                   |
  * | `__hold__`               | one chunk, and then nothing: the request stays open until it is aborted, so a     |
  * |                          | test can hold a turn open as long as it needs and release it itself               |
  * | `__fail_retryable__`     | HTTP 503 (`model_overloaded_error`) on the *first* attempt, then the echo         |
@@ -61,6 +63,16 @@ export const MOCK_ECHO_CHUNK_DELAY_MS = 25
 
 /** The marker that makes the model stream slowly, so a turn can be interrupted mid-flight. */
 export const MOCK_SLOW_MARKER = '__slow__'
+
+/**
+ * The marker that makes the model stream slowly **and then call the test `echo` tool**
+ * (#378, P1), so one turn is long enough to span a rolling restart and has a tool step in it.
+ *
+ * The text after the marker is the tool's input, exactly as `__tool__`'s is. The slow half is
+ * the same paced reply `__slow__` streams, so a turn is in flight for about ten seconds before
+ * its call; the request after the tool answers quickly with what the tool said.
+ */
+export const MOCK_SLOW_TOOL_MARKER = '__slow_tool__'
 
 /** How many chunks a `__slow__` reply is streamed in. */
 export const MOCK_SLOW_CHUNKS = 40
@@ -429,6 +441,17 @@ export function planFor(message: string, attempt: number): ModelPlan {
       chunks: [],
       delayMs: 0,
       error: providerError(503, 'the test model is briefly overloaded'),
+    }
+  }
+  // Before `__slow__`: the two markers share a prefix, and the longer one has to win.
+  if (message.startsWith(MOCK_SLOW_TOOL_MARKER)) {
+    const argument = message.slice(MOCK_SLOW_TOOL_MARKER.length).trim()
+    return {
+      chunks: chunkText(slowReplyText(), MOCK_SLOW_CHUNKS),
+      delayMs: MOCK_SLOW_CHUNK_DELAY_MS,
+      toolCalls: [
+        { name: TEST_TOOL_NAME, input: { text: argument.length > 0 ? argument : message } },
+      ],
     }
   }
   if (message.startsWith(MOCK_SLOW_MARKER)) {

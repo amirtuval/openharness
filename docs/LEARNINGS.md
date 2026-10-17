@@ -225,6 +225,21 @@ loses nothing because nothing was ever in memory — the new owner finds the tur
 opened (`getTurnState` says `running` or `unfinished`), closes the orphaned span with `brain_lost`
 and runs it again, making a model request only if some claimed message still lacks a reply.
 
+**An abort has to carry who asked for it.** A `SIGTERM`, a surplus partition given back and a
+lost lease all reach the turn as the same `AbortSignal` a user's Stop does — and until
+[#378](https://github.com/amirtuval/openharness/issues/378) the brain could only read
+`signal.aborted`, so every deploy stored the partial reply, closed the span `interrupted` and
+went idle, and the user's answer was cut off for good. The scheduler now passes a distinct
+reason (`controller.abort(new TurnHandoff(...))`, `packages/brain/src/handoff.ts`) and the
+brain leaves the turn **open** instead: nothing more is written, the partition's next owner
+closes the span as `brain_lost` and re-issues the request, and the same crash machinery makes
+the deploy invisible. The abort reason is the only thing that can distinguish the two —
+`abort()` with no reason keeps today's user interrupt exactly. Two consequences are worth
+keeping in mind: a handoff is only observed between appends, so a step is never half-recorded
+(the multi-event success commit is one append), and a tool step cut off mid-run keeps its calls
+but not their results — the next owner answers those `execution lost` (X3), never "Interrupted
+by the user."
+
 **Configuration that is self-defeating is refused at boot, and shutdown has to hand back both
 halves in order.** A heartbeat at or above the lease TTL is a partition handing itself over every
 cycle, and `SCHEDULER=postgres` without a `DATABASE_URL` fails too, because partition leases are a
@@ -358,6 +373,19 @@ SQL is generated verbatim from its CLI with its migrator disabled, and a plugin 
 without a matching migration is a runtime failure rather than a startup one — a Postgres test
 asserting Better Auth's schema check passes on the migrated database is the only thing that catches
 it ([`packages/session/docs/postgres.md`](../packages/session/docs/postgres.md)).
+
+**Re-running idempotent DDL on every boot is not free: it deadlocks with a live log write.**
+Because the migrator has no ledger, a pod that boots during a rolling update re-executes every
+migration — including `create index if not exists` (a `SHARE` lock on `events`) and
+`drop table if exists` (`ACCESS EXCLUSIVE`) — in one transaction, while the old pods are
+streaming `insert into events`. Observed while building the rolling-restart e2e: Postgres
+reported `deadlock detected`, and the loser was either the boot (the replacement never came up)
+or the turn (a chunk's append surfaced as `unknown_error`). The transaction and the advisory
+lock only serialize migrations against each other; nothing serializes DDL against writes.
+Starting the surge replicas before the turns makes an e2e reproducible; a deployment that boots
+replicas mid-load needs a migration ledger (or DDL that does not take conflicting locks) — a
+follow-up, not something the scheduler can fix ([#378](https://github.com/amirtuval/openharness/issues/378),
+[`e2e/src/rolling-restart.test.ts`](../e2e/src/rolling-restart.test.ts)).
 
 **Never read `now()` in the store; take a `Clock`, and make ids compare byte-for-byte.** Every
 timestamp and lease-expiry comparison comes from an injected clock, which is what makes the

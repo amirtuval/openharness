@@ -205,9 +205,21 @@ export class LocalScheduler implements SessionScheduler {
   }
 
   async start(): Promise<void> {
-    const sessions = await this.#store.findSessionsNeedingWork(partitions(this.#partitionCount))
+    const all = partitions(this.#partitionCount)
+    const sessions = await this.#store.findSessionsNeedingWork(all)
     for (const sessionId of sessions) {
       this.#queue.request(sessionId)
+    }
+    // A session that was waiting on background tasks when the last process stopped holds no
+    // slot and no timer this process knows about (#378, P1). The log records the deadline, so
+    // recovery arms it here — otherwise the wait would not even reach the sweep's past-deadline
+    // scan until a minute after it was due. A session the work scan just queued needs no timer:
+    // the turn it runs re-reads the wait (and arms one from its outcome if it goes back to it).
+    const working = new Set(sessions)
+    for (const wait of await this.#store.findSessionsWaiting(all)) {
+      if (!working.has(wait.sessionId)) {
+        this.#queue.armWait(wait.sessionId, wait.deadline)
+      }
     }
   }
 

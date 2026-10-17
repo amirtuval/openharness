@@ -1,10 +1,11 @@
-import type {
-  ContextCompactionOption,
-  ContextStrategy,
-  ModeResolver,
-  ModelFactory,
-  ReasoningSupportFor,
-  RetryPolicy,
+import {
+  TurnHandoff,
+  type ContextCompactionOption,
+  type ContextStrategy,
+  type ModeResolver,
+  type ModelFactory,
+  type ReasoningSupportFor,
+  type RetryPolicy,
 } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT, partitionOf, type SessionId } from '@openharness/protocol'
 import {
@@ -166,8 +167,14 @@ export interface PostgresPartitionSchedulerOptions {
   readonly onNotice?: (message: string) => void
 }
 
-/** What a pass runs under, resolved from the lease this instance holds for its partition. */
-const STOPPED_CONTEXT = { signal: AbortSignal.abort() }
+/**
+ * What a pass runs under when its partition is not this instance's any more.
+ *
+ * The signal is already aborted, so {@link SessionRunner} starts no turn at all; the reason is
+ * a handoff anyway, so if a pass is ever reached in that window it leaves the log untouched
+ * rather than writing an interrupt for work that is simply somebody else's (#378, P1).
+ */
+const STOPPED_CONTEXT = { signal: AbortSignal.abort(new TurnHandoff('lease_lost')) }
 
 /**
  * The multi-instance {@link SessionScheduler}: partitions, leases, epochs and recovery.
@@ -557,7 +564,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       // nobody is running. A lease that is no longer ours — it expired and somebody else
       // took it — makes the release a no-op.
       unsubscribe()
-      this.#forget(partition)
+      this.#forget(partition)?.abort(new TurnHandoff('lease_lost'))
       try {
         await this.#store.releasePartition(partition, this.#instanceId, lease.epoch)
       } catch (error: unknown) {
@@ -579,6 +586,22 @@ export class PostgresPartitionScheduler implements SessionScheduler {
         return
       }
       this.#queue.request(sessionId)
+    }
+    // The waits ahead of their deadlines (#378, P1): a session whose last turn ended
+    // `waiting_on_tasks` is not work yet, but the timer that would wake it at the deadline was
+    // the previous owner's. Arm the instant the log records, here — on acquisition and on every
+    // sweep — so a partition that just changed hands wakes its waits on time instead of at the
+    // next sweep after they were due. A session the scan just queued needs no timer: the turn
+    // it runs re-reads the wait and re-arms one from its outcome if it goes back to waiting.
+    const working = new Set(sessions)
+    const waits = await this.#store.findSessionsWaiting([partition])
+    for (const wait of waits) {
+      if (!this.#held.has(partition)) {
+        return
+      }
+      if (!working.has(wait.sessionId)) {
+        this.#queue.armWait(wait.sessionId, wait.deadline)
+      }
     }
   }
 
@@ -625,10 +648,11 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       giving.flatMap((lease) => this.#sessionsOf(lease.partition)),
       this.#drainTimeoutMs,
     )
-    // Whatever is still running is aborted first: a released lease fences its writes anyway,
-    // and an abort is the version that leaves the log closed.
+    // Whatever is still running is handed off, not interrupted (#378, P1): this instance is
+    // giving the partition to a peer, so the turn is left open for that peer to finish. The
+    // handoff reason is what tells the brain not to store a partial reply or an idle here.
     for (const stopper of stoppers) {
-      stopper.abort()
+      stopper.abort(new TurnHandoff('partition_released'))
     }
     await Promise.all(
       giving.map((lease) =>
@@ -648,7 +672,11 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     if (!this.#held.has(partition)) {
       return
     }
-    this.#forget(partition)?.abort()
+    // A lease that is somebody else's is a handoff, not a user's interrupt (#378, P1): the
+    // peer that took it over owns the open turn and finishes it. The write this instance might
+    // still attempt is fenced regardless, but leaving the turn open is what makes the
+    // takeover a continuation rather than an interruption.
+    this.#forget(partition)?.abort(new TurnHandoff('lease_lost'))
     this.#notice(`lost partition ${partition}: ${reason}`)
   }
 
@@ -782,7 +810,10 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     // sitting out the whole TTL.
     const released = [...this.#held.values()]
     for (const lease of released) {
-      this.#forget(lease.partition)?.abort()
+      // `#queue.stop()` has already handed the passes in flight off with a `TurnHandoff`; this
+      // is the second half for a pass that outlived the drain timeout, so it too leaves the
+      // turn open rather than writing an interrupt on its way out (#378, P1).
+      this.#forget(lease.partition)?.abort(new TurnHandoff('shutdown'))
       try {
         await this.#store.releasePartition(lease.partition, this.#instanceId, lease.epoch)
       } catch (error: unknown) {
