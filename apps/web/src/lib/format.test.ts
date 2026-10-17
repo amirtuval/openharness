@@ -25,6 +25,12 @@ const SESSION: Session = SessionSchema.parse({
   system: null,
   mode: null,
   agent: null,
+  // An interactive top-level chat (epic #340, S1/S3): the fields every session carries now.
+  interactive: true,
+  parent_session_id: null,
+  parent_task_id: null,
+  root_session_id: 'sesn_01JZZZZZZZZZZZZZZZZZZZZZZZ',
+  depth: 0,
   created_at: '2026-10-04T10:00:00.000Z',
   updated_at: '2026-10-04T10:00:00.000Z',
 })

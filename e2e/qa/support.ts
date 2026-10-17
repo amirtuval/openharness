@@ -6,6 +6,7 @@ import {
   test as base,
   type APIRequestContext,
   type Cookie,
+  type Locator,
   type Page,
 } from '@playwright/test'
 
@@ -429,6 +430,18 @@ export async function shot(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: path.join(SHOT_DIR, `${name}.png`), animations: 'disabled' })
 }
 
+/**
+ * A screenshot of **one element**, in the same folder and under the same rules as {@link shot}.
+ *
+ * For a thing the page has grown past: the transcript sticks to the bottom and the "jump to
+ * latest" button floats over whatever is under it, so a page shot of a block halfway up is
+ * either half the block or the block with a button on top of the message below it. The page
+ * shots around it are the context; this is the evidence the block's own state needs.
+ */
+export async function shotOf(target: Locator, name: string): Promise<void> {
+  await target.screenshot({ path: path.join(SHOT_DIR, `${name}.png`), animations: 'disabled' })
+}
+
 // --- what the app does when something fails ---------------------------------------------------------
 
 /**
@@ -722,6 +735,327 @@ export async function seedTurns(
 /** The event types of a session's log, in order. */
 export async function eventTypes(request: APIRequestContext, sessionId: string): Promise<string[]> {
   return (await readEvents(request, sessionId)).map((event) => String(event.type))
+}
+
+// --- the session tree, the tasks and the tool settings (epic #340; the A8 pass, #348) ---------
+
+/** One child of a chat, as `GET /v1/sessions?parent_session_id=` answers them (S3). */
+export interface ChildSession {
+  readonly id: string
+  readonly status: string
+  readonly title: string | null
+  readonly depth: number
+}
+
+/**
+ * A session's children — the walk the sidebar's nesting and every A-case about a tree make.
+ *
+ * A child is a real session (#341), so this is the same list route with the parent filter; the
+ * specs read it rather than the card, because it is the deployment's own answer about the tree.
+ */
+export async function listChildren(
+  request: APIRequestContext,
+  parentSessionId: string,
+): Promise<ChildSession[]> {
+  const children: ChildSession[] = []
+  let page = ''
+  for (;;) {
+    const response = await request.get('/v1/sessions', {
+      params: {
+        limit: 100,
+        parent_session_id: parentSessionId,
+        ...(page === '' ? {} : { page }),
+      },
+    })
+    expect(response.status(), await response.text()).toBe(200)
+    const body = (await response.json()) as {
+      data: ChildSession[]
+      next_page: string | null
+    }
+    children.push(...body.data)
+    if (body.next_page === null) {
+      return children
+    }
+    page = body.next_page
+  }
+}
+
+/** One session's usage, with the subtree's own share (#344, S8) — `descendants`. */
+export async function sessionUsage(
+  request: APIRequestContext,
+  sessionId: string,
+): Promise<{
+  totals: { input_tokens: number; output_tokens: number }
+  descendants: { totals: { input_tokens: number; output_tokens: number } }
+}> {
+  const response = await request.get(`/v1/sessions/${sessionId}/usage`)
+  expect(response.status(), await response.text()).toBe(200)
+  return (await response.json()) as never
+}
+
+/**
+ * Set one built-in tool's settings, the way Settings → Tools writes it.
+ *
+ * A tool is replaced **whole** (`enabled` and `policy`), so this sends both — a body carrying
+ * one is the protocol's 400.
+ */
+export async function setToolSetting(
+  request: APIRequestContext,
+  name: string,
+  setting: { readonly enabled: boolean; readonly policy: 'allow' | 'ask' | 'deny' },
+): Promise<void> {
+  const response = await request.put('/v1/me/tools', { data: { builtin: { [name]: setting } } })
+  expect(response.status(), await response.text()).toBe(200)
+}
+
+/**
+ * The `tools` the newest request of a session was really offered (S5).
+ *
+ * The span is what a request carried, so this is the one reading of "was this tool offered"
+ * that cannot disagree with what the model saw.
+ */
+export async function offeredTools(
+  request: APIRequestContext,
+  sessionId: string,
+  options: { readonly afterSeq?: number } = {},
+): Promise<string[]> {
+  const events = await readEvents(request, sessionId)
+  const starts = events.filter(
+    (event) =>
+      event.type === 'span.model_request_start' &&
+      (options.afterSeq === undefined || Number(event.seq) > options.afterSeq),
+  )
+  const last = starts.at(-1)
+  if (last === undefined) {
+    throw new Error(`session ${sessionId} made no model request after ${String(options.afterSeq)}`)
+  }
+  return ((last.tools ?? []) as { name: string }[]).map((tool) => tool.name)
+}
+
+/** One task event a session's log holds, in the shape the specs read. */
+export interface TaskEvent {
+  readonly seq: number
+  readonly id?: string
+  readonly type: string
+  readonly task_id?: string
+  readonly status?: string
+  readonly kind?: string
+  readonly text?: string
+  readonly child_session_id?: string
+  readonly tool_use_id?: string
+  readonly type_name?: string
+}
+
+/** Every task event of a session's log, oldest first (S4). */
+export async function taskEvents(
+  request: APIRequestContext,
+  sessionId: string,
+): Promise<TaskEvent[]> {
+  return (await readEvents(request, sessionId)).filter((event) =>
+    String(event.type).startsWith('session.task_'),
+  ) as unknown as TaskEvent[]
+}
+
+/**
+ * The handle of the `agent` call that started the task whose start event has this `task_id`.
+ *
+ * `session.task_started` names the call that started it (`tool_use_id`, #345), which is what a
+ * card draws at and what a spec steering a helper names.
+ */
+export async function taskHandle(request: APIRequestContext, sessionId: string): Promise<string> {
+  const started = (await taskEvents(request, sessionId)).find(
+    (event) => event.type === 'session.task_started',
+  )
+  if (started?.task_id === undefined) {
+    throw new Error(`session ${sessionId} started no task`)
+  }
+  return started.task_id
+}
+
+/**
+ * Wait until a session's log holds `count` notifications of `kind` (S4).
+ *
+ * A task's news is a queued event, and the turn that folds it in is started by a signal — so a
+ * spec that asserts on it polls the log rather than the screen, exactly as `waitForIdle` does.
+ */
+export async function waitForTaskNotification(
+  request: APIRequestContext,
+  sessionId: string,
+  kind: string | undefined = undefined,
+  count = 1,
+  timeoutMs = 90_000,
+): Promise<TaskEvent[]> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const found = (await taskEvents(request, sessionId)).filter(
+      (event) =>
+        event.type === 'session.task_notification' && (kind === undefined || event.kind === kind),
+    )
+    if (found.length >= count) {
+      return found
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `session ${sessionId} never delivered ${String(count)} ${kind ?? ''} notification(s)`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
+/**
+ * Wait until the turn that answers a message has ended — the `afterSeq` form of
+ * {@link waitForIdle}.
+ *
+ * `waitForIdle` alone is not enough after a send: between `POST …/events` and the brain writing
+ * `session.status_running` the session still reads `idle`, so a wait that does not say *which*
+ * turn it means returns before that turn has started. The same rule the e2e harness documents
+ * (`waitForTurnEnd`), which is why it is here too.
+ */
+export async function waitForTurnEnd(
+  request: APIRequestContext,
+  sessionId: string,
+  afterSeq: number,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const events = await readEvents(request, sessionId)
+    const ended = events
+      .filter((event) => event.type === 'session.status_idle')
+      .some((event) => Number(event.seq) > afterSeq)
+    if (ended) {
+      return
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `session ${sessionId} never ended the turn after seq ${String(afterSeq)} (log: ${(
+          await eventTypes(request, sessionId)
+        ).join(', ')})`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
+/** Wait until a session's log holds a task status of `status` (S4). */
+export async function waitForTaskStatus(
+  request: APIRequestContext,
+  sessionId: string,
+  status: string,
+  timeoutMs = 90_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const found = (await taskEvents(request, sessionId)).some(
+      (event) => event.type === 'session.task_status' && event.status === status,
+    )
+    if (found) {
+      return
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`session ${sessionId} never reached task status ${status}`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
+/** Create a mode — a **subagent type** when it carries a `subagent_description` (#342). */
+export async function createMode(
+  request: APIRequestContext,
+  body: { name: string; model: string; subagent_description?: string | null },
+): Promise<{ id: string; name: string }> {
+  const response = await request.post('/v1/me/modes', { data: body })
+  expect(response.status(), await response.text()).toBe(201)
+  return (await response.json()) as { id: string; name: string }
+}
+
+/**
+ * Create a mode, or bring the one with that name to this state — the **re-runnable** form.
+ *
+ * A name is unique per user and a user holds at most twenty modes, and the QA stack's account is
+ * the same one every run touches: a spec that created a mode per run would fail on the twenty-first
+ * (and a second run of the same spec would meet its own 409). A fixed name plus an update is what
+ * the CLI spec's `createSubagentType` does, in one step.
+ */
+export async function ensureMode(
+  request: APIRequestContext,
+  body: { name: string; model: string; subagent_description?: string | null },
+): Promise<{ id: string; name: string }> {
+  const created = await request.post('/v1/me/modes', { data: body })
+  if (created.status() === 201) {
+    return (await created.json()) as { id: string; name: string }
+  }
+  expect(created.status(), await created.text()).toBe(409)
+  const modes = await request.get('/v1/me/modes')
+  expect(modes.status(), await modes.text()).toBe(200)
+  const found = ((await modes.json()) as { data: { id: string; name: string }[] }).data.find(
+    (mode) => mode.name === body.name,
+  )
+  expect(
+    found,
+    `neither created nor found: a 409 that is not a duplicate name means the account is at the ` +
+      `mode limit (a QA stack that has run the suite many times leaks one mode per run)`,
+  ).toBeDefined()
+  const updated = await request.post(`/v1/me/modes/${found?.id ?? ''}`, {
+    data: {
+      model: body.model,
+      subagent_description: body.subagent_description ?? null,
+    },
+  })
+  expect(updated.status(), await updated.text()).toBe(200)
+  return (await updated.json()) as { id: string; name: string }
+}
+
+/** Delete a mode by name, when it is there — the cleanup a re-runnable UI case needs. */
+export async function deleteModeNamed(request: APIRequestContext, name: string): Promise<void> {
+  const modes = await request.get('/v1/me/modes')
+  expect(modes.status(), await modes.text()).toBe(200)
+  for (const mode of ((await modes.json()) as { data: { id: string; name: string }[] }).data) {
+    if (mode.name === name) {
+      const removed = await request.delete(`/v1/me/modes/${mode.id}`)
+      expect(removed.status(), await removed.text()).toBe(204)
+    }
+  }
+}
+
+/** Update a mode — the write that makes "an edit applies to the second start" testable (#342). */
+export async function updateMode(
+  request: APIRequestContext,
+  modeId: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const response = await request.post(`/v1/me/modes/${modeId}`, { data: body })
+  expect(response.status(), await response.text()).toBe(200)
+}
+
+/**
+ * The `agent` tool's own result text for a call, oldest first — its `content` joined.
+ *
+ * The tool's **description** is not in the log (a span records `{ name, source }` alone), but
+ * what the model is told when it names a type that does not exist is: the refusal answers with
+ * the types that **are** available, which is the same list the description is built from (S2).
+ * That makes "`general-purpose` first, and only modes with a description" assertable from the
+ * log — and it is the sentence a model really reads.
+ */
+export async function agentToolResults(
+  request: APIRequestContext,
+  sessionId: string,
+): Promise<{ text: string; isError: boolean }[]> {
+  const events = await readEvents(request, sessionId)
+  const calls = new Set(
+    events
+      .filter((event) => event.type === 'agent.tool_use' && event.name === 'agent')
+      .map((event) => String(event.id)),
+  )
+  return events
+    .filter((event) => event.type === 'agent.tool_result' && calls.has(String(event.tool_use_id)))
+    .map((event) => ({
+      text: ((event.content ?? []) as { text?: string }[])
+        .map((block) => block.text ?? '')
+        .join(''),
+      isError: event.is_error === true,
+    }))
 }
 
 /** Wait until the session has no turn open — the log says `status_idle` last. */

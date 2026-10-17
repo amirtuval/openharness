@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
   EVENT_TYPES,
+  MESSAGE_PARENT_TOOL_NAME,
+  TASK_DESCRIPTION_MAX_LENGTH,
   TODO_WRITE_TOOL_NAME,
   readTodoList,
   type AgentMessageEvent,
@@ -17,6 +22,10 @@ import { createBundledRegistry } from './catalog/registry'
 import { LocalScheduler } from './scheduler'
 import { createTurnTools, TEST_TOOL_NAME } from './tools'
 import {
+  MESSAGE_PARENT_MARKER,
+  MOCK_AGENT_MARKER,
+  MOCK_AGENT_MESSAGE_MARKER,
+  MOCK_AGENT_STOP_MARKER,
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
   MOCK_HOLD_TEXT,
@@ -353,5 +362,71 @@ describe('chunkText', () => {
 
     expect(chunks.join('')).toBe('🙂🙂')
     expect(chunks.every((chunk) => Array.from(chunk).length === 1)).toBe(true)
+  })
+})
+
+describe('the subagent markers (epic #340, S5; #344)', () => {
+  it('turns `__agent__ <type> | <prompt>` into an `agent` call', () => {
+    expect(
+      planFor(`${MOCK_AGENT_MARKER} researcher | Read the rewind code and report.`, 1).toolCalls,
+    ).toEqual([
+      {
+        name: AGENT_TOOL_NAME,
+        input: {
+          type: 'researcher',
+          description: 'Read the rewind code and report.',
+          prompt: 'Read the rewind code and report.',
+        },
+      },
+    ])
+  })
+
+  it('derives the description from the prompt’s first line, collapsed and bounded', () => {
+    // A multi-line prompt is the common shape — a QA spec writes a paragraph — and the
+    // description is a card's caption: the first line, one line, inside the protocol's cap.
+    const plan = planFor(
+      `${MOCK_AGENT_MARKER} general-purpose | First line.
+Second line, which is not the description.`,
+      1,
+    )
+    expect(plan.toolCalls?.[0]?.input).toEqual({
+      type: 'general-purpose',
+      description: 'First line.',
+      prompt: `First line.
+Second line, which is not the description.`,
+    })
+
+    const long = planFor(
+      `${MOCK_AGENT_MARKER} general-purpose | ${'x'.repeat(TASK_DESCRIPTION_MAX_LENGTH + 50)}`,
+      1,
+    )
+    const description = (long.toolCalls?.[0]?.input as { description: string }).description
+    expect(description.length).toBe(TASK_DESCRIPTION_MAX_LENGTH)
+    expect(description.endsWith('…')).toBe(true)
+  })
+
+  it('turns `__agent_message__ <task_id> | <text>` into an `agent_message` call', () => {
+    expect(planFor(`${MOCK_AGENT_MESSAGE_MARKER} task_1 | keep going`, 1).toolCalls).toEqual([
+      { name: AGENT_MESSAGE_TOOL_NAME, input: { task_id: 'task_1', text: 'keep going' } },
+    ])
+    // A marker with no text still sends something: the tool's own schema refuses an empty one,
+    // and a test that only wants to poke a task should not have to write a sentence.
+    expect(planFor(`${MOCK_AGENT_MESSAGE_MARKER} task_1`, 1).toolCalls?.[0]?.input).toEqual({
+      task_id: 'task_1',
+      text: 'keep going',
+    })
+  })
+
+  it('turns `__agent_stop__ <task_id>` into an `agent_stop` call', () => {
+    expect(planFor(`${MOCK_AGENT_STOP_MARKER} task_1`, 1).toolCalls).toEqual([
+      { name: AGENT_STOP_TOOL_NAME, input: { task_id: 'task_1' } },
+    ])
+  })
+
+  it('turns `__message_parent__ <note>` into a `message_parent` call, note whole', () => {
+    // The note is prose, and nothing in it is a field: the rest of the message is the text.
+    expect(planFor(`${MESSAGE_PARENT_MARKER} half way | still going`, 1).toolCalls).toEqual([
+      { name: MESSAGE_PARENT_TOOL_NAME, input: { text: 'half way | still going' } },
+    ])
   })
 })

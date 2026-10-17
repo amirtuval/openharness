@@ -78,11 +78,12 @@ closes — which holds `/model` (switch models), `/providers` (connect a provide
 the chat), `/new` (start a new chat on the current model), `/compact [instructions]`
 (summarize the older history now, with optional guidance for the summary), `/tools` (turn the
 built-in tools on or off and set what each may do: allow, ask or deny), `/mcp` (your remote MCP
-servers), `/skills` (list, switch, remove or import a skill), `/clear` (clear the screen,
-keeping the session), `/help`, and `/exit`. The enabled skills that you can invoke are offered
-in that menu too, with their argument hints: `/release-notes v1.2` sends the message and loads
-the skill's instructions into that turn (the transcript shows the invocation as a chip, and
-the `skill` calls the model then makes as `Loaded skill …` lines). A message that starts
+servers), `/skills` (list, switch, remove or import a skill), `/agents` (this chat's background
+tasks: open one's own chat, or stop one), `/clear` (clear the screen, keeping the session),
+`/help`, and `/exit`. The enabled skills that you can invoke are offered in that menu too, with
+their argument hints: `/release-notes v1.2` sends the message and loads the skill's instructions
+into that turn (the transcript shows the invocation as a chip, and the `skill` calls the model
+then makes as `Loaded skill …` lines). A message that starts
 with `//` sends a literal `/`. Ctrl+C interrupts the reply; pressed again when idle, it leaves.
 On the way out, `oh` prints the `oh -s <id>` line that resumes the chat.
 
@@ -93,6 +94,29 @@ input and result of the calls still on screen. A task list stays pinned above th
 folds it). A tool set to `ask`, and every MCP tool until you allow it, waits for your answer —
 allow once, for this chat, always, or deny — and a question from the model is answered with the
 arrow keys and Enter. If an MCP server needs signing in again mid-chat, Ctrl+R reconnects it.
+
+**A chat can hand work to a background task** (epic #340). The model starts a helper — a
+**subagent**, on a type you describe as a mode in the web app — and each task is a **card** in the
+transcript, where the call that started it was: the status, the type, the description the parent
+gave it, what the child has spent, the child's own activity as it works, what the two have said to
+each other and the task's result. `/agents` lists this chat's tasks and is the way in and out of
+them — Enter opens a task's own chat, Enter on the row at the top goes back up, and `s` stops the
+highlighted task **while it is still working**: a finished one is not something to stop, and `oh`
+says so rather than flipping it to stopped. A child's chat is a full chat, with the normal composer
+and a breadcrumb line naming the chain down to it; **Esc in one stops that child's turn**, which is
+the one thing a reader does to a helper (Ctrl+C still interrupts, and still leaves `oh` on the
+second idle press). A child's output is drawn as plain text: the terminal escape sequences a page
+or an MCP server could have left in it are stripped before anything is measured, so a helper cannot
+retitle the window or clear the screen you are reading in.
+
+`oh modes` marks a **subagent type** — a mode with a description — and prints that description
+read-only under the mode's line, with a note saying so: `oh` does not edit modes, and a description
+is what a parent model chooses a type by, so the web app's Settings → Modes is where one is
+written. The four calls that start, steer and stop a task — `agent`, `agent_message`, `agent_stop`
+and a child's `message_parent` — take **allow** or **deny** and never `ask`, because a task is drawn
+as a card rather than a call line and nothing a client could show would answer the pause:
+`oh tools --policy ask agent` is refused before it writes anything, and `/tools`' ←/→ skips `ask` on
+those rows. `agent_wait` is unaffected — its pause is a task wait.
 
 When a chat's context fills up, the server summarizes the older history and the chat carries on
 from the summary and the recent messages; the transcript keeps the whole conversation, with a

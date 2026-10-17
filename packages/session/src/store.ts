@@ -18,9 +18,13 @@ import type {
   SessionId,
   SessionRewindEvent,
   SessionRewindEventInput,
+  SessionTaskNotificationEvent,
   StoredEvent,
   StoredEventType,
   StreamEvent,
+  TaskId,
+  TaskNotificationKind,
+  TaskStatus,
   Timestamp,
   UpdateAgentRequest,
   UpdateModeRequest,
@@ -43,7 +47,9 @@ export type { UserPreferences } from '@openharness/protocol'
 
 /**
  * A user's mode (epic #245, M6): a named preset of a model, a reasoning effort, a
- * system-prompt addition and an optional override of which built-in tools are on (#307).
+ * system-prompt addition, an optional override of which built-in tools are on (#307) and an
+ * optional **subagent description** — what the mode is good for when it is offered to a
+ * parent model as a subagent type (#340, S2; #342).
  *
  * The protocol defines it; it is re-exported here because it is the vocabulary of the mode
  * methods below ({@link SessionStore.createMode}, `getMode`, `listModes`, `updateMode`,
@@ -220,7 +226,8 @@ export interface SessionStore {
    * current instant (epic #245, M6).
    *
    * A mode is a user's own named preset — a model, a reasoning effort, a system-prompt
-   * addition and an optional tool override behind a stable name (#307) — so it is created
+   * addition, an optional tool override and an optional subagent description behind a stable
+   * name (#307; #342) — so it is created
    * like the other per-user resources: the
    * owner comes from the caller (the server passes the authenticated user), never from the
    * request, and it is stored as the mode's `owner_id`, which never changes.
@@ -308,12 +315,24 @@ export interface SessionStore {
    * — the same projection {@link SessionStore.appendEvents} describes. The session is `idle`
    * with no status events.
    *
+   * Since epic #340 a session may be created **as a child of another** (S3): pass
+   * `options.parentSessionId`, and the created session takes the parent's owner, gets no
+   * history of its own, and carries the tree the store derives — `root_session_id` from the
+   * parent's root, `depth` one deeper, `parent_task_id` from `options.parentTaskId`. What the
+   * child runs is still whatever `agentId`/`options` say, exactly as for a top-level chat.
+   * `options.interactive` (default `true`) says whether a person is on the other end (S1);
+   * a child is normally created `interactive: false`.
+   *
    * @param agentId the agent whose configuration the session snapshots, or `null` for a
    *   model-first session — one created from `options.model` alone
    * @throws AgentNotFoundError when `agentId` names no agent, or one owned by somebody else —
    *   the same answer either way, so the error does not leak that the agent exists
+   * @throws SessionNotFoundError when `options.parentSessionId` names no session, or one owned
+   *   by somebody else — the same answer either way, so a child cannot be hung off a session
+   *   the caller cannot see (A4)
    * @throws RangeError when there is no agent and no `options.model` either — the protocol
-   *   requires one of the two, and the store refuses to invent a configuration
+   *   requires one of the two, and the store refuses to invent a configuration — or when
+   *   `options.parentTaskId` names a task with no `options.parentSessionId` beside it
    */
   createSession(agentId: AgentId | null, options: CreateSessionOptions): Promise<Session>
 
@@ -346,9 +365,51 @@ export interface SessionStore {
    * **Owner-scoped, and the owner is required** (epic #65, A4): only that owner's sessions
    * come back, and the `agentId` filter narrows inside them.
    *
+   * `parentSessionId` narrows by the tree (epic #340, S3): a session id answers that session's
+   * children, `null` answers only top-level chats, and an omitted field filters by parent not
+   * at all. The filter is applied **inside** the owner scope like every other narrowing, so
+   * another user's parent id is an empty page rather than an error.
+   *
    * `page` and `next_page` are the protocol's opaque keyset cursor, passed through untouched.
    */
   listSessions(options: ListSessionsOptions): Promise<ListSessionsResponse>
+
+  /**
+   * The descendants of a session — its children, their children, and so on — oldest first, as
+   * ids (epic #340, S3/S7).
+   *
+   * This exists for the two things that have to act on a whole subtree: **deleting** a session
+   * deletes its descendants (S7), and the server stops each descendant's turn before the rows
+   * go; and a caller applying S6's cap asks how much of a tree is live
+   * ({@link SessionStore.countLiveDescendants}). The order is `(created_at, id)` ascending
+   * within each level and level by level from the named session down, so a caller that stops
+   * what it is handed does so parents before children.
+   *
+   * **Owner-scoped**: another user's session, or an id nothing has, answers an empty list,
+   * exactly as {@link SessionStore.listSessions} answers `data: []` for both.
+   */
+  listDescendants(sessionId: SessionId, options: OwnerScope): Promise<SessionId[]>
+
+  /**
+   * How many of a session's descendants are **live** (epic #340, S6): the number a caller
+   * compares against `OPENHARNESS_MAX_LIVE_TASKS` before it starts another subagent.
+   *
+   * A descendant is live while its turn is not finished — a turn is open (running, or one
+   * nothing closed), a user event is waiting for a turn that has not started, or the last turn
+   * ended paused on the user (`requires_action`, #309). That last case is what keeps a child
+   * parked in `agent_wait` (#344) inside the cap: to the task vocabulary of S4/S5 it is still
+   * running, and a chat that could park ten children and start ten more would not be capped at
+   * all. A descendant whose turn has finished and which has nothing waiting is not live, even
+   * though it is still there to be continued.
+   *
+   * The count is over the subtree of the named session **excluding it**, so passing a
+   * top-level chat counts its whole tree, which is the S6 reading ("per root chat"). It is
+   * unscoped like the other reads the brain makes for a session rather than for a user.
+   *
+   * @throws SessionNotFoundError when the session does not exist — a caller with a real
+   *   session never sees it, and an id that names nothing is a bug rather than a count of zero
+   */
+  countLiveDescendants(sessionId: SessionId): Promise<number>
 
   /**
    * Change a session's title, and return the session as it is afterwards — or `null` when no
@@ -381,6 +442,11 @@ export interface SessionStore {
    * else — exactly the same answer either way, so nothing leaks, just as
    * {@link SessionStore.getSession} answers `null` for both.
    *
+   * A session's **descendants go with it** (epic #340, S7): a child belongs to its parent, so
+   * one transaction removes the session, its whole log, and every session below it in the
+   * tree, each announced to its own subscribers as {@link SessionStore.listDescendants}
+   * describes. Nothing is left pointing at a session that is gone.
+   *
    * This is the deliberate second exception to "events are never deleted", beside
    * {@link SessionStore.compact} (epic #116 U5, issue #111), and unlike compaction it is
    * **irreversible**: one transaction removes the session's row and every row keyed by the
@@ -394,7 +460,8 @@ export interface SessionStore {
    * held is free again for a later append.
    *
    * The deletion is announced to the session's subscribers: each one receives a final
-   * `session.deleted` `StreamEvent` naming the session, and the subscription ends with it —
+   * `session.deleted` `StreamEvent` naming the session (one per session when the delete
+   * cascaded to descendants, #340 S7), and the subscription ends with it —
    * see {@link SessionStore.subscribe}.
    *
    * @returns `true` when the caller's own session was deleted, `false` otherwise
@@ -637,6 +704,64 @@ export interface SessionStore {
   getPendingUserEvents(sessionId: SessionId): Promise<UserEvent[]>
 
   /**
+   * The background-task notifications waiting to be folded into a turn, ordered by `seq`
+   * (epic #340, S4; issue #343).
+   *
+   * A notification is a **queued** event like a user message: stored with `processed_at: null`
+   * and claimed by the event that answers it, so "has the parent model been told?" is answered
+   * by the log. Pending is "no claim" and nothing more — a notification a recorded range
+   * supersedes is not waiting either, the rule every queued read follows (#238).
+   *
+   * The brain reads these at every request boundary: a running turn folds them into its next
+   * request exactly as it folds steering in, an idle session's work scan starts a turn for
+   * them, and a turn waiting on tasks resolves its wait with the ones for its own tasks. They
+   * are deliberately not part of {@link SessionStore.getPendingUserEvents}: a message and a
+   * task's news are both queued, but only one of them is the user talking, and a caller that
+   * wants one must not silently get the other.
+   *
+   * @throws SessionNotFoundError when the session does not exist
+   */
+  getPendingTaskNotifications(sessionId: SessionId): Promise<SessionTaskNotificationEvent[]>
+
+  /**
+   * Append a background-task notification to a session's log, **once per `source_key`**
+   * (epic #340, S4; issue #343).
+   *
+   * This is how anything reaches a session from outside it — a child session finishing its
+   * turn, a background job reporting a failure — and it is deliberately one method rather than
+   * an `appendEvents` call the caller assembles: the guarantee is exactly once, and the log is
+   * the only thing that can give it. The append is idempotent on `input.sourceKey`: a second
+   * call naming a key this session's log already holds stores **nothing** and answers the
+   * notification that is already there with `appended: false`, however many instances make the
+   * call or however often a recovery path runs. A crash between the append and whatever follows
+   * it therefore costs nothing: the delivery can be retried until it answers `appended: false`,
+   * and the parent's brain will claim the notification exactly once.
+   *
+   * The notification is stored **queued** — `processed_at: null`, claimed by the event that
+   * answers it (usually the `span.model_request_start` of the request that folds it in, and for
+   * a task wait the `agent.tool_result` that resolves it) — so nothing here waits for a turn to
+   * notice it. No fence is needed, for the same reason a user event needs none: the event is
+   * durable the moment it is stored, and the owner's brain is what claims it.
+   *
+   * **A `status` lands with it, in the same append** (epic #340, S4; #363). A child's turn end
+   * owes its parent two facts — the news, and the `session.task_status` that moves the card —
+   * and writing them as two appends left a window no recovery could repair: a crash (or a fence)
+   * between them delivered the news and nothing else, the parent's card stayed `running` for the
+   * rest of the session, and the child was not "work" for the scan because its news had landed.
+   * One append keyed by the same `sourceKey` is what makes them land together: a second call
+   * naming that key stores **neither**, so the status is written exactly once, by the one writer
+   * that also wrote the notification.
+   *
+   * @returns the stored notification, and whether this call is the one that wrote it
+   * @throws SessionNotFoundError when the session does not exist
+   * @throws RangeError when the input is not a notification the protocol would accept
+   */
+  appendTaskNotification(
+    sessionId: SessionId,
+    input: TaskNotificationInput,
+  ): Promise<TaskNotificationAppend>
+
+  /**
    * What the session's turn looks like, from the log alone.
    *
    * `idle` when no turn is open — the last status event is `session.status_idle`, or there is
@@ -804,13 +929,19 @@ export interface SessionStore {
   onPartitionSignal(partition: number, listener: PartitionSignalListener): Promise<Unsubscribe>
 
   /**
-   * The sessions in `partitions` that need work: pending user events, an open turn, or a
-   * pause whose answer has landed.
+   * The sessions in `partitions` that need work: a **queued** event nobody has claimed, an
+   * open turn, a pause whose answer has landed, or a task wait whose deadline has passed.
    *
    * This is recovery's starting point, and it is deliberately log-derived — it does not consult
    * leases, signals or any other transient state, so it answers the same thing for a partition
-   * that has just been taken over as it does for one that is running normally. A session with
-   * pending user events *and* an open turn is returned once.
+   * that has just been taken over as it does for one that is running normally. A session that
+   * needs work for several reasons at once is returned once.
+   *
+   * Queued means what {@link SessionStore.getPendingUserEvents} and
+   * {@link SessionStore.getPendingTaskNotifications} read: the user's own events, and — since
+   * epic #340 S4 (#343) — a background task's notification. A notification is written by
+   * whatever ran the task, on an instance that may not be this one and with no way to signal
+   * this session's owner, so the scan is the only thing that finds it.
    *
    * The third case is the pause (epic #303, X6; #309): a session whose last turn ended
    * `requires_action` and which now holds a `user.tool_confirmation` naming one of the calls it
@@ -818,6 +949,14 @@ export interface SessionStore {
    * user event and the session reads idle — the signal that would start the answering turn is a
    * hint, and one an instance lost before it began leaves the chat stuck until another message.
    * Asking the log here is what keeps a missed signal from stranding an answer.
+   *
+   * The fourth is the **task wait past its deadline** (epic #340, S5; #343): a session whose
+   * last turn ended `waiting_on_tasks` with a `deadline` at or before the store's clock. It is
+   * the same kind of fact as the pause's — the answer will never arrive by itself, and the
+   * scheduler's timer for it is a hint like any other — and it is what makes a wait that
+   * outlives the process that took it recoverable. A wait a notification or a message has since
+   * resolved is not this case: resolving one ends the turn, so the log's last status is a
+   * different idle event, and the deadline is only read while it is the newest status.
    *
    * The result is ordered by `(created_at, id)` ascending: oldest session first.
    */
@@ -1018,6 +1157,32 @@ export interface CreateSessionOptions {
   /** The `user.id` the session belongs to (epic #65, A4); required — nothing is unowned. */
   readonly ownerId: UserId
   /**
+   * Whether a person is on the other end (epic #340, S1); omitted, `true` — a chat someone is
+   * typing into. `false` is a session whose model cannot stop to ask anything: the brain never
+   * offers it `ask_user` and answers an `ask` call at once instead of pausing. Written once
+   * and never changed.
+   */
+  readonly interactive?: boolean
+  /**
+   * The session this one belongs to (epic #340, S3), or omitted for a top-level chat. A child
+   * is a real session that happens to have a parent: it takes **the parent's owner** and no
+   * history, and its tree fields are derived here rather than passed —
+   * `root_session_id` is the parent's root (its own id when the parent is a top-level chat)
+   * and `depth` is one more than the parent's, so no caller can write a tree that does not add
+   * up. Its first `user.message` is the prompt its parent wrote.
+   *
+   * A caller enforcing S6's nesting limit does so **before** calling this: the store writes
+   * the tree it is given, and a limit that lived here would be a deployment's policy in a
+   * contract.
+   */
+  readonly parentSessionId?: SessionId
+  /**
+   * The `task_` id the parent started this session for (epic #340, S3/S4; #343), or `null`
+   * for a child no task names. Only meaningful with {@link CreateSessionOptions.parentSessionId}:
+   * a task id without a parent is a caller error and is refused.
+   */
+  readonly parentTaskId?: TaskId | null
+  /**
    * The effective model the session runs (issue #93): the request's inline model, or a
    * per-session override of the agent's. Omitted, the agent's model is copied; without an
    * agent there is nothing to copy and a missing `model` is a `RangeError`.
@@ -1083,6 +1248,14 @@ export interface ListSessionsOptions extends OwnerScope {
   readonly page?: string
   /** Return only sessions created with this agent. The protocol's `agent_id` filter. */
   readonly agentId?: AgentId
+  /**
+   * Which parent's children to list (epic #340, S3): a session id answers that session's
+   * children, and `null` answers only top-level chats — every session whose
+   * `parent_session_id` is `null`, which is what `GET /v1/sessions` returns by default now
+   * that a chat can start one. Omitting the field does not filter by parent at all, which is
+   * how a caller lists a tree whole.
+   */
+  readonly parentSessionId?: SessionId | null
 }
 
 /** Query of {@link SessionStore.listEvents}: owner-scoped. */
@@ -1128,6 +1301,54 @@ export interface AppendEventsOptions {
 }
 
 /**
+ * A notification to write into a session's log (epic #340, S4; issue #343).
+ *
+ * The fields are the event's, minus the envelope the store assigns. `sourceKey` is the task
+ * side's own key for this notification and the whole of what makes the append idempotent; see
+ * {@link SessionStore.appendTaskNotification}.
+ */
+export interface TaskNotificationInput {
+  /** The task the notification came from: it names a `session.task_started` in the same log. */
+  readonly taskId: TaskId
+  /** What happened: a finished turn's output, a message, or a failure. */
+  readonly kind: TaskNotificationKind
+  /** The text itself — a task's output, framed as data when the parent model is told it. */
+  readonly text: string
+  /**
+   * The task side's key for this notification, e.g. `<child_session_id>:<idle seq>`.
+   *
+   * The task's own identity of "this piece of news": the same finished turn always produces
+   * the same key, so a retry, a recovery path or a second instance appending it changes
+   * nothing.
+   */
+  readonly sourceKey: string
+  /**
+   * The status this news moves the task's card to, appended **with** the notification (#363).
+   *
+   * Optional because not every notification moves a card (`message_parent`'s notes, and the
+   * inbox's own `notify`, carry news and no status), and narrow because only a finished turn's
+   * delivery has one to write: `running` belongs to the child's own turn start, and `stopped`
+   * written by an `agent_stop` is the tool's fact, not a delivery's.
+   */
+  readonly status?: TaskDeliveryStatus
+}
+
+/**
+ * The statuses a **delivery** moves a task's card to (epic #340, S4/S7; #363): a turn that
+ * ended, errored, or was stopped. `running` is not one — it is the child's own turn start — and
+ * neither is a `stopped` an `agent_stop` wrote before the child's turn ended.
+ */
+export type TaskDeliveryStatus = Extract<TaskStatus, 'idle' | 'failed' | 'stopped'>
+
+/** What {@link SessionStore.appendTaskNotification} wrote — or found already written. */
+export interface TaskNotificationAppend {
+  /** The notification in the log: the one this call wrote, or the one the key already named. */
+  readonly event: SessionTaskNotificationEvent
+  /** Whether this call is the one that stored it; `false` means the key was already there. */
+  readonly appended: boolean
+}
+
+/**
  * Proof that a write is made by the partition's current owner.
  *
  * `partition` is the one the protocol's `partitionOf(sessionId)` computes. `epoch` is what
@@ -1140,6 +1361,24 @@ export interface PartitionFence {
   /** The epoch the writer's lease gave it. */
   readonly epoch: number
 }
+
+/**
+ * How deep the tree walks go before they stop: the ceiling on a session tree's depth (#361).
+ *
+ * `listDescendants`, `countLiveDescendants` and the delete cascade all walk `parent_session_id`
+ * recursively, and the Postgres store bounds the walk so a table somebody hand-edited into a
+ * cycle terminates rather than looping (SQL has no cheap cycle check, and a `with recursive`
+ * that loops hangs the connection rather than failing). It is **not** meant to be reached: the
+ * deployment's own nesting limit is `OPENHARNESS_MAX_AGENT_DEPTH`, whose default is 3 and whose
+ * maximum the server bounds with this number, so a tree the API can build never comes near it.
+ *
+ * It lives here, in the contract, rather than in the Postgres store, precisely because the
+ * server's configuration has to know it: a nesting limit above this would let a tree be built
+ * whose bottom a walk cannot see, and a delete would leave descendants behind. The in-memory
+ * store needs no bound of its own for a tree this shape — it walks with a `seen` set that
+ * terminates on a cycle — and the configuration is what keeps the two stores' answers identical.
+ */
+export const MAX_DESCENDANT_DEPTH = 64
 
 /** A lease on a partition: who holds it, at which epoch, until when. */
 export interface PartitionLease {

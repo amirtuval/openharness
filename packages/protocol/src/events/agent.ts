@@ -129,6 +129,21 @@ export const AgentToolResultEventSchema = z.object({
    * provider's own opaque content, never this.
    */
   sources: SourcesSchema.optional(),
+  /**
+   * // extension: the queued events this result answers (epic #340, S5; issue #343).
+   *
+   * A claim belongs on the event that ends the work it consumed (P4), and one case has no other
+   * event to carry it: a **task wait** whose result *is* the notifications that resolved it. A
+   * `session.task_notification` is a queued event, so "the model has been told" must be a claim
+   * — and the append that resolves the wait writes the notifications into the result's content
+   * and lists their ids here, which is what stops the parent's next request from being handed
+   * the same notification a second time as steering.
+   *
+   * Absent for every other result this build writes, which is why the field is optional and why
+   * the remote pair ({@link AgentMcpToolResultEventSchema}) has none: the tool that waits is a
+   * built-in of this deployment, so only the built-in pair ever carries the list.
+   */
+  consumes: z.array(EventIdSchema).optional(),
 })
 
 /** A stored `agent.tool_result`, deep-readonly like every event. */

@@ -1,4 +1,4 @@
-import type { TextBlock, ToolPermission } from '@openharness/protocol'
+import type { EventId, TextBlock, ToolPermission } from '@openharness/protocol'
 import type { z } from 'zod'
 
 /**
@@ -81,6 +81,17 @@ export interface ToolExecutionContext {
    * report "this took too long" rather than be cut off can watch the same clock.
    */
   readonly timeoutMs: number
+  /**
+   * The call this is: the id of the `agent.tool_use` (or `agent.mcp_tool_use`) event the loop
+   * stored for it, which *is* the call's id (epic #303, X1).
+   *
+   * The one thing a tool is told about its own call rather than about the turn. A tool that
+   * writes an event of its own naming the call that caused it needs it — the `agent` tool's
+   * `session.task_started` carries the call's id so a client draws the task's card at the exact
+   * call (#345) — and nothing else the tool is handed can supply it: the input is the model's
+   * words and the result is only the answer. Absent when the caller knew none.
+   */
+  readonly toolUseId?: EventId
   /**
    * The per-user values the host resolved for this turn, keyed by name (epic #303, X4): a
    * service's key, an MCP server's token. `@openharness/hands` never reads the environment or

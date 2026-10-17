@@ -1,4 +1,8 @@
-import { MODE_DEFAULT_MODEL, REASONING_EFFORTS } from '@openharness/protocol'
+import {
+  MODE_DEFAULT_MODEL,
+  MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH,
+  REASONING_EFFORTS,
+} from '@openharness/protocol'
 import type {
   CreateModeRequest,
   McpServer,
@@ -50,6 +54,13 @@ interface FormState {
    * value that reads as "follow my settings" on both sides.
    */
   readonly tools: ModeToolOverride | null
+  /**
+   * What the mode is good for, when a parent model may start it as a subagent type (#342).
+   *
+   * The empty string is the form's "not a type", which is sent as `null` — the wire's one spelling
+   * of "no description", and the one the server reads as "this mode is not a subagent type".
+   */
+  readonly subagentDescription: string
 }
 
 const EMPTY: FormState = {
@@ -59,6 +70,7 @@ const EMPTY: FormState = {
   reasoningEffort: '',
   systemPromptAddition: '',
   tools: null,
+  subagentDescription: '',
 }
 
 /** The form's values from a mode being edited, or the empty form for a new one. */
@@ -73,6 +85,7 @@ function formOf(mode: Mode | null): FormState {
     reasoningEffort: mode.reasoning_effort ?? '',
     systemPromptAddition: mode.system_prompt_addition ?? '',
     tools: mode.tools,
+    subagentDescription: mode.subagent_description ?? '',
   }
 }
 
@@ -171,6 +184,7 @@ export function ModeFormDialog({
     system_prompt_addition:
       form.systemPromptAddition.trim() === '' ? null : form.systemPromptAddition,
     tools: form.tools,
+    subagent_description: form.subagentDescription.trim() === '' ? null : form.subagentDescription,
   })
 
   const canSave =
@@ -195,6 +209,7 @@ export function ModeFormDialog({
             reasoning_effort: request.reasoning_effort,
             system_prompt_addition: request.system_prompt_addition,
             tools: request.tools ?? null,
+            subagent_description: request.subagent_description ?? null,
           })
     setSaving(false)
     if (!result.ok) {
@@ -280,6 +295,28 @@ export function ModeFormDialog({
             />
             <p className="text-xs text-muted-foreground">
               Appended after the chat's own system prompt, never in place of it.
+            </p>
+          </div>
+
+          {/* What makes a mode a **subagent type** (#342): a chat's model may hand work to a
+              helper, and the kinds of helper it may start are the reader's modes that carry one
+              of these. The hint has to say what the description is *for*, because it is not a
+              note to the reader: it is the sentence the parent model chooses a type from. */}
+          <div className="space-y-1">
+            <Label htmlFor="mode-subagent">Subagent description</Label>
+            <Textarea
+              id="mode-subagent"
+              rows={2}
+              maxLength={MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH}
+              placeholder="Reviews a diff for correctness bugs."
+              value={form.subagentDescription}
+              onChange={(event) => patch({ subagentDescription: event.target.value })}
+            />
+            <p className="text-xs text-muted-foreground">
+              A mode with a description is a <strong>subagent type</strong>: a chat&apos;s model can
+              start it as a helper, and this is the sentence it chooses from — say what the type is
+              good for, in the terms a model would pick it by. Leave it empty for a mode that is
+              only a preset.
             </p>
           </div>
 

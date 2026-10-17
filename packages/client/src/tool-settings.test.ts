@@ -3,10 +3,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   NOT_REGISTERED_NOTE,
+  NO_ASK_TOOL_NAMES,
+  SUBAGENT_ASK_NOTE,
   cycleToolPolicy,
   toolAvailabilityNote,
   toolPolicyChoices,
   toolPolicyNote,
+  toolSupportsAsk,
 } from './tool-settings'
 
 describe('toolPolicyChoices', () => {
@@ -19,6 +22,22 @@ describe('toolPolicyChoices', () => {
     // The provider runs the search inside the request, so there is no moment this build could
     // ask — and the server refuses the write (#335).
     expect(toolPolicyChoices('web_search')).toEqual(['allow', 'deny'])
+  })
+
+  it('leaves `ask` out for the four subagent calls that have no prompt (#368)', () => {
+    // Epic #340, S9: a card stands in for the `agent` call and the other three are task
+    // machinery, so none of the four is in the transcript's `toolCalls` — and `pendingCalls`
+    // is a derivation over those alone. An `ask` on one of them therefore paused the parent's
+    // turn with no prompt any client could draw (the finding on #367 and on #369).
+    for (const name of ['agent', 'agent_message', 'agent_stop', 'message_parent']) {
+      expect(toolPolicyChoices(name)).toEqual(['allow', 'deny'])
+    }
+  })
+
+  it('leaves `agent_wait` alone — its own pause outranks the permission', () => {
+    // The wait's pause (the tasks it named) is the loop's, not the approval surface's, so `ask`
+    // is a value it can take.
+    expect(toolPolicyChoices('agent_wait')).toEqual(['allow', 'ask', 'deny'])
   })
 
   it('is not fooled by a remote tool that happens to be called web_search', () => {
@@ -55,6 +74,29 @@ describe('cycleToolPolicy', () => {
     // that had one in hand must still land on a permission the write accepts.
     expect(cycleToolPolicy('web_search', 'ask', 1)).toBe('allow')
     expect(cycleToolPolicy('web_search', 'ask', -1)).toBe('deny')
+  })
+})
+
+describe('toolSupportsAsk (#368)', () => {
+  it('is false for the two kinds of tool that cannot pause, and true for the rest', () => {
+    expect(toolSupportsAsk('web_fetch')).toBe(true)
+    expect(toolSupportsAsk('notes__search')).toBe(true)
+    expect(toolSupportsAsk('agent_wait')).toBe(true)
+    expect(toolSupportsAsk('web_search')).toBe(false)
+    for (const name of NO_ASK_TOOL_NAMES) {
+      expect(toolSupportsAsk(name)).toBe(false)
+    }
+  })
+
+  it('names the four, so a screen can say which rows are the ones without ask', () => {
+    expect([...NO_ASK_TOOL_NAMES].sort()).toEqual([
+      'agent',
+      'agent_message',
+      'agent_stop',
+      'message_parent',
+    ])
+    // The sentence the settings row draws, which has to say why rather than that it is so.
+    expect(SUBAGENT_ASK_NOTE).toContain('Subagents')
   })
 })
 

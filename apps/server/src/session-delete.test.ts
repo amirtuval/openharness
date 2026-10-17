@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   API_VERSION_PREFIX,
   EVENT_TYPES,
+  newTaskId,
   type Session,
   type SessionId,
 } from '@openharness/protocol'
@@ -215,6 +216,53 @@ describe('deleting a session', () => {
     await expect(runner.stopSession(session.id)).resolves.toBe(true)
     await expect(pass).resolves.toEqual({ outcome: 'interrupted' })
     expect(model.requests).toBe(1)
+  })
+
+  it('deletes a session’s descendants with it, a turn running in the middle (S7)', async () => {
+    const store = new CountingStore()
+    const test = createTestApp({
+      store,
+      // Slow enough that the child's turn is still streaming when the delete lands: the abort
+      // takes effect at the next chunk, and 16 chunks × 25 ms is far more than the in-process
+      // request takes to arrive.
+      replies: [{ text: [...'abcdefghijklmnop'], delayMs: 25 }],
+    })
+    const root = await createSession(test)
+    // Children are the server's to create (epic #340, S3; the tools that start them are #344),
+    // so the tree is built through the store — as a child a turn had just created would be.
+    const child = await test.store.createSession(null, {
+      ownerId: root.owner_id,
+      model: { id: 'openharness-test/model' },
+      interactive: false,
+      parentSessionId: root.id,
+      parentTaskId: newTaskId(),
+    })
+    const grandchild = await test.store.createSession(null, {
+      ownerId: root.owner_id,
+      model: { id: 'openharness-test/model' },
+      interactive: false,
+      parentSessionId: child.id,
+      parentTaskId: newTaskId(),
+    })
+    // A message to the middle level: it signals the scheduler, so the child has a turn in
+    // flight — the one that must be stopped before its rows go.
+    await send(test, child.id, 'work in the middle')
+    await test.model.waitForRequests(1)
+
+    const response = await deleteSession(test, root.id)
+    expect(response.status).toBe(204)
+
+    // Every level is gone, not just the one the route named.
+    for (const gone of [root.id, child.id, grandchild.id]) {
+      expect(await test.store.getSessionUnscoped(gone)).toBeNull()
+      expect((await test.request(`${SESSIONS}/${gone}`)).status).toBe(404)
+    }
+    // The child's turn was stopped before the rows went, so nothing more is written for it —
+    // not by the stopped pass, not by a crash loop.
+    const appendsWhenDeleted = store.appends
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(store.appends).toBe(appendsWhenDeleted)
+    expect(test.model.requests).toBe(1)
   })
 })
 

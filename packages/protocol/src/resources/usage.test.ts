@@ -18,6 +18,22 @@ const entry = {
   unpriced_requests: 0,
 }
 
+const zeroTotals = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+}
+
+/** What a chat with no children answers in `descendants` (S8; #344): zeroes, nothing priced. */
+const noDescendants = {
+  totals: zeroTotals,
+  cost: null,
+  unpriced_requests: 0,
+  by_model: [],
+  searches: 0,
+}
+
 describe('SessionUsageSchema', () => {
   it('parses totals with their per-model breakdown and their costs', () => {
     const usage = {
@@ -26,7 +42,40 @@ describe('SessionUsageSchema', () => {
       cost: 0.0045,
       unpriced_requests: 0,
       by_model: [entry],
+      descendants: noDescendants,
       searches: 0,
+    }
+    expect(SessionUsageSchema.parse(usage)).toEqual(usage)
+  })
+
+  it('carries what the chat’s descendants spent beside the tree’s totals (S8; #344)', () => {
+    // A chat and one child it started: the session's totals cover the **tree** — the parent's
+    // request and the child's — and `descendants` is the subtree's own share of the same
+    // numbers, so a reader shows what the work the chat delegated cost without walking it. The
+    // two are different numbers, which is the whole point: the child's tokens are in the totals
+    // because the chat spent them through the helper, and in `descendants` because they are the
+    // helper's own.
+    const childEntry = {
+      model: 'anthropic/claude-haiku-4-5',
+      usage: { ...totals, input_tokens: 500, output_tokens: 100, cache_read_input_tokens: 0 },
+      requests: 1,
+      cost: 0.0009,
+      unpriced_requests: 0,
+    }
+    const usage = {
+      session_id: 'sesn_01JQZ8R6X9M4V0W7Y2B3C5D6E7',
+      totals: { ...totals, input_tokens: 1500, output_tokens: 300 },
+      cost: 0.0054,
+      unpriced_requests: 0,
+      by_model: [entry, childEntry],
+      descendants: {
+        totals: childEntry.usage,
+        cost: childEntry.cost,
+        unpriced_requests: 0,
+        by_model: [childEntry],
+        searches: 1,
+      },
+      searches: 1,
     }
     expect(SessionUsageSchema.parse(usage)).toEqual(usage)
   })
@@ -41,6 +90,7 @@ describe('SessionUsageSchema', () => {
       cost: 0.0045,
       unpriced_requests: 3,
       by_model: [entry, { ...entry, model: 'acme/mystery-1', cost: null, unpriced_requests: 3 }],
+      descendants: noDescendants,
       searches: 2,
     }
     expect(SessionUsageSchema.parse(usage)).toEqual(usage)
@@ -55,6 +105,7 @@ describe('SessionUsageSchema', () => {
       cost: null,
       unpriced_requests: 1,
       by_model: [{ ...entry, cost: null, unpriced_requests: 1 }],
+      descendants: noDescendants,
       searches: 0,
     })
     expect(parsed.cost).toBeNull()
@@ -72,6 +123,7 @@ describe('SessionUsageSchema', () => {
         cost: null,
         unpriced_requests: 0,
         by_model: [],
+        descendants: noDescendants,
         searches: 0,
       }),
     ).toMatchObject({ cost: null, unpriced_requests: 0, by_model: [], searches: 0 })
@@ -84,6 +136,7 @@ describe('SessionUsageSchema', () => {
       cost: 0,
       unpriced_requests: 0,
       by_model: [],
+      descendants: noDescendants,
       searches: 0,
     }
     expect(SessionUsageSchema.safeParse({ ...base, cost: -1 }).success).toBe(false)

@@ -1,8 +1,8 @@
 import type {
   ModelPriceLookup,
   PendingCall,
+  TaskCard as TaskCardData,
   TranscriptConfirmation,
-  TranscriptEntry,
   TranscriptManualCompaction,
   TranscriptMessage,
   TranscriptSummary,
@@ -21,6 +21,7 @@ import { memo } from 'react'
 
 import { useStickToBottom } from '../../hooks/use-stick-to-bottom'
 import type { ModelNameLookup } from '../../lib/models'
+import { mergeTaskCards, type TaskRenderEntry } from '../../lib/tasks'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Skeleton } from '../ui/skeleton'
@@ -30,6 +31,7 @@ import { CompactionNotice } from './compaction-notice'
 import { MessageItem } from './message-item'
 import { previousReplyModels } from './message-meta'
 import { SummaryDivider } from './summary-divider'
+import { TaskCard } from './task-card'
 import { ToolCallLine } from './tool-call'
 import { ToolNotices } from './tool-notices'
 import { TruncationNotice } from './truncation-notice'
@@ -61,6 +63,12 @@ import { WorkingRow, type WorkingState } from './working-row'
  * — the reader's own message was shortened for the model, and what a manual compaction came
  * to (#283) — above the working row.
  *
+ * **A background task's card is merged the same way** (epic #340, S9; issue #346). The client
+ * keeps the cards in `TranscriptState.tasks` with a `position` — the `agent` call that started
+ * one, which is deliberately not drawn as a tool line — so {@link mergeTaskCards} interleaves
+ * them with the entries the client already ordered. The card is not a fourth `TranscriptEntry`:
+ * that union is shared with `oh`, which draws the same cards its own way.
+ *
  * Edit and resend (#238) is offered on **every** message the reader wrote, not just the last:
  * sending one rewinds the session to it, so the edit is what the conversation continues from.
  *
@@ -83,6 +91,14 @@ interface MessageListProps {
   summaries?: readonly TranscriptSummary[]
   /** The tool calls in the conversation, in order (epic #303, X5; #308). */
   toolCalls?: readonly TranscriptToolCall[]
+  /**
+   * The background tasks the chat ran, in position order (epic #340, S9; issue #346).
+   *
+   * A card draws where the `agent` call that started it was — the call is not a tool line, so the
+   * two lists are merged by position rather than the card being an entry of its own. See
+   * `lib/tasks.ts`.
+   */
+  tasks?: readonly TaskCardData[]
   /** The newest item a request had to shorten, or `null` (epic #277, K6; #280). */
   truncation?: TranscriptTruncation | null
   /**
@@ -126,12 +142,20 @@ interface MessageListProps {
    * composer, not gone.
    */
   replacingFrom?: number | undefined
+  /**
+   * Interrupt a task's child session (epic #340, S9; issue #346). Omitted, no card offers Stop —
+   * which is what a read-only view of a conversation wants.
+   */
+  onStopTask?: ((card: TaskCardData) => void) | undefined
+  /** The task whose Stop this tab has sent and the log has not caught up with. */
+  stoppingTask?: string | null
 }
 
 export const MessageList = memo(function MessageList({
   messages,
   summaries = [],
   toolCalls = [],
+  tasks = [],
   truncation = null,
   compaction = null,
   stepLimit = null,
@@ -148,6 +172,8 @@ export const MessageList = memo(function MessageList({
   onEdit,
   editDisabled = false,
   replacingFrom,
+  onStopTask,
+  stoppingTask = null,
 }: MessageListProps) {
   const last = messages.at(-1)
   const { ref, onScroll, isStuck, scrollToLatest } = useStickToBottom(
@@ -155,9 +181,9 @@ export const MessageList = memo(function MessageList({
     // turn that adds no message at all (a request whose newest item did not change): it counts
     // as content, so a reader who is already at the bottom is shown it rather than being left
     // with it below the fold.
-    `${messages.length}:${last?.text.length ?? 0}:${String(toolCalls.length)}:${
-      truncation === null ? '' : 'truncated'
-    }:${compaction?.outcome ?? ''}`,
+    `${messages.length}:${last?.text.length ?? 0}:${String(toolCalls.length)}:${String(
+      tasks.length,
+    )}:${truncation === null ? '' : 'truncated'}:${compaction?.outcome ?? ''}`,
   )
 
   // What each reply's meta line compares its model against (#212). The list is the only place
@@ -246,16 +272,19 @@ export const MessageList = memo(function MessageList({
       >
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-block">
           {/* "Empty" is nothing to say **and** nothing done: a call is an entry of its own
-              (epic #303, #308), so a transcript that holds one is a conversation whatever the
-              messages say — and a transcript that holds neither is the invitation. */}
-          {messages.length === 0 && toolCalls.length === 0 ? (
+              (epic #303, #308) and a task's card is another (epic #340, S9; #346), so a
+              transcript that holds one is a conversation whatever the messages say — and a
+              transcript that holds none is the invitation. */}
+          {messages.length === 0 && toolCalls.length === 0 && tasks.length === 0 ? (
             loading ? (
               <TranscriptSkeleton />
             ) : (
               <EmptyConversation />
             )
           ) : (
-            groupToolCalls(transcriptEntries(messages, summaries, toolCalls)).map((entry) =>
+            groupToolCalls(
+              mergeTaskCards(transcriptEntries(messages, summaries, toolCalls), tasks),
+            ).map((entry) =>
               entry.kind === 'group' ? (
                 // Several calls in a row are one step's work (epic #303, X5): they are drawn as a
                 // tidy block rather than as three full-width lines with gaps between them. The
@@ -281,6 +310,17 @@ export const MessageList = memo(function MessageList({
                   <ToolCallLine call={entry.call} action={decisionAction(entry.call)} />
                   {promptFor(entry.call)}
                 </div>
+              ) : entry.kind === 'task' ? (
+                // A task's card stands where its `agent` call was (epic #340, S9; #346): the call
+                // is not drawn as a tool line at all, so the card is the only thing at that
+                // position. `costOf` is the same catalog lookup the replies are priced with.
+                <TaskCard
+                  key={entry.card.id}
+                  card={entry.card}
+                  prices={costOf}
+                  stopping={stoppingTask === entry.card.id}
+                  {...(onStopTask === undefined ? {} : { onStop: onStopTask })}
+                />
               ) : (
                 <MessageItem
                   key={entry.message.id}
@@ -436,9 +476,10 @@ function PendingPrompt({
   )
 }
 
-/** One row of the transcript as this component draws it: an entry, or a run of tool calls. */
+/** One row of the transcript as this component draws it: an entry, a task's card, or a run of
+ *  tool calls. */
 type RenderEntry =
-  TranscriptEntry | { readonly kind: 'group'; readonly calls: readonly TranscriptToolCall[] }
+  TaskRenderEntry | { readonly kind: 'group'; readonly calls: readonly TranscriptToolCall[] }
 
 /**
  * Collapse runs of consecutive tool calls into one group (epic #303, X5; issue #308).
@@ -447,10 +488,10 @@ type RenderEntry =
  * but it reads as one piece of work, so consecutive calls are drawn inside a single block. A run
  * of one is left as the bare line it already is: a box around a single call is noise. The
  * grouping is a rendering decision and nothing else — the order, the ids and the statuses come
- * from the entries the client merged, and a message or a divider between two calls starts a
- * fresh group.
+ * from the entries the client merged, and a message, a divider or a task's card between two calls
+ * starts a fresh group.
  */
-function groupToolCalls(entries: readonly TranscriptEntry[]): readonly RenderEntry[] {
+function groupToolCalls(entries: readonly TaskRenderEntry[]): readonly RenderEntry[] {
   const grouped: RenderEntry[] = []
   let run: TranscriptToolCall[] = []
   const flush = (): void => {
