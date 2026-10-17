@@ -48,9 +48,12 @@ describe('Sidebar', () => {
     await waitFor(() => {
       expect(sessionRows()).toHaveLength(121)
     })
-    expect(requests.sessions).toEqual([
-      { limit: MAX_PAGE_LIMIT, page: undefined },
-      { limit: MAX_PAGE_LIMIT, page: firstPage.next_page ?? '' },
+    // The chat list's own walk, in order. Since #346 the sidebar also asks the newest chats for
+    // their children, so those reads are filtered out here — what this case is about is the
+    // cursor.
+    expect(requests.sessions.filter((request) => request.parentSessionId === undefined)).toEqual([
+      { limit: MAX_PAGE_LIMIT, page: undefined, parentSessionId: undefined },
+      { limit: MAX_PAGE_LIMIT, page: firstPage.next_page ?? '', parentSessionId: undefined },
     ])
   })
 

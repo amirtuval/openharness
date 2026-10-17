@@ -43,6 +43,8 @@ import type {
 } from '@openharness/protocol'
 
 import { contextAfterSummary } from './compaction'
+import { isTaskToolName, tasksFromEvents } from './tasks'
+import type { TaskCard } from './tasks'
 import { clearedResultsFrom, searchCount, toolCallStatus, truncatedResultsFrom } from './tools'
 import type {
   ClearedToolResults,
@@ -712,6 +714,35 @@ export interface TranscriptState {
    * follows the branch the same way the messages do.
    */
   readonly todoEvents: readonly StoredEvent[]
+
+  /**
+   * The background tasks the conversation holds, in card order (epic #340, S9; issue #345).
+   *
+   * One card per `session.task_started` a `session.rewind` has not taken back: what the task
+   * is, what it is doing, what was said between it and the parent, and what it last produced.
+   * Each card's {@link TaskCard.position} is the `seq` of the `agent` call that started it —
+   * the call the reducer does **not** draw as a tool line — so a frontend that renders
+   * {@link selectTranscriptEntries} merges this list with it by position and the card lands
+   * where its call was.
+   *
+   * The card's own status is the parent's log's — `running`, `done`, `failed` or `stopped`.
+   * The fifth word, **waiting**, is the child's own fact and comes from its stream
+   * (`taskCardStatus` in `./tasks` is where a frontend combines the two).
+   */
+  readonly tasks: readonly TaskCard[]
+
+  /**
+   * The events the tasks are read from, in log order — bookkeeping (epic #340; issue #345).
+   *
+   * The three task events and the task machinery's own `agent*` tool calls, kept whole so
+   * {@link tasksFromEvents} can be the one reading of them — the rule the todo list follows.
+   * Keeping the calls is what lets a card sit at the `agent` call that started it and carry the
+   * parent's half of the conversation; they are kept **here rather than in `toolCalls`**,
+   * because none of them is drawn as an ordinary tool line (S9). A rewind drops the ones its
+   * range covers and the cards are recomputed from what is left, so the branch and the tree its
+   * tasks hang off cannot disagree.
+   */
+  readonly taskEvents: readonly StoredEvent[]
 }
 
 /**
@@ -763,6 +794,8 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
     toolSources: {},
     todos: null,
     todoEvents: [],
+    tasks: [],
+    taskEvents: [],
   }
 }
 
@@ -852,6 +885,10 @@ export function initialTranscriptState(seed: TranscriptSeed = {}): TranscriptSta
  *   message was too long for this model and was shortened" — and the newest real request
  *   replaces it, so a request that capped nothing clears the notice rather than leaving it on
  *   screen for the life of the session.
+ * - **A background task is a card, not a tool call** (epic #340, S9; #345). The three task
+ *   events are kept and {@link TranscriptState.tasks} is recomputed from them, exactly as the
+ *   todo list is; the task machinery's own `agent*` calls are kept with them and **not** drawn
+ *   as tool lines, so the card takes the `agent` call's place.
  *
  * @param state the transcript so far
  * @param event the next event, from `iterate`, `stream`, or anywhere else
@@ -1051,6 +1088,16 @@ function reduceStoredEvent(state: TranscriptState, event: StoredEvent): Transcri
         summarizing: { pass: event.pass, passes: event.passes, seq: event.seq },
       }
 
+    case EVENT_TYPES.sessionTaskStarted:
+    case EVENT_TYPES.sessionTaskStatus:
+    case EVENT_TYPES.sessionTaskNotification:
+      // The parent's whole view of a background task (epic #340, S4; issue #345): the start
+      // opens a card, a status moves it, a notification is a line between the two sessions or
+      // the turn's outcome. All three are kept and the cards are recomputed from them, so the
+      // task derivation is one pure function over the log rather than a restatement here — and
+      // a rewind that takes an event back takes the card it built with it.
+      return withTaskEvents(state, event)
+
     case EVENT_TYPES.modelRequestStart:
       // A request the compaction engine made to write a summary is not the chat's own (epic
       // #277, C2): it answers nothing, claims nothing, and its usage measures the summarizer's
@@ -1178,6 +1225,11 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
   // The tool events the todo list is read from go with the branch too, so a list a rewound call
   // wrote stops being current (epic #303, #308).
   const todoEvents = state.todoEvents.filter((event) => !inRange(event.seq))
+  // A task the edit took back goes with the branch (epic #340, S7; #345): rewinding past an
+  // `agent` call stops that child, and the events the card was read from are inside the range
+  // — its start, its statuses, its notifications. Recomputing the cards from what survives is
+  // what keeps the tree and the log one answer.
+  const taskEvents = state.taskEvents.filter((event) => !inRange(event.seq))
   // A confirmation inside the range goes with it (epic #303, X6; #310): the decision is part of
   // the branch the edit took back, and the brain's own reading of the log — the tools this chat
   // has been told to allow — takes it back with the branch, so the two stay one answer.
@@ -1190,6 +1242,7 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     manualCompaction === state.manualCompaction &&
     toolCalls.length === state.toolCalls.length &&
     todoEvents.length === state.todoEvents.length &&
+    taskEvents.length === state.taskEvents.length &&
     confirmations.length === state.confirmations.length &&
     state.truncatedToolResults.length === 0 &&
     state.clearedToolResults === null &&
@@ -1218,8 +1271,10 @@ function dropRewound(state: TranscriptState, event: SessionRewindEvent): Transcr
     truncatedToolResults: [],
     clearedToolResults: null,
     todoEvents,
+    taskEvents,
     confirmations,
     todos: readTodoList(todoEvents),
+    tasks: tasksFromEvents(taskEvents),
     lastError: null,
     // The notice a rewind covers goes with the branch, like every other position-based record:
     // the turn it was about is not one the conversation is on any more.
@@ -1310,6 +1365,14 @@ function fromToolUse(state: TranscriptState, event: ToolCallEvent): TranscriptSt
   const name = toolCallOfferedName(event)
   const server = toolCallServer(event)
   const permission = toolCallPermission(event)
+  if (isTaskToolName(name)) {
+    // The task machinery's own call (epic #340, S5; issue #345): the card stands in for the
+    // `agent` call, an `agent_message` is a line inside it, and `agent_wait` / `agent_stop` are
+    // the reader's affordances. None is drawn as an ordinary tool line (S9), so none becomes a
+    // `toolCall` — the event is kept for the card derivation instead, which is the only reader
+    // that wants it.
+    return withTaskEvents(state, event)
+  }
   return withTodoEvents(
     upsertToolCall(state, {
       id: toolCallId(event),
@@ -1408,6 +1471,18 @@ function recordConfirmation(
 function withTodoEvents(state: TranscriptState, event: StoredEvent): TranscriptState {
   const todoEvents = [...state.todoEvents, event]
   return { ...state, todoEvents, todos: readTodoList(todoEvents) }
+}
+
+/**
+ * Record an event the tasks are read from, and recompute the cards it holds (epic #340; #345).
+ *
+ * The rule the todo list follows: `tasksFromEvents` is a pure function over the events, so the
+ * transcript keeps them and asks it, rather than restating "the newest status wins" and "the
+ * newest outcome is the result" here — where a rewind would then have to restate them too.
+ */
+function withTaskEvents(state: TranscriptState, event: StoredEvent): TranscriptState {
+  const taskEvents = [...state.taskEvents, event]
+  return { ...state, taskEvents, tasks: tasksFromEvents(taskEvents) }
 }
 
 /**
@@ -2179,6 +2254,19 @@ export function selectSearchCount(state: TranscriptState): number {
  */
 export function selectTodos(state: TranscriptState): TodoList | null {
   return state.todos
+}
+
+/**
+ * The background tasks the conversation holds, in card order (epic #340, S9; issue #345).
+ *
+ * A frontend draws one card per task — the type and the description, the status, the messages
+ * exchanged and the result — and merges the list with {@link selectTranscriptEntries} by
+ * {@link TaskCard.position}, which is the `seq` of the `agent` call the card stands in for.
+ * The status here is the parent's log's; `waiting` comes from the child's own stream through
+ * `taskCardStatus` (`./tasks`).
+ */
+export function selectTasks(state: TranscriptState): readonly TaskCard[] {
+  return state.tasks
 }
 
 /** The summary being written right now, or `null` (epic #277, C2/K10; #280). */

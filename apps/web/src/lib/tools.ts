@@ -28,7 +28,14 @@ export interface ToolPermissionOption {
   readonly hint: string
 }
 
-/** The three permissions, in the order a select offers them. */
+/**
+ * The three permissions, in the order a select offers them.
+ *
+ * A **row** offers fewer when the tool cannot take one: `toolPolicyChoices` (`@openharness/client`)
+ * is the one rule for that — `ask` is missing for a provider-executed search and for the four
+ * subagent calls whose prompt no client could draw (issue #368) — and the settings card filters
+ * this list with it rather than restating which tools those are.
+ */
 export const TOOL_PERMISSIONS: readonly ToolPermissionOption[] = [
   { value: 'allow', label: 'Allow', hint: 'run the call' },
   { value: 'ask', label: 'Ask me first', hint: 'pause the turn until you answer' },

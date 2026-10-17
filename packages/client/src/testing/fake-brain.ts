@@ -4,6 +4,7 @@ import {
   EVENT_TYPES,
   MAX_PAGE_LIMIT,
   askUserAnswerProblems,
+  deriveSessionTitle,
   encodeSeqCursor,
   formatAskUserAnswers,
   isStoredEvent,
@@ -47,7 +48,6 @@ import type {
 import type { StreamOptions } from '../events/stream'
 import { AsyncQueue, sleep } from '../internal/async'
 import { deepFreeze } from './freeze'
-import { deriveFakeSessionTitle } from './titles'
 
 /**
  * The in-memory brain behind one fake session: its log, its script and its turn loop.
@@ -363,7 +363,7 @@ export class FakeBrain {
     // (`apps/server/src/titles.ts`); the fake keeps the same promise so a frontend test about
     // titles is a test against the behaviour, not against a workaround.
     if (stored.type === EVENT_TYPES.userMessage && this.session.title === null) {
-      const title = deriveFakeSessionTitle(stored.content.map((block) => block.text).join('\n'))
+      const title = deriveSessionTitle(stored.content.map((block) => block.text).join('\n'))
       if (title !== null) {
         this.session = { ...this.session, title }
       }

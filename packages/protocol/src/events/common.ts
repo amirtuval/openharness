@@ -175,6 +175,40 @@ export const EVENT_TYPES = {
    */
   sessionRewind: 'session.rewind',
   /**
+   * // extension: a session started a background task and did not wait for it (epic #340, S4;
+   * issue #343).
+   *
+   * Background tasks are a general mechanism — a subagent is the first kind, a sandboxed `bash`
+   * will be the second — and this is the event that puts one in the **parent's** log: what kind
+   * it is, the session it runs in when it has one, and what it is for. Starting one returns at
+   * once and the conversation goes on, so what the task does reaches the parent model as a
+   * {@link EVENT_TYPES.sessionTaskNotification} rather than as a tool result. See
+   * {@link SessionTaskStartedEventSchema}.
+   */
+  sessionTaskStarted: 'session.task_started',
+  /**
+   * // extension: what a background task is doing (epic #340, S4; issue #343).
+   *
+   * Written to the **parent's** log as the task changes state — `running`, `idle`, `failed`,
+   * `stopped` — so a client draws a task's card from the parent's log alone. Live activity is
+   * read from the child's own stream; a task never reports progress. See
+   * {@link SessionTaskStatusEventSchema}.
+   */
+  sessionTaskStatus: 'session.task_status',
+  /**
+   * // extension: something reached the parent model from a background task (epic #340, S4;
+   * issue #343).
+   *
+   * The one **queued** thing a task produces: stored with `processed_at: null` and claimed by
+   * the parent's brain the way a `user.message` is — by the `consumes` list of the event that
+   * answers it — so it is delivered exactly once and never between a tool call and its result.
+   * Its `source_key` makes the append idempotent: a second notification for the same finished
+   * turn changes nothing. To the model it is a framed user-role message whose text is **data,
+   * not instructions** — a task's output can carry what that session read from the web. See
+   * {@link SessionTaskNotificationEventSchema} and [`docs/threat-model.md`](../../../docs/threat-model.md).
+   */
+  sessionTaskNotification: 'session.task_notification',
+  /**
    * // extension: the session this stream was following no longer exists (#111).
    *
    * Stream-only: it is **not** in {@link STORED_EVENT_TYPES} and never lands in a log — the
@@ -186,6 +220,29 @@ export const EVENT_TYPES = {
    */
   sessionDeleted: 'session.deleted',
 } as const
+
+/**
+ * Whether an event type is **queued**: stored unprocessed, and claimed by a turn.
+ *
+ * Queued is "the log holds something the brain has not been told yet", and every side of the
+ * log asks it: a store decides by it whether an event's `processed_at` is left `null` (its
+ * timestamp is then derived from the claim that takes it) and whether a `consumes` list may
+ * name it; the brain asks it to tell the log as a request sees it (a queued event not yet
+ * claimed is not part of the prompt) and to decide what a turn still owes an answer to.
+ *
+ * Two families are queued. The user's own events — `user.message` and `user.interrupt` — and,
+ * since epic #340 S4 (#343), `session.task_notification`: a background task's news is addressed
+ * to the parent **model**, exactly as a message is, so it is claimed the same way and delivered
+ * exactly once. Everything else a session stores is written by a server or a brain that already
+ * knows what it did.
+ */
+export function isQueuedEventType(type: string): boolean {
+  return (
+    type === EVENT_TYPES.userMessage ||
+    type === EVENT_TYPES.userInterrupt ||
+    type === EVENT_TYPES.sessionTaskNotification
+  )
+}
 
 /** An event type string, stored or stream-only. */
 export type EventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]
@@ -218,6 +275,9 @@ export const STORED_EVENT_TYPES = [
   EVENT_TYPES.sessionCompact,
   EVENT_TYPES.sessionCompaction,
   EVENT_TYPES.sessionSkillLoaded,
+  EVENT_TYPES.sessionTaskStarted,
+  EVENT_TYPES.sessionTaskStatus,
+  EVENT_TYPES.sessionTaskNotification,
   EVENT_TYPES.eventStart,
   EVENT_TYPES.eventDelta,
   EVENT_TYPES.sessionRewind,

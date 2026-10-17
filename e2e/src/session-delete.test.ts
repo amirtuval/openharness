@@ -1,7 +1,10 @@
 import {
   DEFAULT_PARTITION_COUNT,
   EVENT_TYPES,
+  newSessionId,
+  newTaskId,
   partitionOf,
+  type SessionId,
   type StoredEvent,
 } from '@openharness/protocol'
 import { MOCK_SLOW_MARKER } from '@openharness/server'
@@ -109,6 +112,39 @@ async function sessionRowExists(sessionId: string): Promise<boolean> {
     },
     { database: database.name },
   )
+}
+
+/**
+ * Write a child session row the way the server's `agent` tool will (epic #340, S3; the tool
+ * itself is #344): a real session, owned by its parent's owner, sharing the parent's root and
+ * one level deeper.
+ *
+ * The API has no route that creates one — that is what "the tree is the server's alone to
+ * write" means — so the row is written directly here. That is also what makes this a test
+ * against the **database**: the columns are the migration's, not a store object's.
+ */
+async function createChildRow(parentId: string, taskId: string): Promise<string> {
+  const childId = newSessionId()
+  const database = await harness.database()
+  await withDatabaseClient(
+    async (client) => {
+      await client.query(
+        `insert into sessions
+           (id, owner_id, status, partition, title, metadata, model, system, mode,
+            agent_id, agent_name, agent_model_id, agent_system,
+            interactive, parent_session_id, parent_task_id, root_session_id, depth,
+            created_at, updated_at)
+         select $1, owner_id, 'idle', $2, null, '{}'::jsonb, model, system, null,
+                null, null, null, null,
+                false, id, $3, root_session_id, depth + 1,
+                now(), now()
+           from sessions where id = $4`,
+        [childId, partitionOf(childId, DEFAULT_PARTITION_COUNT), taskId, parentId],
+      )
+    },
+    { database: database.name },
+  )
+  return childId
 }
 
 /** Every session-keyed table, with the rows each still holds for this session. */
@@ -416,3 +452,42 @@ async function leasesAreHeld(): Promise<boolean> {
     await server.kill()
   }
 }
+
+describe('the session tree (S3/S7)', () => {
+  it('lists a session’s children on request, and deletes them with it', async () => {
+    const server = await harness.server()
+    const client = await harness.client(server)
+    const parentId = await newSession(client)
+    const childId = await createChildRow(parentId, newTaskId())
+
+    // A child is not a chat of its own: the list that names no parent is the caller's
+    // top-level chats…
+    const chats = await client.sessions.list()
+    expect(chats.data.map((session) => session.id)).toContain(parentId)
+    expect(chats.data.map((session) => session.id)).not.toContain(childId)
+
+    // …and naming the parent answers that session's children instead.
+    const children = await client.sessions.list({ parent_session_id: parentId as SessionId })
+    expect(children.data.map((session) => session.id)).toEqual([childId])
+
+    // The child is a session like any other everywhere else: its own header, its own log
+    // (empty — a child inherits no history), and the tree fields naming where it sits.
+    const read = await client.sessions.get(childId)
+    expect(read).toMatchObject({
+      interactive: false,
+      parent_session_id: parentId,
+      root_session_id: parentId,
+      depth: 1,
+    })
+    expect((await client.sessions.events.list(childId)).data).toEqual([])
+
+    // Deleting the parent takes the subtree with it — the mechanism is the store's
+    // transaction, and the database is the evidence.
+    await expect(client.sessions.delete(parentId)).resolves.toBeUndefined()
+    expect(await sessionRowExists(parentId)).toBe(false)
+    expect(await sessionRowExists(childId)).toBe(false)
+    const gone = await errorOf(() => client.sessions.get(childId))
+    expect(gone.status).toBe(404)
+    expect(gone.type).toBe('not_found_error')
+  })
+})

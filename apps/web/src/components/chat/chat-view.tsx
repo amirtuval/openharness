@@ -15,7 +15,12 @@ import {
   stuckNotice,
   truncatedResultsNotice,
 } from '@openharness/client'
-import type { CredentialTarget, ModelPriceLookup, TranscriptMessage } from '@openharness/client'
+import type {
+  CredentialTarget,
+  ModelPriceLookup,
+  TaskCard,
+  TranscriptMessage,
+} from '@openharness/client'
 import type { Mode, Skill, UserToolConfirmationEventInput } from '@openharness/protocol'
 import { Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -24,10 +29,18 @@ import { useClient } from '../client-provider'
 import type { DeleteSessionResult } from '../../hooks/use-sessions'
 import type { ModesView } from '../../hooks/use-modes'
 import { useSession } from '../../hooks/use-session'
+import { useSessionBreadcrumb } from '../../hooks/use-session-breadcrumb'
 import type { ModelsView } from '../../hooks/use-models'
 import { usePreferences } from '../../hooks/use-preferences'
+import { useSubtreeUsage } from '../../hooks/use-subtree-usage'
 import { readTodoPanelCollapsed, writeTodoPanelCollapsed } from '../../lib/todo-panel'
-import { formatCostTotal, shortId, sessionLabel, unpricedExplanation } from '../../lib/format'
+import {
+  formatCostTotal,
+  formatCount,
+  shortId,
+  sessionLabel,
+  unpricedExplanation,
+} from '../../lib/format'
 import { providerOf, type ModelNameLookup } from '../../lib/models'
 import { modeNameOf } from '../../lib/modes'
 import { showNotice } from '../../lib/notice'
@@ -40,6 +53,7 @@ import { ErrorBanner } from './error-banner'
 import { McpNotice } from './mcp-notice'
 import { MessageList } from './message-list'
 import { StatusIndicator } from './status-indicator'
+import { SubagentHeader } from './subagent-header'
 import { TodoPanel } from './todo-panel'
 import { workingState } from './working-row'
 
@@ -89,6 +103,7 @@ export function ChatView({
   skills,
   onDelete,
   onDeleted,
+  onTasksChanged,
 }: {
   sessionId: string
   /**
@@ -109,6 +124,14 @@ export function ChatView({
   onDelete: (sessionId: string) => Promise<DeleteSessionResult>
   /** This chat was deleted elsewhere: the shell drops its row and leaves it. */
   onDeleted: (sessionId: string) => void
+  /**
+   * This chat's tasks moved — it is opened, or a helper was started under it (epic #340, #346).
+   *
+   * The sidebar nests a chat's subagents under its row, and that read is the shell's
+   * (`useSessionTree`); this is how the shell hears that a chat it is already showing has changed
+   * what it has to nest. Omitted, nothing is reported.
+   */
+  onTasksChanged?: (() => void) | undefined
 }) {
   const client = useClient()
   const {
@@ -121,6 +144,7 @@ export function ChatView({
     manualCompaction,
     toolCalls,
     todos,
+    tasks,
     truncatedToolResults,
     clearedToolResults,
     confirmations,
@@ -137,6 +161,7 @@ export function ChatView({
     send,
     compact,
     interrupt,
+    stopTask,
     respond,
     dismissError,
   } = useSession(client, sessionId)
@@ -175,6 +200,26 @@ export function ChatView({
   // until a request has run.
   const sessionCostTotal =
     usage.models.length === 0 ? null : sessionCost(usage, costOf ?? unknownPrices)
+  // The breadcrumb up the tree, and the two lines a child's chat owes a reader (epic #340, S9;
+  // #346). `null` for a top-level chat, which is most of them — nothing is read for one.
+  const breadcrumb = useSessionBreadcrumb(client, session)
+  // What this chat's **descendants** spent (#344, S8; #346), read from the usage route because the
+  // transcript's own totals are the session's alone. Only a chat that has run a task asks: the
+  // signature is what it can see of them, so the numbers move when it learns something new about a
+  // helper. See `hooks/use-subtree-usage.ts`.
+  const descendants = useSubtreeUsage(client, sessionId, {
+    enabled: tasks.length > 0,
+    signature: tasks.map((card) => `${card.id}:${card.status}`).join('|'),
+  })
+  // The four counters are disjoint (the protocol's own rule), so the sum is the subtree's real
+  // token total. It rides the descendants line's `title`, where it costs no pixels.
+  const descendantTokens =
+    descendants === null
+      ? 0
+      : descendants.totals.input_tokens +
+        descendants.totals.output_tokens +
+        descendants.totals.cache_creation_input_tokens +
+        descendants.totals.cache_read_input_tokens
   // How full the context is (epic #277, K10; #280): the last real request's prompt size, measured
   // against the budget of the model the session runs **now** — so a switch re-measures from the
   // catalog's entry for the new model, and the meter moves with it. `null` until something has
@@ -273,6 +318,21 @@ export function ChatView({
     showNotice('This chat was deleted.')
     onDeleted(sessionId)
   }, [deleted, onDeleted, sessionId])
+
+  // The shell hears that this chat's tasks moved (epic #340, #346; #348): once on mount — opening
+  // a chat is one of the two things that can change what the sidebar nests under it — and again
+  // whenever a task's **status** moves, which is what the sidebar's group draws besides the count.
+  // The count alone is not enough: a helper that has just finished changes nothing about how many
+  // there are, so the group's running dot and its "1 running" stayed on the state the last read
+  // answered — a chat showing a finished helper still claimed one was working. The callback is
+  // held in a ref so the effect depends on the tasks alone: the shell's own state moves when this
+  // report lands, and a dependency on the callback's identity would be a loop.
+  const taskShape = tasks.map((task) => `${task.id}:${task.status}`).join(',')
+  const reportTasks = useRef(onTasksChanged)
+  reportTasks.current = onTasksChanged
+  useEffect(() => {
+    reportTasks.current?.()
+  }, [taskShape])
 
   // Whether the session is idle, which is the state the server takes a rewind in (#238). The
   // web's status is exactly that state — `running` is the whole of "not idle" — so the
@@ -383,6 +443,24 @@ export function ChatView({
     [respond],
   )
 
+  // The task whose Stop this tab has sent (epic #340, S9; #346). It is a card's own button, so the
+  // "Stopping…" state belongs to the one that was pressed — and it is dropped as soon as the
+  // request answers either way: the card's real state comes from the log, which the interrupt
+  // makes the child write.
+  const [stoppingTask, setStoppingTask] = useState<string | null>(null)
+  const stopTaskFromCard = useCallback(
+    (card: TaskCard): void => {
+      if (card.childSessionId === null) {
+        return
+      }
+      setStoppingTask(card.id)
+      void stopTask(card.childSessionId).finally(() => {
+        setStoppingTask(null)
+      })
+    },
+    [stopTask],
+  )
+
   // The composer's text, and the one rule about the edit: **clearing the box cancels it**. A
   // reader who empties the box and types something else is writing a new message at the end of
   // the conversation — the branch they were about to take back is theirs to keep.
@@ -447,6 +525,10 @@ export function ChatView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {/* Where this chat sits in a tree, and what being a subagent means — only ever drawn for a
+          child (epic #340, S9; #346). It is chrome *about* the chat rather than part of its title,
+          so it is its own strip above the header. */}
+      {breadcrumb === null ? null : <SubagentHeader chain={breadcrumb} nameOf={nameOf} />}
       <header className="flex items-center justify-between gap-4 border-b px-4 py-3">
         <div className="min-w-0">
           <h1 className="truncate text-sm font-medium">
@@ -492,6 +574,22 @@ export function ChatView({
                 {' · '}
                 <span data-slot="session-searches">
                   {searches} {searches === 1 ? 'search' : 'searches'}
+                </span>
+              </>
+            )}
+            {/* The helpers' share of the bill (epic #340, S8; #344; #346). The number beside the
+                cost above is this chat's **own** log; a chat that delegated work spent more than
+                that, and the route is what says how much more. Drawn only once a task has spent
+                something, so a chat that started a helper and has not been billed shows nothing
+                rather than `$0.00`. */}
+            {descendants === null || descendants.by_model.length === 0 ? null : (
+              <>
+                {' · '}
+                <span
+                  data-slot="session-descendants"
+                  title={`${formatCount(descendantTokens)} tokens, across this chat's subagents.`}
+                >
+                  + subagents {formatCostTotal(descendants)}
                 </span>
               </>
             )}
@@ -561,6 +659,9 @@ export function ChatView({
             messages={messages}
             summaries={summaries}
             toolCalls={toolCalls}
+            tasks={tasks}
+            onStopTask={stopTaskFromCard}
+            stoppingTask={stoppingTask}
             truncation={truncation}
             compaction={manualCompaction}
             stepLimit={stepLimit}

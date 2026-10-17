@@ -1,4 +1,4 @@
--- 0032_skills.sql — a user's imported skills, and the files of each snapshot
+-- 0036_skills.sql — a user's imported skills, and the files of each snapshot
 -- (epic #349, issue #350; decisions K1, K4).
 --
 -- A skill is a folder of instructions in the open Agent Skills format (K1) that a user

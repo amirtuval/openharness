@@ -1,17 +1,22 @@
 import type {
   McpToolProvider,
   SkillProvider,
+  SubagentRuntime,
+  SubagentTypeResolver,
   ToolSecretResolver,
   ToolSettingsResolver,
   ToolSupportFor,
 } from '@openharness/brain'
 import {
+  HARNESS_TOOL_HANDLERS,
+  createSubagentTools,
   createToolRegistry,
   createWebFetchTool,
   textResult,
   todoWriteTool,
 } from '@openharness/hands'
 import type { McpFetch, ToolDefinition, ToolRegistry } from '@openharness/hands'
+import type { SessionId } from '@openharness/protocol'
 import type { SessionStore, SkillStore } from '@openharness/session'
 import { z } from 'zod'
 
@@ -22,6 +27,7 @@ import type { McpServerService } from './mcp/service'
 import type { ResolvedModel } from './model'
 import { askUserTool } from './pausing'
 import { createSkillProvider } from './skills'
+import { testTaskTool } from './test-tasks'
 import { createToolSettingsResolver } from './tool-settings'
 import type { Logger } from './types'
 
@@ -75,9 +81,16 @@ export const testEchoTool: ToolDefinition<{ text: string }> = {
   run: (input) => textResult(input.text),
 }
 
-/** The registry the test hook runs with: {@link testEchoTool} beside the real {@link askUserTool}. */
+/**
+ * The registry the test hooks run with: {@link testEchoTool} beside the real {@link askUserTool}.
+ *
+ * The task **wait** is deliberately not here: `agent_wait` is a real tool every deployment
+ * registers since #344 (`{@link createTurnRegistry}`), so it is registered by the turn's own
+ * registry rather than by a test hook — [`testTaskWaitTool`](./test-tasks.ts) remains for a
+ * test that wants the wait tool on its own.
+ */
 export function createTestToolRegistry(): ToolRegistry {
-  return createToolRegistry([askUserTool, testEchoTool])
+  return createToolRegistry([askUserTool, testEchoTool, testTaskTool])
 }
 
 /**
@@ -108,9 +121,23 @@ export interface TurnRegistryOptions {
 export function createTurnRegistry(options: TurnRegistryOptions): ToolRegistry {
   const tools: ToolDefinition[] = [askUserTool]
   if (options.kind === 'mock') {
-    tools.push(testEchoTool)
+    // The test hooks: the `echo` tool, and the background task the mock model can start
+    // (epic #340, S4/S5; #343). The **wait** a model ends a turn on is no longer a hook: since
+    // #344 every deployment registers the real `agent_wait` below, and two tools under one name
+    // is what a registry refuses.
+    tools.push(testEchoTool, testTaskTool)
   }
-  tools.push(createWebFetchTool(), todoWriteTool)
+  // The subagent tools (epic #340, S5; #344) are registered here and **replaced** per turn: the
+  // definitions this holds are what a settings screen lists (so a user can turn one off, and a
+  // mode can override it), and the loop puts the session-bound ones in their place — the names,
+  // the schemas and the `allow` default are the same either way. Their `run` answers the
+  // sentence every harness-answered tool answers (`HARNESS_TOOL_HANDLERS`): nothing in a real
+  // turn reaches it, because a turn that has a runtime swaps the definition before the offer.
+  tools.push(
+    ...createSubagentTools({ types: [], handlers: HARNESS_TOOL_HANDLERS }),
+    createWebFetchTool(),
+    todoWriteTool,
+  )
   return createToolRegistry(tools)
 }
 
@@ -136,6 +163,12 @@ export interface TurnToolOptions {
   /** The most model requests one turn may make; the brain's default when absent. */
   readonly maxToolSteps?: number
   /**
+   * What this deployment knows about subagents (epic #340, S5/S6; #344): the type resolver, and
+   * S6's two limits. Absent, the loop offers nobody the five tools — which is what a host that
+   * wired no resolver wants.
+   */
+  readonly subagents?: SubagentRuntime
+  /**
    * Where a request's remote MCP tools come from (epic #303, X10; #312), or absent for a
    * deployment whose chats offer this build's tools alone. The loop asks it once per request
    * with the session's owner and the mode's tool override.
@@ -154,10 +187,14 @@ export interface TurnToolOptions {
  * registers, and the store the settings are read from.
  */
 export interface TurnToolsOptions {
-  /** The parsed environment: how many requests one turn may make. */
+  /** The parsed environment: how many requests one turn may make, and the subagent limits. */
   readonly config: {
     /** The most model requests one turn may make. */
     readonly maxToolSteps: number
+    /** How deep a tree of helpers may get (epic #340, S6; #344). */
+    readonly maxAgentDepth: number
+    /** How many of one root chat's descendants may be live at once (S6; #344). */
+    readonly maxLiveTasks: number
   }
   /** Which factory the process runs — `mock` adds the test tool to the built-ins. */
   readonly kind: ResolvedModel['kind']
@@ -198,6 +235,22 @@ export interface TurnToolsOptions {
   readonly now?: () => Date
   /** Where a failed listing is logged. Silent by default. */
   readonly logger?: Logger
+  /**
+   * The subagent types this deployment offers, and how the host is signalled (epic #340, S5/S6;
+   * #344) — everything the five tools need that is not the store or the session.
+   *
+   * `main.ts` builds it from the mode resolver's own deps and the two limits of {@link
+   * TurnToolsOptions.config}; a test wires its own. Absent, the loop adds nothing and takes
+   * nothing away: no chat is offered a helper the deployment cannot start.
+   */
+  readonly subagents?: SubagentTypeResolver
+  /**
+   * How the host is told to look at a session now (S5's `agent_stop`, S6's starts; #344).
+   *
+   * A signal is a hint like every other one — the event is what is durable — so a host that
+   * wires none loses latency and nothing else. `main.ts` passes the scheduler's own `signal`.
+   */
+  readonly signal?: (sessionId: SessionId, kind: 'work' | 'interrupt') => void
 }
 
 /**
@@ -231,6 +284,19 @@ export function createTurnTools(options: TurnToolsOptions): TurnToolOptions {
     // budget and the reasoning effort come from (#304, X2).
     toolSupportFor: createToolSupportResolver(registry),
     maxToolSteps: config.maxToolSteps,
+    // The subagent half of the loop (epic #340, S5/S6; #344): the types the resolver answers,
+    // and the two limits the environment names. Absent a resolver, this stays out of the turn's
+    // options entirely, and the loop offers the five tools to nobody.
+    ...(options.subagents === undefined
+      ? {}
+      : {
+          subagents: {
+            types: options.subagents,
+            maxDepth: config.maxAgentDepth,
+            maxLiveTasks: config.maxLiveTasks,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          },
+        }),
     // The remote tools a request offers (epic #303, X10; #312): listed per request from the
     // chat's in-force servers, through the guarded fetch, and cached briefly.
     ...(mcp === undefined

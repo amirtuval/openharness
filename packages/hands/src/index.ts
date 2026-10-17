@@ -94,6 +94,22 @@ export {
 } from './skill'
 
 export {
+  AGENT_TOOL_DESCRIPTION,
+  HARNESS_ANSWERED,
+  HARNESS_TOOL_HANDLERS,
+  SUBAGENT_TOOL_NAMES,
+  SUBAGENT_TOOLS_WITHOUT_ASK,
+  agentToolDescription,
+  agentWaitTool,
+  cannotAskForApproval,
+  createSubagentTools,
+  isSubagentToolName,
+  type SubagentToolHandlers,
+  type SubagentToolsOptions,
+  type SubagentTypeSummaryLike,
+} from './subagent-tools'
+
+export {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_REDIRECTS,
   DEFAULT_TIMEOUT_MS,

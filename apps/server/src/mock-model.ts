@@ -1,11 +1,22 @@
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider'
 import type { AskUserInput, ModelUsage } from '@openharness/protocol'
-import { ASK_USER_TOOL_NAME, TODO_WRITE_TOOL_NAME } from '@openharness/protocol'
+import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
+  ASK_USER_TOOL_NAME,
+  MESSAGE_PARENT_TOOL_NAME,
+  TASK_DESCRIPTION_MAX_LENGTH,
+  TASK_WAIT_TOOL_NAME,
+  TODO_WRITE_TOOL_NAME,
+  newTaskId,
+} from '@openharness/protocol'
 import { SKILL_READ_TOOL_NAME, SKILL_TOOL_NAME } from '@openharness/hands'
 import { MockLanguageModelV4 } from 'ai/test'
 
 import type { ModelFactory } from '@openharness/brain'
 
+import { TEST_TASK_TOOL_NAME } from './test-tasks'
 import { TEST_TOOL_NAME } from './tools'
 
 /**
@@ -150,6 +161,149 @@ export function skillReadCallOf(message: string): { name: string; path: string }
   return space === -1
     ? { name: rest, path: '' }
     : { name: rest.slice(0, space), path: rest.slice(space + 1).trim() }
+}
+
+/**
+ * The marker that makes the model start a **background task** (epic #340, S4; #343).
+ *
+ * The model calls the test background tool, which returns a handle at once, and the process's
+ * store proxy starts the task and delivers its notification after the delay the marker names —
+ * so a whole background task, end to end (the call, the handle, the `session.task_started` and
+ * its status, the news the parent reacts to) is driven through the real server, scheduler,
+ * brain, store and log. The text after the marker is the delay in milliseconds, defaulting to
+ * {@link TEST_TASK_DELAY_MS}.
+ */
+export const MOCK_TASK_MARKER = '__task__'
+
+/**
+ * The marker that makes the model **wait for background tasks** (epic #340, S5; #343).
+ *
+ * The model calls `agent_wait` and the turn ends `waiting_on_tasks`, holding nothing — which is
+ * what lets an e2e test watch a wait being resolved by a notification, or by its own deadline
+ * (the text after the marker is the timeout in seconds, and a short one is what a test that
+ * wants the deadline rather than the news writes).
+ */
+export const MOCK_WAIT_MARKER = '__wait__'
+
+/**
+ * The marker that makes the model **start a subagent** (epic #340, S5; #344).
+ *
+ * The model calls `agent`, and what follows the marker is the type and the prompt, separated
+ * by a pipe: `__agent__ researcher | Read the rewind code and report.` The description the
+ * `session.task_started` carries is the prompt's first line, collapsed and bounded — a test
+ * that cares about the description writes a one-line prompt and reads it back.
+ *
+ * A child turn is driven by whatever the QA spec sends to the **child session** the handle
+ * names (`parent_session_id` of the parent's children, or the `child_session_id` of its
+ * `session.task_started`), so every marker here works in a child too: `__message_parent__`,
+ * `__fail_terminal__`, `__wait__`, `__task__`, or a plain message whose text is the child's
+ * report.
+ */
+export const MOCK_AGENT_MARKER = '__agent__'
+
+/**
+ * The marker that makes the model **message a task** (epic #340, S5; #344).
+ *
+ * `__agent_message__ task_… | keep going` calls `agent_message` with that handle and that text,
+ * which steers a running child or starts another turn on one that already reported.
+ */
+export const MOCK_AGENT_MESSAGE_MARKER = '__agent_message__'
+
+/**
+ * The marker that makes the model **stop a task** (epic #340, S5; #344):
+ * `__agent_stop__ task_…` calls `agent_stop` with that handle.
+ */
+export const MOCK_AGENT_STOP_MARKER = '__agent_stop__'
+
+/**
+ * The marker a **child** answers with to send its parent a note (epic #340, S5; #344):
+ * `__message_parent__ half way` calls `message_parent`, which writes a `message` notification
+ * in the parent's log without ending the child's turn.
+ */
+export const MESSAGE_PARENT_MARKER = '__message_parent__'
+
+/** How the arguments of a two-field marker are split: `type | prompt`, `task | text`. */
+const MARKER_SEPARATOR = '|'
+
+/**
+ * What a `__agent__` prompt's call carries: the type, the description and the prompt.
+ *
+ * The arguments are `<type> | <prompt>`. The description is the prompt's first line, collapsed
+ * to one line and bounded by the protocol's own cap — derived rather than asked for, because a
+ * marker with three fields is one a test has to count pipes in, and the description is a card's
+ * caption rather than something a test asserts on.
+ */
+export function agentInputOf(message: string): {
+  type: string
+  description: string
+  prompt: string
+} {
+  const [type, ...rest] = message.slice(MOCK_AGENT_MARKER.length).split(MARKER_SEPARATOR)
+  const prompt = rest.join(MARKER_SEPARATOR).trim()
+  return {
+    type: (type ?? '').trim(),
+    description: firstLine(prompt),
+    prompt,
+  }
+}
+
+/**
+ * What an `__agent_message__` prompt's call carries: the handle and the text, split the same
+ * way. A marker with no pipe sends the whole remainder as the text, which is what a test that
+ * only wants to tell a task something writes.
+ */
+export function agentMessageInputOf(message: string): { task_id: string; text: string } {
+  const [taskId, ...rest] = message.slice(MOCK_AGENT_MESSAGE_MARKER.length).split(MARKER_SEPARATOR)
+  const text = rest.join(MARKER_SEPARATOR).trim()
+  return {
+    task_id: (taskId ?? '').trim(),
+    text: text.length > 0 ? text : 'keep going',
+  }
+}
+
+/** What an `__agent_stop__` prompt's call carries: the handle. */
+export function agentStopInputOf(message: string): { task_id: string } {
+  return { task_id: message.slice(MOCK_AGENT_STOP_MARKER.length).trim() }
+}
+
+/**
+ * What a `__message_parent__` prompt's call carries: the note. The rest of the message is the
+ * text, whole — a note is prose, and nothing in it could be mistaken for a field.
+ */
+export function messageParentInputOf(message: string): { text: string } {
+  return { text: message.slice(MESSAGE_PARENT_MARKER.length).trim() }
+}
+
+/** The first line of a prompt, collapsed and bounded — a task's description. */
+function firstLine(prompt: string): string {
+  const line = prompt.split('\n')[0]?.replace(/\s+/g, ' ').trim() ?? ''
+  const text = line.length > 0 ? line : 'A subagent task'
+  return text.length > TASK_DESCRIPTION_MAX_LENGTH
+    ? `${text.slice(0, TASK_DESCRIPTION_MAX_LENGTH - 1)}…`
+    : text
+}
+
+/**
+ * What a `__task__` prompt's call carries: a task id of its own (so the handle the model reads
+ * and the events the log holds name one task) and the delay the marker names, if any.
+ */
+export function testTaskInputOf(message: string): {
+  task_id: string
+  description: string
+  delay_ms?: number
+} {
+  const asked = Number.parseInt(message.slice(MOCK_TASK_MARKER.length).trim(), 10)
+  return {
+    task_id: newTaskId(),
+    description: 'A test background task',
+    ...(Number.isFinite(asked) && asked >= 0 ? { delay_ms: asked } : {}),
+  }
+}
+
+/** What a `__wait__` prompt's call carries: the timeout the marker names, if any. */
+export function testWaitInputOf(message: string): { timeout_s?: number } {
+  const asked = Number.parseFloat(message.slice(MOCK_WAIT_MARKER.length).trim())
+  return Number.isFinite(asked) && asked > 0 ? { timeout_s: asked } : {}
 }
 
 /** How many items a `__todos__` prompt writes when it does not say. */
@@ -344,6 +498,48 @@ export function planFor(message: string, attempt: number): ModelPlan {
       chunks: [],
       delayMs: 0,
       toolCalls: [{ name: TODO_WRITE_TOOL_NAME, input: todoInputOf(message) }],
+    }
+  }
+  if (message.startsWith(MOCK_AGENT_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: AGENT_TOOL_NAME, input: agentInputOf(message) }],
+    }
+  }
+  if (message.startsWith(MOCK_AGENT_MESSAGE_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: AGENT_MESSAGE_TOOL_NAME, input: agentMessageInputOf(message) }],
+    }
+  }
+  if (message.startsWith(MOCK_AGENT_STOP_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: AGENT_STOP_TOOL_NAME, input: agentStopInputOf(message) }],
+    }
+  }
+  if (message.startsWith(MESSAGE_PARENT_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: MESSAGE_PARENT_TOOL_NAME, input: messageParentInputOf(message) }],
+    }
+  }
+  if (message.startsWith(MOCK_TASK_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: TEST_TASK_TOOL_NAME, input: testTaskInputOf(message) }],
+    }
+  }
+  if (message.startsWith(MOCK_WAIT_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: TASK_WAIT_TOOL_NAME, input: testWaitInputOf(message) }],
     }
   }
   if (message.startsWith(MOCK_TOOL_MARKER)) {

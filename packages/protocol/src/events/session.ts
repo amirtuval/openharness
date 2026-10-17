@@ -1,10 +1,16 @@
 import { z } from 'zod'
 
-import { EventIdSchema, SessionIdSchema, SkillIdSchema } from '../ids'
+import { EventIdSchema, SessionIdSchema, SkillIdSchema, TaskIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { SkillNameSchema } from '../resources/skill'
+import { TimestampSchema } from '../common'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 import { ModelUsageSchema } from './span'
+import {
+  SessionTaskNotificationEventSchema,
+  SessionTaskStartedEventSchema,
+  SessionTaskStatusEventSchema,
+} from './task'
 
 /**
  * Events the session itself emits: status transitions, errors, the running usage of the turn
@@ -39,6 +45,14 @@ import { ModelUsageSchema } from './span'
  * or the approval prompt; when the user answers, one `user.tool_confirmation` starts the turn
  * that carries on. Anthropic's union also has `retries_exhausted` and `budget_reached`, which
  * openharness does not emit (see `AGENTS.md`).
+ *
+ * `waiting_on_tasks` is the **task wait** (epic #340, S5; #343): the turn ended because the
+ * model asked to wait for background tasks, and `task_ids` names them. It is the same kind of
+ * pause as `requires_action` — written down, holding no lease and no slot, resumed by whatever
+ * answers it — but what it waits for is not the user: it resumes on a
+ * `session.task_notification` for one of the tasks, on its `deadline`, or on a `user.message`
+ * (which resolves it exactly as a message resolves a user pause). `task_ids` is empty for a
+ * wait that did not name any task — "tell me when anything I started finishes".
  */
 export const StopReasonSchema = z.discriminatedUnion('type', [
   z.object({
@@ -52,6 +66,21 @@ export const StopReasonSchema = z.discriminatedUnion('type', [
      * the calls' own ids, which a `user.tool_confirmation` names to answer one.
      */
     event_ids: z.array(EventIdSchema),
+  }),
+  z.object({
+    // extension: the turn stopped to wait for background tasks (epic #340, S5; #343).
+    type: z.literal('waiting_on_tasks'),
+    /**
+     * The tasks the turn waits for, or an empty list for a wait that named none — anything
+     * this session started may resolve it.
+     */
+    task_ids: z.array(TaskIdSchema),
+    /**
+     * When the wait gives up, as a timestamp: a wait always has one (S5 — ten minutes by
+     * default, an hour at most), because it is what the recovery scan and the scheduler's
+     * timer read to resume a session nothing else will reach.
+     */
+    deadline: TimestampSchema,
   }),
 ])
 
@@ -690,6 +719,9 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
   SessionCompactEventSchema,
   SessionCompactionEventSchema,
   SessionSkillLoadedEventSchema,
+  SessionTaskStartedEventSchema,
+  SessionTaskStatusEventSchema,
+  SessionTaskNotificationEventSchema,
 ])
 
 /** Any stored session event, deep-readonly (D9, issue #46). */

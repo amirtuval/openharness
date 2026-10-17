@@ -58,6 +58,10 @@ import {
   type ProviderCredentialValidator,
 } from './provider-validation'
 import { LocalScheduler, type SessionScheduler } from './scheduler'
+import { MOCK_MODEL_ENV_VALUE } from './mock-model'
+import { createTaskNotifier } from './tasks'
+import { withTestBackgroundTasks } from './test-tasks'
+import { createSubagentTypeResolver } from './subagent-types'
 import { createTurnRegistry, createTurnTools, type TurnToolOptions } from './tools'
 
 /**
@@ -166,6 +170,17 @@ export interface StartServerOptions {
  * scheduler, so no turn can run before the credentials it needs can be read.
  */
 export async function startServer(options: StartServerOptions = {}): Promise<StartedServer> {
+  /**
+   * The scheduler's signal, for the inbox built before there is a scheduler to signal.
+   *
+   * A task reports through the notifier, which is built from the store — and the store has to be
+   * wrapped (under the test model) before the scheduler is built from it, so the two cannot be
+   * ordered the other way round. This reads `scheduler` when a task reports rather than when the
+   * notifier is built, which is what makes the order irrelevant.
+   */
+  function signalToScheduler(sessionId: SessionId, kind: 'work' | 'interrupt'): void {
+    scheduler.signal(sessionId, kind)
+  }
   const config = options.config ?? readServerConfig()
   // The log format is the configuration's (#158): the readable console format by default, the
   // Cloud Logging JSON one when the deployment asks for it. A caller that passes a logger
@@ -181,9 +196,21 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     projectId: config.gcpProjectId,
     logger,
   })
-  const store = tracer.enabled
+  const traced = tracer.enabled
     ? withSessionTraces(opened.store, new SessionTraces(tracer, logger))
     : opened.store
+  // Background tasks (epic #340, S4; #343): the inbox anything that runs a task writes through
+  // — one function over the log and the scheduler's signal. The scheduler is built below, and
+  // the signal is read when a task reports rather than when this is built, so the two do not
+  // have to be ordered: `signalToScheduler` is a declaration, hoisted above the `scheduler` its
+  // body names.
+  const tasks = createTaskNotifier({ store: traced, signal: signalToScheduler })
+  // The test hook: under `OPENHARNESS_TEST_MODEL=mock` the store is wrapped so that a call to
+  // the test background tool really starts a task and reports back later (#343). Wrapping the
+  // store the *scheduler* runs on is what makes it work: a task's side of the story is written
+  // by this process, and the process only sees the appends it makes.
+  const store =
+    config.testModel === MOCK_MODEL_ENV_VALUE ? withTestBackgroundTasks(traced, { tasks }) : traced
   // `/ready` flips to 503 the instant `shutdown()` is called — before the listener closes and
   // before the turns in flight are drained — so a load balancer stops sending new requests
   // while the ones in flight finish (#151). The closure keeps answering this flag for the
@@ -295,6 +322,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     callbackUrl: new URL('/v1/me/mcp_servers/oauth/callback', config.betterAuthUrl).href,
     logger,
   })
+  // The subagent types (epic #340, S2; the tools: #344): a type is a mode with a description,
+  // so the resolver reads the same store and credentials the mode resolver does — and no tool
+  // set of its own (#365): the child is created **on the type's mode**, and the loop resolves
+  // the tools for its every request exactly as it does for a chat's. It
+  // is handed to the turn options and closed over by the tools the loop builds per session —
+  // `agent` is its only caller — and the signals the tools send are the scheduler's own (a
+  // child started, messaged or stopped must be looked at now, not at the next sweep).
+  const subagentTypes = createSubagentTypeResolver({ store, credentials })
   const turnTools = createTurnTools({
     config,
     kind: resolvedModel.kind,
@@ -306,6 +341,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     // store the `/v1/me/skills` routes read, so what a settings screen shows and what a chat can
     // read are one set of snapshots.
     skills,
+    subagents: subagentTypes,
+    signal: signalToScheduler,
     logger,
   })
 

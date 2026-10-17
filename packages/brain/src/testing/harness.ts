@@ -76,15 +76,23 @@ export interface NewSessionOptions {
    * server creates one.
    */
   readonly mode?: ModeId
+  /**
+   * Whether a person is on the other end (epic #340, S1); omitted, `true` — the chat every
+   * test before this one built. `false` is the session whose model cannot stop to ask
+   * anything: `ask_user` is never offered to it, and an `ask` policy is refused at once
+   * instead of pausing the turn.
+   */
+  readonly interactive?: boolean
 }
 
 /**
  * Create a session with an agent, and optionally some events already in its log.
  *
  * @param initialEvents the events the session starts with, as a client would send them
- * @param options overrides: the agent's system prompt, the store's clock, and the store
- *   itself — a test that needs one which refuses or records an append builds a subclass and
- *   passes it through {@link NewSessionOptions.makeStore}
+ * @param options overrides: the agent's system prompt, the store's clock, the store itself —
+ *   a test that needs one which refuses or records an append builds a subclass and passes it
+ *   through {@link NewSessionOptions.makeStore} — and whether the session is interactive
+ *   (epic #340, S1)
  */
 export async function newSession(
   initialEvents: UserEventInput[] = [],
@@ -107,6 +115,7 @@ export async function newSession(
     ownerId: TEST_OWNER_ID,
     initial_events: initialEvents,
     ...(options.mode === undefined ? {} : { mode: options.mode }),
+    ...(options.interactive === undefined ? {} : { interactive: options.interactive }),
   })
   return { store, sessionId: session.id, clock }
 }

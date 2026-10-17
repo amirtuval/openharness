@@ -1,3 +1,4 @@
+import { NO_ASK_TOOL_NAMES, SUBAGENT_ASK_NOTE, toolPolicyChoices } from '@openharness/client'
 import type { ToolPermission, ToolSettingEntry } from '@openharness/protocol'
 import { useState } from 'react'
 
@@ -164,7 +165,9 @@ function ToolRow({
           disabled={saving || unavailable}
           onChange={(event) => onChange({ ...entry, policy: event.target.value as ToolPermission })}
         >
-          {TOOL_PERMISSIONS.map((permission) => (
+          {TOOL_PERMISSIONS.filter((permission) =>
+            toolPolicyChoices(entry.name).includes(permission.value),
+          ).map((permission) => (
             <option key={permission.value} value={permission.value}>
               {permission.label}
             </option>
@@ -177,6 +180,16 @@ function ToolRow({
               ? `Default (${entry.default_policy}).`
               : `Default is ${entry.default_policy}.`}
         </span>
+        {/* Why "Ask me first" is not in the list (issue #368, epic #340 S9). The five subagent
+            tools are listed here like any other built-in, but a call to four of them is kept out
+            of the transcript's tool calls — a card stands in for it — so there is no prompt a
+            client could draw and an `ask` would pause the turn with nothing to answer it. The
+            server refuses the write; saying so here is what keeps a reader from looking for it. */}
+        {NO_ASK_TOOL_NAMES.includes(entry.name) ? (
+          <span className="text-xs text-muted-foreground" data-slot="tool-ask-note">
+            {SUBAGENT_ASK_NOTE}
+          </span>
+        ) : null}
         {unavailable ? (
           <span className="text-xs text-muted-foreground" data-slot="tool-unavailable-reason">
             {entry.reason ?? 'A chat never offers it, whatever the switch says.'}

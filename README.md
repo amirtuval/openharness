@@ -239,6 +239,19 @@ server that is down is a tool source that is missing, never a failed turn. An er
 turn is a notice with a **Reconnect** in the page and `Ctrl+R` in `oh`. `oh mcp` is the same
 screen in the terminal, or a listing when there is no terminal to read.
 
+**A chat can hand work to a background task** (epic #340). The model calls `agent` and a
+**subagent** starts — a real session of its own, with its own log, model, turn, streams, usage and
+crash recovery, belonging to the chat that started it — on a **type** you describe (a mode with a
+description, plus the built-in `general-purpose`, which is the parent continued). It works in the
+background while the conversation goes on, and what it finds reaches the chat as a notification it
+reads when it is ready — a task's news never answers a question that is waiting on **you**. Each
+task is a **card** in the transcript — status, type, description, tokens, cost and the child's own
+activity as it works — with **Open** and **Stop**, and the child is a full chat of its own: the web
+app nests it under its parent in the sidebar, and `oh` reaches it with `/agents` and draws a
+breadcrumb back up. Helpers may start helpers, bounded by a nesting depth and a live-task cap the
+deployment sets. The four subagent calls take **allow** or **deny** and never `ask` — a task is
+drawn as a card, so there is no call line for a client to pause on.
+
 The web app and `oh` speak to the server through the same client
 ([`packages/client`](./packages/client/AGENTS.md)), so a behaviour one of them has, the other
 has too.
