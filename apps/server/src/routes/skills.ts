@@ -1,7 +1,10 @@
 import type { Context, Hono } from 'hono'
 import {
   API_VERSION_PREFIX,
+  PreviewSkillImportRequestSchema,
+  RefreshSkillRequestSchema,
   SKILL_MD_FILENAME,
+  SkillImportRequestSchema,
   UpdateSkillRequestSchema,
   type SkillId,
 } from '@openharness/protocol'
@@ -23,12 +26,17 @@ const SKILLS_PATH = `${API_VERSION_PREFIX}/me/skills`
  * GET    /v1/me/skills/{skill_id}/files/{path}        one file's content, or 404
  * POST   /v1/me/skills/{skill_id}                     update `enabled`, or 404
  * DELETE /v1/me/skills/{skill_id}                     204, or 404
+ * POST   /v1/me/skills/import/preview                 what a repository holds, or 422
+ * POST   /v1/me/skills/import                         store the picked candidates, or 422
+ * POST   /v1/me/skills/{skill_id}/refresh/preview     what changed, or 404
+ * POST   /v1/me/skills/{skill_id}/refresh             replace the snapshot, or 404
  * ```
  *
- * **Import and refresh are not here.** Both write a snapshot, both clone a repository and both
- * are #351's; what this file serves is what a user does with a skill they already have — see
- * it, read it, switch it on or off, delete it. A test that needs a skill makes one through the
- * store, which is the same store the routes read.
+ * The four that read a repository (#351, epic #349 K3/K5) are thin: the URL reading, the
+ * clone, the candidate discovery and the diff are `skills-import.ts`, and what is here is the
+ * body, the owner and the one 404 a route can answer. The import routes are registered
+ * **before** the `{skill_id}` ones so `…/skills/import` can never be read as a skill id —
+ * Hono prefers a static segment anyway, and spelling it out is cheaper than relying on that.
  *
  * Every skill belongs to the caller like any other resource (A4): the owner is always
  * `c.get('user').id`, no request carries one, and another user's skill answers 404 rather than
@@ -42,6 +50,42 @@ const SKILLS_PATH = `${API_VERSION_PREFIX}/me/skills`
 export function registerSkillRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
   const skills = SKILLS_PATH
   const skill = (c: Context<AppEnv>): SkillId => skillIdParam(c, 'skill_id')
+
+  // Import is two steps and the server holds nothing between them (K3): the preview reads the
+  // repository and answers, and the import reads it again and refuses a ref that has moved. Both
+  // are the caller's own skills, like every other route here — the owner is `c.get('user').id`
+  // and no request carries one.
+  app.post(`${skills}/import/preview`, async (c) => {
+    const body = await parseBody(c, PreviewSkillImportRequestSchema)
+    return c.json(await deps.skillImport.preview(c.get('user').id, body))
+  })
+
+  app.post(`${skills}/import`, async (c) => {
+    const body = await parseBody(c, SkillImportRequestSchema)
+    const stored = await deps.skillImport.importSkills(c.get('user').id, body)
+    return c.json({ data: stored }, 201)
+  })
+
+  // A refresh is by hand (K5): the preview re-clones the skill's stored source and shows the
+  // diff, and the confirm names the commit it resolved — so what is stored is what was read.
+  app.post(`${skills}/:skill_id/refresh/preview`, async (c) => {
+    const skillId = skill(c)
+    const answer = await deps.skillImport.previewRefresh(c.get('user').id, skillId)
+    if (answer === null) {
+      throw notFoundError(`no skill with id ${skillId}`)
+    }
+    return c.json(answer)
+  })
+
+  app.post(`${skills}/:skill_id/refresh`, async (c) => {
+    const body = await parseBody(c, RefreshSkillRequestSchema)
+    const skillId = skill(c)
+    const updated = await deps.skillImport.refresh(c.get('user').id, skillId, body.commit_sha)
+    if (updated === null) {
+      throw notFoundError(`no skill with id ${skillId}`)
+    }
+    return c.json(updated)
+  })
 
   app.get(skills, async (c) => {
     const data = await deps.skills.list({ ownerId: c.get('user').id })

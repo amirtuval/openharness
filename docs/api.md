@@ -143,6 +143,10 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill, with its content and size                                                                                                                                                                                              |
 | `POST`   | `/v1/me/skills/{skill_id}`                      | switch a skill on or off (`enabled`); the snapshot itself is not editable                                                                                                                                                                        |
 | `DELETE` | `/v1/me/skills/{skill_id}`                      | delete a skill and its whole snapshot; `204`                                                                                                                                                                                                     |
+| `POST`   | `/v1/me/skills/import/preview`                  | read a public repository and answer the candidate skills; stores nothing                                                                                                                                                                         |
+| `POST`   | `/v1/me/skills/import`                          | store the picked candidates; `201` with the new skills                                                                                                                                                                                           |
+| `POST`   | `/v1/me/skills/{skill_id}/refresh/preview`      | re-clone the skill's stored source and answer what changed                                                                                                                                                                                       |
+| `POST`   | `/v1/me/skills/{skill_id}/refresh`              | replace the snapshot with the commit the preview named                                                                                                                                                                                           |
 | `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                                                                                                                                                                          |
 | `GET`    | `/v1/sessions/{session_id}/usage`               | what one session **and its descendants** spent: totals, cost, the per-model breakdown, and the subtree's own share as `descendants` (epic #340, S8; #344)                                                                                        |
 | `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day                                                                                                                                                           |
@@ -1474,9 +1478,9 @@ A **skill** (epic #349, decision K1) is a folder of instructions in the open
 and a `description`, then a Markdown body — plus any other files the folder holds. A user
 **imports** one from a public git repository and reviews it before it is stored (K3), and from
 then on it is a **snapshot**: nothing is read from git again, so a skill a chat loaded cannot
-change under it and a chat never depends on a git host being up. Import and refresh — the two
-routes that write a snapshot — are #351; these are the routes over a skill a caller already
-has.
+change under it and a chat never depends on a git host being up. [Importing and
+refreshing](#importing-and-refreshing-a-skill) are the four routes that read a repository; the
+rest are the routes over a skill a caller already has.
 
 The routes are `/v1/me/skills`, owner-scoped like the rest of `/v1/me`: another user's skill is
 a `404`, never a `403`, and so is a file of one — the same answer an unknown path gets, so a
@@ -1538,6 +1542,98 @@ client action and never a skill (K7). A skill cannot be called `compact`.
 **in force for a request** are the caller's `enabled` ones with the mode's patch over them, and
 a mode naming a skill the caller no longer has is ignored rather than refused. See
 [Modes](#modes).
+
+### Importing and refreshing a skill
+
+An import is **two steps** (K3), and neither holds anything between them:
+
+```bash
+# 1. Preview: clone the repository, and answer every SKILL.md under the path.
+curl -X POST localhost:3000/v1/me/skills/import/preview -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://github.com/anthropics/skills/tree/main/skills"}'
+# → 200 {"url":"https://github.com/anthropics/skills","ref":"main","path":"skills",
+#        "commit_sha":"e1f2a…",
+#        "candidates":[
+#          {"name":"pdf","folder":"skills/pdf","description":"Works with PDFs.",
+#           "files":[{"path":"SKILL.md","size":4210}],
+#           "skill_md":"---\nname: pdf\n…","problems":[],"name_taken":false},
+#          {"name":"broken","folder":"skills/broken","description":null,"files":[…],
+#           "skill_md":"no frontmatter here","name_taken":false,
+#           "problems":[{"code":"invalid-frontmatter","message":"SKILL.md must open with YAML frontmatter and a closing `---` line."}]}
+#        ]}
+
+# 2. Import the ones the reader picked, naming the commit the preview resolved.
+curl -X POST localhost:3000/v1/me/skills/import -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://github.com/anthropics/skills/tree/main/skills","commit_sha":"e1f2a…","names":["pdf"]}'
+# → 201 {"data":[ { …the new skill… } ]}
+```
+
+**The URL** is `https://` only, and may be a browse URL: `…/tree/<ref>/<path>` on GitHub and
+`…/-/tree/<ref>/<path>` on GitLab are split into the repository, the ref and the path, so a
+reader can paste the address bar. An explicit `ref` or `path` in the body wins over what the URL
+implied. A URL that is not `https`, carries credentials (`user:token@`) or names no repository
+is the `400` `invalid_request_error`; credentials are never sent, and a private repository is
+not supported (K3).
+
+**Every `SKILL.md` under the path is a candidate** — one folder each, its files read
+recursively, its frontmatter parsed (K1) — and each carries its **problems** rather than failing
+the preview: `invalid-frontmatter`, `name-mismatch` (the frontmatter's `name` is not the
+folder's), `reserved-name` (a built-in command's), `duplicate-name` (two candidates of one name)
+and `over-limit` (one of the limits below). `name_taken` is separate and says the caller already
+has a skill by that name.
+
+**A `SKILL.md` at the repository's own root is a candidate**, because a single-skill repository
+puts one there. A skill's name is its folder's (K1) and the root is not a folder, so the
+repository itself is read as the folder: the candidate's `folder` is `""` and its **name is the
+repository's** — the last segment of the repo URL's path with a trailing `.git` dropped, so
+`https://github.com/acme/release-notes.git` is named `release-notes`. The frontmatter has to
+agree with that name like any other, and a mismatch is the usual `name-mismatch`. A `SKILL.md`
+sitting directly under a named `path` keeps **that folder's** own name. A root skill's files are
+the **whole tree under the root**, except that a folder below it holding a `SKILL.md` is a
+candidate of its own and its subtree is that candidate's, not the root's — so a repository whose
+root holds the skill and one subfolder holds another offers two candidates with no duplicated
+files. (A **nested** candidate keeps the ordinary rule: its files are its parent folder's too.)
+
+**The import re-clones and refuses a ref that has moved**: the ref must still resolve to the
+`commit_sha` the preview answered, or the answer is the `409` `conflict_error` telling the
+caller to preview again. Everything is checked before anything is stored, so a refused import
+stores nothing — a name no candidate has is a `400`, a candidate that cannot be imported (or a
+skill that cannot be stored) is a `422` `skill_import_error` carrying the candidate's own
+problems, and a name the caller already has is a `409`.
+
+```bash
+# A refresh is by hand (K5): preview what changed, then confirm the commit.
+curl -X POST localhost:3000/v1/me/skills/skl_01J…/refresh/preview -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{}'
+# → 200 {"commit_sha":"a4b5c…","changed":true,
+#        "files_added":["reference/format.md"],"files_removed":[],"files_changed":["SKILL.md"],
+#        "skill_md_diff":"--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,4 +1,4 @@\n …",
+#        "problems":[]}
+
+curl -X POST localhost:3000/v1/me/skills/skl_01J…/refresh -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"commit_sha":"a4b5c…"}'
+# → 200 { …the skill, with the new snapshot and a moved refreshed_at… }
+```
+
+The refresh clones the skill's **stored** source — the same URL, ref and path it was imported
+from — and compares the result against the snapshot the caller has, so nothing depends on the
+client remembering anything. `changed` is the whole answer in one boolean, the three lists are
+the file story (paths, not listings), and `skill_md_diff` is a unified diff of the one file a
+skill is read by. An unchanged commit answers `changed: false`; confirming it is allowed and
+moves no snapshot. A preview of a repository that no longer holds the skill, or one that would
+replace a working skill with a broken one, is a `422` `skill_import_error` — and the confirm of
+a broken snapshot is refused rather than stored. There are **no automatic updates**: nothing
+refreshes a skill in the background, and a chat that already loaded one keeps what it loaded.
+
+**The errors are specific**, because a pasted URL can be wrong in ways a user can fix
+(`skill_import_error`, `422`): `unreachable`, `not_a_repository`, `authentication_required`
+(private or credentials needed — a forge answers `401` for both, so the message claims no
+more), `ref_not_found`, `path_not_found`, `no_skills_found`, `over_limit` (the 20 MB clone or
+its deadline), `refused_address` (a private, loopback, link-local or metadata address this
+deployment will not dial — see `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`), and
+`skill_not_importable` (the repository read worked; the skill itself cannot be stored).
 
 ## The model catalog
 

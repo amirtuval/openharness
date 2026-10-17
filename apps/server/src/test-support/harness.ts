@@ -34,7 +34,13 @@ import {
   type Vault,
 } from '@openharness/vault'
 
-import { alwaysReady, createApp, type McpServersAppOptions, type Readiness } from '../app'
+import {
+  alwaysReady,
+  createApp,
+  type McpServersAppOptions,
+  type Readiness,
+  type SkillImportAppOptions,
+} from '../app'
 import {
   DEV_LOGIN_EMAIL,
   DEV_LOGIN_PASSWORD,
@@ -290,9 +296,15 @@ export interface TestOptions {
   readonly todoNudge?: boolean
   /**
    * Where a test's imported skills live (epic #349, K4), instead of a fresh in-memory store.
-   * A test that needs a skill seeds one through it, since no route writes a snapshot yet.
+   * A test that needs a skill seeds one through it, or imports one through the routes (#351).
    */
   readonly skills?: SkillStore
+  /**
+   * How the skill import and refresh routes read a repository (epic #349, K3/K5), instead of
+   * the deployment's guarded clone. A test points it at its own repository fixture, so the
+   * routes are driven over a real git server on loopback rather than the internet.
+   */
+  readonly skillImport?: SkillImportAppOptions
   /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
@@ -509,6 +521,9 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     mcpServers: { service: mcpServers },
     // The skill store the routes read and a test seeds through (epic #349, K4).
     skills,
+    // How an import reads a repository (epic #349, K3/K5): a test's fixture-backed clone, or
+    // the real guarded one when the test said nothing.
+    ...(options.skillImport === undefined ? {} : { skillImport: options.skillImport }),
     ...(options.tools === undefined ? {} : { tools: options.tools }),
     // What `GET /v1/me/preferences` reports as the default trigger share (C3, #282).
     compactionThreshold,

@@ -5,6 +5,7 @@ import {
   GetSkillResponseSchema,
   SkillFileContentSchema,
   SkillSchema,
+  newSkillId,
   skillFileSize,
   type ListSkillsResponse,
   type Mode,
@@ -70,8 +71,11 @@ function get(test: TestContext, path: string): Promise<Response> {
 describe('skills over HTTP (epic #349, K4)', () => {
   it('lists the caller’s own skills, oldest first, with no file’s content', async () => {
     const test = createTestApp()
-    const first = await seedSkill(test)
-    const second = await seedSkill(test, { name: 'pdf-tools', enabled: false })
+    // The ids are pinned, and their timestamps differ. `list` orders by `(imported_at, id)`,
+    // and two skills created in the same millisecond tie on the timestamp — so a fresh ULID's
+    // random half would decide the order, and this assertion would be a coin flip.
+    const first = await seedSkill(test, { id: newSkillId(1) })
+    const second = await seedSkill(test, { id: newSkillId(2), name: 'pdf-tools', enabled: false })
 
     const response = await get(test, SKILLS)
     expect(response.status).toBe(200)

@@ -1157,6 +1157,80 @@ different decision from allowing their own `web_fetch`, and two servers' `search
 else on the line" ([#313](https://github.com/amirtuval/openharness/issues/313),
 [#327](https://github.com/amirtuval/openharness/pull/327)).
 
+## Skills: importing from git
+
+**`isomorphic-git`'s `listFiles` walks into a submodule and fails the whole clone; a `TREE` walk that
+skips non-blob entries does not.** A tree entry of mode `160000` is a gitlink — a commit whose object
+lives in another repository — and `listFiles` reads it, so a repository with one submodule anywhere in
+its tree ends the import with `Could not find <sha>` however unrelated the submodule is to the skill.
+Walking the tree yourself (`git.walk` with `TREE({ ref })`, keeping entries whose `type()` is `blob`)
+reports the type without reading the object, which is what makes "no submodules" (K3) a property of
+our code rather than of a library's error path
+([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**Read the ref advert before cloning, because `HEAD` locally does not resolve after a shallow
+single-branch clone.** `_init` writes `ref: refs/heads/master`, and a `singleBranch` fetch writes the
+branch it fetched as a **remote-tracking** ref (`refs/remotes/origin/main`) — so `resolveRef('HEAD')`
+on the fresh clone answers `NotFoundError: master`, and there is no local ref that names what was just
+fetched. The way out is one extra `GET /info/refs`: `git.getRemoteInfo` answers the default branch,
+and the clone is then made with an explicit `ref`, so the commit the clone landed on is resolvable by
+name. That call's own shape is worth knowing too — refs come back as a tree (`refs.heads.main`,
+`refs.tags.v1`) while the symref `HEAD` is a **top-level** field holding the target verbatim
+(`refs/heads/main`) ([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**A clone failure has to be classified from more than its error code.** `isomorphic-git` raises
+`HttpError` with a status, `NotFoundError` for a ref that is not there, and `RemoteCapabilityError` for
+a server that is not a git server at all — but a connection that never opened surfaces as undici's
+bare `TypeError: fetch failed` with no `code` at all, so "unreachable" is the case with _nothing_ to
+read rather than another code to add. The same lesson from the other side: a download cap enforced
+inside the response body is reported by the library as its own `Empty response from git server`, so the
+cap records a flag as well as throwing — the flag is what survives the library's translation
+([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**`allowPrivate` is coarser than "loopback", and a sandbox's egress proxy can answer for an address
+the guard was supposed to refuse.** The self-host flag lets **every** non-public address through,
+link-local and the metadata service included; a test that wants to show a redirect landing on
+`169.254.169.254` being refused therefore has to keep its first hop on a **public** name (an injected
+resolver plus a transport that connects to the fixture, the pattern `web-fetch.test.ts` uses) rather
+than turning the flag on. And with `HTTP_PROXY`/`HTTPS_PROXY` set — as in the sandbox this was built
+in — a hop to a link-local address is answered **by the proxy** (`No MMDS token provided`, a 401), so a
+refusal test that forgets to delete the proxy variables fails for the wrong reason, or worse, passes
+by accident ([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**A test fixture for smart HTTP is real `git`, not a hand-written packfile.** `git upload-pack
+--stateless-rpc --advertise-refs` behind `GET /info/refs` and `--stateless-rpc` behind the `POST` is
+all a clone needs, and it is what `git http-backend` runs — so the _client_ is what is under test, and
+the fixture cannot agree with a bug in our own idea of the pack format. Two details that cost time:
+the responses must be assembled and written as **binary** (a UTF-8 round trip corrupts a packfile only
+on the repositories whose deltas hold invalid sequences), and the advertisement needs the
+`001e# service=git-upload-pack\n0000` preamble in front of git's own lines. It is exported from
+`@openharness/hands/testing` rather than kept in a test file, because the server's import tests and
+the QA specs of [#355](https://github.com/amirtuval/openharness/issues/355) want the same repository
+([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**Sort a preview's file listing the way the store does, or the preview and the skill it becomes
+disagree.** `SkillStore` lists a snapshot's files in code-point path order (`'SKILL.md'` before
+`'reference/tone.md'`), which is **not** `localeCompare`'s order — a locale-aware sort puts
+`reference/…` first, so an import that sorted that way showed one order in the preview and another
+after the import succeeded ([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**A repository's root is a candidate, so the repository's _name_ has to be a skill name — and some
+repositories can never have one.** "A skill's name is its folder's" has no folder to read at a
+repository's root, so a `SKILL.md` sitting there is named for the repository instead: the last
+segment of its URL path with a trailing `.git` dropped (`packages/hands/src/git-url.ts`'s
+`repositoryName`, read off the `url` `parseGitUrl` answered so a browse URL's `/tree/…` half can
+never leak in). Two consequences are easy to miss. A root `SKILL.md` whose frontmatter disagrees
+with that name is an ordinary `name-mismatch`; and a repository called for a built-in command
+(`skills`, `compact`, …) or with an uppercase or underscored name can only ever answer
+`reserved-name`/`invalid-frontmatter` at its root — such a repository is still importable by naming
+its folder, which is what `path` is for, so the root rule is an addition rather than the only way
+in. The rule that is the root's **alone** is which files it takes: the whole tree under the root,
+minus the subtree of every folder below it that holds a `SKILL.md`, because that folder is a
+candidate of its own and its files are its own. Without that exclusion the shape single-skill
+repositories actually have — a `SKILL.md` at the root beside a `skills/` directory — would store
+every other skill's files twice, or blow the K4 limits doing it
+([#364](https://github.com/amirtuval/openharness/pull/364)).
+
 ## The HTTP layer
 
 **A route whose path parameter may hold slashes is written `:path{.+}`, not `*` — Hono 4 does not

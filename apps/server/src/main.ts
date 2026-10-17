@@ -400,6 +400,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     // Where users' imported skills live (epic #349, K4): the routes over `/v1/me/skills` read
     // them, and so does the settings resolver a turn is handed (#352).
     skills,
+    // How an import reads a repository (epic #349, K3/K5): the real guarded clone, with the
+    // one setting that decides whether a private address may be dialled — the same flag a
+    // remote MCP server and a custom OpenAI-compatible endpoint read (#249; #303, X10).
+    skillImport: { allowPrivateUrls: config.allowPrivateProviderUrls },
     credentialRoutes: {
       credentials,
       vault,

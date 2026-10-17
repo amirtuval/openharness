@@ -310,6 +310,21 @@ export {
   type SkillSettingsDeps,
   type SkillSettingsResolver,
 } from './skills'
+// Importing a skill from a public repository, and refreshing one (epic #349, K3/K5): the
+// clone through `safeFetch`, the candidate discovery, the diff, and the service the four
+// routes that read a repository are handed.
+export {
+  InvalidSkillSelectionError,
+  SkillImportFailureError,
+  SkillSourceRefusalError,
+  StaleSkillCommitError,
+  createSkillImportService,
+  skillImportFailureMessage,
+  type CloneRepository,
+  type SkillImportOptions,
+  type SkillImportService,
+} from './skills-import'
+export { diffSnapshots, skillMdDiff, type DiffableFile, type SnapshotDiff } from './skills-diff'
 export {
   createTaskNotifier,
   taskDescription,

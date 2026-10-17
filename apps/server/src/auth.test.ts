@@ -42,6 +42,12 @@ const V1_ROUTES: readonly (readonly [string, string])[] = [
   ['GET', `${API_VERSION_PREFIX}/me/skills/skl_01HZZZZZZZZZZZZZZZZZZZZZZZ/files/SKILL.md`],
   ['POST', `${API_VERSION_PREFIX}/me/skills/skl_01HZZZZZZZZZZZZZZZZZZZZZZZ`],
   ['DELETE', `${API_VERSION_PREFIX}/me/skills/skl_01HZZZZZZZZZZZZZZZZZZZZZZZ`],
+  // The import and refresh routes (#351): a preview reads a repository and a confirm writes a
+  // snapshot, and both are the caller's own — no session, no import.
+  ['POST', `${API_VERSION_PREFIX}/me/skills/import/preview`],
+  ['POST', `${API_VERSION_PREFIX}/me/skills/import`],
+  ['POST', `${API_VERSION_PREFIX}/me/skills/skl_01HZZZZZZZZZZZZZZZZZZZZZZZ/refresh/preview`],
+  ['POST', `${API_VERSION_PREFIX}/me/skills/skl_01HZZZZZZZZZZZZZZZZZZZZZZZ/refresh`],
   ['GET', `${API_VERSION_PREFIX}/models`],
   ['GET', `${API_VERSION_PREFIX}/provider-credentials`],
   ['PUT', `${API_VERSION_PREFIX}/provider-credentials/anthropic`],
