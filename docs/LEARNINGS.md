@@ -246,6 +246,17 @@ another turn, while a plain `interrupt` ends its turn and then looks for more wo
 `SessionNotFoundError` is treated as an answer throughout the runner, or a delete becomes a crash
 loop ([epic #116](https://github.com/amirtuval/openharness/issues/116), U5).
 
+**A server default can be right for a laptop and wrong for every deployment, so the chart has to
+own the deployment's value.** `DEFAULT_SCHEDULER` is `local` (`apps/server/src/config.ts`) because
+that is what one process wants, but the Helm chart runs two replicas and scales to four; `local`
+owns all 64 partitions, writes unfenced, recovers every session on boot and handles interrupts
+in-process, so a second pod closes turns the first is still running as `brain_lost` and re-runs
+them, and an interrupt on the wrong pod starts a second brain (#378). The chart now defaults
+`env.SCHEDULER` to `postgres` — repeated in `infra/modules/app/locals.tf` so the two agree — and a
+template helper refuses to render `local` when `replicaCount > 1` or the HPA's `maxReplicas > 1`.
+Because Helm deep-merges a values file into the chart's defaults, a Terraform `env` map that omits
+`SCHEDULER` can no longer fall through to the server's unsafe default.
+
 ## Authentication and identity providers
 
 **Identity is the provider-verified email, and boolean-shaped claims are not booleans.** Microsoft

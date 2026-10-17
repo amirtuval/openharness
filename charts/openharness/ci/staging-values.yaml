@@ -71,6 +71,10 @@ gcpProject: openharness-dev
 # {env: GOOGLE_CLIENT_SECRET, secret: google-client-secret}).
 env:
   BETTER_AUTH_URL: https://staging.oharness.dev
+  # The chart runs 2–4 pods, and the partitioned scheduler is the only one that is safe there
+  # (issue #378). This is also the chart's default, set here and in Terraform so all three
+  # places agree; `local` with more than one pod fails the render.
+  SCHEDULER: postgres
   OPENHARNESS_TRUSTED_PROXY_HOPS: '1'
   OPENHARNESS_KEY_PROVIDER: gcp-kms
   OPENHARNESS_KMS_KEY: projects/openharness-dev/locations/global/keyRings/openharness/cryptoKeys/credentials

@@ -212,6 +212,12 @@ table and the in-memory store has no database to put them in. A heartbeat at or 
 fails it too: that is a lease that lapses between two renewals, which is a partition handing
 itself over every cycle rather than a configuration.
 
+Any deployment that can run more than one instance must use `postgres`. `local` owns every
+partition in the process and writes unfenced, so a second copy would recover and re-run turns
+the first is still running and could not deliver an interrupt to the owner. The Helm chart
+(`charts/openharness`) therefore defaults `SCHEDULER` to `postgres`, and refuses to render
+`local` when `replicaCount` or the HPA allows more than one pod (issue #378).
+
 Two instances sharing a database is all it takes to run the partitioned scheduler — nothing
 else coordinates them:
 

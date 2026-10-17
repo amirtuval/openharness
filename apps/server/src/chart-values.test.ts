@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,6 +24,12 @@ import { readServerConfig } from './config'
 /** The repo root, three levels up from `apps/server/src`. */
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 
+/** The chart's own defaults, which every values file is merged over. */
+const CHART_DEFAULTS = join(REPO_ROOT, 'charts', 'openharness', 'values.yaml')
+
+/** The chart directory, for a render that merges those defaults the way Helm does. */
+const CHART_DIR = join(REPO_ROOT, 'charts', 'openharness')
+
 /** The values Terraform passes for staging — the chart side of the pair this test guards. */
 const STAGING_VALUES = join(REPO_ROOT, 'charts', 'openharness', 'ci', 'staging-values.yaml')
 
@@ -45,6 +52,33 @@ interface ChartValues {
 /** The chart's staging values, parsed. */
 function readStagingValues(): ChartValues {
   return parse(readFileSync(STAGING_VALUES, 'utf8')) as ChartValues
+}
+
+/** The chart's own defaults, parsed — the values a values file is merged over. */
+function readChartDefaults(): ChartValues {
+  return parse(readFileSync(CHART_DEFAULTS, 'utf8')) as ChartValues
+}
+
+/** Whether `helm` is on this machine; the render checks skip without it. */
+function hasHelm(): boolean {
+  return spawnSync('helm', ['version'], { encoding: 'utf8' }).status === 0
+}
+
+/**
+ * Render the chart with `--set` overrides, the way `helm template` does in
+ * `.github/workflows/chart.yml`. The chart's own defaults are the starting point, so a test
+ * that sets only `env.SCHEDULER=local` is still rendered with `replicaCount: 2` and the HPA on.
+ */
+function render(overrides: readonly string[]): {
+  readonly status: number | null
+  readonly stderr: string
+} {
+  const args = ['template', 'openharness', CHART_DIR]
+  for (const override of overrides) {
+    args.push('--set', override)
+  }
+  const result = spawnSync('helm', args, { encoding: 'utf8' })
+  return { status: result.status, stderr: result.stderr }
 }
 
 /**
@@ -112,6 +146,8 @@ describe('the chart values staging boots with (#159)', () => {
 
       // The values took effect, and the dev login is off because nothing set it.
       expect(config.devLogin).toBe(false)
+      // The chart runs 2–4 pods, so staging must be on the partitioned scheduler (#378).
+      expect(config.scheduler).toBe('postgres')
       expect(config.betterAuthUrl).toBe('https://staging.oharness.dev')
       expect(config.keyProvider).toBe('gcp-kms')
       expect(config.databaseUrl).toBe('database-url-placeholder')
@@ -158,5 +194,40 @@ describe('the chart values staging boots with (#159)', () => {
     // note in locals.tf points at this test.
     const values = readStagingValues()
     expect(Object.keys(values.env).sort()).toEqual(terraformEnvVars().sort())
+  })
+})
+
+describe('the deployed scheduler (#378)', () => {
+  it('defaults to the partitioned scheduler wherever the deployment is described', () => {
+    // `local` owns every partition in one process and writes unfenced; the chart runs 2–4 pods,
+    // so the default has to be the multi-instance scheduler. Terraform repeats the value so the
+    // chart, its CI values and the infrastructure all say the same thing.
+    expect(readChartDefaults().env.SCHEDULER).toBe('postgres')
+    expect(readStagingValues().env.SCHEDULER).toBe('postgres')
+    expect(terraformEnvVars()).toContain('SCHEDULER')
+  })
+
+  // The render half needs the Helm binary. It runs here wherever Helm is installed; the chart
+  // workflow proves the same guard with the same command on every chart change.
+  describe.skipIf(!hasHelm())('guarding the chart against SCHEDULER=local', () => {
+    it('renders the default values, which run postgres', () => {
+      expect(render([]).status).toBe(0)
+    })
+
+    it('refuses local when the Deployment can have more than one pod', () => {
+      // The defaults are replicaCount: 2 and an HPA to 4, so either half of the guard refuses.
+      expect(render(['env.SCHEDULER=local']).stderr).toContain(
+        'SCHEDULER=local is single-instance only',
+      )
+      expect(
+        render(['env.SCHEDULER=local', 'replicaCount=1', 'autoscaling.maxReplicas=2']).status,
+      ).not.toBe(0)
+    })
+
+    it('allows local when exactly one pod can run', () => {
+      expect(
+        render(['env.SCHEDULER=local', 'replicaCount=1', 'autoscaling.enabled=false']).status,
+      ).toBe(0)
+    })
   })
 })

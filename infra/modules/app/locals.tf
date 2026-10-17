@@ -29,7 +29,12 @@ locals {
   # updates the other.
   env = merge(
     {
-      BETTER_AUTH_URL                = "https://${var.host}"
+      BETTER_AUTH_URL = "https://${var.host}"
+      # The chart runs 2–4 pods, so this must be the partitioned scheduler: `local` owns every
+      # partition in one process and writes unfenced, which multi-replica deployments cannot
+      # use (issue #378). The chart defaults to this too and refuses to render `local` with
+      # more than one pod; it is set here as well so the two sides say the same thing.
+      SCHEDULER                      = "postgres"
       OPENHARNESS_TRUSTED_PROXY_HOPS = "1"
       OPENHARNESS_KEY_PROVIDER       = "gcp-kms"
       OPENHARNESS_KMS_KEY            = var.kms_key_id
