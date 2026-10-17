@@ -139,4 +139,23 @@ describe('the sidebar nests a chat’s subagents (#346)', () => {
       within(row as HTMLElement).getByRole('button', { name: /2 subagents/ }),
     ).toBeInTheDocument()
   })
+
+  it('labels a child with its title rather than the model it runs', async () => {
+    // The bug the maintainer found on staging: a child was created with no title, so the only
+    // thing left to label it with was its **model's** name — "DeepSeek V4 Pro" for a helper
+    // whose job was "Check the changelog". The title is the description the parent model gave
+    // (epic #340), and the row shows it.
+    const user = userEvent.setup()
+    const parent = makeSession({ title: 'Release notes' })
+    const child = makeChildSession(parent, {
+      title: 'Check the changelog',
+      model: { id: 'deepseek/deepseek-chat' },
+    })
+    renderSidebar({ sessions: [parent], children: [child], parentId: parent.id })
+
+    await user.click(screen.getByRole('button', { name: /1 subagent/ }))
+
+    expect(screen.getByRole('link', { name: 'Check the changelog' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /deepseek/ })).toBeNull()
+  })
 })

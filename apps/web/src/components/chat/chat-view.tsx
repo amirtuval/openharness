@@ -309,17 +309,20 @@ export function ChatView({
     onDeleted(sessionId)
   }, [deleted, onDeleted, sessionId])
 
-  // The shell hears that this chat's tasks moved (epic #340, #346): once on mount — opening a chat
-  // is one of the two things that can change what the sidebar nests under it — and again whenever
-  // the count changes, which is when a helper was started from here. The callback is held in a ref
-  // so the effect depends on the count alone: the shell's own state moves when this report lands,
-  // and a dependency on the callback's identity would be a loop.
-  const taskCount = tasks.length
+  // The shell hears that this chat's tasks moved (epic #340, #346; #348): once on mount — opening
+  // a chat is one of the two things that can change what the sidebar nests under it — and again
+  // whenever a task's **status** moves, which is what the sidebar's group draws besides the count.
+  // The count alone is not enough: a helper that has just finished changes nothing about how many
+  // there are, so the group's running dot and its "1 running" stayed on the state the last read
+  // answered — a chat showing a finished helper still claimed one was working. The callback is
+  // held in a ref so the effect depends on the tasks alone: the shell's own state moves when this
+  // report lands, and a dependency on the callback's identity would be a loop.
+  const taskShape = tasks.map((task) => `${task.id}:${task.status}`).join(',')
   const reportTasks = useRef(onTasksChanged)
   reportTasks.current = onTasksChanged
   useEffect(() => {
     reportTasks.current?.()
-  }, [taskCount])
+  }, [taskShape])
 
   // Whether the session is idle, which is the state the server takes a rewind in (#238). The
   // web's status is exactly that state — `running` is the whole of "not idle" — so the

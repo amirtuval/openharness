@@ -10,7 +10,7 @@ import {
 } from '@openharness/protocol/fixtures'
 import type { EventId, SessionId, StoredEvent, TaskId } from '@openharness/protocol'
 
-import { isTaskToolName, taskCardStatus, tasksFromEvents } from './tasks'
+import { isTaskToolName, taskCardStatus, taskIsLive, tasksFromEvents } from './tasks'
 
 /**
  * The `agent` call that starts a task, as the parent's log records it (epic #340, S5).
@@ -179,10 +179,20 @@ describe('tasksFromEvents (#340, S4; #345)', () => {
     })
   })
 
-  it('is stopped when it was stopped', () => {
+  it('is stopped when it was stopped, result or not', () => {
     const log = [...opened, makeSessionTaskStatus(taskId, 'stopped', { seq: 6 })]
 
     expect(tasksFromEvents(log)[0]?.status).toBe('stopped')
+
+    // The shape a reader's Stop leaves (S7; #348): a `stopped` status **and** the `result` the
+    // brain delivers for the stopped turn. `done` is `idle` + a result alone — a stopped task has
+    // an answer `idle` cannot give, so the result never makes it read as finished.
+    const withNews = [...log, outcome(taskId, 'result', 'The user stopped this subagent.', 7)]
+
+    expect(tasksFromEvents(withNews)[0]).toMatchObject({
+      status: 'stopped',
+      result: { kind: 'result', text: 'The user stopped this subagent.' },
+    })
   })
 
   it('keeps an idle task that has told the parent nothing as running', () => {
@@ -289,6 +299,19 @@ describe('taskCardStatus (#340, S9; #345)', () => {
 
   it('is the parent’s own status when the child is not waiting', () => {
     expect(taskCardStatus('running', false)).toBe('running')
+  })
+})
+
+describe('taskIsLive (#340, S9; #368)', () => {
+  it('is running and waiting — the two a card follows its child for', () => {
+    expect(taskIsLive('running')).toBe(true)
+    expect(taskIsLive('waiting')).toBe(true)
+  })
+
+  it('is nothing else: a task that has an answer is not followed', () => {
+    expect(taskIsLive('done')).toBe(false)
+    expect(taskIsLive('failed')).toBe(false)
+    expect(taskIsLive('stopped')).toBe(false)
   })
 })
 

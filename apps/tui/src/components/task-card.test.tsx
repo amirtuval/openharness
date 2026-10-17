@@ -309,6 +309,74 @@ describe('TaskCardView (#347)', () => {
     })
     expect(view.lastFrame() ?? '').toContain('1.6k tokens')
   })
+
+  it('opens no stream for a card that has finished (#368)', () => {
+    // A done, failed or stopped helper is doing nothing, so there is no activity line to draw and
+    // no reason to hold an SSE connection — with the server's keepalive — open for as long as the
+    // transcript holds the card. `taskIsLive` is the client's own rule, and the web card was
+    // already passing it to its watcher; `oh`'s card opened one for every card, always.
+    // Spies with no behaviour: the assertion is that they are never reached at all.
+    const iterate = vi.fn(() => asyncOf([]) as AsyncIterable<never>)
+    const stream = vi.fn(() => asyncOf([]) as AsyncIterable<never>)
+    const log: TaskActivityLog = { iterate, stream }
+    const view = render(
+      <ThemeProvider theme={DARK}>
+        <TaskCardView
+          card={card({
+            status: 'done',
+            result: { kind: 'result', text: 'One assertion was flaky.', seq: 9 },
+          })}
+          log={log}
+          prices={PRICES}
+          width={80}
+        />
+      </ThemeProvider>,
+    )
+
+    expect(view.lastFrame() ?? '').toContain('● done')
+    expect(iterate).not.toHaveBeenCalled()
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('closes the follower when the card goes away (#368)', async () => {
+    // The other half of the same rule, and the one thing nothing pinned: `useTaskActivity`'s
+    // `close()` is what drops the connection when a card leaves the screen, and the review found
+    // no test that unmounted a card at all.
+    const signals: AbortSignal[] = []
+    const log: TaskActivityLog = {
+      iterate: (_sessionId, _params, options) => {
+        if (options?.signal !== undefined) signals.push(options.signal)
+        return asyncOf([]) as AsyncIterable<never>
+      },
+      // Nothing live to follow, so the follower parks here — which is where a real one sits for a
+      // child that is working and has not said anything new.
+      stream: (_sessionId, options) => {
+        if (options?.signal !== undefined) signals.push(options.signal)
+        return asyncOf([]) as AsyncIterable<never>
+      },
+    }
+
+    const view = render(
+      <ThemeProvider theme={DARK}>
+        <TaskCardView card={card({ status: 'running' })} log={log} width={80} />
+      </ThemeProvider>,
+    )
+
+    await vi.waitFor(() => {
+      if (signals.length === 0) {
+        throw new Error('the card never followed its child')
+      }
+    })
+    expect(signals.some((signal) => signal.aborted)).toBe(false)
+
+    view.unmount()
+
+    await vi.waitFor(() => {
+      if (!signals.some((signal) => signal.aborted)) {
+        throw new Error('the follower was left open when the card went away')
+      }
+    })
+  })
 })
 
 describe('taskActivityOf’s reading of a child (#347)', () => {

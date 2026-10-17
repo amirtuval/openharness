@@ -192,6 +192,9 @@ describe('the wait for background tasks over HTTP', () => {
     const taskId = newTaskId()
     const test = createTestApp({
       tools: registry(),
+      // The five subagent tools are offered only to a deployment that wired a runtime (#365),
+      // and `agent_wait` is one of them: the real server always wires this one (`main.ts`).
+      subagents: true,
       replies: [
         {
           toolCalls: [
@@ -266,6 +269,9 @@ describe('the wait for background tasks over HTTP', () => {
     const taskId = newTaskId()
     const test = createTestApp({
       tools: registry(),
+      // The five subagent tools are offered only to a deployment that wired a runtime (#365),
+      // and `agent_wait` is one of them: the real server always wires this one (`main.ts`).
+      subagents: true,
       replies: [
         {
           toolCalls: [{ name: TASK_WAIT_TOOL_NAME, input: { task_ids: [taskId], timeout_s: 0.2 } }],
@@ -334,7 +340,7 @@ describe('the wait for background tasks over HTTP', () => {
   })
 
   it('offers the task tools through the registry, and lists agent_wait as available', async () => {
-    const test = createTestApp({ tools: registry() })
+    const test = createTestApp({ tools: registry(), subagents: true })
     const response = await test.request(`${API_VERSION_PREFIX}/me/tools`)
     expect(response.status).toBe(200)
     const body = (await response.json()) as { data: { name: string; available: boolean }[] }

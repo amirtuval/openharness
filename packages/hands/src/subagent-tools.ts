@@ -239,3 +239,33 @@ export const SUBAGENT_TOOL_NAMES = [
 export function isSubagentToolName(name: string): boolean {
   return (SUBAGENT_TOOL_NAMES as readonly string[]).includes(name)
 }
+
+/**
+ * The subagent tools a call is **never paused** on (epic #340, S5/S7; #363).
+ *
+ * `ask` is a pause: the turn ends `requires_action` and a client draws the call for the user to
+ * answer. That is possible for a tool with a call of ours behind it, and impossible for these
+ * four — **no client renders a subagent tool call**. The parent's transcript draws a task
+ * *card*, and a child's transcript is the child's own: the call is not on any screen a person is
+ * looking at, so a pause on one could never be answered. S5 says these four run or refuse.
+ *
+ * `agent_wait` is deliberately not here: its pause is a **task wait** (`@openharness/brain`'s
+ * `waitsForTasks`), which a notification, a deadline or a user message resolves — no person has
+ * to answer it, and it is how a parent waits at all.
+ *
+ * Two readers share this list, which is why it lives with the definitions: `PUT /v1/me/tools`
+ * refuses a new `ask` on one of these names, and both the settings listing and the loop read a
+ * stored one as `allow` — a switch that says "ask me" and can never ask is worse than no switch,
+ * the rule #335's provider-native tool already follows.
+ */
+export const SUBAGENT_TOOLS_WITHOUT_ASK = [
+  AGENT_TOOL_NAME,
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  MESSAGE_PARENT_TOOL_NAME,
+] as const
+
+/** Whether a call to this tool name is never held for the user's answer (`ask` reads as `allow`). */
+export function cannotAskForApproval(name: string): boolean {
+  return (SUBAGENT_TOOLS_WITHOUT_ASK as readonly string[]).includes(name)
+}

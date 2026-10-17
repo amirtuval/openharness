@@ -12,6 +12,7 @@ import {
   DEFAULT_MAX_LIVE_TASKS,
   DEFAULT_PARTITION_COUNT,
 } from '@openharness/protocol'
+import { MAX_DESCENDANT_DEPTH } from '@openharness/session'
 import { DEFAULT_KEY_CACHE_TTL_MS, envKeyProvider, gcpKmsKeyProvider } from '@openharness/vault'
 
 import type { TracingMode } from './observability/tracing'
@@ -491,7 +492,14 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     maxToolSteps: readInteger(env, ENV_VARS.maxToolSteps, DEFAULT_MAX_TOOL_STEPS, { min: 1 }),
     // The subagent limits (epic #340, S6; #344). A depth of at least one keeps the tools on the
     // chat a person started, and a live cap of at least one lets a chat start a helper at all.
-    maxAgentDepth: readInteger(env, ENV_VARS.maxAgentDepth, DEFAULT_MAX_AGENT_DEPTH, { min: 1 }),
+    // The depth is capped at the tree walks' own ceiling (#361): a deployment allowed to build a
+    // tree deeper than `MAX_DESCENDANT_DEPTH` would get a delete that leaves descendants behind
+    // (and two stores that disagree about an orphaned child), so the configuration is where the
+    // two limits are kept consistent rather than left to a comment.
+    maxAgentDepth: readInteger(env, ENV_VARS.maxAgentDepth, DEFAULT_MAX_AGENT_DEPTH, {
+      min: 1,
+      max: MAX_DESCENDANT_DEPTH,
+    }),
     maxLiveTasks: readInteger(env, ENV_VARS.maxLiveTasks, DEFAULT_MAX_LIVE_TASKS, { min: 1 }),
     // Observability (#158). The log format and the trace mode are a choice each, so an
     // unknown value is a boot failure naming the variable rather than a silent default; the

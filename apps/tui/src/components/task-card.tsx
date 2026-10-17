@@ -1,4 +1,9 @@
-import { taskActivityLabel, taskCardStatus, watchTaskActivity } from '@openharness/client'
+import {
+  taskActivityLabel,
+  taskCardStatus,
+  taskIsLive,
+  watchTaskActivity,
+} from '@openharness/client'
 import type {
   TaskActivityLog,
   TaskActivityState,
@@ -94,7 +99,16 @@ export function TaskCardView({
 }) {
   const theme = useTerminalTheme()
   const { stdout } = useStdout()
-  const live = useTaskActivity(log, card.childSessionId, prices)
+  // **A finished task is not followed** (issue #368; the line the web card already drew). The
+  // child's stream is what the activity line and the cost come from, and a task that has
+  // finished is doing nothing — so a card for one would hold an SSE connection open, with the
+  // server's 15 s keepalive, for as long as the screen holds its transcript. `useTaskActivity`
+  // takes `log: undefined` as "there is nothing to follow", which is what the gate is.
+  const live = useTaskActivity(
+    taskIsLive(card.status) ? log : undefined,
+    card.childSessionId,
+    prices,
+  )
   const lines = taskCardLines(card, live, width ?? stdout.columns ?? FALLBACK_COLUMNS, theme)
 
   return (

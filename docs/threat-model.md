@@ -110,6 +110,15 @@ the guard has no reason to refuse.
   [#310](https://github.com/amirtuval/openharness/issues/310)), which is the control that exists
   for exactly this: a fetches-with-your-data-in-the-URL attack meets a prompt the user reads
   before it leaves.
+- **Some tools cannot be set to `ask`, because their call is never shown.** A pause is a control
+  only if the user can see the call it is about: the provider-native `web_search` runs inside the
+  model request, and a subagent tool's call is drawn as a task **card**, never as a call a client
+  offers for approval. `PUT /v1/me/tools` refuses `ask` on those five names with a 400 naming the
+  reason, and a stored one reads as `allow` on both sides — a switch that says "ask me" and can
+  never ask is worse than no switch
+  ([#335](https://github.com/amirtuval/openharness/issues/335),
+  [#363](https://github.com/amirtuval/openharness/issues/363); `agent_wait` is exempt: its pause
+  is a wait on tasks, which a notification or a deadline resolves).
 - **Nothing secret is ever in the model's context to leak.** A tool is handed the per-user values
   the host resolved, and `@openharness/hands` scrubs every one of them out of what a tool returns
   before it is stored — so a tool that echoes its own key back stores `[REDACTED]`. The same rule
@@ -191,10 +200,29 @@ this build did not have before, so what it may carry is worth stating.
 - **Delivery cannot be used to talk to someone else's session.** A notification names the
   session it goes to, and only the code that ran the task — inside this deployment, on the
   parent's own log — writes one. A task's id is stored, never interpreted as a destination.
+- **It cannot answer a question the user was asked.** A notification that arrives while a call
+  waits on the user is news, not the reader moving on: the pause stands (the call is not answered
+  "The user sent a message instead."), and the news is delivered by the turn the user's own answer
+  starts. Nothing a task says may stand in for a person's decision
+  ([#363](https://github.com/amirtuval/openharness/issues/363)).
 - **Exactly once, so a replay is not a second telling.** The append is idempotent on the task
   side's `source_key` and the claim is the model's having been told, so a crash, a recovery scan
   and a re-delivery cannot make the model act on the same output twice — and cannot silently
   swallow it either.
+- **Terminal rendering is sanitised, because a terminal executes what it is printed** (#368). The
+  same text is also drawn for the **reader** — a task's description, its activity line, what it
+  said and its result, on the parent's card — and a terminal acts on escape sequences in it:
+  `ESC ] 52 ; c ; … BEL` writes the reader's clipboard, `ESC ] 0 ; … BEL` retitles their window,
+  `ESC [ 2 J` clears the screen, and the C1 spellings (`\x9b…`) do the same on a terminal in
+  8-bit mode. A helper that summarised a page, or answered from an MCP server, is enough to
+  carry one. `oh`'s span layer therefore strips a control out of every string on its way to a
+  rendered line (`apps/tui/src/markdown/text.ts`'s `sanitizeText`, applied by `textSpans`,
+  `wrapSpans`, `truncateSpans` and `splitToWidth`): every C0 control but `\n` and `\t`, every C1
+  control, and each whole `ESC`/C1-introduced CSI, OSC, DCS, SOS, PM and APC sequence. This is
+  the rendering half of the rule above: the model is told a task's output is data, and the reader
+  is shown it as text. The web app needs no equivalent — it renders into DOM text nodes, never
+  `dangerouslySetInnerHTML` — and a child's output is _not_ sanitised on its way into the log,
+  because the log records what was said.
 
 ## What this build does and does not have yet
 

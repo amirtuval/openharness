@@ -98,7 +98,8 @@ interface MessageListProps {
    * two lists are merged by position rather than the card being an entry of its own. See
    * `lib/tasks.ts`.
    */
-  tasks?: readonly TaskCardData[] /** The newest item a request had to shorten, or `null` (epic #277, K6; #280). */
+  tasks?: readonly TaskCardData[]
+  /** The newest item a request had to shorten, or `null` (epic #277, K6; #280). */
   truncation?: TranscriptTruncation | null
   /**
    * The manual compaction the log last asked for, or `null` (epic #277, K8; #283): the notice a

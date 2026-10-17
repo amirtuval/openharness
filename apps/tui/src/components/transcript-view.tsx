@@ -1,4 +1,4 @@
-import { transcriptEntries } from '@openharness/client'
+import { taskIsLive, transcriptEntries } from '@openharness/client'
 import type {
   ModelPriceLookup,
   TaskActivityLog,
@@ -333,14 +333,22 @@ function isLiveBlock(entry: Block, holdLive: string | undefined): boolean {
     return entry.call.status === 'running' || entry.call.status === 'waiting'
   }
   if (entry.kind === 'task') {
-    // **A task card is always live** (issue #347), and the reason is the one #208 gives for
-    // holding a reply: what a card draws under its head — the child's activity line, and what
-    // the child has spent — arrives on the *child's* stream, continues to arrive after the
-    // parent's log has gone quiet, and would be frozen the instant `<Static>` wrote it. The
-    // alternative (settle the card and keep a watcher open behind a scrollback nobody can
-    // rewrite) only pays for a stream nothing draws. Cards are few, and a running tool call
-    // already takes the same trade.
-    return true
+    // **A card is live while the task is** (issue #347; narrowed by #368). Under its head a card
+    // draws the child's activity line and what the child has spent, and those arrive on the
+    // *child's* stream — so a card that is still working must stay in the live area, because a
+    // block `<Static>` has written is never redrawn (#208). Once the task has finished there is
+    // nothing more to draw: the status, the description, the conversation and the result are the
+    // parent's log's, which has stopped moving. Leaving a finished card out of `<Static>` for
+    // ever was what kept it — and every message *after* it, since `firstLive` is the first card —
+    // re-rendered on each chunk of any later stream.
+    //
+    // The one thing this trades: a finished helper the parent model messages again
+    // (`agent_message` restarts it, and the parent's log then reads `running` once more) leaves
+    // the written prefix rather than being rewritten in place — Ink's scrollback is appending,
+    // so the card is drawn again at the frontier, below what was already written. That is the
+    // same trade a divider makes (`committedSettled`), and it is preferable to a scrollback that
+    // says a running helper is done.
+    return taskIsLive(entry.card.status)
   }
   return false
 }

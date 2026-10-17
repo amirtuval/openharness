@@ -140,11 +140,15 @@ export interface TaskCard {
  * inside it, and `agent_wait` / `agent_stop` are the reader's own affordances rather than
  * something the model did worth a line — so none of the four is drawn as an ordinary tool call
  * (S9). The names are the protocol's own (#344 spells them once for the deployment that offers
- * them, the brain that answers them and the frontends that draw the card), gathered here so a
- * frontend does not have to list them again; `message_parent` is deliberately **not** one of
- * them, because it is a **child's** tool and never appears in the parent's log.
+ * them, the brain that answers them and the frontends that draw the card); `message_parent` is
+ * deliberately **not** one of them, because it is a **child's** tool and never appears in the
+ * parent's log.
+ *
+ * It is **not exported** (#367's nit, #368): both frontends ask the predicate below and nothing
+ * else ever wanted the list, and an unused export is what drifts silently at the next wire
+ * change.
  */
-export const TASK_TOOL_NAMES = [
+const TASK_TOOL_NAMES = [
   AGENT_TOOL_NAME,
   AGENT_MESSAGE_TOOL_NAME,
   TASK_WAIT_TOOL_NAME,
@@ -163,6 +167,27 @@ export const TASK_TOOL_NAMES = [
  */
 export function isTaskToolName(name: string): boolean {
   return (TASK_TOOL_NAMES as readonly string[]).includes(name)
+}
+
+/**
+ * Whether a task is still working — the one state a card follows its child's stream for, and the
+ * one it offers **Stop** in (epic #340, S9; #368).
+ *
+ * A finished task's activity line would be a line about nothing (the child is not doing
+ * anything), and watching it would hold an SSE connection open — with the server's keepalive —
+ * for as long as a screen holds the card: `watchTaskActivity`'s reference count exists for
+ * exactly this, and a card that is done has nothing to watch. Both frontends draw the same line
+ * with it, which is why it lives here rather than in each of them: the web app's card passed it
+ * to its watcher while `oh`'s card opened one for every card whatever its status, and one
+ * predicate is what keeps the two from disagreeing about where that line is.
+ *
+ * `waiting` is live: a child parked in its own `agent_wait` is still working, and the status
+ * only `running` can be refined to it comes from the very stream being watched.
+ *
+ * @param status the status a card draws, after {@link taskCardStatus} refined it
+ */
+export function taskIsLive(status: TaskCardStatus): boolean {
+  return status === 'running' || status === 'waiting'
 }
 
 /**
