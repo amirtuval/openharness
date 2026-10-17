@@ -1686,6 +1686,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           path: filePath,
           // Bytes, the way the real route measures a file's size (the protocol's own rule).
           size: new TextEncoder().encode(content).length,
+          // The fake holds text files only; a binary snapshot is the real store's business.
+          encoding: 'utf8',
           content,
         }),
       )

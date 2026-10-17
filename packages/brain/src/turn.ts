@@ -104,7 +104,12 @@ import type { OpaqueTarget } from './opaque'
 import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
 import { redactSecrets } from './redact'
 import type { SkillProvider } from './skills'
-import { resolveSkills, skillInvocationBody, unloadedSkillMessages } from './skills'
+import {
+  resolveSkills,
+  skillInvocationBody,
+  unloadedSkillMessages,
+  userLoadedSkillNames,
+} from './skills'
 import { stuckEnd } from './stuck'
 import {
   awaitingTasks,
@@ -1087,6 +1092,25 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
       mode?.toolOverride ?? null,
     )
     await reportMcpFailures(mcp.failures)
+    // The log is read here rather than a little lower because which skills the model may read
+    // depends on it (K7): a `disable-model-invocation` skill the **user** has already run is one
+    // whose instructions are in the request, so its files are readable — while one they never
+    // ran stays refused and unlisted. Reading it before the skills are resolved is what lets the
+    // tools be built with that answer; the read is reused below for the request's own claims.
+    let read = await readLog(store, sessionId)
+    // What the log says the user has run, plus what this batch is about to load: `/name` is
+    // written into the log below, before the request is built, so its files are readable from
+    // the very request that carries its instructions — not only from the next turn.
+    const userLoaded = userLoadedSkillNames(read)
+    for (const event of pending) {
+      if (
+        claims.includes(event.id) &&
+        event.type === EVENT_TYPES.userMessage &&
+        event.skill !== undefined
+      ) {
+        userLoaded.add(event.skill.name)
+      }
+    }
     // The skills this request has (epic #349, K6/K8), resolved once here with the same owner and
     // the same mode override the settings and the MCP listing were asked with — so what this
     // request offers, what its listing says and what a slash invocation loads cannot disagree.
@@ -1097,6 +1121,7 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
       current.owner_id,
       mode?.toolOverride ?? null,
       options.tools,
+      userLoaded,
     )
     // One registry for this request, this build's tools, the remote ones and the skills together:
     // everything downstream is keyed by a tool's name and knows nothing about where it came from —
@@ -1149,7 +1174,6 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
         ...(opaqueTarget === undefined ? {} : { opaqueTarget }),
       })
-    let read = await readLog(store, sessionId)
     // ---- The skills this request's messages invoked (epic #349, K7).
     //
     // `/name arguments` arrives as an ordinary `user.message` carrying a `skill`; the brain that
@@ -1905,8 +1929,10 @@ async function loadSkills(
     if (offered === undefined) {
       continue
     }
-    const content = await offered.readFile(SKILL_MD_FILENAME)
-    if (content === null) {
+    const file = await offered.readFile(SKILL_MD_FILENAME)
+    if (file === null || file.encoding !== 'utf8') {
+      // A skill with no `SKILL.md`, or one stored as binary, has no instructions to load; the
+      // import refuses both, so this is the broken-invariant path rather than a user error.
       continue
     }
     loaded.push(
@@ -1915,7 +1941,7 @@ async function loadSkills(
         message.name,
         offered.skill.id,
         offered.skill.source.commit_sha,
-        skillInvocationBody(skillBody(content), message.arguments),
+        skillInvocationBody(skillBody(file.content), message.arguments),
       ),
     )
   }

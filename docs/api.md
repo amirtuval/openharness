@@ -140,7 +140,7 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                                                                                                                                     |
 | `GET`    | `/v1/me/skills`                                 | list the caller's imported skills, oldest first (no cursor: at most 50)                                                                                                                                                                          |
 | `GET`    | `/v1/me/skills/{skill_id}`                      | read one skill, with its `SKILL.md`'s content                                                                                                                                                                                                    |
-| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill, with its content and size                                                                                                                                                                                              |
+| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill: its content, size and `encoding` (`utf8`, or `base64` for a binary file)                                                                                                                                               |
 | `POST`   | `/v1/me/skills/{skill_id}`                      | switch a skill on or off (`enabled`); the snapshot itself is not editable                                                                                                                                                                        |
 | `DELETE` | `/v1/me/skills/{skill_id}`                      | delete a skill and its whole snapshot; `204`                                                                                                                                                                                                     |
 | `POST`   | `/v1/me/skills/import/preview`                  | read a public repository and answer the candidate skills; stores nothing                                                                                                                                                                         |
@@ -1539,7 +1539,11 @@ curl localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN"
 
 # Any other file, by its path — which may hold slashes.
 curl localhost:3000/v1/me/skills/skl_01J…/files/reference/tone.md -H "Authorization: Bearer $TOKEN"
-# → 200 {"path":"reference/tone.md","size":380,"content":"Be terse.\n"}
+# → 200 {"path":"reference/tone.md","size":380,"encoding":"utf8","content":"Be terse.\n"}
+
+# A file that is not text: the bytes, base64-encoded, and the original size in bytes.
+curl localhost:3000/v1/me/skills/skl_01J…/files/assets/icon.png -H "Authorization: Bearer $TOKEN"
+# → 200 {"path":"assets/icon.png","size":33,"encoding":"base64","content":"iVBORw0KGgo…"}
 
 # On or off. The snapshot is not editable: a new one comes from a refresh.
 curl -X POST localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN" \
@@ -1554,6 +1558,14 @@ curl -X DELETE localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer 
 comes with the single-skill read and any other file with its own. That keeps a listing of fifty
 skills one small answer whatever the snapshots hold, and it keeps the contents free to move to
 object storage later (K4) without a resource changing shape.
+
+**A file that is not text is stored losslessly, and says so.** A skill folder may ship an icon,
+a font or a `.docx`, and some of those bytes are not valid UTF-8 — or contain a NUL, which
+Postgres `text` refuses outright. The import detects such a file and stores its bytes
+base64-encoded; `encoding` is `utf8` or `base64`, and `size` is always the **original** byte
+length, so the K4 limits count the file rather than its base64 spelling. The `skill_read` tool
+answers a binary file with a marker naming its path and size instead of its content; `utf8` and
+`base64` are the only two spellings.
 
 **The format's three optional fields are honoured**, and the rest are stored and shown and
 otherwise ignored: `disable-model-invocation: true` is a command only the user runs,
@@ -1578,7 +1590,9 @@ offered two tools (K6): `skill { "name": "release-notes" }` answers the skill's 
 skill's scripts are files to read and never to execute, and the tool's own description says so.
 `skill`'s description **is** the listing: the names and descriptions of every skill the model
 may invoke, so a chat with none offers neither tool. A `disable-model-invocation: true` skill is
-left out of that listing and refused by both tools — only the user runs it, with `/name`. An
+left out of that listing and refused by both tools — only the user runs it, with `/name` — until
+the user **has** run it in the chat: the flag stops the model picking the skill on its own, and
+once `/name` has loaded its instructions the files those instructions name are readable. An
 unknown name answers the names there are, and an unknown path the files the skill holds.
 
 **A skill is the user's own instructions, not third-party data** (K10). Its text is framed to

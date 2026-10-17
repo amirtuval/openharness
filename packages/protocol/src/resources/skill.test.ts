@@ -172,7 +172,12 @@ describe('the skill endpoints’ shapes', () => {
   })
 
   it('reads one file with its path, its size and its content', () => {
-    const file = { path: 'reference/tone.md', size: 6, content: 'terse\n' }
+    const file = {
+      path: 'reference/tone.md',
+      size: 6,
+      encoding: 'utf8' as const,
+      content: 'terse\n',
+    }
     expect(SkillFileContentSchema.parse(file)).toEqual(file)
   })
 

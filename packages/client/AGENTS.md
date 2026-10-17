@@ -255,7 +255,7 @@ for await (const event of client.sessions.events.stream(session.id, { deltas: tr
 | `mcpServers.disconnect(id, options?)`            | `POST /v1/me/mcp_servers/{id}/disconnect`                                                                                                                 | the `McpServer` with its tokens dropped, on `needs_reconnect`                                                       |
 | `skills.list(options?)`                          | `GET /v1/me/skills`                                                                                                                                       | `{ data: Skill[] }` (no pagination: at most 50)                                                                     |
 | `skills.get(id, options?)`                       | `GET /v1/me/skills/{id}`                                                                                                                                  | the skill with `SKILL.md`'s content                                                                                 |
-| `skills.file(id, path, options?)`                | `GET /v1/me/skills/{id}/files/{path}`                                                                                                                     | that file's content, or a 404                                                                                       |
+| `skills.file(id, path, options?)`                | `GET /v1/me/skills/{id}/files/{path}`                                                                                                                     | that file's content, size and `encoding` (`utf8`/`base64`), or a 404                                                |
 | `skills.update(id, { enabled }, options?)`       | `POST /v1/me/skills/{id}`                                                                                                                                 | `Skill`                                                                                                             |
 | `skills.delete(id, options?)`                    | `DELETE /v1/me/skills/{id}`                                                                                                                               | `void` (the wire answers `204`)                                                                                     |
 | `skills.previewImport(body, options?)`           | `POST /v1/me/skills/import/preview`                                                                                                                       | the commit and every candidate, or a 422                                                                            |
@@ -472,10 +472,15 @@ menu (K7) and the words a settings screen shows:
   when the action it names exists, and the rest are held for the rows that land later
   (`/new`, `/model`, `/mode`, `/agents`, `/skills`). Reserving them now is what stops a skill
   taking a name the menu will need.
-- **`slashCommands(skills)`** is the whole menu — the built-ins first, then the reader's
-  **enabled** and **user-invocable** skills (K8, K1), each with its `argument-hint` — and
+- **`slashCommands(skills, override?)`** is the whole menu — the built-ins first, then the
+  reader's **effective** and **user-invocable** skills (K8, K1), each with its `argument-hint`.
+  `override` is the mode the chat follows (`Mode.tools`), and the effective set comes from
+  `@openharness/protocol`'s `skillsInForce` — the same rule the server applies — so a skill the
+  mode turns off is not offered (the server would answer 400) and one it turns on _is_ (the
+  server would accept it). It is
   **`filterSlashCommands(commands, query)`** is the prefix match a composer runs as the reader
-  types. `slashCommandQuery(value)` is the word being typed after the slash (`''` for a bare
+  types. Both frontends pass the chat's mode override (the web chat and New chat's picked mode,
+  `oh`'s current or pending mode), so the menu follows a mode switch. `slashCommandQuery(value)` is the word being typed after the slash (`''` for a bare
   `/`, `null` once the name is settled or the box is not a command line), which is what a
   composer watches to open, filter and close the menu.
 - **`slashEnterAction(value, commands, highlighted?)`** is what pressing Enter means, so a

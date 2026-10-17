@@ -3,6 +3,7 @@ import type { APIRequestContext, Page } from '@playwright/test'
 import {
   CANDIDATE_PATHS,
   IMPORTABLE_CANDIDATES,
+  SKILLS_BINARY_ICON,
   SKILLS_FILES,
   SKILLS_FILES_CHANGED,
   skillsFixtureAvailable,
@@ -310,6 +311,11 @@ test.describe('W30 the skills screens', () => {
       await first.getByRole('button', { name: /files?$/ }).click()
       await expect(first.locator('[data-slot="skill-candidate-skill-md"]')).toBeVisible()
       await expect(first.locator('[data-slot="skill-candidate-files"]')).toContainText('SKILL.md')
+      // A binary file is a candidate's file like any other: the import stores it losslessly
+      // (base64) rather than failing the Postgres write on a NUL byte.
+      await expect(first.locator('[data-slot="skill-candidate-files"]')).toContainText(
+        'assets/icon.png',
+      )
 
       // S3: the three the import would refuse, each with the server's own reason, and a
       // checkbox that cannot be ticked into a refusal.
@@ -341,6 +347,28 @@ test.describe('W30 the skills screens', () => {
         '/org/skills.git',
       )
       await expectNoErrorBanner(page)
+
+      // The binary file the fixture ships is stored, listed at its real byte size, and served
+      // as base64 — which is what a Postgres-backed import of it has to answer (K4).
+      const listed = await request.get('/v1/me/skills')
+      expect(listed.status(), await listed.text()).toBe(200)
+      const release = (
+        (await listed.json()) as {
+          data: { id: string; name: string; files: { path: string; size: number }[] }[]
+        }
+      ).data.find((skill) => skill.name === 'release-notes')
+      expect(release, 'the fixture import stored release-notes').toBeDefined()
+      expect(release?.files).toContainEqual({
+        path: 'assets/icon.png',
+        size: SKILLS_BINARY_ICON.length,
+      })
+      const icon = await request.get(`/v1/me/skills/${release?.id ?? ''}/files/assets/icon.png`)
+      expect(icon.status(), await icon.text()).toBe(200)
+      expect(await icon.json()).toMatchObject({
+        path: 'assets/icon.png',
+        size: SKILLS_BINARY_ICON.length,
+        encoding: 'base64',
+      })
     })
 
     await test.step('S3 a name the reader already has is flagged, and only that one', async () => {
@@ -468,7 +496,8 @@ test.describe('W30 the skills screens', () => {
       // The whole stored body — the markdown heading included — with the arguments appended
       // after it, because this skill's body has no `$ARGUMENTS` to put them in.
       expect(loaded[1]?.content).toBe(
-        '# Summarize a thread\n\nRead the thread and list its decisions.\n\nthe release thread',
+        '# Summarize a thread\n\nRead the thread and list its decisions, following ' +
+          '`references/format.md`.\n\nthe release thread',
       )
     })
 
@@ -512,6 +541,48 @@ test.describe('W30 the skills screens', () => {
       )
       expect(result, 'the skill tool refused it').toBeDefined()
       expect(JSON.stringify(result)).toContain('disable-model-invocation')
+    })
+
+    await test.step('the model reads a command-only skill’s reference once the user has run it', async () => {
+      const sessionId = await chatOn(page, request)
+      // The user runs the command themselves — the one way a `disable-model-invocation` skill
+      // is meant to be started. Its body lands in the log.
+      const started = await request.post(`/v1/sessions/${sessionId}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [{ type: 'text', text: '/summarize-thread the thread' }],
+              skill: { name: 'summarize-thread', arguments: 'the thread' },
+            },
+          ],
+        },
+      })
+      expect(started.status(), await started.text()).toBe(200)
+      // Wait for the thing that really changed — the loaded instructions — rather than for an
+      // idle status the session already had before the turn started.
+      await waitForLoaded(request, sessionId, 1)
+
+      // The instructions name `references/format.md`; from this request on the model may read
+      // it (the earlier step proved the same tool still refuses a skill the user never ran).
+      const asked = await request.post(`/v1/sessions/${sessionId}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [
+                { type: 'text', text: '__skill_read__ summarize-thread references/format.md' },
+              ],
+            },
+          ],
+        },
+      })
+      expect(asked.status(), await asked.text()).toBe(200)
+      const results = (await waitForResults(request, sessionId, 1))
+        .map((event) => JSON.stringify(event))
+        .join('\n')
+      expect(results).toContain('One decision per line')
+      expect(results).not.toContain('disable-model-invocation')
     })
 
     await test.step('a user-invocable: false skill typed anyway is a 400 that stores nothing', async () => {
@@ -738,14 +809,25 @@ test.describe('W30 the skills screens', () => {
     const byName = new Map(skills.map((skill) => [skill.name, skill.id]))
     const summarize = byName.get('summarize-thread')
     const house = byName.get('house-style')
+    const release = byName.get('release-notes')
     expect(summarize, 'the fixture import left summarize-thread stored').toBeDefined()
     expect(house, 'the fixture import left house-style stored').toBeDefined()
+    expect(release, 'the fixture import left release-notes stored').toBeDefined()
+
+    // `release-notes` starts **off** for the reader; the mode turns it on. Together with
+    // `summarize-thread` (stored on, the mode turns it off) that is both directions the `/`
+    // menu has to follow (K8).
+    const off = await request.post(`/v1/me/skills/${release ?? ''}`, { data: { enabled: false } })
+    expect(off.status(), await off.text()).toBe(200)
 
     const created = await request.post('/v1/me/modes', {
       data: {
         name: 'no-thread-summary',
         model: modeModel,
-        tools: { builtin: {}, skills: { [summarize ?? '']: false, [house ?? '']: true } },
+        tools: {
+          builtin: {},
+          skills: { [summarize ?? '']: false, [house ?? '']: true, [release ?? '']: true },
+        },
       },
     })
     expect(created.status(), await created.text()).toBe(201)
@@ -797,6 +879,17 @@ test.describe('W30 the skills screens', () => {
         },
       })
       expect(off.status(), await off.text()).toBe(400)
+
+      // The `/` menu is the **effective** set, not the stored switches: `release-notes` is
+      // stored off but this mode turns it on, and `summarize-thread` is stored on but the mode
+      // turns it off — the same answer the route above just gave (K8).
+      await page.goto(`/#/s/${id}`)
+      const input = composer(page)
+      await input.fill('/')
+      const menu = page.getByRole('listbox', { name: 'Slash commands' })
+      await expect(menu.locator('[data-command="release-notes"]')).toBeVisible()
+      await expect(menu.locator('[data-command="summarize-thread"]')).toHaveCount(0)
+      await expectNoErrorBanner(page)
     })
 
     await test.step('editing the mode applies to the next request', async () => {

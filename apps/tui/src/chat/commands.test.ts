@@ -1,5 +1,10 @@
 import { createFakeClient } from '@openharness/client/testing'
-import { makeMode, makeModelEntry, makeProviderCredential } from '@openharness/protocol/fixtures'
+import {
+  makeMode,
+  makeModelEntry,
+  makeProviderCredential,
+  makeSkill,
+} from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import { waitFor } from '../test-support/input'
@@ -13,6 +18,7 @@ import {
   currentModelOf,
   filterCommands,
   findCommand,
+  menuCommands,
   parseChatInput,
   unknownCommandNotice,
   type ChatCommand,
@@ -106,6 +112,33 @@ async function run(name: string, context: CommandContext, args = ''): Promise<vo
   if (command === undefined) throw new Error(`the registry lost /${name}`)
   await command.run?.(context, args)
 }
+
+describe('the skills in the / menu (K7, K8)', () => {
+  /** The skill rows of a menu, with the mode's override applied. */
+  function skillRows(
+    skills: Parameters<typeof menuCommands>[0],
+    override: Parameters<typeof menuCommands>[1] = null,
+  ): string[] {
+    return menuCommands(skills, override)
+      .filter((command) => command.skill !== undefined)
+      .map((command) => command.name)
+  }
+
+  it('follows the chat mode’s override over the stored switches', () => {
+    const turnedOff = makeSkill({ name: 'off-here' })
+    const turnedOn = makeSkill({ name: 'on-here', enabled: false })
+    const untouched = makeSkill({ name: 'untouched' })
+    const skills = [turnedOff, turnedOn, untouched]
+
+    // With no mode, the user's own switches decide.
+    expect(skillRows(skills)).toEqual(['off-here', 'untouched'])
+    // A mode that names two of them is what the chat really has: the row the server would
+    // refuse is gone, and the one it would accept is there.
+    expect(
+      skillRows(skills, { builtin: {}, skills: { [turnedOff.id]: false, [turnedOn.id]: true } }),
+    ).toEqual(['on-here', 'untouched'])
+  })
+})
 
 describe('parseChatInput', () => {
   it('leaves an ordinary message alone, whitespace and all', () => {

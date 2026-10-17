@@ -1,6 +1,6 @@
 import { parseSlashCommand, slashCommands } from '@openharness/client'
 import type { SlashCommand, SlashInvocation, TranscriptState } from '@openharness/client'
-import type { Skill } from '@openharness/protocol'
+import type { ModeToolOverride, Skill } from '@openharness/protocol'
 
 import type { ChatSession, Notice } from './session'
 
@@ -211,8 +211,11 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
  *
  * @param skills the reader's skills, as `GET /v1/me/skills` answered
  */
-export function skillCommands(skills: readonly Skill[]): readonly ChatCommand[] {
-  return slashCommands(skills)
+export function skillCommands(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null = null,
+): readonly ChatCommand[] {
+  return slashCommands(skills, override)
     .filter((command) => command.kind === 'skill')
     .map((command) => ({
       name: command.name,
@@ -232,8 +235,11 @@ export function skillCommands(skills: readonly Skill[]): readonly ChatCommand[] 
  * built-ins come first because they always exist, and a skill may not take one of their names
  * (`RESERVED_SKILL_NAMES`, enforced by the import).
  */
-export function menuCommands(skills: readonly Skill[]): readonly ChatCommand[] {
-  return [...CHAT_COMMANDS, ...skillCommands(skills)]
+export function menuCommands(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null = null,
+): readonly ChatCommand[] {
+  return [...CHAT_COMMANDS, ...skillCommands(skills, override)]
 }
 
 /**

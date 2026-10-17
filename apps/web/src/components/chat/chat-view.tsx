@@ -171,11 +171,6 @@ export function ChatView({
   // drawn. A server that predates the field — or a read that failed — leaves the default.
   const { preferences } = usePreferences(client)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  // The `/` menu (epic #349, K7; #353): the built-in commands and the reader's own usable
-  // skills, from the client's one reading of both. Built here rather than in the composer
-  // because the send path parses the same line against the same list — a box that offered a row
-  // the send would not recognize would be a lie.
-  const commands = useMemo(() => slashCommands(skills), [skills])
   // The draft, owned here rather than by the composer (#212): "Edit and resend" puts the
   // reader's own words back in the box, and a screen that wants to put words in the box owns
   // its text (U10) — the composer is the box, not the thing that decides what is in it.
@@ -268,6 +263,18 @@ export function ChatView({
   const currentModeId =
     pendingMode?.id ?? (modeInEffect === undefined ? sessionModeId : modeInEffect)
   const currentModeName = modeNameOf(modes.modes, currentModeId)
+  // The mode's skill (and tool) override, which is what makes the `/` menu the **effective**
+  // set (epic #349, K8): the menu follows a mode switch, the same way the server's answer does.
+  const modeOverride = useMemo(
+    () => modes.modes.find((mode) => mode.id === currentModeId)?.tools ?? null,
+    [modes.modes, currentModeId],
+  )
+  // The `/` menu (epic #349, K7; #353): the built-in commands and the reader's own usable
+  // skills, from the client's one reading of both. Built here rather than in the composer
+  // because the send path parses the same line against the same list — a box that offered a row
+  // the send would not recognize would be a lie. The mode's override is applied first, so a
+  // skill the mode turns off is not offered and one it turns on is.
+  const commands = useMemo(() => slashCommands(skills, modeOverride), [skills, modeOverride])
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)

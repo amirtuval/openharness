@@ -1295,8 +1295,13 @@ Four things about the UI are worth knowing:
 ### The `/` menu, and the slash invocation (epic #349, K7; issue #353)
 
 Typing `/` in the composer opens the command menu, and the box is its combobox: the rows come
-from `@openharness/client`'s `slashCommands(skills)` — the built-in commands first, then the
-reader's **enabled**, **user-invocable** skills, each with its `argument-hint` — so the web and
+from `@openharness/client`'s `slashCommands(skills, mode?.tools ?? null)` — the built-in
+commands first, then the reader's **effective**, **user-invocable** skills, each with its
+`argument-hint` — where the mode's `tools.skills` patch is applied over `enabled` by the
+protocol's `skillsInForce`, the same rule the server checks (K8). `ChatView` passes the mode the
+chat follows (including a switch this tab has just sent), and `NewChatScreen` the mode picked for
+the new chat, so the menu follows the mode and cannot offer a row the server would refuse. So the
+web and
 `oh` offer the same commands and send the same event for the same line. The shell loads the
 skills once (`useSkills`, beside the catalog and the modes) and hands them to the chat, New chat
 and Settings, so a menu is never a fetch behind the reader's typing.

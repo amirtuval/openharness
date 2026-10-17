@@ -106,6 +106,7 @@ describe('skills over HTTP (epic #349, K4)', () => {
     expect(SkillFileContentSchema.parse(await file.json())).toEqual({
       path: 'reference/tone.md',
       size: skillFileSize('Be terse.\n'),
+      encoding: 'utf8',
       content: 'Be terse.\n',
     })
     // A path is the rest of the URL, and it is decoded: the `SKILL.md` is reachable by its own

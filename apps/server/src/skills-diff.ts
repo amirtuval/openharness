@@ -14,12 +14,22 @@
  * would be a new dependency in the server for it.
  */
 
+import type { SkillFileEncoding } from '@openharness/protocol'
+
 /** One file of a snapshot: its path inside the skill folder, and its content. */
 export interface DiffableFile {
   /** The file's path, relative to the skill folder and forward-slashed. */
   readonly path: string
   /** The file's content, exactly as the snapshot holds it. */
   readonly content: string
+  /**
+   * How `content` is spelled (`utf8`, or `base64` for a binary file).
+   *
+   * Compared beside the content: two spellings of the same bytes are the same file, but the
+   * import only ever writes one spelling per byte sequence, so including it in the comparison
+   * is a cheap guard against a file whose encoding changed being read as unchanged.
+   */
+  readonly encoding?: SkillFileEncoding
 }
 
 /** How two snapshots' file sets differ (K5). */
@@ -49,8 +59,8 @@ export function diffSnapshots(
   before: readonly DiffableFile[],
   after: readonly DiffableFile[],
 ): SnapshotDiff {
-  const oldFiles = new Map(before.map((file) => [file.path, file.content]))
-  const newFiles = new Map(after.map((file) => [file.path, file.content]))
+  const oldFiles = new Map(before.map((file) => [file.path, fileSpelling(file)]))
+  const newFiles = new Map(after.map((file) => [file.path, fileSpelling(file)]))
 
   const added = [...newFiles.keys()].filter((path) => !oldFiles.has(path)).sort()
   const removed = [...oldFiles.keys()].filter((path) => !newFiles.has(path)).sort()
@@ -59,6 +69,18 @@ export function diffSnapshots(
     .sort()
 
   return { added, removed, changed }
+}
+
+/**
+ * One file as a value the diff can compare: its content, and the spelling it is held in.
+ *
+ * A binary file is base64 on both sides, so its bytes compare as its bytes — the one spelling
+ * the import writes for a given sequence. The encoding is part of the key so a file whose
+ * content happened to equal another spelling's is not read as unchanged. `utf8` is the default,
+ * which is what every caller that predates the field holds.
+ */
+function fileSpelling(file: DiffableFile): string {
+  return `${file.encoding ?? 'utf8'}\u0000${file.content}`
 }
 
 /**

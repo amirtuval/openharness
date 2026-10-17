@@ -23,13 +23,17 @@
 -- a skill written for another harness must import unchanged.
 --
 -- `skill_files` is the snapshot's files: one row per file, keyed by `(skill_id, path)`, which is
--- both what makes a path appear once and the index `getFile` seeks by. The content is text —
--- a model reads a skill's files, and one that is not text is stored as the text it was read as
--- (K2) — and `size` is its byte length, computed by the store so it can never disagree with what
--- is stored. `on delete cascade` means a deleted skill takes its whole snapshot, which is the
--- whole of "delete a skill". The contents live in their own table rather than beside the skill
--- because a listing must never read one (K4), and because they are what moves to object storage
--- later without anything above the store noticing — which is why `list` and `get` do not select
+-- both what makes a path appear once and the index `getFile` seeks by. The content is the file
+-- in the spelling `encoding` names: its text (`utf8`), or its bytes base64-encoded (`base64`)
+-- for a file that is not text — an icon, a font, a `.docx`. Base64 is not a preference: a
+-- skill folder may ship a PNG, and Postgres' `text` rejects a NUL byte outright (`invalid byte
+-- sequence for encoding "UTF8": 0x00`), while invalid UTF-8 cannot be kept faithfully as a
+-- string. `size` is the original file's byte length, computed by the store so it can never
+-- disagree with what is stored, and K4's limits count those bytes rather than the base64 text.
+-- `on delete cascade` means a deleted skill takes its whole snapshot, which is the whole of
+-- "delete a skill". The contents live in their own table rather than beside the skill because
+-- a listing must never read one (K4), and because they are what moves to object storage later
+-- without anything above the store noticing — which is why `list` and `get` do not select
 -- `content` at all.
 --
 -- **Migration number.** 0032 follows `0031_mcp_tool_policies.sql`. Every file runs on every
@@ -60,6 +64,11 @@ create table if not exists skill_files (
   skill_id text collate "C" not null references skills (id) on delete cascade,
   path text collate "C" not null,
   content text not null,
+  -- `utf8` is the file's text; `base64` is a non-text file's bytes. Required, because a
+  -- reader must not guess: base64 text shown as text is mojibake, and the `skill_read`
+  -- tool's binary marker is chosen from this.
+  encoding text not null default 'utf8' check (encoding in ('utf8', 'base64')),
+  -- The original file's byte length, not the length of `content` when it is base64.
   size integer not null,
   -- A path appears once in a snapshot, and a read by `(skill, path)` is a lookup.
   primary key (skill_id, path)
