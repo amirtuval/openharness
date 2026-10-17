@@ -1694,16 +1694,30 @@ rows an arrow key should not have to walk. Colour is never the selection: the ma
 is the one thing that survives `NO_COLOR`, and a test per screen asserts the frame carries it
 ([#335](https://github.com/amirtuval/openharness/issues/335)).
 
-**`argument-hint: [version]` — the spelling the Agent Skills docs use — is a YAML flow sequence, so the
-honoured field is not a string and the `/` menu silently shows no hint.** The protocol reads the field
-through one helper (`skillSettingsOf`/`argumentHintOf`) which honours a real string and ignores anything
-else, on purpose: the frontmatter is open and untyped, so a hand-written file that got a field wrong is
-an ignored field rather than a skill that behaves differently from what it says. The consequence is that
-a skill following the format's own bracket convention (`argument-hint: [version]`, brackets meaning
-"this is the placeholder") is offered as a bare `/release-notes` while `argument-hint: version` shows
-`/release-notes <version>`. It cost a hands-on run to notice, because nothing errors — which is the kind
-of thing the `/` menu is exactly the wrong place to be quiet about
+**The Agent Skills format's own `argument-hint: [version]` is a YAML flow sequence, and
+`argument-hint: [pr-number] [priority]` is not YAML at all — a format whose _convention_ is in the
+brackets cannot be round-tripped by a YAML parser.** The protocol read the field as a string and
+silently ignored anything else, so a skill written for Claude Code shipped with no hint at all
+(`/release-notes` in the `/` menu) while the same field written as a bare word showed one — and the
+second spelling went further and made the whole frontmatter fail to parse, so the skill could not be
+imported. The import therefore reads `argument-hint`'s **own line** whenever YAML does not answer with a
+plain string, and a block whose YAML fails _only_ because of that line is read with the line set aside
+rather than refused (`apps/server/src/skills-import.ts`'s `parseFrontmatterBlock`); `argumentHintOf`
+renders an already-stored array back as `[a, b]`, so a snapshot imported before the fix shows the hint
+too. The lesson is the shape: an open, untyped frontmatter carries fields whose meaning is a convention
+rather than a value, and the parser has to keep the line that wrote it, not the parse
 ([#354](https://github.com/amirtuval/openharness/issues/354)).
+
+**A `/` menu whose one Enter rule is "take the highlighted row" charges the reader a second keystroke
+for every command that is already complete.** Typing `/compact` and pressing Enter used to leave
+`/compact ` in the box and need another Enter to run it, because the same rule served the complete
+command and the skill whose arguments were still to come. What Enter means is a client decision now
+(`slashEnterAction` in `packages/client/src/skills.ts`): a **built-in** the line names in full runs at
+once, a **skill** still completes to `/name ` — it is never run from the menu, since it is sent as an
+ordinary message carrying its arguments (K7) — and a line that already has arguments sends. Both
+frontends call the one function, so the web composer and `oh` cannot drift; `oh`'s menu still closes
+once a name is a command of its own (a one-row list is noise), and the same rule decides what Enter does
+with that line anyway ([#354](https://github.com/amirtuval/openharness/issues/354)).
 
 **A tool call and the thing it started were not linked by an id, so the client's join had to be a
 heuristic — and a heuristic keyed on the wrong field is a bug that waits for a second matching

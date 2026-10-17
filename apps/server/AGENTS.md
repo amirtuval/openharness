@@ -1227,6 +1227,15 @@ allowPrivateUrls?, maxBytes?, timeoutMs? })` — `clone` defaults to the package
   repository may offer a good skill and a broken one at once. The discovery checks the limits of
   K4 itself (`SKILL_MD_MAX_BYTES`, `SKILL_FILE_MAX_BYTES`, `SKILL_MAX_BYTES`, `MAX_SKILL_FILES`)
   because the store does not — those are the import's refusals, with the reason a user reads.
+- **`argument-hint` is kept as the file wrote it** (#354). The format's own spelling is a
+  bracketed placeholder — `argument-hint: [version]`, `argument-hint: [pr-number] [priority]` —
+  and neither is a YAML string: the first parses as a flow sequence and the second is not valid
+  YAML at all, so a parser that read the field as a string lost the hint and, for the second,
+  refused the whole frontmatter. `parseFrontmatterBlock` therefore takes the line's own text
+  (after the colon, trimmed) whenever YAML does not answer with a plain string, and reads a block
+  whose YAML fails **only** because of that line with the line set aside — so a skill written for
+  Claude Code imports unchanged and its hint shows exactly as typed. A quoted value is a string
+  and is left to YAML.
 - **A `SKILL.md` at the repository's own root is a candidate**, and its name is the
   **repository's**: a skill's name is its folder's (K1) and the root is not one, so the
   repository is read as the folder — the candidate's `folder` is `''` and its name is the URL
@@ -2717,7 +2726,10 @@ session` remembered for the chat and `remember: always` written to the user's se
   name a `name-mismatch`, and the root skill importing, storing and refreshing like any other; a
   path that is not there and a path holding no `SKILL.md` refused with the protocol's own
   sentence; an import storing the snapshot whole (frontmatter, source, files and sizes, read back
-  through the single-skill and file reads); a ref that moved since the preview a 409 that stores
+  through the single-skill and file reads) — a skill per `argument-hint` spelling (#354):
+  `[version]`, `[pr-number] [priority]`, a quoted string, a bare word and none all import with no
+  problems, and `skillSettingsOf` answers each exactly as the file wrote it; a ref that moved
+  since the preview a 409 that stores
   nothing; an
   unknown name a 400 and a candidate that cannot be imported a 422 that stores **none** of the
   batch; a name the caller already has a 409 that stores none of it; an explicit `ref`/`path`

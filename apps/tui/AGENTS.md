@@ -389,10 +389,14 @@ start the line — a line with a leading space is a message — which is the men
 
 Typing `/` on an empty buffer opens the filtered list under the prompt. ↑/↓ highlight (they do
 not walk the history while it is up), Tab completes the highlighted command into the buffer,
-Enter runs it, Esc closes the menu and keeps the text. The menu closes once the command word
-is over: at the first space, or as soon as the word is a command. Its rows are ANSI colours
-(`cyan` for the highlighted one), and the usage column is padded to the whole registry's
-widest label so the descriptions do not move as the filter narrows.
+and Esc closes the menu and keeps the text. What **Enter** does is the client's own rule
+(`slashEnterAction`, epic #349 K7; #354), so `oh` and the web app agree: a **built-in** the line
+names in full runs at once (`/compact`), while a name still being typed — and any **skill** row,
+arguments or not — completes to `/name ` for them, and a line that already has arguments sends
+as it always did. The menu closes once the command word is over: at the first space, or as soon
+as the word is a command (a one-row list is noise) — the Enter rule reads the line either way.
+Its rows are ANSI colours (`cyan` for the highlighted one), and the usage column is padded to
+the whole registry's widest label so the descriptions do not move as the filter narrows.
 
 **The inline prompt slot** (`src/components/prompt-slot.tsx`) is the one mechanism through
 which a flow takes the input area over and gives it back with a result:
@@ -1450,8 +1454,10 @@ and a whole chat that follows a mode from `src/chat/session.test.ts`.
 The skills half (#349, K3/K5/K7/K8; #354) is four files. `src/chat/commands.test.ts` and
 `src/components/prompt-input.test.tsx` hold the menu: `menuCommands` puts the reader's enabled,
 user-invocable skills beside the chat's own commands with their `argument-hint`, `parseChatInput`
-reads a skill line as an invocation (`invocationSkill`'s `{ name, arguments }`), and the menu
-offers, filters, completes and suggests them. `src/commands/skills.test.ts` holds `oh skills`'
+reads a skill line as an invocation (`invocationSkill`'s `{ name, arguments }`), the menu offers,
+filters, completes and suggests them, and Enter follows the client's own rule (#354): a built-in
+named in full runs, a skill completes to `/name ` and is sent with its arguments by the Enter after
+it. `src/commands/skills.test.ts` holds `oh skills`'
 words and its flows against the fake client — the listing and its badges, the printed preview's
 candidates and reasons, the refresh's diff, and every branch of `runSkills`: `--all`/`--name`,
 the refusals (a name the preview did not offer, a broken candidate, nothing importable), the

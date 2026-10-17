@@ -732,7 +732,61 @@ function parseFrontmatter(text: string): Record<string, unknown> | null {
   if (end === -1) {
     return null
   }
-  return parseYamlBlock(lines.slice(1, end).join('\n'))
+  return parseFrontmatterBlock(lines.slice(1, end))
+}
+
+/** The field `argument-hint` at the start of its own line — the format's own spelling, top level. */
+const ARGUMENT_HINT_LINE = /^argument-hint\s*:/
+
+/**
+ * A frontmatter block as a mapping, with `argument-hint` kept as the file wrote it (K1).
+ *
+ * The Agent Skills format and Claude Code both spell an argument hint as a bracketed
+ * placeholder, and **neither is a YAML string**: `argument-hint: [version]` is a flow sequence,
+ * and `argument-hint: [pr-number] [priority]` is not valid YAML at all. The hint is free text
+ * the format only ever shows, so it is read off its own line (the text after the colon,
+ * trimmed) whenever YAML does not already answer with a plain string — and a block whose YAML
+ * fails **only** because of that line is read with the line set aside rather than refused, so a
+ * skill written for Claude Code imports unchanged. A value the file quoted (`"[version]"`) is a
+ * string already and is left to YAML, which is the one spelling that keeps its own quotes.
+ */
+function parseFrontmatterBlock(lines: readonly string[]): Record<string, unknown> | null {
+  const parsed = parseYamlBlock(lines.join('\n'))
+  if (parsed !== null) {
+    return withRawArgumentHint(parsed, lines)
+  }
+  // The YAML did not parse. It may be the one line the format's own bracket spelling made
+  // unparseable: read the block again without it, and only if the rest is a mapping has the
+  // failure been understood rather than papered over.
+  const hintIndex = lines.findIndex((line) => ARGUMENT_HINT_LINE.test(line))
+  if (hintIndex === -1) {
+    return null
+  }
+  const rest = parseYamlBlock(lines.filter((_, index) => index !== hintIndex).join('\n'))
+  if (rest === null) {
+    return null
+  }
+  const raw = lineValue(lines[hintIndex] ?? '')
+  return raw === null ? rest : { ...rest, 'argument-hint': raw }
+}
+
+/** A value YAML did not answer as a plain string is replaced by the text its line carried. */
+function withRawArgumentHint(
+  parsed: Record<string, unknown>,
+  lines: readonly string[],
+): Record<string, unknown> {
+  if (typeof parsed['argument-hint'] === 'string') {
+    return parsed
+  }
+  const line = lines.find((candidate) => ARGUMENT_HINT_LINE.test(candidate))
+  const raw = line === undefined ? null : lineValue(line)
+  return raw === null ? parsed : { ...parsed, 'argument-hint': raw }
+}
+
+/** The text after a frontmatter field's colon, trimmed, or `null` when it is empty. */
+function lineValue(line: string): string | null {
+  const value = line.slice(line.indexOf(':') + 1).trim()
+  return value === '' ? null : value
 }
 
 /** Parse a block of YAML, answering `null` for anything that is not a mapping. */

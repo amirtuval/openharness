@@ -211,6 +211,35 @@ describe('Composer', () => {
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
 
+  it('runs a built-in the box names in full on one Enter (#354)', async () => {
+    const { user, input, send } = setup()
+
+    await user.type(input, '/compact')
+    // The menu is up with the built-in highlighted — and Enter runs it at once rather than
+    // filling the box a second time, which is what a second Enter used to be needed for.
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+    await user.keyboard('{Enter}')
+
+    expect(send).toHaveBeenCalledWith('/compact')
+    expect(input).toHaveValue('')
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+  })
+
+  it('completes a fully-typed skill to `/name ` so its arguments can follow (#354)', async () => {
+    const { user, input, send } = setup()
+
+    await user.type(input, '/release-notes')
+    await user.keyboard('{Enter}')
+
+    // A skill is never run from the menu: it is sent as the message the invocation is, so Enter
+    // leaves the box ready for the arguments.
+    expect(input).toHaveValue('/release-notes ')
+    expect(send).not.toHaveBeenCalled()
+
+    await user.type(input, 'v1.2{Enter}')
+    expect(send).toHaveBeenCalledWith('/release-notes v1.2')
+  })
+
   it('shows the skill’s argument-hint as the placeholder once it is picked (K7)', async () => {
     const { user, input } = setup()
 

@@ -25,6 +25,7 @@ import {
   skillSourceLabel,
   slashCommandQuery,
   slashCommands,
+  slashEnterAction,
 } from './skills'
 
 /** A candidate with nothing wrong with it, named `name`. */
@@ -146,6 +147,40 @@ describe('the / menu (K7)', () => {
       'compact',
     ])
     expect(filterSlashCommands(commands, 'zzz')).toEqual([])
+  })
+
+  it('is what Enter does with the line: run a full built-in, complete a skill, else send', () => {
+    const commands = slashCommands([makeSkill({ name: 'release-notes' })])
+    const release = commands[1]!
+    expect(release.kind).toBe('skill')
+
+    // A built-in named in full is a command with nothing left to type: Enter runs it now.
+    expect(slashEnterAction('/compact', commands)).toEqual({ kind: 'run', name: 'compact' })
+    // A skill is never run from the menu — it is sent carrying its arguments — so even a full
+    // name completes to `/name ` for them.
+    expect(slashEnterAction('/release-notes', commands)).toEqual({
+      kind: 'complete',
+      name: 'release-notes',
+    })
+    // A name still being typed completes to the row the reader is on.
+    expect(slashEnterAction('/co', commands, commands[0])).toEqual({
+      kind: 'complete',
+      name: 'compact',
+    })
+    expect(slashEnterAction('/release', commands, release)).toEqual({
+      kind: 'complete',
+      name: 'release-notes',
+    })
+    // Arguments typed, a miss, or an ordinary message: Enter sends, as it always did.
+    expect(slashEnterAction('/release-notes v1.2', commands, release)).toEqual({ kind: 'send' })
+    expect(slashEnterAction('/compact keep the API decisions', commands)).toEqual({ kind: 'send' })
+    expect(slashEnterAction('/release-notes v1.2', commands)).toEqual({ kind: 'send' })
+    expect(slashEnterAction('/zzz', commands)).toEqual({ kind: 'send' })
+    expect(slashEnterAction('hello', commands)).toEqual({ kind: 'send' })
+    expect(slashEnterAction('', commands)).toEqual({ kind: 'send' })
+    // A partial with no row highlighted is nothing to complete to, so it is sent — and a line
+    // naming no command is an ordinary message either way.
+    expect(slashEnterAction('/release', commands)).toEqual({ kind: 'send' })
   })
 })
 

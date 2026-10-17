@@ -1,4 +1,4 @@
-import { filterSlashCommands, slashCommandQuery } from '@openharness/client'
+import { filterSlashCommands, slashCommandQuery, slashEnterAction } from '@openharness/client'
 import type { SlashCommand } from '@openharness/client'
 import { Pencil, SendHorizontal, Square } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
@@ -138,11 +138,13 @@ export function Composer({
   /**
    * The `/` menu (epic #349, K7; #353): the built-in commands, then the reader's own skills.
    *
-   * Typing `/` opens it, the arrows move the highlight, Enter picks the highlighted row and
-   * Escape closes it. Picking a row fills the box with `/name ` — which is what makes that
-   * command's {@link SlashCommand.argumentHint} the box's placeholder — and the send then parses
-   * the line: a skill becomes a message carrying `skill`, and a built-in runs its action. The
-   * list comes from `@openharness/client`'s `slashCommands`, so `oh` offers the same rows.
+   * Typing `/` opens it, the arrows move the highlight, Enter takes the highlighted row and
+   * Escape closes it. What Enter does is the shared rule (`slashEnterAction`, K7; #354): a
+   * built-in the box names **in full** runs now (`/compact`), and everything else fills the box
+   * with `/name ` — which is what makes that command's {@link SlashCommand.argumentHint} the
+   * box's placeholder — and the send then parses the line: a skill becomes a message carrying
+   * `skill`, and a built-in runs its action. The list comes from `@openharness/client`'s
+   * `slashCommands`, so `oh` offers the same rows.
    */
   commands: readonly SlashCommand[]
 }) {
@@ -218,9 +220,9 @@ export function Composer({
     }
   }
 
-  /** Take the highlighted row: the box becomes `/name `, so its arguments can be typed next. */
-  const pick = (command: SlashCommand): void => {
-    setText(`/${command.name} `)
+  /** Take a row: the box becomes `/name `, so the command's arguments can be typed next. */
+  const complete = (name: string): void => {
+    setText(`/${name} `)
     setDismissed(true)
     ownRef.current?.focus()
   }
@@ -246,7 +248,7 @@ export function Composer({
           commands={menu}
           highlighted={highlight}
           onHighlight={setHighlight}
-          onPick={pick}
+          onPick={(command) => complete(command.name)}
         />
       ) : null}
       <Label htmlFor={COMPOSER_INPUT_ID} className="sr-only">
@@ -284,9 +286,20 @@ export function Composer({
               return
             }
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault()
-              pick(highlighted)
-              return
+              // What Enter means is the shared rule (K7; #354): a built-in the box names in
+              // full runs now, a skill (or a name still being typed) completes to `/name `, and
+              // anything with arguments is sent by the fall-through below.
+              const action = slashEnterAction(text, commands, highlighted)
+              if (action.kind === 'run') {
+                event.preventDefault()
+                void submit()
+                return
+              }
+              if (action.kind === 'complete') {
+                event.preventDefault()
+                complete(action.name)
+                return
+              }
             }
             if (event.key === 'Escape') {
               event.preventDefault()
@@ -354,13 +367,14 @@ export function Composer({
  * skills, from `@openharness/client`'s `slashCommands` — each drawn as the line it would run
  * (`/compact [instructions]`, `/release-notes <[version]>`) with what it does beside it. It is a
  * listbox the box itself is the combobox for: the arrows move the highlight, Enter takes the
- * highlighted row ({@link Composer}'s `pick`), Escape closes it, and a click takes one too —
- * `onMouseDown` and not `onClick`, because the box has to keep the focus a click would take.
+ * highlighted row ({@link Composer}'s `complete` for a skill, `submit` for a fully-typed
+ * built-in), Escape closes it, and a click takes one too — `onMouseDown` and not `onClick`,
+ * because the box has to keep the focus a click would take.
  *
  * It is presentation and one callback: which rows there are comes from the draft, and what a
- * pick *does* (fill the box, so the arguments can be typed next) belongs to the box. Picking a
- * command whose name is already the whole line is therefore a no-op that adds a space — the
- * honest thing, since a row the reader picked is a row they meant.
+ * click *does* (fill the box with `/name `, so the arguments can be typed next) belongs to the
+ * box. A click adds the space a full name would not have — the honest thing, since a row the
+ * reader clicked is a row they meant.
  */
 function CommandMenu({
   commands,
