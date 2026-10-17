@@ -21,6 +21,7 @@ import {
   frameOf,
   pressKey,
   submit,
+  typeText,
   waitForFrame,
   waitForScreen,
   type TestInstance,
@@ -200,6 +201,32 @@ describe('a task’s own chat (#347)', () => {
 
     pressKey(app, 'escape')
     await waitForFrame(app, 'Interrupted')
+  })
+
+  it('takes an Esc that dismissed the command menu as the menu’s, not the turn’s (#368)', async () => {
+    // Ink delivers one keypress to every mounted handler, so before #368 this Esc did both
+    // things: the prompt closed its list and this screen interrupted the helper. A reader who
+    // typed `/` to look at the commands and pressed Esc to dismiss them did not ask to stop the
+    // turn they were watching.
+    const app = renderApp([], {
+      parent_session_id: PARENT_ID,
+      title: 'child chat',
+    })
+    await waitForChat(app, 'sesn_')
+    await waitForFrame(app, 'root chat › child chat')
+
+    app.fake.respondWith('one two three four five six seven eight', { chunks: 8, delayMs: 60 })
+    submit(app, 'do the work')
+    await waitForFrame(app, 'running')
+
+    // `/` on an empty buffer opens the menu, and Esc is how a reader dismisses it.
+    typeText(app, '/')
+    await waitForFrame(app, '/model')
+    pressKey(app, 'escape')
+
+    // The turn runs to its end: the Esc was spent on the menu.
+    await waitForFrame(app, 'eight')
+    expect(frameOf(app)).not.toContain('Interrupted')
   })
 
   it('leaves a top-level chat’s turn alone: Esc is the prompt’s key there', async () => {

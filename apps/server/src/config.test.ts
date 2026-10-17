@@ -14,6 +14,7 @@ import {
   DEFAULT_MAX_LIVE_TASKS,
   DEFAULT_PARTITION_COUNT,
 } from '@openharness/protocol'
+import { MAX_DESCENDANT_DEPTH } from '@openharness/session'
 import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
@@ -369,6 +370,24 @@ describe('readServerConfig', () => {
     expect(() => readServerConfig(env({ OPENHARNESS_MAX_TOOL_STEPS: 'many' }))).toThrow(
       /OPENHARNESS_MAX_TOOL_STEPS/,
     )
+  })
+
+  it('bounds the nesting depth at the tree walk’s own ceiling (#361)', () => {
+    // The walks over `parent_session_id` stop at `MAX_DESCENDANT_DEPTH`, so a deployment whose
+    // nesting limit is above it could build a tree whose bottom a walk cannot see: a delete
+    // would leave descendants behind, and the two stores would disagree about an orphaned
+    // child. The ceiling is the config's too, and the number is spelled once.
+    expect(readServerConfig(env({ OPENHARNESS_MAX_AGENT_DEPTH: '64' })).maxAgentDepth).toBe(
+      MAX_DESCENDANT_DEPTH,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_AGENT_DEPTH: '65' }))).toThrow(
+      /OPENHARNESS_MAX_AGENT_DEPTH must be an integer 1\.\.64/,
+    )
+    // Below the ceiling, and at it, is a deployment's own choice.
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_AGENT_DEPTH: '0' }))).toThrow(
+      /OPENHARNESS_MAX_AGENT_DEPTH/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_AGENT_DEPTH: '3' }))).not.toThrow()
   })
 
   it('refuses a concurrency limit below one', () => {

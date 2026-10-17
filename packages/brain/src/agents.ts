@@ -56,8 +56,9 @@ import type { SubagentParent, SubagentTypeResolver } from './subagent'
  * What a deployment tells the loop about subagents (epic #340, S6; #344).
  *
  * Absent means "this deployment has none", and it is a real answer rather than a missing one:
- * the loop then adds nothing and takes nothing away — a registry that carries a tool of one of
- * these names stays as the host built it (which is what the test hooks' `agent_wait` is). A
+ * the loop then offers **none** of the five — they are taken out of the registry the host
+ * built, so a chat cannot call a tool whose handler could only answer "the harness answers
+ * this", and cannot park itself on an `agent_wait` no task can ever resolve (#365). A
  * deployment that **does** wire one has every one of the five decided here: a session offered
  * none loses them, so nothing can promise a helper the deployment will not start.
  */
@@ -108,8 +109,8 @@ export interface SubagentToolContext {
   /**
    * The deployment's types and limits, or `undefined` for one that wired none.
    *
-   * `undefined` means the host wired no subagents: the loop adds nothing and takes nothing
-   * away, so the registry is the offer the host built.
+   * `undefined` means the host wired no subagents: the five tools are taken out of the offer,
+   * so a chat on a deployment that cannot start a helper is not offered one (#365).
    */
   readonly runtime: SubagentRuntime | undefined
 }
@@ -156,6 +157,9 @@ export function offeredSubagentTools(
  * - **A session offered none loses them.** A chat at the depth cap, or a deployment that wired
  *   no runtime at all, must not be offered a tool that could only refuse: what the model cannot
  *   see it cannot ask for, which is the rule `ask_user` follows in a non-interactive session.
+ *   The no-runtime case is a deployment without subagents **at all**: the five are taken out of
+ *   the offer even though the process registry carries them (a settings screen lists them), so a
+ *   host that never starts a helper never offers one (#365).
  *
  * The types are listed per request, not per turn: the `agent` description is what the model
  * chooses from, and a mode edited between two starts is offered as it is now (#342).
@@ -166,11 +170,16 @@ export async function withSubagentTools(
 ): Promise<ToolRegistry | undefined> {
   const runtime = context.runtime
   if (runtime === undefined) {
-    // A host that wired no runtime is left exactly as it was: the loop then knows nothing about
-    // subagents, and a registry that carries a tool of one of these names is the host's own
-    // business — the test hooks register `agent_wait` for the mock model without one, and the
-    // loop still recognises it there.
-    return registry
+    // A deployment that wired **no runtime has no subagents**, so it offers none of the five —
+    // whatever its process registry carries. The five are registered by every deployment (a
+    // settings screen lists them so a user can turn one off, and a mode can override one), so
+    // leaving them in the offer would hand a chat four calls whose handlers can only answer
+    // "the harness answers this", and — worse — a **live** `agent_wait`, whose call really ends
+    // the turn `waiting_on_tasks` with no task in existence to resolve it and only the deadline
+    // or a user message to end it (#365). Offering a tool that could only refuse is what the
+    // `ask_user` rule forbids everywhere else: what the model cannot see it cannot ask for.
+    const kept = (registry?.tools ?? []).filter((tool) => !isSubagentToolName(tool.name))
+    return sameTools(registry, kept)
   }
   const kept = (registry?.tools ?? []).filter((tool) => !isSubagentToolName(tool.name))
   const offered = offeredSubagentTools(context.session, runtime)
@@ -252,7 +261,13 @@ export function createSubagentHandlers(context: SubagentHandlerContext): Subagen
         // can only label with its **model's** name, which is what the sidebar showed instead of
         // the description. Normalised by the same rule a chat's first message is, so a
         // multi-line or over-long description still becomes one bounded line.
-        title: deriveSessionTitle(input.description),
+        //
+        // A description with no text in it at all — `" "`, `"\n"`, which the tool's `min(1)`
+        // schema accepts — derives to `null` (`deriveSessionTitle` answers `null`, never `''`,
+        // for input with nothing in it), and a child left untitled is the bug #379 fixed. The
+        // type's name is then the fallback: it is always there, and "researcher" names the
+        // helper better than its model does.
+        title: deriveSessionTitle(input.description) ?? type.name,
         // The prompt a chat on this type would run with: the parent's own system prompt with the
         // type's addition after it. The subagent prompt itself is appended per request, by the
         // loop — every child runs with it, including one created before this issue existed.
@@ -480,6 +495,19 @@ export const EMPTY_TURN_RESULT = 'The helper finished a turn without saying anyt
  */
 export const STOPPED_TURN_RESULT = 'The user stopped this subagent before it finished.'
 
+/**
+ * The sentence a turn the **server** aborted is announced with (#378).
+ *
+ * A rolling deploy drains by aborting the turns in flight (`stopper.abort()`, the same abort a
+ * shutdown and a delete's stop use), which ends a turn exactly as a person's Stop does — an
+ * `interrupted` span end and nothing else. No human intent is in the log for it, so the parent
+ * model must not be told the user stopped its helper; and unlike a stop this is not the end of
+ * the work: the child is idle with its context intact, and `agent_message` continues it.
+ */
+export const RESTARTED_TURN_RESULT =
+  "This subagent's turn was interrupted by the server (a restart or shutdown). Send it a " +
+  'message with `agent_message` to continue.'
+
 export function childTurnDelivery(
   events: readonly StoredEvent[],
   session: Pick<Session, 'id'>,
@@ -490,7 +518,22 @@ export function childTurnDelivery(
   }
   const turn = events.slice(turnStartIndex(events, idle.index), idle.index)
   const sourceKey = `${session.id}:${idle.seq}`
-  const stopped = turnWasStopped(turn) || stoppedClaimedBy(events, idle.index)
+  // A turn whose window is **empty** and which answered nothing is not a turn that ended
+  // (#371). An interrupt written into an idle child is what produces one: nothing is queued, so
+  // the loop's first check ends the turn with nothing in flight and its idle claims the
+  // interrupt. Announcing that as a stop would tell the parent model its helper was stopped
+  // *before it finished* after it had already finished, and flip a card that read **done** back
+  // to stopped. A turn the child was really in the middle of leaves something in the window —
+  // the reply it streamed, a call it made, or, for a child parked in a task wait, the result
+  // that ends the wait. A window can also be empty while the turn really did answer something:
+  // the idle itself may claim the prompt a child's first turn was, so a claimed message or
+  // notification is what keeps that one a turn. The store's undelivered-turn scan reads the same
+  // rule (`@openharness/session`), which is what stops it waking a child for news that cannot
+  // exist.
+  if (turn.length === 0 && !answeredBy(events, idle.index)) {
+    return null
+  }
+  const stop = turnStop(turn, events, idle.index)
   const reply = turn
     .filter(
       (event): event is Extract<StoredEvent, { type: 'agent.message' }> =>
@@ -500,7 +543,7 @@ export function childTurnDelivery(
   const text = reply?.content.map((block) => block.text).join('') ?? ''
   // A stop outranks a retryable failure beside it: the turn ended because it was stopped, which
   // is the fact the parent has to act on, and whatever error preceded it was being retried.
-  if (stopped) {
+  if (stop === 'user') {
     return {
       kind: 'result',
       text:
@@ -509,6 +552,22 @@ export function childTurnDelivery(
           : STOPPED_TURN_RESULT,
       sourceKey,
       status: 'stopped',
+    }
+  }
+  // The host aborted the turn and **nobody said "stop"** (#378): a rolling deploy's drain, a
+  // shutdown, a delete that was already stopping this child. The log holds no human intent
+  // there, so the parent must not be told the user stopped it — the sentence a drain would
+  // otherwise produce is a lie the model acts on. The turn is over all the same, so the news
+  // says what really happened and how to carry on.
+  if (stop === 'server') {
+    return {
+      kind: 'result',
+      text:
+        text.length > 0
+          ? `${RESTARTED_TURN_RESULT} Its partial output: ${text}`
+          : RESTARTED_TURN_RESULT,
+      sourceKey,
+      status: 'idle',
     }
   }
   const failed = turn.find(
@@ -532,20 +591,58 @@ export function childTurnDelivery(
 }
 
 /**
- * Whether the ended turn was stopped rather than finished (S7; #348).
+ * Whether the idle that ended a turn claims a message or a task's news — something the turn
+ * really answered even though nothing was written inside its window (#371).
  *
- * Two shapes and one fact. A `user.interrupt` in the turn is what a person's Stop leaves —
- * appended by the route that accepts it, or by `agent_stop` on the user's behalf — and it is
- * claimed by the span end it stopped or by the turn's idle event (P4). An `interrupted` span
- * end is the same stop when the host aborted the turn with a signal and wrote no event for it
- * (a hard delete's stopped descendants, a drain).
+ * The one shape that matters is a child's first turn, whose idle may claim the prompt it
+ * answered; the store's undelivered-turn scan asks the same question of a child's log so the
+ * two cannot disagree about which ends are worth announcing.
  */
-function turnWasStopped(turn: readonly StoredEvent[]): boolean {
-  return turn.some(
-    (event) =>
-      event.type === EVENT_TYPES.userInterrupt ||
-      (event.type === EVENT_TYPES.modelRequestEnd && event.error?.type === 'interrupted'),
+function answeredBy(events: readonly StoredEvent[], idleIndex: number): boolean {
+  const idle = events[idleIndex]
+  const claimed = new Set(
+    (idle?.type === EVENT_TYPES.sessionStatusIdle ? idle.consumes : undefined)?.map(String) ?? [],
   )
+  if (claimed.size === 0) {
+    return false
+  }
+  return events.some(
+    (event) =>
+      claimed.has(String(event.id)) &&
+      (event.type === EVENT_TYPES.userMessage ||
+        event.type === EVENT_TYPES.sessionTaskNotification),
+  )
+}
+
+/** Who — if anyone — stopped the ended turn (S7; #348; #378). */
+type TurnStop = 'user' | 'server' | null
+
+/**
+ * Whether the ended turn was stopped, and by **whom** (S7; #348; #378).
+ *
+ * Two shapes and two different facts, which is the point of the split. A `user.interrupt` in
+ * the turn is what a person's Stop leaves — appended by the route that accepts it, or by
+ * `agent_stop` on the user's behalf — and it is claimed by the span end it stopped or by the
+ * turn's idle event (P4); so is one the ended idle itself claims, for a child that was paused
+ * in a task wait when it arrived ({@link stoppedClaimedBy}). An `interrupted` span end with no
+ * such event is the **host** aborting a turn with a signal: a rolling deploy's drain, a
+ * shutdown, a delete already stopping this child. Nothing in the log records a person's intent
+ * there, so a delivery that read it as a user stop would tell the parent model the user stopped
+ * a helper the operator restarted.
+ */
+function turnStop(
+  turn: readonly StoredEvent[],
+  events: readonly StoredEvent[],
+  idleIndex: number,
+): TurnStop {
+  const byEvent = turn.some((event) => event.type === EVENT_TYPES.userInterrupt)
+  if (byEvent || stoppedClaimedBy(events, idleIndex)) {
+    return 'user'
+  }
+  const aborted = turn.some(
+    (event) => event.type === EVENT_TYPES.modelRequestEnd && event.error?.type === 'interrupted',
+  )
+  return aborted ? 'server' : null
 }
 
 /**
@@ -556,8 +653,8 @@ function turnWasStopped(turn: readonly StoredEvent[]): boolean {
  * ends that wait is appended **before** the turn the signal starts, and the turn window
  * {@link turnStartIndex} slices holds none of it. The **claim** is what says the turn ended
  * because it was stopped: the idle event carries the interrupts it ended on (P4), and this reads
- * that record rather than the window's shape. It is the same fact {@link turnWasStopped} reads
- * for a running child, where the interrupt really is inside the window.
+ * that record rather than the window's shape. It is the same fact {@link turnStop} reads for a
+ * running child, where the interrupt really is inside the window.
  */
 function stoppedClaimedBy(events: readonly StoredEvent[], idleIndex: number): boolean {
   const idle = events[idleIndex]
@@ -639,11 +736,13 @@ export async function childTurnStart(store: SessionStore, session: Session): Pro
 /**
  * Give the parent what the child's finished turn owes it (S4).
  *
- * The notification is appended through the store's idempotent `appendTaskNotification`, so this
- * is safe to call more than once — the turn's end calls it, and a turn started on a child whose
- * last one was never delivered calls it again (the no-op guard in `./turn`) — and the **status
- * moves only when the notification was really new**, so the two land together and a recovery
- * cannot write a stream of duplicate statuses.
+ * The news and the status that moves the card are **one append** through the store's idempotent
+ * `appendTaskNotification` (#363), so this is safe to call more than once — the turn's end calls
+ * it, and a turn started on a child whose last one was never delivered calls it again (the no-op
+ * guard in `./turn`) — and the status is written exactly once, by the one call that also wrote
+ * the notification. As two appends the pair had a window nothing repaired: a crash or a fence
+ * between them delivered the news and lost the status, leaving the parent's card `running` for
+ * the rest of the session while the model acted on a result for a task that looked unfinished.
  *
  * Returns whether this call is the one that delivered it. A child with no parent, a turn that
  * has not ended, and a turn the parent has already been told about are all `false`.
@@ -662,17 +761,25 @@ export async function deliverChildTurn(
     return false
   }
   const delivered = await inParent(store, own.parentSessionId, async () => {
+    // The reader may have taken this task back while the child's turn was ending: a
+    // `session.rewind` past the `agent` call it started supersedes the `session.task_started`,
+    // so the parent's log no longer names the task (S7) — and the news from a task the log
+    // does not name is not this chat's, as `./tasks`' `deliverableNotifications` says for the
+    // task-wait path. Dropping it **at the write** rather than at the read is what keeps it
+    // from becoming work: a notification nothing may claim would be found by the store's work
+    // scan and by `SessionRunner`'s `#hasMoreWork` on every pass, and the parent would wake
+    // for ever over news it is not allowed to read (a rewind's own turn writes the stop, so
+    // nothing else tells the model this work ended).
+    if (!taskStarts(await readLog(store, own.parentSessionId)).has(own.taskId)) {
+      return false
+    }
     const { appended } = await store.appendTaskNotification(own.parentSessionId, {
       taskId: own.taskId,
       kind: delivery.kind,
       text: delivery.text,
       sourceKey: delivery.sourceKey,
+      status: delivery.status,
     })
-    if (appended) {
-      await store.appendEvents(own.parentSessionId, [
-        { type: EVENT_TYPES.sessionTaskStatus, task_id: own.taskId, status: delivery.status },
-      ])
-    }
     return appended
   })
   if (!delivered) {
@@ -824,11 +931,17 @@ export async function stopOrphanedTasks(
     })),
   )
   for (const orphan of orphans) {
-    // A helper parked in a task wait is interrupted with an **event** as well: its pause is a
-    // turn end, so the signal alone starts a turn that finds the same open wait and pauses again
-    // — leaving a task the reader took back still working, and letting the turn that eventually
-    // ends announce `idle` after the `stopped` this turn just wrote (S7; #348).
-    if (await childPausedOnTasks(store, orphan.child.id)) {
+    // The stop is written into the child as an **event** before the signal, exactly as
+    // `agent_stop` does (S7; #348): a signal is a hint that a lost `LISTEN`, a child owned by an
+    // instance that is restarting or a dropped notification can swallow, and then the helper a
+    // rewind removed from the log keeps running and later delivers news for a task that no
+    // longer exists. A **paused** orphan is the sharper case — its pause is a turn end, so a
+    // bare signal starts a turn that finds the same open wait and pauses again — and a running
+    // one is the same fact one step earlier. `childInterruptible` is the test for both: a turn
+    // is open, or there is a wait to end. A child that has already reported is left alone: an
+    // interrupt of one opens a turn of its own whose delivery would be a stop for work that had
+    // finished (which `childTurnDelivery` now refuses to send, #371).
+    if (await childInterruptible(store, orphan.child.id)) {
       await ignoreMissing(() =>
         store.appendEvents(orphan.child.id, [{ type: EVENT_TYPES.userInterrupt }]),
       )
