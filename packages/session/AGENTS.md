@@ -654,7 +654,10 @@ key on a session, so deleting one can never delete a chat). A mode also carries 
 (epic #340, S2; #342) — which the store writes and returns like any other nullable field: what
 a description _means_ (which modes a parent model is offered, and what starting one runs) is
 the server's and the brain's, and the store stores what it is given, as it does for every other
-bound the protocol owns.
+bound the protocol owns. A mode's `tools` object also carries the three section defaults of
+epic #349 B8 (`builtin_default`, `mcp_servers_default`, `skills_default`); they ride inside the
+same `tools jsonb` column `0027` added, so **no migration was needed**, and an older row with
+none of them reads as `follow`.
 
 **Errors.** `SessionNotFoundError` (every session-scoped method except `getSession`,
 `getSessionUnscoped` and `updateSession`, which answer `null`),

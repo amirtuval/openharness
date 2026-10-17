@@ -1001,6 +1001,10 @@ the web app does, in the transcript, where the `agent` call that started it was.
   second column, plus one line saying a type is a helper's mode and that this CLI only shows it.
   `oh` does not create or edit modes, and a description is what the parent model chooses a type
   by — so it is read here and written in the web app's Settings → Modes.
+- **`oh modes` shows each section default a mode carries** (epic #349, B8): a mode with a
+  `tools` override adds `not listed: tools follow · mcp on · skills off`, naming all three
+  values (`follow` included) so two modes can be compared without remembering which absence
+  means what. The override is read-only here, like the skill map beside it.
 
 ### Remote MCP servers in the terminal (#303, X10; #313)
 

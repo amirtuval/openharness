@@ -1056,6 +1056,149 @@ test.describe('W30 the skills screens', () => {
     await request.delete(`/v1/sessions/${parent.id}`)
   })
 
+  test('S11c a `skills_default: off` allows only the named skill, in a chat and its subagent', async ({
+    page,
+    request,
+  }) => {
+    test.skip(!(await skillsFixtureAvailable()), 'needs a `git` executable for the fixture')
+    // One user-invocable skill first, so the mode can name it; the other is imported **after**
+    // the mode is written, which is the case the default exists for (epic #349, B8).
+    // `summarize-thread` is the fixture's user-run command (`disable-model-invocation: true`),
+    // so it is a `/` menu row; `house-style` is `user-invocable: false` and would be absent for
+    // a reason that has nothing to do with the mode.
+    const [allowed] = await ensureSkills(request, ['summarize-thread'])
+    expect(allowed, 'the fixture import left summarize-thread stored').toBeDefined()
+
+    const credentials = await request.get('/v1/provider-credentials')
+    const providers = ((await credentials.json()) as { data: { name: string }[] }).data
+    test.skip(
+      providers.length === 0,
+      'a mode whose model has no credential cannot be used — this stack has none',
+    )
+    const provider = providers[0]?.name ?? 'custom'
+
+    const created = await request.post('/v1/me/modes', {
+      data: {
+        name: 'allowlist',
+        model: `${provider}/a-mode-model`,
+        subagent_description: 'Summarizes a thread',
+        tools: { skills_default: 'off', skills: { [allowed?.id ?? '']: true } },
+      },
+    })
+    expect(created.status(), await created.text()).toBe(201)
+    const mode = (await created.json()) as { id: string }
+
+    // Imported afterwards: an allowlist says it stays off in this mode, however recently it
+    // arrived.
+    await ensureSkills(request, ['release-notes'], { wipe: false })
+    const listing = await request.get('/v1/me/skills')
+    const skills = ((await listing.json()) as { data: { id: string; name: string }[] }).data
+    expect(skills.some((skill) => skill.name === 'release-notes')).toBe(true)
+
+    const session = await request.post('/v1/sessions', { data: { mode: mode.id } })
+    expect(session.status(), await session.text()).toBe(201)
+    const chat = ((await session.json()) as { id: string }).id
+
+    await test.step('the chat is offered only the allowlisted skill', async () => {
+      // The `/` menu is the effective set: the one the mode names is there, and the skill
+      // imported afterwards is not.
+      await page.goto(`/#/s/${chat}`)
+      const input = composer(page)
+      await input.fill('/')
+      const menu = page.getByRole('listbox', { name: 'Slash commands' })
+      await expect(menu.locator('[data-command="summarize-thread"]')).toBeVisible()
+      await expect(menu.locator('[data-command="release-notes"]')).toHaveCount(0)
+      await input.press('Escape')
+      await expectNoErrorBanner(page)
+
+      // The server agrees: a slash invocation of the later skill is refused before anything is
+      // stored, and the one the mode names is accepted and loaded.
+      const refused = await request.post(`/v1/sessions/${chat}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [{ type: 'text', text: '/release-notes v1' }],
+              skill: { name: 'release-notes', arguments: 'v1' },
+            },
+          ],
+        },
+      })
+      expect(refused.status(), await refused.text()).toBe(400)
+
+      const accepted = await request.post(`/v1/sessions/${chat}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [{ type: 'text', text: '/summarize-thread' }],
+              skill: { name: 'summarize-thread' },
+            },
+          ],
+        },
+      })
+      expect(accepted.status(), await accepted.text()).toBe(200)
+      await waitForIdle(request, chat)
+      const loaded = await waitForLoaded(request, chat, 1)
+      expect(loaded.map((event) => event.name)).toEqual(['summarize-thread'])
+    })
+
+    await test.step('a subagent of the type sees the same allowlist', async () => {
+      const parent = await createChat(request, QA_MODEL)
+      const sent = await request.post(`/v1/sessions/${parent.id}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [
+                { type: 'text', text: '__agent__ allowlist | Use the summarize-thread skill' },
+              ],
+            },
+          ],
+        },
+      })
+      expect(sent.status(), await sent.text()).toBe(200)
+      const started = await waitForEvent(
+        request,
+        parent.id,
+        (event) => event.type === 'session.task_started',
+      )
+      const child = started.child_session_id as string
+      expect(child).toBeTruthy()
+      await waitForEvent(request, child, (event) => event.type === 'session.status_idle')
+
+      // The child was created on the mode, so the same allowlist applies: the later skill is
+      // refused and the named one loads.
+      const refused = await request.post(`/v1/sessions/${child}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [{ type: 'text', text: '/release-notes v1' }],
+              skill: { name: 'release-notes', arguments: 'v1' },
+            },
+          ],
+        },
+      })
+      expect(refused.status(), await refused.text()).toBe(400)
+
+      const accepted = await request.post(`/v1/sessions/${child}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [{ type: 'text', text: '/summarize-thread' }],
+              skill: { name: 'summarize-thread' },
+            },
+          ],
+        },
+      })
+      expect(accepted.status(), await accepted.text()).toBe(200)
+      await waitForIdle(request, child)
+      await request.delete(`/v1/sessions/${parent.id}`)
+    })
+  })
+
   test('S14 the four views in three themes at a desktop and a narrow width', async ({
     page,
     request,

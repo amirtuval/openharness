@@ -865,6 +865,24 @@ database and, unless they ask otherwise, **one** dev account: a skill seeded for
 force for every later test in the file, so per-test accounts are not politeness but the fixture
 ([#352](https://github.com/amirtuval/openharness/issues/352)).
 
+**A boolean patch over "the user's setting" cannot say "only these", and the missing statement is
+the whole difference between a preset and a policy.** `Mode.tools` was a map of exceptions: a name
+absent from it followed the user's own switch, so a server or skill added after the mode was
+written was silently on in it, and no mode could be the allowlist a reviewed helper needs. The
+fix is one tri-state per kind — `builtin_default`, `mcp_servers_default`, `skills_default`, each
+`follow | off | on` with absent meaning `follow` — and the trap is that the three kinds were
+already resolved in three places (`tool-settings.ts`'s `effectiveTools`, `mcp/in-force.ts`,
+`skill.ts`'s `skillInForce`). Adding the default at each site would have been three chances to
+disagree with the brain, the frontends' `/` menus and a child session; instead one
+`modeItemInForce(entry, follows, fallback)` in the protocol is applied by one helper per kind,
+and every consumer calls it. `off` is an allowlist (an item added later stays off), `on` turns
+every unlisted item on even where the user turned it off globally, and **an explicit entry still
+wins**; a default is never a permission, and it cannot undo a hard rule — `withoutAskUser`, the
+subagent tools a depth withholds and `disable-model-invocation` are applied outside it. Storage
+needed no migration because all of it rides inside the existing `tools jsonb`
+([#349](https://github.com/amirtuval/openharness/issues/349) B8,
+`packages/protocol/src/resources/mode.ts`).
+
 ## Pausing for the user
 
 **A pause is written down, not held in memory.** A call evaluated as `ask` (or any `ask_user` call)
