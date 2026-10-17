@@ -23,7 +23,9 @@ import { DEFAULT_MODEL_PATTERN, UserIdSchema } from './user'
  * mode without touching every chat that runs it. This is the first step of the modes design
  * (epic #245, decision M6). Since #307 a mode may also override which tools a chat has —
  * the built-in ones by name, and the user's remote MCP servers by id (#311) — see
- * {@link ModeToolOverrideSchema}.
+ * {@link ModeToolOverrideSchema}. Since #342 a mode may also say what it is **good for**, and
+ * a mode that says so is a **subagent type** a parent model may start (epic #340, S2) — see
+ * {@link ModeSubagentDescriptionSchema}.
  *
  * Modes are per user and owner-scoped like every other resource (epic #65, A4): a mode is
  * listed only to its owner and answers 404 to anyone else.
@@ -31,6 +33,15 @@ import { DEFAULT_MODEL_PATTERN, UserIdSchema } from './user'
 
 /** Longest mode name the API accepts. */
 export const MODE_NAME_MAX_LENGTH = 64
+
+/**
+ * Longest subagent description a mode may carry (epic #340, S2; issue #342).
+ *
+ * The description is read by a **parent model** choosing a helper to start, so it is a
+ * sentence or two rather than a paragraph — the whole list of types goes into one tool
+ * description, and a page of prose per mode would be the model's context, not its choice.
+ */
+export const MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH = 500
 
 /** How many modes one user may have. */
 export const MAX_MODES_PER_USER = 20
@@ -114,6 +125,31 @@ export const ModeToolOverrideSchema = z.object({
 
 export type ModeToolOverride = z.infer<typeof ModeToolOverrideSchema>
 
+/**
+ * // extension: the description that makes a mode a **subagent type** (epic #340, S2; #342).
+ *
+ * A parent model starting a helper picks a *kind* of helper, and a kind is a mode: the mode
+ * already says how a chat on it runs — a model, an effort, a prompt addition and a tool set —
+ * and this field is the one thing it did not have, what the mode is **good for**. A mode with
+ * one is offered to the parent as a type it may start; a mode without is not, because
+ * `null` is the honest spelling of "this mode is not meant to be one".
+ *
+ * It is a description for a **model**, not for a settings screen: short sentences saying what
+ * the type is for, phrased so the parent can tell it from its neighbours ("Reviews a diff for
+ * correctness bugs", "Searches the web and reports sources"), and bounded to
+ * {@link MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH} because every one of them is part of the one
+ * description of the `agent` tool.
+ *
+ * The type a mode becomes resolves **exactly as a chat on that mode does** — its model
+ * ("my default model" included), its effort, its prompt addition and its tool and MCP-server
+ * override — so a user retunes what their helpers do by editing the mode they already have.
+ * Policies are not a mode's (E6): what a call may do stays the user's setting.
+ *
+ * Stripped like every unknown field when the API did not put it there; the empty string is
+ * refused rather than read as `null`, because "no description" has one spelling.
+ */
+const ModeSubagentDescriptionSchema = z.string().min(1).max(MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH)
+
 /** The `mode` resource. */
 export const ModeSchema = z.object({
   id: ModeIdSchema,
@@ -137,6 +173,12 @@ export const ModeSchema = z.object({
    * for no addition. Appended after it, never in place of it.
    */
   system_prompt_addition: z.string().nullable(),
+  /**
+   * What this mode is good for, when it is offered to a parent model as a subagent type
+   * (epic #340, S2; #342), or `null` for a mode that is not one. See
+   * {@link ModeSubagentDescriptionSchema}.
+   */
+  subagent_description: ModeSubagentDescriptionSchema.nullable(),
   /**
    * Which built-in tools a chat on this mode has on or off, overriding the user's own settings
    * (#307), or `null` for no override at all — a mode that says nothing about tools and lets
@@ -162,6 +204,7 @@ export const CreateModeRequestSchema = z.object({
   model: ModeModelSchema,
   reasoning_effort: ReasoningEffortSchema.nullable().optional(),
   system_prompt_addition: z.string().nullable().optional(),
+  subagent_description: ModeSubagentDescriptionSchema.nullable().optional(),
   tools: ModeToolOverrideSchema.nullable().optional(),
 })
 
@@ -176,6 +219,7 @@ export const UpdateModeRequestSchema = z.object({
   model: ModeModelSchema.optional(),
   reasoning_effort: ReasoningEffortSchema.nullable().optional(),
   system_prompt_addition: z.string().nullable().optional(),
+  subagent_description: ModeSubagentDescriptionSchema.nullable().optional(),
   tools: ModeToolOverrideSchema.nullable().optional(),
 })
 

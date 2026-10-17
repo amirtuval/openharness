@@ -9,6 +9,7 @@ import {
   isStoredEvent,
   newEventId,
   newSessionId,
+  newTaskId,
   partitionOf,
   type CreateAgentRequest,
   type EventId,
@@ -29,6 +30,7 @@ import {
   DuplicateMcpServerNameError,
   FencedError,
   isFencedError,
+  SessionNotFoundError,
 } from '../errors'
 import type { AppendableEvent } from '../store'
 import { timestampAt } from '../clock'
@@ -245,6 +247,45 @@ if (target === null) {
         ...(await second.listEventsUnscoped(other.id)).data,
       ]
       expect(stored.map((event) => event.id)).toEqual([id])
+    })
+
+    it('refuses a child of a session whose delete committed first, and waits for one in flight (#361)', async () => {
+      // The one hole the cascade had: `deleteSession` collects the subtree and then locks and
+      // deletes exactly those ids, and `parent_session_id` carries no foreign key — so a child
+      // inserted between the walk and the delete used to survive a parent that is gone, with no
+      // route that would ever list or cascade to it again. `createSession` now **locks the
+      // parent row it reads** (`for share`), which the delete's tree lock excludes, so the two
+      // serialize instead of interleaving.
+      // The seeded store is not used: the child is created through a **second** store, so the
+      // pool connection that holds the parent row is not the one the create runs on.
+      const { clock, session: parent } = await seeded()
+      const other = track(createPostgresSessionStore({ pool }, { now: clock.now }))
+      const client = await pool.connect()
+      try {
+        // A second connection holds the parent's row as the delete's tree lock does, and the
+        // create is left waiting for it rather than reading a snapshot and inserting.
+        await client.query('begin')
+        await client.query('select id from sessions where id = $1 for update', [parent.id])
+        const creating = other.createSession(null, {
+          ownerId: OWNER_A,
+          parentSessionId: parent.id,
+          model: { id: 'anthropic/claude-haiku-4-5' },
+        })
+        const first = await Promise.race([
+          creating.then(() => 'settled' as const),
+          new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 150)),
+        ])
+        expect(first).toBe('waiting')
+
+        // The delete commits: the parent is gone, so the create is the parent it looked up —
+        // `SessionNotFoundError`, nothing created, and no session left pointing at a session
+        // that is not there.
+        await client.query('delete from sessions where id = $1', [parent.id])
+        await client.query('commit')
+        await expect(creating).rejects.toBeInstanceOf(SessionNotFoundError)
+      } finally {
+        client.release()
+      }
     })
 
     it('fences a stale epoch across stores, and accepts the current one', async () => {
@@ -529,8 +570,9 @@ if (target === null) {
       // `create table if not exists` (#111, #122), `0018_credential_key_provider.sql`,
       // `0019_user_preferences_theme.sql`, `0025_user_preferences_compaction.sql`,
       // `0027_tool_settings.sql`, `0030_mcp_oauth_state_client.sql`,
-      // `0031_mcp_tool_policies.sql` and `0032_session_tree.sql` one or more
-      // `add column if not exists` (#150, #203, #282, #307, #311, #312, #340), and
+      // `0031_mcp_tool_policies.sql`, `0032_session_tree.sql` and
+      // `0033_mode_subagent_description.sql` one or more
+      // `add column if not exists` (#150, #203, #282, #307, #311, #312, #340, #342), and
       // `0021_model_request_end_usage.sql`, `0026_agent_tool_use_usage.sql`,
       // `0027_tool_settings.sql`, `0028_paused_confirmation_work.sql` and
       // `0029_mcp_servers.sql` build an index or a table (#247, #305, #307, #309, #311): a
@@ -560,9 +602,22 @@ if (target === null) {
       // #312's file adds the remote tool policies to the settings table `0027` created, and is
       // numbered after #311's pair for the same reason they follow `0028`.
       expect(files).toContain('0031_mcp_tool_policies.sql')
-      // #340's file adds the session tree to `sessions`, and is numbered after the tools
-      // stack's tip for the same reason — the numbers have to be unique and ordered.
+      // #340's file adds the session tree to `sessions` (A1, #341), and #342's adds the
+      // subagent description to the `modes` table `0024` created — both numbered after the
+      // tools stack's tip for the same reason: the numbers have to be unique and ordered.
       expect(files).toContain('0032_session_tree.sql')
+      // `0033_mode_subagent_description.sql` adds the subagent description to the `modes`
+      // table `0024` created, and `0034_task_notifications.sql` builds the two indexes a
+      // background task's notification needs (#343): the partial one the pending read and the
+      // work scan use, and the unique one that makes an append idempotent on its `source_key`.
+      // Both are exercised below, after the re-run — a unique index that a re-run dropped would
+      // let the second append through.
+      expect(files).toContain('0033_mode_subagent_description.sql')
+      expect(files).toContain('0034_task_notifications.sql')
+      // #361's file drops the `root_session_id` index `0032` created for a query that does not
+      // exist: every tree read is a recursion over `parent_session_id`. It is written as
+      // `if exists`, so the re-run below leaves the schema exactly as it was.
+      expect(files).toContain('0035_drop_sessions_root_idx.sql')
       expect(files.indexOf('0026_agent_tool_use_usage.sql')).toBeLessThan(
         files.indexOf('0027_tool_settings.sql'),
       )
@@ -580,6 +635,15 @@ if (target === null) {
       )
       expect(files.indexOf('0031_mcp_tool_policies.sql')).toBeLessThan(
         files.indexOf('0032_session_tree.sql'),
+      )
+      expect(files.indexOf('0032_session_tree.sql')).toBeLessThan(
+        files.indexOf('0033_mode_subagent_description.sql'),
+      )
+      expect(files.indexOf('0033_mode_subagent_description.sql')).toBeLessThan(
+        files.indexOf('0034_task_notifications.sql'),
+      )
+      expect(files.indexOf('0034_task_notifications.sql')).toBeLessThan(
+        files.indexOf('0035_drop_sessions_root_idx.sql'),
       )
       expect(await migrate(db)).toEqual(files)
 
@@ -612,6 +676,21 @@ if (target === null) {
       await store.removeInstance('after-a-re-run')
       expect(await store.listLiveInstances(30_000)).toEqual([])
 
+      // `0033`'s column is exercised after the re-run too: a mode stores the subagent
+      // description it was created with, and reads it back (#342).
+      const described = await store.createMode(
+        {
+          name: 'reviewer',
+          model: 'anthropic/claude-sonnet-5',
+          subagent_description: 'Reviews a diff for correctness bugs.',
+        },
+        OWNER_A,
+      )
+      expect(described.subagent_description).toBe('Reviews a diff for correctness bugs.')
+      expect((await store.getMode(described.id, { ownerId: OWNER_A }))?.subagent_description).toBe(
+        'Reviews a diff for correctness bugs.',
+      )
+
       // `0020`'s column is exercised after the re-run too: a rewind records its range and its
       // kind, and a replay still reads the session the way a rewind means it to (#238).
       const [queued] = await store.appendEvents(session.id, [userMessage('hi')])
@@ -620,6 +699,26 @@ if (target === null) {
         userMessage('hi again'),
       ])
       expect((await store.listEventsUnscoped(session.id)).data).toEqual([rewind, edited])
+
+      // `0034`'s unique index is exercised after the re-run: the second append of one
+      // `source_key` is refused by the index and answered as the notification already stored,
+      // and `0034`'s partial index is what the pending read seeks (#343).
+      const taskId = newTaskId()
+      const input = {
+        taskId,
+        kind: 'result' as const,
+        text: 'the child finished',
+        sourceKey: `${taskId}:1`,
+      }
+      const first = await store.appendTaskNotification(session.id, input)
+      expect(first.appended).toBe(true)
+      expect(await store.appendTaskNotification(session.id, input)).toEqual({
+        event: first.event,
+        appended: false,
+      })
+      expect(
+        (await store.getPendingTaskNotifications(session.id)).map((event) => event.id),
+      ).toEqual([first.event.id])
     })
 
     it('stores a rewind’s range and its kind, beside the chunk range a reply records (#238)', async () => {

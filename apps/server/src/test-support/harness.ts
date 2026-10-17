@@ -9,6 +9,8 @@ import {
 } from '@openharness/brain'
 import {
   API_VERSION_PREFIX,
+  DEFAULT_MAX_AGENT_DEPTH,
+  DEFAULT_MAX_LIVE_TASKS,
   DEFAULT_PARTITION_COUNT,
   type Agent,
   type AgentId,
@@ -51,6 +53,7 @@ import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { createMcpFetch } from '../mcp/fetch'
 import { createMcpServerService } from '../mcp/service'
 import { InMemoryMcpServerStore } from '@openharness/session'
+import { createSubagentTypeResolver } from '../subagent-types'
 import { createTurnTools } from '../tools'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
 import {
@@ -272,6 +275,9 @@ export interface TestOptions {
    * The production default unless a test wants a turn cut short early.
    */
   readonly maxToolSteps?: number
+  /** The subagent limits a test runs with (epic #340, S6; #344); the deployment's defaults. */
+  readonly maxAgentDepth?: number
+  readonly maxLiveTasks?: number
   /** `OPENHARNESS_CLEAR_THRESHOLD` for {@link testConfig} (#331). */
   readonly clearThreshold?: number
   /** `OPENHARNESS_TODO_NUDGE` for {@link testConfig} (#331). */
@@ -346,7 +352,27 @@ export interface TestOptions {
    * nothing" in-process, with a registry of the test's own rather than #305's built-ins.
    */
   readonly tools?: ToolRegistry
+  /**
+   * Whether the harness wires the **subagent** half the way `main.ts` does (epic #340, S5/S6;
+   * #344): the type resolver over this harness's store and credentials, the two limits of the
+   * config, and a signal into the scheduler below.
+   *
+   * Off by default, like {@link TestOptions.mcpTools}: a test that does not ask for it builds
+   * exactly the offer it built before, because a wired runtime is what puts the five tools into
+   * every session's request.
+   */
+  readonly subagents?: boolean
 }
+
+/**
+ * The scheduler's own `signal`, for the subagent tools (#344).
+ *
+ * A variable rather than a hoisted function, because the tools are built a few lines **before**
+ * the scheduler they signal: the assignment below happens long before any turn can call one, and
+ * a signal is a hint — an event is what is durable — so a call that somehow arrived first would
+ * lose latency and nothing else.
+ */
+let signalToScheduler: (sessionId: SessionId, kind: 'work' | 'interrupt') => void = () => {}
 
 /** Build an app, a store and a scheduler in-process; nothing listens. */
 export function createTestApp(options: TestOptions = {}): TestContext {
@@ -390,6 +416,14 @@ export function createTestApp(options: TestOptions = {}): TestContext {
           store,
           registry,
           ...(options.mcpTools === true ? { mcp: { service: mcpServers, fetch: mcpFetch } } : {}),
+          // The subagent half (#344), built the way `main.ts` builds it — the resolver over the
+          // same store, credentials and registry, and the signals the scheduler below receives.
+          ...(options.subagents === true
+            ? {
+                subagents: createSubagentTypeResolver({ store, credentials }),
+                signal: (sessionId, kind) => signalToScheduler(sessionId, kind),
+              }
+            : {}),
         })
   const scheduler = new LocalScheduler({
     store,
@@ -435,6 +469,10 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     ...(options.drainTimeoutMs === undefined ? {} : { drainTimeoutMs: options.drainTimeoutMs }),
     onError: () => {},
   })
+  // The signal the subagent tools send (#344), now that there is a scheduler to receive it.
+  signalToScheduler = (sessionId, kind) => {
+    scheduler.signal(sessionId, kind)
+  }
   const auth = buildTestAuth(options, store, logger)
   const catalog = options.catalog ?? inertCatalog(credentials, vault)
   const app = createApp({
@@ -777,6 +815,8 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     clearThreshold: options.clearThreshold ?? DEFAULT_CLEAR_THRESHOLD,
     todoNudge: options.todoNudge ?? false,
     maxToolSteps: options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS,
+    maxAgentDepth: options.maxAgentDepth ?? DEFAULT_MAX_AGENT_DEPTH,
+    maxLiveTasks: options.maxLiveTasks ?? DEFAULT_MAX_LIVE_TASKS,
     // Observability (#158) is off in a test by default: the readable log format, and no
     // exporter to load. The suites that assert on the JSON shape call `jsonLogger` directly.
     logFormat: options.logFormat ?? DEFAULT_LOG_FORMAT,

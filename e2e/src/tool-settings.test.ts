@@ -1,6 +1,15 @@
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
-import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
-import { ASK_USER_TOOL_NAME, EVENT_TYPES, WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
+import { MOCK_TOOL_MARKER, TEST_TASK_TOOL_NAME, TEST_TOOL_NAME } from '@openharness/server'
+import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
+  ASK_USER_TOOL_NAME,
+  EVENT_TYPES,
+  MESSAGE_PARENT_TOOL_NAME,
+  TASK_WAIT_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+} from '@openharness/protocol'
 import type { ModelRequestStartEvent, StoredEvent, ToolSettingEntry } from '@openharness/protocol'
 import type { Client } from '@openharness/client'
 import { describe, expect, it } from 'vitest'
@@ -94,14 +103,21 @@ describe('the tool settings over the wire', () => {
     const server = await harness.server()
     const me = await person(server, 'drops')
 
-    // Every deployment registers `ask_user` (#309); the mock process adds the test tool, and
-    // #305's built-ins follow. Each is on under its own declared `allow`, and a call to
-    // `ask_user` is answered by the user rather than run, which is what its `policy: 'allow'`
-    // says about the *tool* — the registry the settings and the chat read alike. `web_search`
-    // is listed beside them without any registry carrying it (#335): it is the provider's own.
+    // Every deployment registers `ask_user` (#309), the five subagent tools (epic #340, S5;
+    // #344) and #305's built-ins; the mock process adds the test tool and the task it can
+    // start. Each is on under its own declared `allow`, and a call to `ask_user` is answered by
+    // the user rather than run, which is what its `policy: 'allow'` says about the *tool* — the
+    // registry the settings and the chat read alike. `web_search` is listed beside them without
+    // any registry carrying it (#335): it is the provider's own.
     expect(await listTools(server, me)).toEqual([
       listed(ASK_USER_TOOL_NAME),
       listed(TEST_TOOL_NAME),
+      listed(TEST_TASK_TOOL_NAME),
+      listed(AGENT_TOOL_NAME),
+      listed(AGENT_MESSAGE_TOOL_NAME),
+      listed(TASK_WAIT_TOOL_NAME),
+      listed(AGENT_STOP_TOOL_NAME),
+      listed(MESSAGE_PARENT_TOOL_NAME),
       listed(WEB_FETCH_TOOL_NAME),
       listed('todo_write'),
       listed(WEB_SEARCH_TOOL_NAME),
@@ -110,12 +126,21 @@ describe('the tool settings over the wire', () => {
     const session = await me.client.sessions.create({ model: { id: 'anthropic/claude-sonnet-5' } })
     await sendAndWait(me.client, session.id, `${MOCK_TOOL_MARKER} before the setting`)
     // Every tool was offered, so the model's call to the test tool ran and was answered with
-    // what it said.
+    // what it said — the five subagent tools last, because the loop adds them to the offer
+    // per request (`withSubagentTools`) rather than the registry carrying them in that spot.
     expect(spans(await readLog(me.client, session.id))[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: TEST_TOOL_NAME, source: 'builtin' },
+      { name: TEST_TASK_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
+      { name: AGENT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_MESSAGE_TOOL_NAME, source: 'builtin' },
+      { name: TASK_WAIT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_STOP_TOOL_NAME, source: 'builtin' },
+      // `message_parent` is deliberately absent: it is the one tool a **child** is offered, and
+      // a top-level chat has nobody above it (epic #340, S5). A settings screen still lists it,
+      // which the first assertion of this test reads.
       // And the provider's own tool, because this chat runs a Claude (#335).
       { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
     ])
@@ -145,11 +170,18 @@ describe('the tool settings over the wire', () => {
 
     const log = await readLog(me.client, second.id)
     // The tool turned off was not in the offer at all — the span records what was: `ask_user`,
-    // which the user left on, and the built-ins.
+    // which the user left on, the built-ins — and the five subagent tools **last**, because the
+    // loop builds them per request and adds them to the offer (`withSubagentTools`); a settings
+    // screen lists them in the registry's order instead, which the first assertion reads.
     expect(spans(log)[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
+      { name: TEST_TASK_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
+      { name: AGENT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_MESSAGE_TOOL_NAME, source: 'builtin' },
+      { name: TASK_WAIT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_STOP_TOOL_NAME, source: 'builtin' },
       { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
     ])
     // The mock called the disabled tool anyway (nothing told it what the request offered) and
@@ -171,6 +203,12 @@ describe('the tool settings over the wire', () => {
         builtin: {
           [ASK_USER_TOOL_NAME]: { enabled: false, policy: 'allow' },
           [TEST_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [TEST_TASK_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [AGENT_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [AGENT_MESSAGE_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [TASK_WAIT_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [AGENT_STOP_TOOL_NAME]: { enabled: false, policy: 'allow' },
+          [MESSAGE_PARENT_TOOL_NAME]: { enabled: false, policy: 'allow' },
           [WEB_FETCH_TOOL_NAME]: { enabled: false, policy: 'allow' },
           [WEB_SEARCH_TOOL_NAME]: { enabled: false, policy: 'allow' },
           todo_write: { enabled: false, policy: 'allow' },

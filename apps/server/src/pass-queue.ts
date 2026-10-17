@@ -2,7 +2,7 @@ import type { SessionId } from '@openharness/protocol'
 import type { PartitionFence } from '@openharness/session'
 
 import { DEFAULT_DRAIN_TIMEOUT_MS, withTimeout } from './runner'
-import type { SessionRunner } from './runner'
+import type { SessionRunner, TurnOutcome } from './runner'
 
 /**
  * The half of scheduling that does not depend on *why* a session runs: at most
@@ -17,7 +17,10 @@ import type { SessionRunner } from './runner'
  * longer owns write nothing at all.
  *
  * Nothing here decides *when* a pass should run for a session that is not running: a caller
- * {@link PassQueue.request}s one, and the queue starts it as soon as there is a slot.
+ * {@link PassQueue.request}s one, and the queue starts it as soon as there is a slot. The one
+ * exception is a turn that ended **waiting on background tasks** (epic #340, S5; #343): its
+ * deadline is a timer this queue arms, because nothing in the log wakes a session at an
+ * instant, and a wait that outlives the process is resumed by the store's work scan instead.
  */
 
 /**
@@ -114,6 +117,9 @@ export class PassQueue {
     return [...this.#active.keys()]
   }
 
+  /** The timers armed for sessions waiting on background tasks, by session (#343). */
+  readonly #waits = new Map<SessionId, NodeJS.Timeout>()
+
   /**
    * Ask for a pass on `sessionId`, respecting the limit.
    *
@@ -172,6 +178,10 @@ export class PassQueue {
   async stop(options: { readonly drainTimeoutMs?: number } = {}): Promise<void> {
     this.#stopped = true
     this.clearWaiting()
+    for (const timer of this.#waits.values()) {
+      clearTimeout(timer)
+    }
+    this.#waits.clear()
     await this.#runner.stop({
       drainTimeoutMs: options.drainTimeoutMs ?? this.#drainTimeoutMs,
     })
@@ -190,7 +200,9 @@ export class PassQueue {
         continue
       }
       const pass = this.#runner.run(sessionId, this.#contextFor?.(sessionId) ?? {}).then(
-        () => undefined,
+        (outcome) => {
+          this.#afterPass(sessionId, outcome)
+        },
         (error: unknown) => {
           this.#report(error, sessionId)
         },
@@ -207,6 +219,35 @@ export class PassQueue {
         this.#pump()
       })
     }
+  }
+
+  /**
+   * What a finished pass leaves behind: a timer, if it ended waiting on background tasks.
+   *
+   * A wait holds nothing — no lease, no slot, no open request (S5) — so the only thing that
+   * resumes it on time is a clock somewhere, and this is where the process's is. The timer asks
+   * the queue for another pass at the deadline, and that turn answers the wait as timed out (or
+   * finds it already answered, and does nothing). A later pass for the same session replaces
+   * the timer rather than stacking one behind it, and a queue that is stopping arms nothing.
+   */
+  #afterPass(sessionId: SessionId, outcome: TurnOutcome): void {
+    const existing = this.#waits.get(sessionId)
+    if (existing !== undefined) {
+      clearTimeout(existing)
+      this.#waits.delete(sessionId)
+    }
+    if (this.#stopped || outcome.waiting === undefined) {
+      return
+    }
+    const delayMs = Math.max(0, Date.parse(outcome.waiting.deadline) - Date.now())
+    const timer = setTimeout(() => {
+      this.#waits.delete(sessionId)
+      this.request(sessionId)
+    }, delayMs)
+    // A wait is a reason to come back, never a reason to stay up: a process whose only work is
+    // a deadline an hour away is a process that should be able to exit.
+    timer.unref?.()
+    this.#waits.set(sessionId, timer)
   }
 
   /** Report a failed pass without ever letting it escape: the reporter is the only listener. */
