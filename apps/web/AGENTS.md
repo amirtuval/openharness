@@ -109,6 +109,17 @@ src/
       tools.tsx                Settings -> Tools (#303 X4; #307; #308; #313): per-tool on/off
                                and allow/ask/deny for this build's own tools, an unavailable
                                tool listed as such, and a line saying where MCP tools are set
+      skills.tsx               Settings -> Skills (epic #349, K3/K5/K8; #353): the list — name,
+                               description, the source with its short commit, the `command only`
+                               / `model only` badge, on/off, Refresh, Delete — and the two flows'
+                               entry points
+      skill-import.tsx         the import (K3): the URL with its Advanced ref/folder, then the
+                               preview's candidates with their descriptions, their SKILL.md and
+                               file lists, their problems and their taken names, the checkboxes
+                               and the Import
+      skill-refresh.tsx        the refresh (K5): what the re-clone changed — files added,
+                               removed and changed, and SKILL.md's unified diff — with the
+                               confirm, or `unchanged`
       mcp-servers.tsx          Settings -> MCP servers (#303, X10; #313): the remote servers —
                                status and last error, on/off, Test, Connect/Reconnect,
                                Disconnect, Edit, Delete, under each one its tools with the
@@ -147,7 +158,10 @@ src/
       code-block.tsx           a fenced block: the language, the Copy button, the highlighted
                                lines — lazily, per theme — and the full column of the message
                                it is in (#204, #231)
-      composer.tsx             the input: Enter sends, it grows to a cap and then scrolls,
+      composer.tsx             the input, and the `/` menu above it (epic #349, K7; #353):
+                               Enter sends, arrows/Enter/Escape drive the menu, a pick fills
+                               `/name ` and its `argument-hint` becomes the placeholder, the box
+                               grows to a cap and then scrolls,
                                Stop (worded) and Send sit in its foot, the model control
                                is part of the same surface (#211), and the edit indicator
                                with its Cancel sits above it (#238)
@@ -205,9 +219,9 @@ src/
                                required, a preselected sole model, a loading skeleton, the
                                catalog's error, or the "add a provider key" state when there
                                are no providers and no models
-    settings-screen.tsx        Providers, Default model, Modes, Context, Tools, Appearance,
-                               Usage, Advanced
-                               — the server URL, collapsed (#209, #245)
+    settings-screen.tsx        Providers, Default model, Modes, Context, Tools, Skills,
+                               MCP servers, Appearance, Usage, Advanced
+                               — the server URL, collapsed (#209, #245; skills: #353)
     sign-in-screen.tsx         one button per provider, the dev form when offered
     device-screen.tsx          the device-approval page `oh login` opens
   hooks/
@@ -233,6 +247,9 @@ src/
     use-tools.ts               GET/PUT /v1/me/tools: the effective tool list, one tool's
                                merge-write, and a remote tool's permission (#303 X4; #307;
                                #308; #312)
+    use-skills.ts              the shell's skills (epic #349, K4/K5; #353): GET /v1/me/skills
+                               plus every write — the on/off switch, a delete, and the two
+                               previewed flows (import, refresh) — updating the list in place
     use-mcp-servers.ts         GET/POST/DELETE /v1/me/mcp_servers: the reader's remote MCP
                                servers, and create/update/delete/test/connect/disconnect
                                (#303, X10; #313)
@@ -266,14 +283,14 @@ src/
                                days / Older), measured in local calendar days (#211)
     suggestions.ts             the four openers New chat offers; they fill the composer
                                and send nothing (#211)
-    commands.ts                the composer's slash commands: `/compact` parsing and its hint
-                               row (#283)
     models.ts                  helpers over the catalog: grouping, name lookup, price lookup,
                                providerOf (#247)
     modes.ts                   helpers over the modes: what a mode resolves to, the name a chat
                                follows (#245, M6)
     tools.ts                   the permissions a form offers, and the mode editor's tri-state
-                               (follow / on / off) over a mode's tool patch (#307; #308)
+                               (follow / on / off) over a mode's tool patch — a built-in tool by
+                               name (#307), a remote MCP server by id (#311) and an imported
+                               skill by id (#349, K8; #353)
     usage.ts                   the reader's local days: the zone, the month so far, a day's label
     tasks.ts                   the web's half of the task view (#340, S9; #346): merging the
                                cards into the entries the client ordered, the two ends of an
@@ -292,14 +309,14 @@ the build, which is why its rasterizer is a devDependency rather than a dependen
 
 ### Routes
 
-| route                       | screen                                                                                                                                                             |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `#/`                        | New chat — or the first-run flow with no key (#209)                                                                                                                |
-| `#/s/<sessionId>`           | the chat                                                                                                                                                           |
-| `#/new`                     | new chat: an empty composer on the default model                                                                                                                   |
-| `#/settings`                | Providers, Default model, Modes, Context, Tools, MCP servers, Appearance, Usage, Advanced — an OAuth callback lands here as `?mcp_connected=<id>#/settings` (#313) |
-| `#/signin`                  | sign in (`?next=<hash>` to return there)                                                                                                                           |
-| `#/device?user_code=<code>` | the device-approval page `oh login` opens                                                                                                                          |
+| route                       | screen                                                                                                                                                                     |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `#/`                        | New chat — or the first-run flow with no key (#209)                                                                                                                        |
+| `#/s/<sessionId>`           | the chat                                                                                                                                                                   |
+| `#/new`                     | new chat: an empty composer on the default model                                                                                                                           |
+| `#/settings`                | Providers, Default model, Modes, Context, Tools, Skills, MCP servers, Appearance, Usage, Advanced — an OAuth callback lands here as `?mcp_connected=<id>#/settings` (#313) |
+| `#/signin`                  | sign in (`?next=<hash>` to return there)                                                                                                                                   |
+| `#/device?user_code=<code>` | the device-approval page `oh login` opens                                                                                                                                  |
 
 There is no `#/agents` route since #91: chatting is model-first, agents are hidden from the
 UI, and an old bookmark to that screen lands on the root route. There is no **Home** screen
@@ -317,6 +334,14 @@ rewrite rule. Chat links are real `<a href="#/s/…">`, so Back, middle-click an
 where a reader expects.
 
 ## State flow
+
+Three lists are loaded **once, in the shell** (`AppFrame`) and threaded down: the catalog
+(`useModels`), the reader's modes (`useModes`) and their skills (`useSkills`, epic #349/#353) —
+so the composer's model control, its `/` menu, the chat header, Settings → Skills and the mode
+editor all read the same copy, and a write updates it in place. `useSkills` classifies a failed
+write the way the routes do (`conflict` for a name already taken, `import` for a 422
+`skill_import_error`, `session` for a 401, everything else one line), because an import's refusal
+belongs beside the URL the reader typed.
 
 `useSession(client, sessionId)` (`src/hooks/use-session.ts`) is the one place the chat state
 lives. It owns a `createTranscript()` store and, in one effect:
@@ -738,6 +763,56 @@ caret — with one global rule, since an `animate-pulse` three levels down canno
 variant. Colours are the #203 palettes unchanged; the new surfaces were built out of token
 pairs that were already measured.
 
+### The skills, on screen (epic #349; issue #353)
+
+A **skill** is a folder of instructions the reader imported from a public git repository and
+this deployment stored as a snapshot (K1, K3, K4). Four places in the app are about them, and
+every word comes from `@openharness/client` (or from `@openharness/protocol`'s
+`skillSettingsOf`, which is the one reading of the honoured frontmatter fields) so the page and
+`oh` say the same things:
+
+- **Settings → Skills** (`components/settings/skills.tsx`) is the list: one row per skill with
+  its name, its description, its source as one line (`skillSourceLabel`: the URL, the ref and
+  folder it was taken at, and the short commit), a badge when the frontmatter gives the skill to
+  one side of the conversation (`skillBadgeLabel`: `command only` for
+  `disable-model-invocation`, which keeps it out of the model's listing, and `model only` for
+  `user-invocable: false`, which keeps it out of the `/` menu), an on/off switch (K8) and
+  **Refresh** and **Delete**. A switch writes `{ enabled }` and nothing else — what a skill _is_
+  comes from its snapshot — and a delete confirms in the page, like every other destructive
+  action here.
+- **Import** (K3) is `skill-import.tsx`, and it is two steps in one panel: the **URL** (with the
+  optional `ref` and folder under **Advanced**, because a browse URL `…/tree/<ref>/<path>` fills
+  both in), then the **preview** — every candidate the clone found, each with its description,
+  its whole `SKILL.md` and its file list behind a disclosure, its problems as the server stated
+  them, and `You already have a skill called …` for a taken name. A candidate that cannot be
+  imported has its checkbox **off and disabled** (`candidateSelectable`): the import would be
+  refused, and a checkbox that can be ticked into a refusal is a lie. The importable ones start
+  ticked, and **Import** — which names the commit the preview resolved — is the confirm, so a
+  branch that moves between the two steps is refused rather than imported. A failed preview lands
+  under the URL as the server's own sentence (`no_skills_found`, `unreachable`, …).
+- **Refresh** (K5) is `skill-refresh.tsx`, opened from a row: what a re-clone of the skill's
+  stored source found — `refreshChangeSummary` (`unchanged`, or `2 files added, 1 changed`), the
+  files themselves with what happened to each (`refreshFileChanges`), and `SKILL.md`'s unified
+  diff — and the confirm that replaces the snapshot at the commit the preview resolved. A source
+  with nothing new is a result rather than an empty panel: `unchanged` is shown, and the confirm
+  is still offered (a no-op on the snapshot that moves `refreshed_at`). A preview with
+  **problems** draws them and offers no confirm: replacing a working skill with a broken one is
+  not a refresh.
+- **The mode editor** (K8) grew a **Skills** section beside its tools and servers
+  (`mode-form-dialog.tsx`), the same tri-state at skill granularity — _Follow my settings_ /
+  _Always on_ / _Always off_, over the mode's `tools.skills` map by `skl_` id, read and written
+  by `lib/tools.ts`'s `modeSkillChoice` / `withModeSkillChoice`. The Modes list names the skills a
+  mode overrides (`release-notes off`), and a skill the mode names that the reader has since
+  deleted reads as `a removed skill` rather than disappearing: the patch still names it, and the
+  server ignores it.
+- **The transcript** shows both halves of a skill's life in a chat. A `skill`/`skill_read` call
+  is a compact tool line — `Loaded skill release-notes`, `Read reference.md`, from the client's
+  `skillToolCallLabel` — instead of the tool's own name beside a bare argument. A message that
+  invoked a skill carries `skill` (K7) and draws a chip above its text (`/release-notes` with the
+  arguments beside it, `data-slot="message-skill"`), from the **stored event** rather than by
+  parsing the text back: the text stays what the reader typed, and a message whose words merely
+  start with a slash carries no chip.
+
 ### The MCP servers, on screen (epic #303, X10; issue #313)
 
 A chat can reach the reader's own remote MCP servers, and Settings → MCP servers is where they
@@ -1041,8 +1116,8 @@ Settings trip.
 
 ### Settings, in the order a reader needs it (#209, X5; Modes: #245, M6)
 
-**Providers**, **Default model**, **Modes**, **Context**, **Tools**, **Appearance**, **Usage**,
-then **Advanced** — the server URL, collapsed.
+**Providers**, **Default model**, **Modes**, **Context**, **Tools**, **Skills**, **MCP servers**,
+**Appearance**, **Usage**, then **Advanced** — the server URL, collapsed.
 The screen used to open on a Connection card only a self-hoster has a use for, with the thing
 everyone needs below the fold. The Providers card is the **list**: it shows each key by the
 name it is typed under — what the reader writes as the `provider` half of a model id, from
@@ -1217,24 +1292,48 @@ Four things about the UI are worth knowing:
   back a 409. `sendFromComposer` refuses it as well, because the composer is not the only
   thing that could ask.
 
+### The `/` menu, and the slash invocation (epic #349, K7; issue #353)
+
+Typing `/` in the composer opens the command menu, and the box is its combobox: the rows come
+from `@openharness/client`'s `slashCommands(skills)` — the built-in commands first, then the
+reader's **enabled**, **user-invocable** skills, each with its `argument-hint` — so the web and
+`oh` offer the same commands and send the same event for the same line. The shell loads the
+skills once (`useSkills`, beside the catalog and the modes) and hands them to the chat, New chat
+and Settings, so a menu is never a fetch behind the reader's typing.
+
+- **The menu opens and closes on the text alone.** `slashCommandQuery(text)` is the word being
+  typed after the slash: `''` for a bare `/` (everything), `'co'` for `/co`, and `null` once the
+  name is settled (`/compact keep the API decisions`) or the line is not a command. `null` or no
+  match closes it — a miss is a line that will be sent as words, and a menu with a wrong row in
+  it would be a lie. Escape closes it without stopping the turn (the menu is what the reader is
+  looking at, and Escape is Stop everywhere else in the box).
+- **Arrows move the highlight, Enter takes the highlighted row, a click takes a row too**
+  (`onMouseDown`, so the box keeps the focus a click would take). Taking a row fills the box with
+  `/name ` — that is the whole gesture — and the command's `argument-hint` then becomes the
+  box's placeholder (`[version]`, from `argumentHintFor`), which is what tells the reader what to
+  type next.
+- **The send is what decides what the line was** (`sendFromComposer`): `parseSlashCommand(text,
+commands)` against the same list the menu was built from. A **skill** rides the message —
+  `skill: invocationSkill(invocation)` (`SendMessageOptions.skill`) — with the text left as what
+  the reader typed (K7), which is what the brain loads the instructions from; a **built-in** is a
+  client action: `/compact [instructions]` calls `useSession.compact(instructions)`
+  (`client.sessions.compact`) instead of sending words (#283), and carries no model, mode or
+  rewind. A line naming no command is an ordinary message, exactly as it always was.
+- **`/compact` is still what it was** (#283), with one difference a reader sees: the hint row it
+  had is now its row in the menu, because a menu of one command was what the old row was standing
+  in for. `composer.test.tsx` pins the menu's open/filter/highlight/pick/Escape behaviour;
+  `App.test.tsx` pins that a `/compact` line asks for a compaction, and that `/release-notes
+v1.2` is stored as a message carrying the skill.
+
 ### Manual compaction: `/compact [instructions]` (#283)
 
-The composer runs one slash command. `lib/commands.ts` is the whole of it: `COMPOSER_COMMANDS`
-(one entry — `compact`, its usage and a one-line description), `parseComposerInput`, and
-`commandHint`. A line is a command only when it is exactly `/compact`, lower case, with the rest
-of it as the guidance (`/compact keep the API decisions`) — everything else, including a bare `/`
-and an unknown `/foo`, is an ordinary message, so nothing a reader types as prose is swallowed.
-`parseComposerInput` is what `sendFromComposer` consults: a `compact` line calls
-`useSession.compact(instructions)` (`client.sessions.compact`) instead of sending words, and
-never carries a model, a mode or a rewind. The request is folded into the transcript at once and
-the brain's `session.compaction` outcome arrives on the stream.
-
-`commandHint` puts the usage above the box while the command is being typed — `/c`, `/co`, …
-`/compact` — as a `data-slot="composer-hint"` row (`CommandHint` in `composer.tsx`), the same
-shape as the edit indicator. It appears for nothing else: a bare `/` is one keystroke from a
-message, and a line that names no command is a message, so a hint about it would be a lie.
-`composer.test.tsx` pins the hint and its absence; `App.test.tsx` pins that a `/compact` line
-asks for a compaction with its guidance and sends no `user.message`.
+`/compact` is the one built-in command this build implements (`BUILTIN_COMMANDS` in
+`@openharness/client`), and it is a **client action**: the line calls
+`useSession.compact(instructions)` (`client.sessions.compact`), never sends a message, and never
+carries a model, a mode or a rewind. The request is folded into the transcript at once
+(`session.compact` shows as `Compacting…`) and the brain's `session.compaction` outcome arrives
+on the stream, drawn by `compaction-notice.tsx`. The line is a command only when its first token
+is exactly `/compact`; everything else is an ordinary message.
 
 ### Deleting a chat (#113, U5)
 
@@ -1486,6 +1585,11 @@ outside `@openharness/client` — is stubbed at `fetch` where a test needs it.
 | `src/components/settings/mcp-servers.test.tsx`                                                 | Settings → MCP servers (#303, X10; #313): the empty state and a registration through the dialog (the save-time check listing the server's tools and pricing them), the inline name/URL refusals and the 409 a duplicate name gets, the header pair a `headers` server needs, a server's tools with their policies and cost (a permission written to the `mcp` map), the batch control — its `Ask (all)` and `Mixed` states, **one** `PUT` carrying every tool of that server, the per-tool rows following it, and a refused write reported inline — Test reporting a failure and the on/off switch, Connect opening the authorization URL in a new tab and Disconnect, an edit that keeps the sealed header map (the body it sends, asserted), the in-page delete with its cancel, and the `?mcp_connected=` confirmation with the parameter taken off the URL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `src/components/chat/mcp-notice.test.tsx`                                                      | the MCP failure notice (#313): the brain's sentence with the server named and **no** red banner, Reconnect starting the flow in a new tab, a server with no OAuth flow sending the reader to Settings instead, and Dismiss hiding one message while the next failure is shown again                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `src/components/settings/tools.test.tsx`                                                       | Settings → Tools (#303, X4; #307; #308; #313): the registered tools with their state and default, a toggle writing only that tool, a permission change, a subagent tool whose select offers **Allow** and **Deny** only with the note that says why (and `agent_wait` keeping all three, #368), and an unregistered tool listed as unavailable and not switchable — and, for #313, that a listing which offers remote MCP tools renders **none** of them (and no server group), that the hint names how many come from MCP servers and where they are set, and that it is absent when the deployment offers none                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/components/settings/skills.test.tsx`                                                      | Settings → Skills (epic #349, K3/K5/K8; #353): the list — its source line, the two badges, the on/off switch writing `{ enabled }` alone, the in-page delete with its cancel — and the two flows against a fake repository: an import that previews two candidates, opens a SKILL.md and its file list, unticks one and stores the other at the previewed commit; a candidate with a problem and one whose name is taken listed and **not** selectable (only the importable one counted); the server's own sentence for a repository that holds no SKILL.md; a refresh that shows the summary, the changed files and the diff and replaces the snapshot on confirm; `unchanged` with the confirm still offered; and a snapshot with problems that cannot be confirmed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `src/App.test.tsx` (the skills half)                                                           | a `/release-notes v1.2` line stored as the message the reader typed **carrying the skill** (K7) with the transcript's chip drawn from the stored event — live and again after a reload — and an unknown `/not-a-skill` line left an ordinary message with no `skill`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/components/settings/modes.test.tsx` (the skills half)                                     | the mode editor's Skills section (#349, K8; #353): a skill offered per mode at skill granularity (a whole skill on or off), the choice stored as `tools.skills`, the row naming the skill it overrides, and a mode's skill patch kept when a built-in tool is edited                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/lib/tools.test.ts` (the skills half)                                                      | `modeSkillChoice`/`withModeSkillChoice` (#349, K8): a missing id read as "follow", an explicit boolean as on/off, one skill set without disturbing the tools, the servers or the other skills, the other halves carried through a built-in/tool or server write, and a patch naming nothing folded back to `null`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/components/chat/composer.test.tsx` (the menu half)                                        | the `/` menu (#349, K7; #353): opened by a bare `/` and filtered as the reader types, closed by a line that names no command, the arrows moving the highlight (and wrapping), Enter taking the highlighted row (the box becomes `/name `, nothing sent), the skill's `argument-hint` as the placeholder until the arguments are typed, and Escape closing the menu **without** stopping the turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/lib/tools.test.ts`                                                                        | the mode editor's tri-state (#307): a missing tool read as "follow my settings", an explicit boolean as on/off, one tool set without disturbing the others, and an empty patch folded back to `null` — and, for #311/#312, a mode's `mcp_servers` patch carried through a built-in write and keeping the patch from folding to `null`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `src/components/theme-menu.test.tsx`                                                           | the theme quick switch (#203), now the account menu's submenu (#211): a pick paints and saves, it reads back with `aria-checked`, Escape closes without choosing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/components/settings/appearance.test.tsx`                                                  | the Appearance picker (#203): a pick is saved to the account and painted at once, the cached theme paints first and the account's stored one takes over once it answers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |

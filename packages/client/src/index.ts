@@ -41,6 +41,7 @@ export type { McpServersResource } from './resources/mcp-servers'
 export type { ModesResource } from './resources/modes'
 export type { ModelsResource } from './resources/models'
 export type { PreferencesResource } from './resources/preferences'
+export type { GetSkillContent, SkillsResource } from './resources/skills'
 export type { ToolsResource } from './resources/tools'
 export type { UsageResource } from './resources/usage'
 
@@ -115,6 +116,7 @@ export type {
   TranscriptMcpFailure,
   TranscriptMessage,
   TranscriptMessageMeta,
+  TranscriptMessageSkill,
   TranscriptSeed,
   TranscriptState,
   TranscriptSummarizing,
@@ -157,6 +159,7 @@ export {
   mcpServerMarker,
   modelSupportsTools,
   searchCount,
+  skillToolCallLabel,
   stepLimitNotice,
   stuckNotice,
   toolCallStatus,
@@ -220,6 +223,26 @@ export {
   toolPolicyNote,
   toolSupportsAsk,
 } from './tool-settings'
+
+export {
+  BUILTIN_COMMANDS,
+  candidateSelectable,
+  filterSlashCommands,
+  importableCandidateNames,
+  invocationSkill,
+  isBuiltinCommandName,
+  parseSlashCommand,
+  refreshChangeSummary,
+  refreshFileChanges,
+  shortCommit,
+  skillBadgeLabel,
+  skillFileList,
+  skillFileSizeLabel,
+  skillSourceLabel,
+  slashCommandQuery,
+  slashCommands,
+} from './skills'
+export type { BuiltinCommand, RefreshFileChange, SlashCommand, SlashInvocation } from './skills'
 
 export {
   APPROVAL_CHOICES,

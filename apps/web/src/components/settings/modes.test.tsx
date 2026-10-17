@@ -1,4 +1,4 @@
-import { makeMcpServer, makeMode } from '@openharness/protocol/fixtures'
+import { makeMcpServer, makeSkill, makeMode } from '@openharness/protocol/fixtures'
 import { newMcpServerId, newModeId } from '@openharness/protocol'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -209,6 +209,63 @@ describe('Settings → Modes', () => {
     await waitFor(async () => {
       const { data } = await fake.modes.list()
       expect(data[0]?.tools).toEqual({ builtin: {}, mcp_servers: { [server.id]: false } })
+    })
+  })
+
+  it('offers a skill per mode, and keeps it as a sibling of the other halves (#349, K8; #353)', async () => {
+    const skill = makeSkill({ name: 'release-notes' })
+    const fake = makeFake({ ...TWO_PROVIDERS, skills: [skill] })
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: 'Create mode' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // A whole skill is on or off; there is no per-file or per-command switch.
+    const choice = within(dialog).getByLabelText('release-notes in this mode')
+    expect(choice).toHaveValue('follow')
+
+    await user.type(within(dialog).getByLabelText('Name'), 'notes-writer')
+    await user.click(within(dialog).getByLabelText(/My default model/))
+    await user.selectOptions(choice, 'on')
+    await user.click(within(dialog).getByRole('button', { name: 'Create mode' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.tools).toEqual({ builtin: {}, skills: { [skill.id]: true } })
+    })
+    // The row names the skill, so a mode that says something about one does not read as a mode
+    // that follows the reader's settings.
+    expect(await screen.findByText('tools: release-notes on')).toBeInTheDocument()
+  })
+
+  it('keeps a mode’s skill patch when a built-in tool is edited (#353)', async () => {
+    const skill = makeSkill({ name: 'release-notes' })
+    const fake = makeFake({
+      ...TWO_PROVIDERS,
+      skills: [skill],
+      modes: [
+        makeMode({
+          name: 'research',
+          model: 'anthropic/claude-sonnet-5',
+          tools: { builtin: { web_search: true }, skills: { [skill.id]: false } },
+        }),
+      ],
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByLabelText('release-notes in this mode')).toHaveValue('off')
+
+    await user.selectOptions(within(dialog).getByLabelText('todo_write in this mode'), 'off')
+    await user.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.tools).toEqual({
+        builtin: { web_search: true, todo_write: false },
+        skills: { [skill.id]: false },
+      })
     })
   })
 

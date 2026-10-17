@@ -355,6 +355,35 @@ chat the send creates. W1b is the same key form opened from inside an open chat,
 must not navigate. W17 covers Settings → Providers and the dialog's refusing, adding, replacing
 and deleting.
 
+### The skills pass (#353)
+
+`w30-skills.spec.ts` is the hands-on pass for the skills screens (epic #349; issue #353), and it
+is also where that issue's screenshots come from: four views — Settings → Skills, the import
+preview, the refresh diff and the `/` menu — captured in the three themes at 1280 and ~400 wide,
+written to `QA_SHOT_DIR`.
+
+It drives the real thing: an import from a **`git` repository on loopback**, cloned by the real
+`isomorphic-git`/`safeFetch` path, then a push to that repository and the refresh diff that
+follows; a `/release-notes v1.2` line typed into the `/` menu and stored as the message it is;
+and — when the network allows — a second import from `https://github.com/anthropics/skills`
+(`QA_SKILLS_URL` overrides it), which is the only part that needs the internet. Two things the
+stack must be told:
+
+- **The fixture is served over `https` on loopback, and the server has to trust it.** The import
+  route takes an `https://` URL and nothing else (K3) while `createGitFixture` serves plain HTTP,
+  so the spec puts a TLS-terminating proxy in front of it with a certificate from
+  `QA_SKILLS_FIXTURE_TLS` (a directory holding `cert.pem` and `key.pem`), and the stack must
+  start with `NODE_EXTRA_CA_CERTS` naming that certificate (plus the deployment's own CA, if it
+  has one — `cat` them into one file) and `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1`. Without
+  `QA_SKILLS_FIXTURE_TLS` the fixture half skips and only the real repository is imported.
+- **The account needs a provider credential for a composer to exist.** A mock stack chats
+  without a key, but the root route shows the first-run screen until the account holds one, so a
+  pass that wants a chat seeds one the way `e2e/src/harness/credentials.ts` does — the row the
+  `PUT` route would write, sealed with the stack's own `OPENHARNESS_SECRETS_KEY`.
+
+The pass cleans up after itself and its predecessors: it deletes the account's skills and chats
+before it starts, because a QA stack is shared and long-lived.
+
 W31 is the subagents pass (epic #340, S9; #346): the mock's `__agent__`, `__agent_message__` and
 `__message_parent__` markers drive a chat that starts a helper, and the scenario follows the card
 through its states — the type, the description and the status, the live line and the tokens the

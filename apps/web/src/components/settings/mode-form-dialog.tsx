@@ -8,6 +8,7 @@ import type {
   McpServer,
   Mode,
   ModeToolOverride,
+  Skill,
   ToolSettingEntry,
 } from '@openharness/protocol'
 import { useEffect, useState } from 'react'
@@ -16,8 +17,10 @@ import type { ModesView } from '../../hooks/use-modes'
 import type { ModelsView } from '../../hooks/use-models'
 import {
   modeMcpServerChoice,
+  modeSkillChoice,
   modeToolChoice,
   withModeMcpServerChoice,
+  withModeSkillChoice,
   withModeToolChoice,
   type ModeToolChoice,
 } from '../../lib/tools'
@@ -109,6 +112,7 @@ export function ModeFormDialog({
   catalog,
   tools,
   mcpServers,
+  skills,
   onSaved,
   onClose,
 }: {
@@ -138,6 +142,16 @@ export function ModeFormDialog({
    * from the list is not a change to the mode.
    */
   mcpServers: readonly McpServer[]
+  /**
+   * The reader's imported skills, for the skills section (epic #349, K8; #353): a mode may turn
+   * a whole skill on or off for the chats that follow it, by id — the sibling of the servers
+   * above, and the thing that gives a subagent type its own set of skills (epic #340, S2).
+   *
+   * A skill the reader has deleted is not offered, exactly as a deleted server is not: the mode
+   * routes store the map as written and ignore an id that matches nothing, so an old entry is
+   * untroubled and this form simply does not show it.
+   */
+  skills: readonly Skill[]
   /** Called after a successful write, with what was saved. */
   onSaved: (mode: Mode) => void
   onClose: () => void
@@ -368,6 +382,45 @@ export function ModeFormDialog({
                           tools: withModeMcpServerChoice(
                             form.tools,
                             server.id,
+                            event.target.value as ModeToolChoice,
+                          ),
+                        })
+                      }
+                    >
+                      {TOOL_CHOICES.map((choice) => (
+                        <option key={choice.value} value={choice.value}>
+                          {choice.label}
+                        </option>
+                      ))}
+                    </select>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {skills.length === 0 ? null : (
+            <div className="space-y-2">
+              <Label>Skills</Label>
+              <p className="text-xs text-muted-foreground">
+                Which of your imported skills a chat on this mode has, or leave each one following
+                your own settings. A skill is on or off as a whole.
+              </p>
+              <ul className="space-y-1.5">
+                {skills.map((skill) => (
+                  <li key={skill.id} className="flex items-center gap-2 text-sm">
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs">{skill.name}</span>
+                    <select
+                      data-slot="mode-skill-choice"
+                      data-skill={skill.name}
+                      aria-label={`${skill.name} in this mode`}
+                      className="h-8 rounded-md border bg-transparent px-2 text-xs"
+                      value={modeSkillChoice(form.tools, skill.id)}
+                      onChange={(event) =>
+                        patch({
+                          tools: withModeSkillChoice(
+                            form.tools,
+                            skill.id,
                             event.target.value as ModeToolChoice,
                           ),
                         })

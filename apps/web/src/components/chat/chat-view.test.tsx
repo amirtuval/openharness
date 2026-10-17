@@ -124,6 +124,7 @@ function renderChat(todos: TodoList | null): { readonly container: HTMLElement }
       sessionId="ses_1"
       catalog={CATALOG}
       modes={MODES}
+      skills={[]}
       onDelete={() => Promise.resolve({ ok: true })}
       onDeleted={() => undefined}
     />,
@@ -215,6 +216,7 @@ describe("the shell hears that a chat's tasks moved (epic #340; #348)", () => {
         sessionId="ses_1"
         catalog={CATALOG}
         modes={MODES}
+        skills={[]}
         onDelete={() => Promise.resolve({ ok: true })}
         onDeleted={() => undefined}
         onTasksChanged={onTasksChanged}

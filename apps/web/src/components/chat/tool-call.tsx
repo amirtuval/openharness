@@ -1,4 +1,9 @@
-import { formatToolInput, toolCallSummary, toolStatusLabel } from '@openharness/client'
+import {
+  formatToolInput,
+  skillToolCallLabel,
+  toolCallSummary,
+  toolStatusLabel,
+} from '@openharness/client'
 import type { TranscriptToolCall, ToolCallStatus } from '@openharness/client'
 import type { Source } from '@openharness/protocol'
 import {
@@ -48,6 +53,11 @@ export function ToolCallLine({
   /** A control the caller owns for a waiting call (#310): drawn at the end of the row. */
   action?: ReactNode
 }) {
+  // A skill call reads as what it did — `Loaded skill release-notes`, `Read reference.md` —
+  // rather than as the tool's own name beside a bare argument, which is what the client's
+  // `skillToolCallLabel` spells once for both frontends (epic #349, K6; #353). Every other tool
+  // keeps the name-and-summary pair below.
+  const skillLabel = skillToolCallLabel(call)
   const summary = toolCallSummary(call)
   const status = toolStatusLabel(call.status)
   const busy = call.status === 'running' || call.status === 'waiting'
@@ -67,13 +77,19 @@ export function ToolCallLine({
         )}
       >
         <ToolStatusIcon status={call.status} />
-        <span className="shrink-0 font-mono font-medium">{call.name}</span>
+        {skillLabel === null ? (
+          <span className="shrink-0 font-mono font-medium">{call.name}</span>
+        ) : (
+          <span data-slot="tool-label" className="min-w-0 flex-1 truncate font-medium">
+            {skillLabel}
+          </span>
+        )}
         {call.source === 'mcp' ? (
           <Badge variant="outline" className="text-2xs" title={call.server}>
             MCP
           </Badge>
         ) : null}
-        {summary === null ? (
+        {skillLabel !== null ? null : summary === null ? (
           <span className="min-w-0 flex-1" />
         ) : (
           <span data-slot="tool-summary" className="min-w-0 flex-1 truncate text-muted-foreground">
