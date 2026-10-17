@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process'
+
 import type { APIRequestContext } from '@playwright/test'
 
 import { ensureDefaultModel, expect, shot, test } from './support'
@@ -263,6 +265,41 @@ test.describe('cli subagents (#340, S9; #347)', () => {
     }
   })
 
+  test('a child’s output cannot drive the reader’s terminal (#368)', async ({
+    context,
+    request,
+  }) => {
+    const name = 'oh-qa-a7g'
+    const terminal = new Terminal(name, 100, 30)
+    const shot = await context.newPage()
+    await ensureCliSignedIn(shot)
+    terminal.start()
+
+    try {
+      await startChat(terminal, request)
+      // The mock echoes its prompt, so a prompt carrying the sequences is a **reply** carrying
+      // them — and the reply is what a card folds in and draws. Two of the real attacks: an OSC
+      // that renames the pane, and a CSI that clears it.
+      const marker = 'qaescape'
+      send(terminal, `__agent__ ${TYPE} | ${marker} \u001b]0;pwned\u0007\u001b[2J tail`)
+      await terminal.waitFor(new RegExp(`● done · ${TYPE}`), 90_000)
+
+      const screen = terminal.capture(400)
+      // Drawn as plain text: nothing was cleared (the chat above the card is still on screen)
+      // and the printable tail came through.
+      expect(screen).toContain(marker)
+      expect(screen).toContain('tail')
+      // The title the OSC would have rewritten is untouched.
+      expect(paneTitle(name)).not.toContain('pwned')
+      expectNoErrorNotice(screen)
+      await terminal.screenshot(shot, 'a7-10-sanitized-output')
+      await quit(terminal)
+    } finally {
+      terminal.kill()
+      await shot.close()
+    }
+  })
+
   test('oh modes marks a subagent type and shows its description', async ({ context, request }) => {
     // Wide enough that the description is one line: a terminal wraps a long line at column 0,
     // which would split the sentence the assertion is about.
@@ -383,4 +420,11 @@ async function createSubagentType(
   })
   // A name is unique per user, so a second run of the pass reuses what the first one made.
   expect([201, 409]).toContain(response.status())
+}
+
+/** The tmux pane's own title — what an unsanitised OSC 0 would have rewritten (#368). */
+function paneTitle(session: string): string {
+  return execFileSync('tmux', ['display-message', '-p', '-t', session, '#{pane_title}'], {
+    encoding: 'utf8',
+  })
 }

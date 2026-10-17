@@ -1584,6 +1584,31 @@ describe('a rewind that took an `agent` call back (S7; #344)', () => {
     ).toEqual([])
   })
 
+  it('delivers nothing when a rewind took the task back while the child was finishing (#382)', async () => {
+    // The delivery reads the **parent's** log, not only the child's: the reader may have taken
+    // the `agent` call back while the child's turn was ending, and a task the parent's log no
+    // longer names has no news to bring. Written anyway, the notification would be a queued
+    // event nothing may claim — the store's work scan and `SessionRunner`'s `#hasMoreWork`
+    // would both find it on every pass — and the parent would wake for ever over news the
+    // rewind said did not happen.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment, signal } = runtime()
+    const { child, taskId } = await childOfParent(store, sessionId)
+    // The reader edits the message that started it, covering the `session.task_started`.
+    await store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.sessionRewind, from_seq: 1 },
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'never mind' }] },
+    ])
+    expect(starts(await logOf(store, sessionId)).has(taskId)).toBe(false)
+    signal.mockClear()
+
+    await turn(store, child.id, [{ text: ['I finished before you took it back.'] }], deployment)
+
+    const parentLog = await logOf(store, sessionId)
+    expect(of(parentLog, EVENT_TYPES.sessionTaskNotification)).toEqual([])
+    expect(signal).not.toHaveBeenCalledWith(sessionId, 'work')
+  })
+
   it('interrupts a paused orphan with an event, so the card cannot flip back (S7; #348)', async () => {
     // The same hole as `agent_stop`'s, on the rewind path: a child parked in a task wait is not
     // stopped by a signal alone, so the turn it eventually ends would announce `idle` after the
