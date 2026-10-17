@@ -56,7 +56,10 @@ automatic retries of a failed model request, and sessions that survive the proce
 running them — a turn a dead server left open is closed as `brain_lost` and run again by the
 next one. Several servers can share one database (`SCHEDULER=postgres`): they split the session
 space into leased partitions, and when one dies another takes its partitions over and finishes
-its turns (see `apps/server/docs/scheduling.md`). [`docs/ROADMAP.md`](./ROADMAP.md) has the
+its turns (see `apps/server/docs/scheduling.md`). A graceful shutdown — a rolling restart — does
+the same on purpose: the scheduler aborts its turns with a handoff reason, the brain leaves them
+open, and the partition's next owner finishes the requests, so a deploy does not end a reply
+(#378). [`docs/ROADMAP.md`](./ROADMAP.md) has the
 phases and what comes next.
 
 ## How it runs
