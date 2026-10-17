@@ -35,6 +35,14 @@ export interface PassContext {
   readonly fence?: PartitionFence
   /** Aborting this stops the pass: the lease was given up, or the process is shutting down. */
   readonly signal?: AbortSignal
+  /**
+   * An already-aborted **drain** signal for a partition that is being given up (#378, P2).
+   *
+   * A pass that starts in such a partition must write nothing — the work is the peer's now —
+   * so the queue hands it a drain that is already set; `runTurn` sees it at its own start and
+   * answers `handed_off` without opening a turn.
+   */
+  readonly drain?: AbortSignal
 }
 
 /** What {@link PassQueue} is built from. */
@@ -44,7 +52,7 @@ export interface PassQueueOptions {
   /** How many sessions may have a pass in flight at once; defaults to
    * {@link DEFAULT_MAX_CONCURRENT_PASSES}. */
   readonly maxConcurrentSessions?: number
-  /** How long {@link PassQueue.stop} waits for the passes in flight; defaults to 5000 ms. */
+  /** How long {@link PassQueue.stop} lets the steps in flight finish; defaults to 40000 ms. */
   readonly drainTimeoutMs?: number
   /** Called when a pass rejects — a fenced write, an unexpected failure. Never throws. */
   readonly onError?: (error: unknown, sessionId: SessionId) => void
@@ -128,6 +136,31 @@ export class PassQueue {
     return [...this.#active.keys()]
   }
 
+  /** Whether a pass is in flight for `sessionId`. */
+  isActive(sessionId: SessionId): boolean {
+    return this.#active.has(sessionId)
+  }
+
+  /**
+   * Stop accepting passes and ask every pass in flight to **drain** (#378, P2).
+   *
+   * This is the soft half of {@link stop}: no new pass starts, the sessions waiting for a slot
+   * are forgotten, the task-wait timers are cleared, and each running pass finishes the step
+   * it is in. The caller decides when to reach for the hard handoff — a single-process stop
+   * does it after one timeout, while the partition scheduler gives each partition its own.
+   *
+   * @returns the sessions that had a pass in flight
+   */
+  beginDrain(): SessionId[] {
+    this.#stopped = true
+    this.clearWaiting()
+    for (const timer of this.#waits.values()) {
+      clearTimeout(timer)
+    }
+    this.#waits.clear()
+    return this.#runner.drainAll()
+  }
+
   /** The timers armed for sessions waiting on background tasks, by session (#343). */
   readonly #waits = new Map<SessionId, NodeJS.Timeout>()
 
@@ -187,12 +220,9 @@ export class PassQueue {
    * write their last events.
    */
   async stop(options: { readonly drainTimeoutMs?: number } = {}): Promise<void> {
-    this.#stopped = true
-    this.clearWaiting()
-    for (const timer of this.#waits.values()) {
-      clearTimeout(timer)
-    }
-    this.#waits.clear()
+    this.beginDrain()
+    // The runner does the soft-then-hard sequence: the steps in flight finish for up to
+    // `drainTimeoutMs`, then whatever is left is handed off and settles (#378, P2).
     await this.#runner.stop({
       drainTimeoutMs: options.drainTimeoutMs ?? this.#drainTimeoutMs,
     })

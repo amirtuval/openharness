@@ -137,6 +137,7 @@ if (SOURCE === null) {
       readonly ttlMs?: number
       readonly heartbeatMs?: number
       readonly sweepMs?: number
+      readonly drainTimeoutMs?: number
       readonly store?: SessionStore
       readonly model?: ScriptedModel
     } = {},
@@ -154,7 +155,7 @@ if (SOURCE === null) {
       ttlMs: options.ttlMs ?? TTL_MS,
       heartbeatMs: options.heartbeatMs ?? HEARTBEAT_MS,
       sweepMs: options.sweepMs ?? NO_SWEEP_MS,
-      drainTimeoutMs: 500,
+      drainTimeoutMs: options.drainTimeoutMs ?? 500,
       onError: (error, sessionId) => {
         errors.push({ error, sessionId })
       },
@@ -975,6 +976,186 @@ if (SOURCE === null) {
       expect(result !== undefined ? JSON.stringify(result.content) : '').toContain('timed out')
       expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
       expect(Date.now() - deadlineMs).toBeLessThan(4_000)
+    })
+  })
+
+  describe('draining instead of cutting a step off (#378, P2)', () => {
+    /** The lease row for a partition, as the database holds it. */
+    async function leaseOf(
+      partition: number,
+    ): Promise<{ owner: string | null; expires_at: Date } | undefined> {
+      const result = await db.pool.query<{ owner: string | null; expires_at: Date }>(
+        'select owner, expires_at from partition_leases where partition = $1',
+        [partition],
+      )
+      return result.rows[0]
+    }
+
+    it('releases an idle partition at once on shutdown, so the peer serves its message during the drain', async () => {
+      // One partition is held open by a turn, the other is idle. The idle one must not wait
+      // for the busy one's drain: it goes back immediately, and a user message to a session in
+      // it is served by the peer while the old instance is still draining.
+      const first = instance('first', { ttlMs: LONG_TTL_MS, drainTimeoutMs: 3000 })
+      const second = instance('second', {
+        ttlMs: LONG_TTL_MS,
+        replies: [{ text: ['served by the peer'] }],
+      })
+      await Promise.all([first.scheduler.start(), second.scheduler.start()])
+      await waitFor(() => first.scheduler.heldPartitions().length > 1, {
+        timeoutMs: WAIT_MS,
+        message: 'the first instance never held more than one partition',
+      })
+      const store = db.store()
+      const held = first.scheduler.heldPartitions()
+      const idlePartition = held[0] as number
+      const busyPartition = held[1] as number
+
+      // The busy partition's turn is held mid-stream, so its drain cannot finish quickly.
+      const busy = await sessionIn(store, busyPartition)
+      const release = gate()
+      first.model.push({
+        text: Array.from({ length: 30 }, (_, index) => `part ${index + 1} `),
+        delayMs: 50,
+        onChunk: (_chunk, index) => (index === 0 ? release.wait() : Promise.resolve()),
+      })
+      await appendMessage(store, busy.id, 'a long one')
+      first.scheduler.signal(busy.id, 'work')
+      await first.model.waitForRequests(1)
+
+      // An idle session in the other partition — no turn has ever run for it.
+      const idle = await sessionIn(store, idlePartition)
+
+      const stopping = first.scheduler.stop()
+      let stopped = false
+      void stopping.then(() => {
+        stopped = true
+      })
+
+      // The peer takes the idle partition while the shutdown is still draining the busy one.
+      await waitFor(() => second.scheduler.heldPartitions().includes(idlePartition), {
+        timeoutMs: WAIT_MS,
+        message: 'the idle partition was not released before the drain ended',
+      })
+      expect(stopped, 'the shutdown finished before the busy turn did').toBe(false)
+
+      // A message to the idle session is served by the peer — promptly, while the old
+      // instance is still draining.
+      await appendMessage(store, idle.id, 'hello from the drain')
+      second.scheduler.signal(idle.id, 'work')
+      await waitForIdle(store, idle.id, WAIT_MS)
+      expect(second.model.requests).toBe(1)
+      expect(repliesIn(await readHistory(store, idle.id))).toEqual(['served by the peer'])
+
+      release.open()
+      await stopping
+    })
+
+    it('releases a partition as soon as its short turn finishes, not at the drain deadline', async () => {
+      // A five-second drain, but the turn takes a fraction of a second: the release waits for
+      // the pass, not for the timer. The whole stop is measured, so a release that slept to the
+      // deadline fails by seconds.
+      const first = instance('first', {
+        ttlMs: LONG_TTL_MS,
+        drainTimeoutMs: 5000,
+        replies: [{ text: ['a ', 'short ', 'answer'], delayMs: 60 }],
+      })
+      const second = instance('second', { ttlMs: LONG_TTL_MS })
+      await Promise.all([first.scheduler.start(), second.scheduler.start()])
+      await waitFor(() => first.scheduler.heldPartitions().length > 0, {
+        timeoutMs: WAIT_MS,
+      })
+      const store = db.store()
+      const partition = first.scheduler.heldPartitions()[0] as number
+      const session = await sessionIn(store, partition)
+
+      await appendMessage(store, session.id, 'hello')
+      first.scheduler.signal(session.id, 'work')
+      await first.model.waitForRequests(1)
+
+      const before = Date.now()
+      await first.scheduler.stop()
+      const elapsed = Date.now() - before
+
+      // The step ended naturally — the best case — so the turn is closed here, not handed off.
+      const history = await readHistory(store, session.id)
+      expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+      expect(spanErrors(history)).toEqual([null])
+      expect(elapsed, 'the release waited for the drain deadline').toBeLessThan(2_000)
+      await waitFor(() => second.scheduler.heldPartitions().includes(partition), {
+        timeoutMs: WAIT_MS,
+        message: 'the partition was not released after its turn ended',
+      })
+    })
+
+    it('keeps renewing a surplus partition while it drains, with a drain longer than the TTL', async () => {
+      // The constraint P2 removes: the old surplus release drained inside the heartbeat cycle,
+      // so the TTL had to outlast the drain. Here the drain (4 s) is eight times the TTL
+      // (500 ms), and both the draining partition and the partitions the instance keeps are
+      // still renewed throughout — owner unchanged, expiry moving forward.
+      const TTL = 500
+      const first = instance('first', { ttlMs: TTL, heartbeatMs: 30, drainTimeoutMs: 4000 })
+      await first.scheduler.start()
+      await waitFor(() => first.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the single instance never claimed the whole space',
+      })
+      const held = first.scheduler.heldPartitions()
+      const keptPartition = held[0] as number
+      // The surplus is given up newest-tenure first, and the held turn keeps one of those
+      // partitions in its drain.
+      const drainingPartition = held[held.length - 1] as number
+
+      const store = db.store()
+      const session = await sessionIn(store, drainingPartition)
+      const release = gate()
+      first.model.push({
+        text: ['kept ', 'open'],
+        delayMs: 50,
+        onChunk: (_chunk, index) => (index === 0 ? release.wait() : Promise.resolve()),
+      })
+      await appendMessage(store, session.id, 'hold this partition')
+      first.scheduler.signal(session.id, 'work')
+      await first.model.waitForRequests(1)
+
+      const second = instance('second', { ttlMs: TTL, heartbeatMs: 30 })
+      await second.scheduler.start()
+
+      // The other surplus partitions are released at once; this one stays ours (and is
+      // renewed) until its turn finishes.
+      await waitFor(
+        () =>
+          first.scheduler.heldPartitions().includes(drainingPartition) &&
+          first.scheduler.heldPartitions().length === PARTITIONS / 2 + 1,
+        {
+          timeoutMs: WAIT_MS,
+          message: 'the surplus was not released, or the draining partition was dropped early',
+        },
+      )
+
+      const startLease = await leaseOf(drainingPartition)
+      expect(startLease?.owner).toBe('first')
+      // Several TTLs — long enough that a blocked heartbeat would have expired both leases.
+      await new Promise((resolve) => setTimeout(resolve, TTL * 4))
+      const endLease = await leaseOf(drainingPartition)
+      expect(endLease?.owner, 'the draining partition stopped being renewed').toBe('first')
+      expect(
+        endLease?.expires_at.getTime() ?? 0,
+        'the draining lease was not renewed while it drained',
+      ).toBeGreaterThan(startLease?.expires_at.getTime() ?? 0)
+      expect((await leaseOf(keptPartition))?.owner, 'a kept lease lapsed during the drain').toBe(
+        'first',
+      )
+      // Nothing was fenced, and no lease was lost: the heartbeat never waited on the drain.
+      expect(first.errors).toEqual([])
+      expect(first.notices.join('\n')).not.toContain('lost partition')
+
+      release.open()
+      await waitForIdle(store, session.id, WAIT_MS)
+      await waitFor(() => second.scheduler.heldPartitions().includes(drainingPartition), {
+        timeoutMs: WAIT_MS,
+        message: 'the drained partition was not released to the peer',
+      })
+      expect(repliesIn(await readHistory(store, session.id))).toEqual(['kept open'])
     })
   })
 

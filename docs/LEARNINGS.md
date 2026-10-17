@@ -251,6 +251,27 @@ instance at once and their shares grow, and releases every lease; an acquire alr
 cannot be cancelled, so the scan that holds it releases it the moment it sees the instance stopped,
 and a stopping instance never leaves a live lease behind.
 
+**A drain is a level of stop, not a longer interrupt, and it must be checked after the natural
+end.** A pod has a grace period, so a scheduler's first move is a **soft** signal: the model
+request or tool step in flight finishes and stores its result, and the loop writes nothing at the
+next step boundary. A second signal is what that cannot be — the request's own abort is how a
+request is cut off — so `RunTurnOptions.drain` is separate from `signal`, and its check sits
+_after_ "nothing left to answer": a turn whose last step completed must write its own
+`session.status_idle`, not be left open for a peer to close. Only the hard `TurnHandoff` abort at
+the deadline writes nothing from a step that was running (#378, P2;
+`packages/brain/src/turn.ts`, `apps/server/src/runner.ts`).
+
+**A release that drains inside the heartbeat buys a correctness constraint it never needed.**
+The old surplus release waited for its turns inside one heartbeat cycle, so the lease TTL had to
+outlast the drain timeout — otherwise the instance's own still-nursing leases expired and a peer
+took the very partition it was releasing, turning a deliberate handoff into a `FencedError`. The
+fix is not a bigger TTL: start the release in the background, keep renewing the partition while it
+drains (it is still ours until `releasePartition`), release each partition the moment its own
+passes are done, and do not count draining partitions toward the share. The heartbeat then never
+waits on a drain, a 3 s TTL works against a 40 s drain, and an idle partition goes back at once
+instead of behind a busy sibling (#378, P2; `apps/server/src/partition-scheduler.ts`;
+`e2e/src/rolling-restart.test.ts` keeps the short TTL on purpose).
+
 **The runner is where "one turn at a time" and "keep going while there is work" live, and a session
 that vanishes is an answer rather than a failure.** It re-reads the log when a turn resolves, stops
 on `noop` but honours a `wake` that arrived during that `noop` turn (the brain reads the log before

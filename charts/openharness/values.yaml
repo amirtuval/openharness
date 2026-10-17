@@ -127,11 +127,13 @@ backend:
   timeoutSec: 3600
   # Connection draining: how long the load balancer keeps sending in-flight requests to a pod
   # that is going away. It must be at least the server's own drain timeout
-  # (`OPENHARNESS_DRAIN_TIMEOUT_MS`, 5s by default) so the pod is not killed mid-turn.
-  drainingTimeoutSec: 30
+  # (`OPENHARNESS_DRAIN_TIMEOUT_MS`, 40s by default) so the pod is not killed mid-turn, and
+  # shorter than the pod's grace period so the load balancer lets go before Kubernetes kills
+  # it. The three numbers are one budget: 60 (grace) > 45 (draining) > 40 (drain).
+  drainingTimeoutSec: 45
 
 # How long Kubernetes waits after SIGTERM before it SIGKILLs the pod. It must be **longer than
-# the server's drain timeout** (`OPENHARNESS_DRAIN_TIMEOUT_MS`, 5s by default) so a clean
+# the server's drain timeout** (`OPENHARNESS_DRAIN_TIMEOUT_MS`, 40s by default) so a clean
 # shutdown finishes; 60s leaves room for the load balancer's connection draining above to
 # finish too, and for a Postgres migration that is still applying at boot on a slow start.
 terminationGracePeriodSeconds: 60
