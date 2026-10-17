@@ -218,6 +218,15 @@ tool step and stores the result before the hard handoff, so most rolling restart
 nothing (#378, P2). The 20 s between the drain and the grace period cover the listener close,
 the hard handoffs' settlement and the store close.
 
+Balancing is debounced against the rollout's own churn (#378, P3): an instance gives surplus
+partitions up only after the live membership has been unchanged for
+`OPENHARNESS_BALANCE_STABILITY_MS` (30 s by default). Without that, the surge pod's join
+shrinks every share and makes the old pods release partitions that the `SIGTERM` a moment
+later would have left in place — each release a drain, and for a long step a re-run. The
+default covers the chart's readiness gap between a replacement becoming Ready and the old pod
+being terminated; no chart value sets it, so a deployment whose readiness probe is slower than
+30 s can raise it through `env`.
+
 ### The CDN (`gateway.cdn`)
 
 `GCPHTTPFilter` is GKE's Cloud CDN extension for a Gateway, attached to a route the standard

@@ -167,6 +167,7 @@ itself is a `session.context_summary` with reason `manual`.
 | `OPENHARNESS_LEASE_TTL_MS`                | `30000`                          | how long a partition lease lasts before it must be renewed                                                                                                                                                                                                                                                         |
 | `OPENHARNESS_HEARTBEAT_MS`                | `10000`                          | how often leases are renewed and free partitions taken                                                                                                                                                                                                                                                             |
 | `OPENHARNESS_SWEEP_MS`                    | `60000`                          | how often owned partitions are re-scanned for missed work                                                                                                                                                                                                                                                          |
+| `OPENHARNESS_BALANCE_STABILITY_MS`        | `30000`                          | how long the live membership must be unchanged before surplus partitions are released (#378, P3); `0` releases on the next heartbeat                                                                                                                                                                               |
 | `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                                                                                                                                                                                 |
 | `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                                                                                                                                                                                 |
 | `OPENHARNESS_COMPACTION_THRESHOLD`        | `0.7`                            | the share of the chat model's context budget at which older history is summarized (epic #277, K2; #279), and the default a user who has not chosen one follows (C3, #282); a fraction in `0..1`                                                                                                                    |
@@ -1632,6 +1633,7 @@ new PostgresPartitionScheduler({
   ttlMs = 30000, // how long a lease lasts before it must be renewed
   heartbeatMs = 10000, // renew held leases, take free ones, give up surplus
   sweepMs = 60000, // re-scan owned partitions for work no signal mentioned
+  balanceStabilityMs = 30000, // wait for a stable membership before giving surplus up (#378, P3)
   maxConcurrentSessions = 32,
   drainTimeoutMs = 40000, // soft drain first; the hard handoff follows at this deadline
   retry,
@@ -1663,8 +1665,14 @@ only while it holds that partition's lease, writing every turn under `fence: {pa
   `TurnHandoff('partition_released')` abort), and the lease is released **as soon as that
   partition's passes are done** — an idle partition goes back at once. The give-up runs in the
   background, never inside the heartbeat: a draining partition is renewed like every other
-  lease, so the TTL does not have to outlast the drain. There is **no periodic idle
-  release**: an instance whose membership is only
+  lease, so the TTL does not have to outlast the drain. A give-up waits until the membership
+  has been **unchanged for `OPENHARNESS_BALANCE_STABILITY_MS`** (#378, P3): a rolling update is
+  a join followed a moment later by a leave, so releasing on the join would move partitions
+  the leave is about to make unnecessary — each move a drain, and for a long step a re-run. A
+  newcomer still takes free and expired partitions at once, so a leaving pod's released
+  partitions reach it without waiting, an HPA scale-up converges when the window passes, and
+  crash takeover (an expired lease taken on the next scan) is unchanged. There is **no
+  periodic idle release**: an instance whose membership is only
   itself has the whole space as its share and keeps it; a newcomer is visible the moment it
   heartbeats, so the holder's next heartbeat starts the surplus release for it — a release,
   not a steal, and never more than the share. A draining partition starts no new pass and
