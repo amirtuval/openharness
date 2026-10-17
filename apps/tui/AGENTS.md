@@ -248,7 +248,10 @@ A mode whose model cannot be used is refused with the server's own sentence in t
 never silently swapped. A plain model pick and a mode pick are one choice: each clears the
 other, because a chat follows a mode or a model, never both. The status line names the mode
 first — `smart · claude-sonnet-5` — so what the chat follows and what it resolved to are on one
-line (`(next message)` while the pick is pending).
+line (`(next message)` while the pick is pending). **A plain model pick drops the mode clause
+immediately** (`statusModeLabel`): the session still follows its mode until that message is
+sent, but the reader must see the switch the moment it is made — keeping the mode named until
+send was the reported web bug's terminal twin.
 
 ### Switching the model in a chat
 

@@ -1895,6 +1895,20 @@ read said `idle` and the card said `done` (found by the #348 pass). The fix is o
 about what an effect is keyed on: the thing the reader sees is the status, and a count is only
 ever a proxy for it that happens to be wrong exactly when work stops.
 
+**"Pending switch" and "the mode in effect" are two states, and collapsing them made one
+direction of a mode switch invisible.** In the web chat, picking a **mode** while on a model was
+visible at once because the picked mode was rendered as the current one; picking a **model**
+while on a mode was not, because the current mode id still came from the session and the picker's
+trigger prefers a selected mode over a model name — so the reader saw the mode until the next
+message detached it. Clearing the mode id on the pick would have fixed the display and broken the
+send: choosing the very model the mode resolves to must still send `{ model }`, and the switch
+test needs to know the session was on a mode at that moment. The fix was a separate
+`detachingMode` flag (display: detached now) beside a committed mode id (send: still on a mode),
+with `oh`'s status line dropping its mode clause on the same rule and its `/` menu reading the
+override of the mode the next message will _not_ follow
+(`apps/web/src/components/chat/chat-view.tsx`,
+`apps/tui/src/chat/screen.tsx`'s `statusModeLabel`).
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take

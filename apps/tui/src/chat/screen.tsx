@@ -26,6 +26,7 @@ import type { Client, TaskCard, TranscriptError, TranscriptToolCall } from '@ope
 import type {
   GetPreferencesResponse,
   Mode,
+  ModeId,
   ModelEntry,
   Skill,
   Session,
@@ -113,6 +114,33 @@ export interface ChatScreenProps {
    * {@link Session} rather than an id.
    */
   readonly onOpenSession: (session: Session) => void
+}
+
+/** The three pieces of chat state the status line's mode clause reads. */
+export interface StatusModeView {
+  readonly modeId: ModeId | null
+  readonly pendingMode: ModeId | null
+  readonly pendingModel: string | null
+}
+
+/**
+ * The mode clause the status line draws (#245, M6), or `undefined` for no clause.
+ *
+ * A pending mode is named with `(next message)`. A pending **plain model** is a pending
+ * **detach**: the session still follows its mode until that message is sent, but the line must
+ * show the switch the moment it is made — naming the mode there is the web bug's terminal twin,
+ * where the reader sees nothing happen until they send. The model itself is drawn by the
+ * `model` clause beside this one.
+ */
+export function statusModeLabel(modes: readonly Mode[], view: StatusModeView): string | undefined {
+  const pendingModeName = view.pendingMode === null ? null : modeNameOf(modes, view.pendingMode)
+  if (pendingModeName !== null) {
+    return `${pendingModeName} (next message)`
+  }
+  if (view.pendingModel !== null) {
+    return undefined
+  }
+  return modeNameOf(modes, view.modeId) ?? undefined
 }
 
 /**
@@ -281,7 +309,9 @@ export function ChatScreen({
   // The mode the chat follows — or the one a `/model` pick is about to switch to — and its
   // tool/skill override. The `/` menu applies it over the reader's switches (K8), so a skill
   // the mode turns off is not offered and one it turns on is, exactly as the server answers.
-  const menuModeId = view.pendingMode ?? view.modeId
+  // A pending plain model detaches the chat from its mode on the next message, so the mode's
+  // override stops applying to the menu at once — the display may not lag the switch (#349, B8).
+  const menuModeId = view.pendingMode ?? (view.pendingModel === null ? view.modeId : null)
   const menuModeOverride = useMemo(
     () => (modeList ?? []).find((mode) => mode.id === menuModeId)?.tools ?? null,
     [modeList, menuModeId],
@@ -363,13 +393,7 @@ export function ChatScreen({
   // The mode the chat follows (#245, M6), named the way the picker names it — or the one a
   // `/model` pick is about to switch to, said so. Absent until the modes are read, or for a
   // chat without one.
-  const knownModes = modeList ?? []
-  const pendingModeName =
-    view.pendingMode === null ? null : modeNameOf(knownModes, view.pendingMode)
-  const mode =
-    pendingModeName !== null
-      ? `${pendingModeName} (next message)`
-      : (modeNameOf(knownModes, view.modeId) ?? undefined)
+  const mode = statusModeLabel(modeList ?? [], view)
 
   // What the session has spent (#247), priced from the transcript's own totals — the running
   // ones the log reported, or the ones derived from its replies for a session stored before
