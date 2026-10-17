@@ -131,6 +131,75 @@ async function heldPartitions(id: string): Promise<number> {
   )
 }
 
+/**
+ * Make "how many times did a partition move" a read.
+ *
+ * A move is an acquisition by a **different owner than the tenure before it**: the lease row's
+ * owner changing from one instance to another, or from free to owned. A renewal (owner
+ * unchanged) and a release (owner becomes `null`) are not moves. `partition_leases` keeps only
+ * the current tenure, so the test installs this audit for the rollout and reads it afterwards;
+ * the server has no such table, and nothing in it reads one.
+ */
+async function countMovesFromNow(): Promise<void> {
+  const database = await harness.database()
+  await withDatabaseClient(
+    async (client) => {
+      await client.query(
+        `create table if not exists partition_moves (
+           partition integer not null,
+           owner text not null,
+           epoch integer not null,
+           moved_at timestamptz not null default clock_timestamp()
+         )`,
+      )
+      await client.query('truncate partition_moves')
+      await client.query(
+        `create or replace function record_partition_move() returns trigger language plpgsql as $$
+         begin
+           if new.owner is not null and new.owner is distinct from old.owner then
+             insert into partition_moves (partition, owner, epoch)
+             values (new.partition, new.owner, new.epoch);
+           end if;
+           return new;
+         end
+         $$`,
+      )
+      await client.query('drop trigger if exists partition_moves_after_update on partition_leases')
+      await client.query(
+        `create trigger partition_moves_after_update after update on partition_leases
+         for each row execute function record_partition_move()`,
+      )
+    },
+    { database: database.name },
+  )
+}
+
+/** The moves recorded since {@link countMovesFromNow}, per partition. */
+async function movesPerPartition(): Promise<Map<number, number>> {
+  const database = await harness.database()
+  const moves = new Map<number, number>()
+  await withDatabaseClient(
+    async (client) => {
+      const result = await client.query<{ partition: number; moves: string }>(
+        'select partition, count(*) as moves from partition_moves group by partition',
+      )
+      for (const row of result.rows) {
+        moves.set(row.partition, Number(row.moves))
+      }
+    },
+    { database: database.name },
+  )
+  return moves
+}
+
+/** The per-partition counts as `3×2, 5×1`, for an assertion message. */
+function describeMoves(moves: ReadonlyMap<number, number>): string {
+  return [...moves.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([partition, count]) => `${partition}×${count}`)
+    .join(', ')
+}
+
 /** Which instance owns each session's partition, right now. */
 async function ownersOf(sessions: readonly Session[]): Promise<Map<string, number>> {
   const database = await harness.database()
@@ -375,6 +444,11 @@ describe('a rolling restart while turns are streaming', () => {
       throw new Error('the rollout had no servers to stop')
     }
     expect(counts.get(busiest.id) ?? 0, 'no in-flight turn ran on an original').toBeGreaterThan(0)
+
+    // From here on, every acquisition that changes a partition's owner is recorded. The
+    // originals have already settled into their shares, so this counts the rollout's moves and
+    // nothing else.
+    await countMovesFromNow()
     const replacements = await replaceOneByOne(order, env, 'graceful')
     const last = replacements[replacements.length - 1]
     if (last === undefined) {
@@ -416,6 +490,22 @@ describe('a rolling restart while turns are streaming', () => {
     // The counts this scenario exists to report.
     expect(requests).toBe(SLOW_SESSIONS * 1 + TOOL_SESSIONS * 2)
     expect(reRuns, 'a request was re-run during a drain that should have been invisible').toBe(0)
+
+    // How far the partitioning moved while the versions changed. On the P2 base every join
+    // makes the old members give up surplus, and the leave a moment later gives it back, so a
+    // partition can move once per replacement join; P3's debounce brings this down to one move
+    // per partition (the one its original owner's departure forces).
+    const moves = await movesPerPartition()
+    const moved = [...moves.values()]
+    const mostMoved = Math.max(0, ...moved)
+    console.info(
+      `partition moves over the rollout: ${moved.reduce((total, count) => total + count, 0)} ` +
+        `total, max ${mostMoved} — ${describeMoves(moves)}`,
+    )
+    expect(
+      mostMoved,
+      `partition moves during the rollout: ${describeMoves(moves)}`,
+    ).toBeLessThanOrEqual(replacements.length)
 
     // A graceful release is not a race with the lease: no pass was ever refused a write —
     // including while a surplus partition was draining across several three-second TTLs.
