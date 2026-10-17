@@ -19,6 +19,7 @@ import {
   createTestToolRegistry,
   createTurnRegistry,
   createTurnTools,
+  TEST_SLOW_TOOL_NAME,
   TEST_TOOL_NAME,
   testEchoTool,
 } from './tools'
@@ -97,6 +98,7 @@ describe('createTurnRegistry and createTurnTools', () => {
       ASK_USER_TOOL_NAME,
       TEST_TOOL_NAME,
       TEST_TASK_TOOL_NAME,
+      TEST_SLOW_TOOL_NAME,
       AGENT_TOOL_NAME,
       AGENT_MESSAGE_TOOL_NAME,
       TASK_WAIT_TOOL_NAME,

@@ -1,3 +1,5 @@
+import { appendFile } from 'node:fs/promises'
+
 import type {
   McpToolProvider,
   SubagentRuntime,
@@ -79,6 +81,69 @@ export const testEchoTool: ToolDefinition<{ text: string }> = {
   run: (input) => textResult(input.text),
 }
 
+/** The name of the mock model's slow test tool (#378, P4). */
+export const TEST_SLOW_TOOL_NAME = 'echo_slow'
+
+/** What the model reads about {@link createTestSlowTool}. */
+export const TEST_SLOW_TOOL_DESCRIPTION =
+  'Test only: echo the text after a delay, so a test can kill the process while the call runs.'
+
+/** How long the slow tool waits when its call names no delay. */
+export const TEST_SLOW_TOOL_DEFAULT_DELAY_MS = 60_000
+
+/**
+ * A test-only tool that takes its time (#378, P4).
+ *
+ * The e2e crash suite needs a tool call that is really in flight when its owner is killed: the
+ * recovering brain must answer the inherited call `execution lost` and **not** run it. A
+ * delay is the seam; the input carries it, so a test chooses the window. When
+ * `OPENHARNESS_TEST_TOOL_EXECUTION_LOG` names a file, the tool appends one line to it per
+ * execution — the count a test reads afterwards to prove there was only one.
+ *
+ * Only reachable under `OPENHARNESS_TEST_MODEL=mock`; a deployment never registers it.
+ */
+export function createTestSlowTool(options: {
+  readonly executionLog?: string | undefined
+}): ToolDefinition<{ text: string; delay_ms?: number }> {
+  return {
+    name: TEST_SLOW_TOOL_NAME,
+    description: TEST_SLOW_TOOL_DESCRIPTION,
+    inputSchema: z.object({
+      text: z.string(),
+      delay_ms: z.number().int().min(0).max(TEST_SLOW_TOOL_DEFAULT_DELAY_MS).optional(),
+    }),
+    permission: 'allow',
+    // Above the delay the call is allowed to ask for, so the test's own kill is what ends it.
+    timeoutMs: TEST_SLOW_TOOL_DEFAULT_DELAY_MS + 5_000,
+    run: async (input, context) => {
+      if (options.executionLog !== undefined) {
+        await appendFile(options.executionLog, `${TEST_SLOW_TOOL_NAME}\n`, 'utf8')
+      }
+      await waitUnlessAborted(input.delay_ms ?? TEST_SLOW_TOOL_DEFAULT_DELAY_MS, context.signal)
+      return textResult(input.text)
+    },
+  }
+}
+
+/** Wait `ms`, or until the call is aborted — the registry reports the abort either way. */
+function waitUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted === true) {
+      resolve()
+      return
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /**
  * The registry the test hooks run with: {@link testEchoTool} beside the real {@link askUserTool}.
  *
@@ -98,8 +163,13 @@ export function createTestToolRegistry(): ToolRegistry {
  * object to both builders rather than restating the environment twice.
  */
 export interface TurnRegistryOptions {
-  /** Which factory the process runs — `mock` adds the test tool to the built-ins. */
+  /** Which factory the process runs — `mock` adds the test tools to the built-ins. */
   readonly kind: ResolvedModel['kind']
+  /**
+   * A file the mock model's slow tool appends an execution line to (#378, P4); test only.
+   * Ignored unless `kind` is `mock`.
+   */
+  readonly executionLog?: string | undefined
 }
 
 /**
@@ -123,7 +193,11 @@ export function createTurnRegistry(options: TurnRegistryOptions): ToolRegistry {
     // (epic #340, S4/S5; #343). The **wait** a model ends a turn on is no longer a hook: since
     // #344 every deployment registers the real `agent_wait` below, and two tools under one name
     // is what a registry refuses.
-    tools.push(testEchoTool, testTaskTool)
+    tools.push(
+      testEchoTool,
+      testTaskTool,
+      createTestSlowTool({ executionLog: options.executionLog }),
+    )
   }
   // The subagent tools (epic #340, S5; #344) are registered here and **replaced** per turn: the
   // definitions this holds are what a settings screen lists (so a user can turn one off, and a

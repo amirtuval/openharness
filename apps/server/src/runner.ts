@@ -91,6 +91,12 @@ export interface SessionRunnerOptions {
   readonly clearThreshold?: number
   /** Whether a turn nudges the model to write a todo list (#331); off when omitted. */
   readonly todoNudge?: boolean
+  /**
+   * How many times one turn may be taken over and re-run before recovery gives up (#378, P4),
+   * passed to every turn; the brain's default (3) when omitted. The server wires it from
+   * `OPENHARNESS_MAX_RECOVERY_ATTEMPTS`.
+   */
+  readonly maxRecoveryAttempts?: number
 }
 
 /** What one call to {@link SessionRunner.run} adds to the runner's configuration. */
@@ -202,6 +208,8 @@ export class SessionRunner {
 
   readonly #todoNudge: boolean | undefined
 
+  readonly #maxRecoveryAttempts: number | undefined
+
   readonly #turns = new Map<SessionId, TurnHandle>()
 
   #stopped = false
@@ -218,6 +226,7 @@ export class SessionRunner {
     this.#tools = options.tools
     this.#clearThreshold = options.clearThreshold
     this.#todoNudge = options.todoNudge
+    this.#maxRecoveryAttempts = options.maxRecoveryAttempts
   }
 
   /** Whether the runner has been told to stop and no longer starts passes. */
@@ -513,6 +522,9 @@ export class SessionRunner {
             ...(this.#resolveMode === undefined ? {} : { resolveMode: this.#resolveMode }),
             ...(this.#clearThreshold === undefined ? {} : { clearThreshold: this.#clearThreshold }),
             ...(this.#todoNudge === undefined ? {} : { todoNudge: this.#todoNudge }),
+            ...(this.#maxRecoveryAttempts === undefined
+              ? {}
+              : { maxRecoveryAttempts: this.#maxRecoveryAttempts }),
             // The field names are `RunTurnOptions`' own, so the whole group goes over as it is.
             ...(this.#tools === undefined ? {} : this.#tools),
           })
