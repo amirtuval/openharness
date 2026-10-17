@@ -30,21 +30,25 @@ import {
 } from './harness'
 
 /**
- * A rolling restart of a real deployment, while turns are streaming (#378, P1).
+ * A rolling restart of a real deployment, while turns are streaming (#378, P1/P3).
  *
- * Three servers run against one database with the partition scheduler, with three surge
- * replicas already up beside them — the capacity a rolling update starts before it terminates
- * anything. Sessions stream replies long enough to be in flight for the whole restart (ten
- * seconds each, and every handoff makes the next owner start its request again). Then, for
- * each original server, once the replacements hold partitions: `SIGTERM` it and wait for it to
- * exit. The old process hands its turns **off**; the partitions' next owners close the
- * inherited spans as `brain_lost` and re-issue the requests.
+ * Three servers run against one database with the partition scheduler. Sessions stream replies
+ * long enough to be in flight for the whole restart (ten seconds each, and every handoff makes
+ * the next owner start its request again). Then, one original at a time — the order a
+ * `maxSurge: 1, maxUnavailable: 0` rollout uses — a fresh replacement process is **started
+ * while the turns are still streaming**; it boots, migrates and joins the membership, and once
+ * it holds partitions the original it replaces is `SIGTERM`ed. The old process hands its turns
+ * **off**; the partitions' next owners close the inherited spans as `brain_lost` and re-issue
+ * the requests.
  *
- * The surge replicas are started **before** the turns here, and that is not the shape this
- * test is about — a replacement booted mid-turn re-runs every idempotent migration, and the
- * DDL's table locks deadlock with a live `insert into events` (seen while building this test;
- * it aborts the boot or the turn's append). That is a deployment concern of its own, noted in
- * the PR, and starting the surge capacity first keeps this test about the handoff.
+ * The replacement booting mid-turn is deliberate: a pod boots on every rollout, scale-up and
+ * crash restart, and it must be harmless to the servers still appending. Before the migration
+ * ledger (#378, PR 3/6) this test had to start the surge replicas before the turns, because a
+ * boot re-ran every idempotent migration and its DDL (`create index if not exists` on `events`,
+ * `alter table … add column if not exists` on `sessions`) deadlocked with a live
+ * `insert into events`; Postgres aborted either the boot or the turn. With the ledger a boot
+ * with nothing to apply takes no lock on any application table, which is what lets this test
+ * run the rollout in the order Kubernetes does.
  *
  * What this asserts is the product goal: every turn ends with a complete final reply and an
  * idle session, no span ended `interrupted`, no session ever had two brains' requests open at
@@ -60,10 +64,19 @@ const harness = e2eHarness('rolling-restart')
 const SLOW_SESSIONS = 8
 const TOOL_SESSIONS = 4
 
-/** The scheduler's timings: a lease well inside the test, a heartbeat well inside the lease. */
+/**
+ * The scheduler's timings: a lease well inside the test, a heartbeat well inside the lease.
+ *
+ * The TTL has to outlast the surplus release's drain (OPENHARNESS_DRAIN_TIMEOUT_MS, 5 s):
+ * a replacement joining mid-turn makes the originals give surplus partitions up, and that
+ * release lets the turns there finish for up to the drain timeout inside one heartbeat cycle.
+ * A TTL shorter than the drain would expire the leases this instance is still nursing, a peer
+ * would take them, and the release would fence its own in-flight appends — a test-only shape,
+ * because a deployment's lease is 30 s.
+ */
 const PARTITION_ENV = {
   SCHEDULER: 'postgres',
-  OPENHARNESS_LEASE_TTL_MS: '3000',
+  OPENHARNESS_LEASE_TTL_MS: '15000',
   OPENHARNESS_HEARTBEAT_MS: '300',
   // The sweep is a safety net, not a way to find work: with it out of the way, a turn that is
   // finished after a handoff can only have been found by the acquire scan.
@@ -211,36 +224,23 @@ function expectCompleteReplies(log: readonly StoredEvent[], label: string): void
 
 describe('a rolling restart while turns are streaming', () => {
   it('hands every turn off: complete replies, no interrupt, no two brains at once', async () => {
-    // The deployment and the surge capacity it rolls onto. They are all up before the turns
-    // for the migration reason in this file's header; every old server is still terminated
-    // while its partitions' turns are streaming, which is the behaviour under test.
-    const originals = await Promise.all([
-      startInstance('roll-a'),
-      startInstance('roll-b'),
-      startInstance('roll-c'),
-    ])
-    const replacements = await Promise.all([
-      startInstance('roll-replacement-a'),
-      startInstance('roll-replacement-b'),
-      startInstance('roll-replacement-c'),
-    ])
+    // The deployment before the rollout. Nothing else is running: the replacements are started
+    // later, one at a time, while the turns below are streaming. The first boots are serial
+    // because the dev-login seed is a check-then-insert Better Auth runs on boot, and three
+    // *first* boots against an empty database would race it — a test-harness property (the dev
+    // login is off in a deployment) and not what this test is about.
+    const originals: Instance[] = []
+    for (const id of ['roll-a', 'roll-b', 'roll-c']) {
+      originals.push(await startInstance(id))
+    }
     await waitForTheWholeSpace()
-    // Each of them holds a share before anything is terminated: the state a `maxSurge` rollout
-    // waits for before it takes an old replica out.
-    const everyone = [...originals, ...replacements]
-    await waitFor(
-      'every instance to hold partitions',
-      async () => {
-        const held = await Promise.all(
-          everyone.map(async (instance) => heldPartitions(instance.id)),
-        )
-        return held.every((count) => count > 0) ? true : undefined
-      },
-      { timeoutMs: RESTART_WAIT_MS },
-    )
 
-    const signedIn: SignedIn = await harness.user(originals[0].server)
-    const client = clientFor(originals[0].server, signedIn)
+    const first = originals[0]
+    if (first === undefined) {
+      throw new Error('the deployment had no server to create the sessions on')
+    }
+    const signedIn: SignedIn = await harness.user(first.server)
+    const client = clientFor(first.server, signedIn)
     const agent = await client.agents.create({
       name: 'Rolling restart agent',
       model: { id: 'anthropic/claude-sonnet-5' },
@@ -281,27 +281,35 @@ describe('a rolling restart while turns are streaming', () => {
       }),
     )
 
-    // The rollout: the first original to go is the one running most of the test's turns, so
-    // the handoff path is certainly exercised. Its replacement already holds partitions (the
-    // surge capacity above), which is the state a rolling update waits for before SIGTERM.
+    // The rollout, in the order Kubernetes uses (`maxSurge: 1`, `maxUnavailable: 0`): start
+    // one replacement, wait until it holds partitions, and only then take out the original it
+    // replaces. Each replacement boots while the turns are still streaming — the property the
+    // migration ledger is for. The first original to go is the one running most of the test's
+    // turns, so the handoff path is certainly exercised.
     const counts = await ownersOf(sessions.map((entry) => entry.session))
     const order = [...originals].sort(
       (left, right) => (counts.get(right.id) ?? 0) - (counts.get(left.id) ?? 0),
     )
     const busiest = order[0]
-    const surge = replacements[0]
-    const last = replacements[replacements.length - 1]
-    if (busiest === undefined || surge === undefined || last === undefined) {
-      throw new Error('the rollout had no servers to stop or to end on')
+    if (busiest === undefined) {
+      throw new Error('the rollout had no servers to stop')
     }
     expect(counts.get(busiest.id) ?? 0, 'no in-flight turn ran on an original').toBeGreaterThan(0)
-    for (const old of order) {
+    const replacements: Instance[] = []
+    for (const [index, old] of order.entries()) {
+      // This boot runs the migrations, while the turns above are streaming.
+      const replacement = await startInstance(`roll-replacement-${index}`)
+      replacements.push(replacement)
       await waitFor(
-        'the surge capacity to hold partitions',
-        async () => ((await heldPartitions(surge.id)) > 0 ? true : undefined),
+        'the replacement to hold partitions',
+        async () => ((await heldPartitions(replacement.id)) > 0 ? true : undefined),
         { timeoutMs: RESTART_WAIT_MS },
       )
       await old.server.kill('SIGTERM')
+    }
+    const last = replacements[replacements.length - 1]
+    if (last === undefined) {
+      throw new Error('the rollout had no replacement to end on')
     }
 
     // Every turn ends on the surviving instances, from the log's own record.
