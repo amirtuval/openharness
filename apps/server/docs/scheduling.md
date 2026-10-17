@@ -131,9 +131,15 @@ follows from that share:
 - **An instance over its share gives the surplus up**, newest tenure first: the turns running
   in those partitions are allowed to reach a safe point (up to the drain timeout) and are then
   **handed off** — a `TurnHandoff('partition_released')` abort leaves each open for the peer
-  that takes the partition over, which finishes it (#378, P1). Released partitions are left
-  alone by this instance for a heartbeat, so the peer gets the chance to take them instead of
-  watching them bounce back.
+  that takes the partition over, which finishes it (#378, P1). The abort is cooperative, so a
+  delta already in flight may still be awaiting its append: the release waits for the aborted
+  passes to settle before it calls `releasePartition`, or the release's own fence would refuse
+  that append and log a `FencedError` for a partition this instance gave up on purpose.
+  Released partitions are left alone by this instance for a heartbeat, so the peer gets the
+  chance to take them instead of watching them bounce back. The release drains inside one
+  heartbeat cycle, so the lease TTL has to outlast `OPENHARNESS_DRAIN_TIMEOUT_MS` (the
+  deployment's 30 s TTL against a 5 s drain is fine; a test that shortens the TTL has to keep
+  that ordering).
 - **The membership ages out with the leases.** Both windows are one lease TTL: a crash stops
   the heartbeats, so the row is out of every peer's count at the instant the dead instance's
   leases stop being renewed and start being stealable — the survivors' shares grow back to the

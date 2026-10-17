@@ -228,8 +228,11 @@ boot also needs **a way to sign in**: with no `*_CLIENT_ID`/`*_SECRET` pair conf
 `OPENHARNESS_DEV_LOGIN` off, `readServerConfig` refuses to start — every route is behind a
 session nobody could create — and says which variables to set.
 
-**The store.** With `DATABASE_URL`, `main.ts` builds a pool, runs `migrate()` (idempotent, so
-two instances starting together are safe) and hands the pool to `createPostgresSessionStore`.
+**The store.** With `DATABASE_URL`, `main.ts` builds a pool, runs `migrate()` and hands the
+pool to `createPostgresSessionStore`. The migration ledger makes the boot cheap and safe under
+a rollout: a pod whose database is up to date runs no migration statement and takes no lock on
+an application table, and the advisory lock keeps two instances from interleaving the rare run
+that has work to do (#378, PR 3/6 — see `packages/session/AGENTS.md`).
 Without it, the server runs on `InMemorySessionStore` and says so loudly at startup: that mode
 is for local development and quick trials, and nothing survives a restart.
 

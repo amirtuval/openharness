@@ -644,16 +644,20 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     // Gracefully, and once for the whole batch: the turns running in the partitions being
     // given up are allowed to finish writing (up to the drain timeout) rather than being cut
     // off — so whoever takes the partitions over inherits closed turns.
-    await this.#queue.drain(
-      giving.flatMap((lease) => this.#sessionsOf(lease.partition)),
-      this.#drainTimeoutMs,
-    )
+    const handing = giving.flatMap((lease) => this.#sessionsOf(lease.partition))
+    await this.#queue.drain(handing, this.#drainTimeoutMs)
     // Whatever is still running is handed off, not interrupted (#378, P1): this instance is
     // giving the partition to a peer, so the turn is left open for that peer to finish. The
     // handoff reason is what tells the brain not to store a partial reply or an idle here.
     for (const stopper of stoppers) {
       stopper.abort(new TurnHandoff('partition_released'))
     }
+    // An abort is cooperative: a delta already in the stream may still be awaiting its append.
+    // Let the passes settle before the release — they abort promptly — or `releasePartition`'s
+    // own fence would refuse that append and log a `FencedError` for a partition this instance
+    // deliberately gave up. That is the difference between a handoff and a race, and a
+    // replacement joining mid-turn (a real rollout) makes it happen on every surplus release.
+    await this.#queue.drain(handing, this.#drainTimeoutMs)
     await Promise.all(
       giving.map((lease) =>
         this.#store.releasePartition(lease.partition, this.#instanceId, lease.epoch),
