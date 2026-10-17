@@ -761,6 +761,18 @@ export async function deliverChildTurn(
     return false
   }
   const delivered = await inParent(store, own.parentSessionId, async () => {
+    // The reader may have taken this task back while the child's turn was ending: a
+    // `session.rewind` past the `agent` call it started supersedes the `session.task_started`,
+    // so the parent's log no longer names the task (S7) — and the news from a task the log
+    // does not name is not this chat's, as `./tasks`' `deliverableNotifications` says for the
+    // task-wait path. Dropping it **at the write** rather than at the read is what keeps it
+    // from becoming work: a notification nothing may claim would be found by the store's work
+    // scan and by `SessionRunner`'s `#hasMoreWork` on every pass, and the parent would wake
+    // for ever over news it is not allowed to read (a rewind's own turn writes the stop, so
+    // nothing else tells the model this work ended).
+    if (!taskStarts(await readLog(store, own.parentSessionId)).has(own.taskId)) {
+      return false
+    }
     const { appended } = await store.appendTaskNotification(own.parentSessionId, {
       taskId: own.taskId,
       kind: delivery.kind,
