@@ -354,19 +354,50 @@ chat the send creates. W1b is the same key form opened from inside an open chat,
 must not navigate. W17 covers Settings → Providers and the dialog's refusing, adding, replacing
 and deleting.
 
+W31 is the subagents pass (epic #340, S9; #346): the mock's `__agent__`, `__agent_message__` and
+`__message_parent__` markers drive a chat that starts a helper, and the scenario follows the card
+through its states — the type, the description and the status, the live line and the tokens the
+child's own stream feeds, the conversations between parent and child inline, the result folding
+in, the child opening as a chat under a breadcrumb, the sidebar nesting it — where the nested
+row is labelled with the **description the parent model gave**, which is the child's title (epic
+#340) — and Stop interrupting
+a child parked in `__hold__` — after which the card reads **stopped**, not `done`, because the
+reader's Stop is a `user.interrupt` and the brain announces that turn as a stop (S7; #348). It
+also pins the two things no component test can: Settings → Tools lists the five subagent tools
+against the **real** registry (the fake registers three built-ins and no agent tools), and the
+card holds up in Light, Dim and Dark at 1280 and at 390.
+
+The **#348 pass** grew the same file into the epic's test plan: two helpers live at once with
+both results folded in (A1), a result reaching a busy, an idle and a waiting parent — the wait
+resolved by the news, by its deadline and by a message (A2) — the reader steering, Stopping and
+continuing a child (A5), an `ask` tool denied in a child with no prompt anywhere (A6), the types
+on offer with an unknown one and an edit between two starts (A7), nesting to the depth cap and
+the live-task cap (A8), a stopped parent that leaves its helpers running and a rewind that stops
+one (A9, A10), a delete over the whole tree and a chat's usage including its descendants
+(A11, A14), a chat that never used subagents (A17), and — both found by the pass — a helper
+parked in a task wait whose Stop reads **stopped** rather than the `done` an `idle` delivery
+draws ([#373](https://github.com/amirtuval/openharness/issues/373)), and a sidebar group that
+stops claiming work is running once its helpers have finished
+([#374](https://github.com/amirtuval/openharness/issues/374)). `cli-subagents.spec.ts`
+adds the terminal's half of the nesting (A12), the two clients agreeing on one task (A15) and
+the card and `/agents` at 120 and 80 columns (A16); `w31-restart.spec.ts` is A13 — a kill
+between a child's turn and its news, opt-in with `QA_ALLOW_SERVER_RESTART=1` like `w14`. The
+real-model cases (A1 and A4) are a `test.describe` skipped unless `QA_MODEL` names a provider.
+
 ### What the pass needs on the stack
 
-| variable                            | what it enables                                                                                  |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `QA_BASE_URL`                       | where the system under test lives (`http://localhost:3000`)                                      |
-| `QA_DEV_EMAIL` / `QA_DEV_PASSWORD`  | the dev user's credentials, when a stack configures them differently                             |
-| `QA_WITH_CLI=1`                     | the `oh` specs (needs `tmux` and a built `apps/tui`)                                             |
-| `QA_ALLOW_SERVER_RESTART=1`         | the scenarios that recreate the server container (W11f, W14)                                     |
-| `QA_PROVIDER` / `QA_PROVIDER_KEY`   | a key the pass may store for real (W11f, W17b); `QA_PROVIDER_KEY_2` for replace                  |
-| `QA_MISSING_MODEL`                  | the model whose provider the pass has no key for — W11e (default `groq/llama-3.3-70b-versatile`) |
-| `QA_MODEL=openai/gpt-4.1-mini`      | a real-model pass; without it the stack runs the mock                                            |
-| `QA_SHOT_DIR` / `QA_OH_CONFIG_HOME` | where screenshots and the CLI's credentials go                                                   |
-| `QA_COMPOSE_ARGS`                   | extra `docker compose` arguments, for a stack that is not plain `docker-compose.yml`             |
+| variable                                   | what it enables                                                                                                                                                                                             |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QA_BASE_URL`                              | where the system under test lives (`http://localhost:3000`)                                                                                                                                                 |
+| `QA_DEV_EMAIL` / `QA_DEV_PASSWORD`         | the dev user's credentials, when a stack configures them differently                                                                                                                                        |
+| `QA_WITH_CLI=1`                            | the `oh` specs (needs `tmux` and a built `apps/tui`)                                                                                                                                                        |
+| `QA_ALLOW_SERVER_RESTART=1`                | the scenarios that recreate the server container (W11f, W14, W31's restart)                                                                                                                                 |
+| `QA_MAX_AGENT_DEPTH` / `QA_MAX_LIVE_TASKS` | what `OPENHARNESS_MAX_AGENT_DEPTH` / `OPENHARNESS_MAX_LIVE_TASKS` the **stack** runs (3 / 10); the A8 cases lower their assertion to a skip that names the variable when they are not small enough to reach |
+| `QA_PROVIDER` / `QA_PROVIDER_KEY`          | a key the pass may store for real (W11f, W17b); `QA_PROVIDER_KEY_2` for replace                                                                                                                             |
+| `QA_MISSING_MODEL`                         | the model whose provider the pass has no key for — W11e (default `groq/llama-3.3-70b-versatile`)                                                                                                            |
+| `QA_MODEL=openai/gpt-4.1-mini`             | a real-model pass; without it the stack runs the mock                                                                                                                                                       |
+| `QA_SHOT_DIR` / `QA_OH_CONFIG_HOME`        | where screenshots and the CLI's credentials go                                                                                                                                                              |
+| `QA_COMPOSE_ARGS`                          | extra `docker compose` arguments, for a stack that is not plain `docker-compose.yml`                                                                                                                        |
 
 The sign-in page's provider buttons only exist when the server has OAuth clients configured
 (A1), so W15 skips that half unless the stack was started with them — dummy values are enough,

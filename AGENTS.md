@@ -10,8 +10,9 @@ v1 (chat server, web UI, TUI), authentication (epic #65: sign-in, ownership, per
 keys), model-first chat (epic #92), deployment (epic #148), Chat and TUI UX pass 1 (epic
 #201), model selection (epic #245), context compaction (epic #277) and tools (epic #303: the
 tool loop, built-in tools, provider-native web search, context management, per-user settings,
-pausing for the user and remote MCP servers with OAuth) are built; subagents (epic #340) and
-skills (epic #349) are next
+pausing for the user and remote MCP servers with OAuth) are built, and so are subagents and
+background tasks (epic #340: the session tree, subagent types, the task inbox, the five tools
+and both clients); skills (epic #349) are next
 ([`docs/ROADMAP.md`](./docs/ROADMAP.md)), and what a tool may reach is
 [`docs/threat-model.md`](./docs/threat-model.md). Each package's `AGENTS.md` describes what that
 package implements today.

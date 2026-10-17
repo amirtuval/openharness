@@ -13,6 +13,7 @@ import type {
   SessionTaskNotificationEvent,
   StoredEvent,
   TaskId,
+  TaskStatus,
 } from '@openharness/protocol'
 import type { Client } from '@openharness/client'
 import { describe, expect, it } from 'vitest'
@@ -61,6 +62,15 @@ function notificationsOf(
   taskId: TaskId,
 ): SessionTaskNotificationEvent[] {
   return of(log, EVENT_TYPES.sessionTaskNotification).filter((event) => event.task_id === taskId)
+}
+
+/** What the log's newest status says the task is doing, or `null` when it holds none. */
+function statusOf(log: readonly StoredEvent[], taskId: TaskId): TaskStatus | null {
+  return (
+    of(log, EVENT_TYPES.sessionTaskStatus)
+      .filter((event) => event.task_id === taskId)
+      .at(-1)?.status ?? null
+  )
 }
 
 /**
@@ -208,6 +218,57 @@ describe('a subagent through the real server', () => {
         .filter((event) => event.task_id === first.taskId)
         .at(-1)?.status,
     ).toBe('stopped')
+  })
+
+  it('reads a person’s Stop on a running child as stopped, and restarts it after (S7; #348)', async () => {
+    const server = await harness.server()
+    const client: Client = await harness.client(server)
+    const session = await client.sessions.create({ model: { id: 'anthropic/claude-sonnet-5' } })
+
+    // A helper that has reported once, then steered into `__hold__` — a turn that never ends until
+    // something aborts it, which is exactly what a reader's Stop is.
+    await say(client, session.id, `${MOCK_AGENT_MARKER} general-purpose | Report the tail.`)
+    const started = startOf(await readLog(client, session.id))
+    await waitFor(
+      `the helper to report`,
+      async () => notificationsOf(await readLog(client, session.id), started.taskId)[0],
+      { timeoutMs: 30_000 },
+    )
+    await say(client, session.id, `${MOCK_AGENT_MESSAGE_MARKER} ${started.taskId} | __hold__`)
+    await waitFor(
+      `the helper to be running again`,
+      async () => statusOf(await readLog(client, session.id), started.taskId) === 'running',
+      { timeoutMs: 30_000 },
+    )
+
+    // The reader's Stop — the web card's Stop, `oh`'s `/agents` → `s` and Esc in a child are all
+    // this — is one `user.interrupt` to the child session (S1/S7).
+    await client.interrupt(started.child)
+
+    // The parent's log says **stopped**, not `idle`, so the card reads stopped rather than **done**
+    // (S9), and the news says plainly that the user stopped the helper — not that it finished.
+    const afterStop = await waitFor(
+      `the parent to be told the helper was stopped`,
+      async () => {
+        const log = await readLog(client, session.id)
+        return statusOf(log, started.taskId) === 'stopped' ? log : undefined
+      },
+      { timeoutMs: 30_000 },
+    )
+    const news = notificationsOf(afterStop, started.taskId)
+    expect(news).toHaveLength(2)
+    const stoppedNews = news.at(-1)
+    expect(stoppedNews?.kind).toBe('result')
+    expect(stoppedNews?.text).toContain('stopped this subagent')
+    expect(stoppedNews?.text).not.toContain('finished a turn')
+
+    // A later message restarts it as usual (S7): a stopped child can be continued.
+    await say(client, session.id, `${MOCK_AGENT_MESSAGE_MARKER} ${started.taskId} | carry on`)
+    await waitFor(
+      `the stopped helper to run again`,
+      async () => statusOf(await readLog(client, session.id), started.taskId) === 'running',
+      { timeoutMs: 30_000 },
+    )
   })
 
   it('delivers a child’s own note, and a failing child’s error', async () => {

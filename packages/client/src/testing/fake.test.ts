@@ -22,6 +22,7 @@ import type {
 } from '@openharness/protocol'
 import {
   fixtureTimestamp,
+  makeChildSession,
   makeMcpServer,
   makeMode,
   makeModelEntry,
@@ -1077,6 +1078,57 @@ describe('the fake deletes a session (#111)', () => {
     await expect(fake.sessions.get(other.id)).resolves.toEqual(other)
     await expect(fake.sessions.delete(other.id)).resolves.toBeUndefined()
     await expect(fake.sessions.get(other.id)).rejects.toMatchObject({ status: 404 })
+  })
+})
+
+describe('the fake session tree (#340, S1/S3; #361)', () => {
+  it('lists top-level chats by default, and one chat’s children with a parent filter', async () => {
+    // A child is a real session with a parent and is never a chat of its own, so the route
+    // answers the caller's **top-level** chats and narrows that to one chat's children with
+    // `?parent_session_id=`. The fake used to ignore the filter and answer everything, which is
+    // why the web app carried a test-support shim re-implementing the rule on top of it.
+    const fake = createFakeClient()
+    const child = makeChildSession(fake.session, { title: 'Check the changelog' })
+    const grandchild = makeChildSession(child, { title: 'Read the issue' })
+    const other = await fake.sessions.create({ agent: fake.agent.id })
+    fake.addSession(child)
+    fake.addSession(grandchild)
+
+    const topLevel = await fake.sessions.list()
+    expect(topLevel.data.map((session) => session.id).sort()).toEqual(
+      [fake.session.id, other.id].sort(),
+    )
+
+    const children = await fake.sessions.list({ parent_session_id: fake.session.id })
+    expect(children.data.map((session) => session.id)).toEqual([child.id])
+
+    // A `parent_session_id` of the child answers its own children, and one nothing hangs off
+    // answers nothing rather than the whole list.
+    expect(
+      (await fake.sessions.list({ parent_session_id: child.id })).data.map((s) => s.id),
+    ).toEqual([grandchild.id])
+    expect((await fake.sessions.list({ parent_session_id: other.id })).data).toEqual([])
+    // No parent is the top-level filter, spelled either way.
+    expect((await fake.sessions.list({ parent_session_id: undefined })).data).toHaveLength(2)
+  })
+
+  it('deletes a chat’s descendants with it', async () => {
+    // #341: a child belongs to its parent, so a delete reaches the whole subtree — the store
+    // holds no session left pointing at one that is gone.
+    const fake = createFakeClient()
+    const child = makeChildSession(fake.session)
+    const grandchild = makeChildSession(child)
+    const other = await fake.sessions.create({ agent: fake.agent.id })
+    fake.addSession(child)
+    fake.addSession(grandchild)
+
+    await fake.sessions.delete(fake.session.id)
+
+    for (const gone of [child, grandchild]) {
+      await expect(fake.sessions.get(gone.id)).rejects.toMatchObject({ status: 404 })
+    }
+    await expect(fake.sessions.get(other.id)).resolves.toEqual(other)
+    expect((await fake.sessions.list()).data.map((session) => session.id)).toEqual([other.id])
   })
 })
 
