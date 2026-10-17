@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react'
 
 import type { ChatViewState } from '../chat/session'
 import { PALETTE, paint, type TerminalTheme } from '../markdown/theme'
-import { spanWidth, truncateSpans, type Span } from '../markdown/text'
+import { sanitizeSpans, spanWidth, truncateSpans, type Span } from '../markdown/text'
 import { CURSOR_COLUMNS } from './message-view'
 import { useTerminalTheme } from './theme'
 
@@ -528,7 +528,14 @@ function joined(segments: readonly Segment[]): Span[] {
 
 /** The segments as one run of spans, painted — `NO_COLOR` drops the paint, not the text. */
 function lineSpans(segments: readonly Segment[], theme: TerminalTheme): Span[] {
-  return joined(segments).map((span) => ({ ...span, color: paint(theme, span.color) }))
+  // Sanitised here as well, and not only where the spans are built: the model's own display
+  // name and the id a reader typed are text off the wire, and this line draws them beside the
+  // chat's own (issue #368). `fitSegments` only reaches `truncateSpans` when the line is too
+  // wide, so a line that fits would otherwise be the one path that skipped the sanitiser.
+  return sanitizeSpans(joined(segments)).map((span) => ({
+    ...span,
+    color: paint(theme, span.color),
+  }))
 }
 
 /** The width of the line the segments would draw, separators included. */

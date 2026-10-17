@@ -1,6 +1,5 @@
 import type {
   TaskCard,
-  TaskCardStatus,
   TaskMessage,
   TranscriptEntry,
   SessionUsageTotals,
@@ -81,21 +80,6 @@ function entryPosition(entry: TranscriptEntry): number {
     case 'summary':
       return entry.summary.position
   }
-}
-
-/**
- * Whether a task is still working — the one state a card offers **Stop** in, and the only one it
- * follows the child's stream for.
- *
- * A finished task's activity line would be a line about nothing (the child is not doing
- * anything), and watching it would hold an SSE connection open for a card nobody can act on:
- * `watchTaskActivity`'s reference count exists for exactly this, and a card that is done has
- * nothing to watch.
- *
- * @param status the status the card draws, after {@link taskCardStatus} refined it
- */
-export function taskIsLive(status: TaskCardStatus): boolean {
-  return status === 'running' || status === 'waiting'
 }
 
 /**

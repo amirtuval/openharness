@@ -1,10 +1,4 @@
-import type {
-  McpServerId,
-  ModeId,
-  ModeToolOverride,
-  ReasoningEffort,
-  UserId,
-} from '@openharness/protocol'
+import type { ModeId, ModeToolOverride, ReasoningEffort, UserId } from '@openharness/protocol'
 
 /**
  * Subagents, brain-side (epic #340): the **system prompt** a child runs with, and the
@@ -178,19 +172,15 @@ export interface SubagentParent {
  * what a child runs is what a chat on that mode would run, and a parent that wants its helper
  * to change is a user who edits the mode they already have.
  *
- * Two spellings of the tool half, and neither is spare:
- *
- * - `toolOverride` is the **patch** the type imposes (`Mode.tools`, or the parent's own mode's
- *   for {@link GENERAL_PURPOSE_TYPE}) — what a caller that creates the child **on the mode**
- *   passes on, so the child follows it live exactly as a chat does; and
- * - `tools` and `mcpServers` are that patch **applied to the owner's settings**, which is the
- *   set a child really has: the loop's own answer (`apps/server`'s `effectiveTools` and
- *   `listMcpServersInForce`), for a caller that builds the child's turn options itself. A
- *   caller must not compute this a second way: "the tools this child has" and "the tools this
- *   request offers" are one answer, and the server is where it is computed.
- *
- * `tools` is a list of **names** and `mcpServers` a list of server ids: policies stay the
- * user's (E6), so a type says which tools a child has and never what a call to one may do.
+ * One spelling of the tool half, and the caller does not compute it: `toolOverride` is the
+ * **patch** the type imposes (`Mode.tools`, or the parent's own mode's for
+ * {@link GENERAL_PURPOSE_TYPE}) — what a caller that creates the child **on the mode**
+ * (`modeId`) passes on, so the child follows it live exactly as a chat does. The child's
+ * *effective* tool set is then the one the loop resolves for its every request, through the
+ * same `effectiveTools`/`listMcpServersInForce` a chat's request goes through (#365):
+ * "the tools this child has" and "the tools its request offers" are one answer, and computing
+ * it here would be a second one that nothing reads and nothing keeps honest. Policies stay the
+ * user's (E6) either way.
  */
 export interface ResolvedSubagentType {
   /** The type's name, as it was asked for. */
@@ -223,10 +213,6 @@ export interface ResolvedSubagentType {
    * this chat has" in the one vocabulary a tool override has.
    */
   readonly toolOverride: ModeToolOverride | null
-  /** The built-in tools the child has, by name — the patch applied to the owner's settings. */
-  readonly tools: readonly string[]
-  /** The ids of the remote MCP servers in force for the child. */
-  readonly mcpServers: readonly McpServerId[]
 }
 
 /**

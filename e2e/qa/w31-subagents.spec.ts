@@ -1,14 +1,37 @@
+import type { APIRequestContext } from '@playwright/test'
+
 import {
+  agentToolResults,
   createChat,
+  deleteModeNamed,
+  ensureMode,
+  deleteChat,
   expect,
   expectNoErrorBanner,
+  ensureDefaultModel,
+  getSession,
+  isRealModel,
+  listChildren,
+  offeredTools,
   openChat,
+  QA_MODEL,
+  readEvents,
   sendFromComposer,
+  sendMessage,
+  sessionUsage,
   setStoredTheme,
+  setToolSetting,
   shot,
   shotOf,
+  taskEvents,
   test,
-  uniqueName,
+  transcript,
+  updateMode,
+  waitForAnswer,
+  waitForIdle,
+  waitForTaskNotification,
+  waitForTaskStatus,
+  waitForTurnEnd,
 } from './support'
 
 /**
@@ -36,6 +59,18 @@ const TYPE = 'general-purpose'
 
 /** The description the mock derives from the prompt (its first line, collapsed). */
 const DESCRIPTION = 'Check the release notes for 1.2'
+
+/**
+ * The limits the stack under test was started with (S6).
+ *
+ * Both have deployment defaults (3 and 10, `OPENHARNESS_MAX_AGENT_DEPTH` /
+ * `OPENHARNESS_MAX_LIVE_TASKS`), and the cases that exercise them need a stack whose values
+ * are small enough to reach in a scenario. The screen name of what the stack runs is
+ * `QA_MAX_AGENT_DEPTH` / `QA_MAX_LIVE_TASKS`; the cases that need them lower their assertion to
+ * a skip that says which variable to set, rather than starting ten helpers at a default of ten.
+ */
+const MAX_DEPTH = Number(process.env.QA_MAX_AGENT_DEPTH ?? '3')
+const MAX_LIVE_TASKS = Number(process.env.QA_MAX_LIVE_TASKS ?? '10')
 
 /** The card in the open transcript. */
 function card(page: Parameters<typeof shot>[0]) {
@@ -105,6 +140,9 @@ test.describe('W31 subagents', () => {
 
       await group.getByRole('button').click()
       await expect(group.getByRole('link')).toHaveCount(1)
+      // The row is labelled with the description the parent model gave — which is the child's
+      // title (epic #340) — and not with the model it runs.
+      await expect(group.getByRole('link')).toHaveText(DESCRIPTION)
       await expectNoErrorBanner(page)
     })
 
@@ -206,14 +244,14 @@ test.describe('W31 subagents', () => {
       await shotOf(card(page), 'w31-06-task-running')
     })
 
-    await test.step('Stop interrupts the child', async () => {
+    await test.step('Stop interrupts the child, and the card reads stopped', async () => {
       await task.locator('[data-slot="task-stop"]').click()
 
-      // The child's turn ends, and the brain announces every ended child turn as a `result` with
-      // `status: idle` — so the card reads **done**. `stopped` is what `agent_stop` writes, a
-      // tool only the parent *model* calls; a reader's Stop has no route that writes it. The
-      // task has really stopped (its child is not running), and #346's PR records the gap.
-      await expect(task.locator('[data-slot="task-status"]')).not.toHaveText('running')
+      // The child's turn ends because of the reader's `user.interrupt`, so the brain announces it
+      // as a **stop** — `status: stopped` and a result that says the user stopped the helper
+      // (S7; #348). Read as `idle`, the card would say **done** and the parent model would believe
+      // the helper finished, which is the gap #346 and #347 both recorded.
+      await expect(task.locator('[data-slot="task-status"]')).toHaveText('stopped')
       await expect(task.locator('[data-slot="task-stop"]')).toHaveCount(0)
       await expectNoErrorBanner(page)
       await shotOf(card(page), 'w31-07-task-stopped')
@@ -224,20 +262,27 @@ test.describe('W31 subagents', () => {
 
   test('W31c a described mode is a subagent type, and the agent tools are listed (#342; #346)', async ({
     page,
+    request,
     consoleErrors,
   }) => {
     await page.goto('/#/settings')
     await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
 
     await test.step('the editor asks for a subagent description', async () => {
+      // A **fixed** name, cleared first: the account is the stack's own and keeps its modes, so a
+      // unique name per run would leak one each time and meet the twenty-mode limit (#348's
+      // re-runs did exactly that), while a fixed one reuses the row it made last time. The reload
+      // is for the row this tab still holds: it was deleted through the API, and a person who
+      // deleted from another tab would see the list without it.
+      const name = 'qa-mode-field'
+      await deleteModeNamed(request, name)
+      await page.reload()
+      await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
+
       await page.getByRole('button', { name: 'Create mode' }).click()
       const dialog = page.getByRole('dialog')
       await expect(dialog.getByLabel('Subagent description')).toBeVisible()
       await expect(dialog.getByText(/subagent type/)).toBeVisible()
-
-      // A fresh name every run: the stack's account keeps its modes, and a second run of this
-      // spec would otherwise be answered with the 409 a duplicate name gets.
-      const name = uniqueName('researcher')
       await dialog.getByLabel('Name').fill(name)
       await dialog.getByLabel(/My default model/).check()
       await dialog.getByLabel('Subagent description').fill('Reviews a diff for correctness bugs.')
@@ -267,6 +312,15 @@ test.describe('W31 subagents', () => {
         const row = tools.locator(`[data-slot="tool-row"][data-tool="${name}"]`)
         await expect(row).toHaveCount(1)
         await expect(row.locator('[data-slot="tool-default"]')).toContainText('allow')
+        // **And no "Ask me first" for four of the five** (#368). A call to them is kept out of
+        // the transcript's tool calls — a card stands in for the `agent` call — so an `ask`
+        // would pause the parent's turn with no prompt any client could draw; the server
+        // refuses the write, and the card does not offer the value. `agent_wait` is the
+        // control: its own pause outranks the permission, so `ask` is a value it can take.
+        const options = await row.locator(`#tool-policy-${name} option`).allTextContents()
+        expect(options).toEqual(
+          name === 'agent_wait' ? ['Allow', 'Ask me first', 'Deny'] : ['Allow', 'Deny'],
+        )
       }
       await shot(page, 'w31-10-settings-tools-agent')
     })
@@ -320,5 +374,1052 @@ test.describe('W31 subagents', () => {
     }
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
+
+  test('W31e two helpers work at once: two cards, and both results reach the parent (A1)', async ({
+    page,
+    request,
+    consoleErrors,
+  }) => {
+    const chat = await createChat(request)
+    await openChat(page, chat.id)
+    const cards = page.locator('[data-slot="task-card"]')
+
+    await test.step('two helpers are started and both are live at once', async () => {
+      await sendFromComposer(page, `__agent__ ${TYPE} | __slow__ list three fruits`)
+      await expect(cards).toHaveCount(1)
+      await expect(cards.first().locator('[data-slot="task-status"]')).toHaveText('running')
+      // The live line is the child's own stream, so a card that shows one is a card whose child
+      // really is being followed (#345).
+      await expect(cards.first().locator('[data-slot="task-activity-line"]')).toBeVisible()
+      await expectNoErrorBanner(page)
+      await shot(page, 'w31-13-two-helpers-one')
+
+      await sendFromComposer(page, `__agent__ ${TYPE} | __slow__ list three colours`)
+      await expect(cards).toHaveCount(2)
+      await expect(cards.nth(1).locator('[data-slot="task-status"]')).toHaveText('running')
+      await shot(page, 'w31-14-two-helpers-running')
+    })
+
+    await test.step('the reader keeps talking to the parent while both run', async () => {
+      // The parent is idle between its two `agent` calls, so this is an ordinary message: the
+      // point is that two helpers running do not stop the chat being a chat (S1).
+      await sendFromComposer(page, 'still there?')
+      await waitForAnswer(page, 'still there?')
+      await expectNoErrorBanner(page)
+    })
+
+    await test.step('both cards finish, each with its own result', async () => {
+      await expect(cards.first().locator('[data-slot="task-status"]')).toHaveText('done', {
+        timeout: 60_000,
+      })
+      await expect(cards.nth(1).locator('[data-slot="task-status"]')).toHaveText('done', {
+        timeout: 60_000,
+      })
+      // Each card is its own task: a description derived from its own prompt, and a result that
+      // is its own child's final message (the mock's slow reply, counted off).
+      await expect(cards.first().locator('[data-slot="task-description"]')).toContainText('fruits')
+      await expect(cards.nth(1).locator('[data-slot="task-description"]')).toContainText('colours')
+      await cards.first().getByRole('button', { name: 'Result' }).click()
+      await expect(cards.first().locator('[data-slot="task-result"]')).toContainText('part 40/40')
+      await cards.nth(1).getByRole('button', { name: 'Result' }).click()
+      await expect(cards.nth(1).locator('[data-slot="task-result"]')).toContainText('part 40/40')
+      // Both tasks ended with an `idle` delivery — two cards, two results, and no status left
+      // `running` (S4).
+      const statuses = (await taskEvents(request, chat.id))
+        .filter((event) => event.type === 'session.task_status')
+        .map((event) => event.status)
+      expect(statuses.filter((status) => status === 'idle')).toHaveLength(2)
+      await expectNoErrorBanner(page)
+      await shot(page, 'w31-15-two-helpers-done')
+    })
+
+    await test.step('the sidebar counts both under the chat, and settles', async () => {
+      const group = sidebarGroup(page)
+      await expect(group).toBeVisible()
+      await expect(group.getByRole('button')).toHaveText(/2 subagents/)
+      // Both helpers have finished, so nothing is working: the group's running count and its coral
+      // dot have to move with the cards, or the sidebar claims work is in flight when none is
+      // (#374 — the report the shell hears was keyed on how *many* tasks there are, so a helper
+      // finishing changed nothing it could see).
+      await expect(group.getByRole('button')).toHaveText(/^2 subagents$/)
+      await expect(group.locator('[data-slot="chat-children-running"]')).toHaveCount(0)
+      await expectNoErrorBanner(page)
+    })
+
+    expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
+
+  test('W31f a result reaches a busy, an idle and a waiting parent (A2)', async ({ request }) => {
+    /** The last status event before `seq` — what the parent was doing when the news arrived. */
+    const statusBefore = async (sessionId: string, seq: number): Promise<string | undefined> => {
+      const log = await readEvents(request, sessionId)
+      const before = log
+        .filter(
+          (event) => String(event.type).startsWith('session.status_') && Number(event.seq) < seq,
+        )
+        .at(-1)
+      return before === undefined ? undefined : String(before.type)
+    }
+
+    /** What the session's `agent_wait` call was finally answered with — its own result. */
+    const waitResultText = async (sessionId: string, timeoutMs = 60_000): Promise<string> => {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        const log = await readEvents(request, sessionId)
+        const call = log.find(
+          (event) => event.type === 'agent.tool_use' && event.name === 'agent_wait',
+        )
+        const result = log.find(
+          (event) => event.type === 'agent.tool_result' && event.tool_use_id === call?.id,
+        )
+        if (result !== undefined) {
+          return ((result.content ?? []) as { text?: string }[])
+            .map((block) => block.text ?? '')
+            .join('')
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`session ${sessionId} never resolved its agent_wait call`)
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+    }
+
+    await test.step('idle: the news starts a parent turn of its own', async () => {
+      const chat = await createChat(request)
+      await sendMessage(request, chat.id, `__agent__ ${TYPE} | report the idle case`)
+      await waitForTaskNotification(request, chat.id, 'result')
+      const notification = (await taskEvents(request, chat.id)).find(
+        (event) => event.type === 'session.task_notification',
+      )
+      expect(notification, 'the child reported').toBeDefined()
+      // The parent was idle when it arrived — and its log holds a turn after it that nobody
+      // asked for: a notification is a queued event, so a signal starts the turn that folds it
+      // in (S4).
+      expect(await statusBefore(chat.id, notification?.seq ?? 0)).toBe('session.status_idle')
+      await waitForIdle(request, chat.id)
+      const log = await readEvents(request, chat.id)
+      const after = log.filter(
+        (event) =>
+          String(event.type) === 'session.status_running' &&
+          Number(event.seq) > (notification?.seq ?? 0),
+      )
+      expect(after, 'the notification started a turn').not.toHaveLength(0)
+    })
+
+    await test.step('busy: the news waits for the request in flight', async () => {
+      const chat = await createChat(request)
+      // The test background task reports after two seconds; the parent's own reply is a
+      // ten-second one, so the news lands while a request is open.
+      const started = await sendMessage(request, chat.id, '__task__ 2000')
+      await waitForTurnEnd(request, chat.id, started)
+      await sendMessage(request, chat.id, '__slow__ a long reply while the task works')
+      await waitForTaskNotification(request, chat.id, undefined, 1)
+      const notification = (await taskEvents(request, chat.id)).find(
+        (event) => event.type === 'session.task_notification',
+      )
+      // The turn was open: the news arrived *during* a request, so it is steering for the next
+      // one rather than the start of a turn (S4).
+      expect(await statusBefore(chat.id, notification?.seq ?? 0)).toBe('session.status_running')
+      await waitForIdle(request, chat.id, 60_000)
+      // And it did reach the model: the notification is claimed by a request, which is what
+      // "folded in" means in the log (P4).
+      const claimed = (await readEvents(request, chat.id)).some((event) =>
+        ((event.consumes ?? []) as unknown[]).includes(notification?.id ?? ''),
+      )
+      expect(claimed, 'a request claimed the queued notification').toBe(true)
+    })
+
+    await test.step('waiting: the news is the agent_wait result', async () => {
+      const chat = await createChat(request)
+      const armed = await sendMessage(request, chat.id, '__task__ 2000')
+      await waitForTurnEnd(request, chat.id, armed)
+      await sendMessage(request, chat.id, '__wait__ 30')
+      // The wait was open when the news arrived; the call's result *is* that news (S5), framed
+      // as data rather than as instructions.
+      const text = await waitResultText(chat.id)
+      expect(text, 'the framed notification is the result').toContain('background task')
+    })
+
+    await test.step('waiting: the deadline resolves it, naming what is still running', async () => {
+      const chat = await createChat(request)
+      await sendMessage(request, chat.id, '__wait__ 1')
+      const text = await waitResultText(chat.id)
+      expect(text).toContain('The wait timed out')
+    })
+
+    await test.step('a user message resolves it instead', async () => {
+      const chat = await createChat(request)
+      const waiting = await sendMessage(request, chat.id, '__wait__ 60')
+      // The wait has to be *open* before the message lands: the turn ends `waiting_on_tasks`,
+      // and the session is idle while the call is still unanswered (S5).
+      await waitForTurnEnd(request, chat.id, waiting)
+      await sendMessage(request, chat.id, 'never mind, do something else')
+      expect(await waitResultText(chat.id)).toBe('The user sent a message instead.')
+    })
+  })
+
+  test('W31p a helper parked in a wait is stopped from its card, and reads stopped (A9; #373)', async ({
+    page,
+    request,
+    consoleErrors,
+  }) => {
+    const chat = await createChat(request)
+    await openChat(page, chat.id)
+    // The child calls `agent_wait` itself, so it is idle *and* working: the card's fifth status.
+    await sendFromComposer(page, `__agent__ ${TYPE} | __wait__ 120 wait for something to report`)
+    const task = card(page)
+    await expect(task.locator('[data-slot="task-status"]')).toHaveText('waiting')
+    await expect(task.locator('[data-slot="task-stop"]')).toBeVisible()
+    await shotOf(task, 'w31-23-task-waiting')
+
+    // The reader's Stop is the child's `user.interrupt`, and a paused child is still working: the
+    // stop has to be recorded in the child's own log, its wait resolved, and the card read
+    // **stopped** rather than the `done` an `idle` delivery draws (S7; #373).
+    await task.locator('[data-slot="task-stop"]').click()
+    await expect(task.locator('[data-slot="task-status"]')).toHaveText('stopped', {
+      timeout: 30_000,
+    })
+    await waitForTaskStatus(request, chat.id, 'stopped')
+    // Nothing moves it back afterwards: the newest task status is the stop, however long the
+    // child's wait had left to run (the #371 caveat, closed).
+    await page.waitForTimeout(2000)
+    const statuses = (await taskEvents(request, chat.id))
+      .filter((event) => event.type === 'session.task_status')
+      .map((event) => event.status)
+    expect(statuses.at(-1), 'the newest status is still stopped').toBe('stopped')
+    await expectNoErrorBanner(page)
+    await shotOf(card(page), 'w31-24-task-waiting-stopped')
+
+    expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
+
+  test('W31g the reader steers, interrupts and continues a child (A5)', async ({
+    page,
+    request,
+    consoleErrors,
+  }) => {
+    const chat = await createChat(request)
+    await openChat(page, chat.id)
+    await sendFromComposer(page, `__agent__ ${TYPE} | Keep the changelog current`)
+    await expect(card(page).locator('[data-slot="task-status"]')).toHaveText('done')
+    await card(page).getByRole('link', { name: 'Open' }).click()
+    await expect(page).toHaveURL(/#\/s\/sesn_/)
+    await expectNoErrorBanner(page)
+
+    await test.step('the child is a chat the reader can steer', async () => {
+      await sendFromComposer(page, 'one more pass over the tail')
+      await expect(
+        page.getByRole('log', { name: 'Conversation' }).getByText('one more pass over the tail'),
+      ).toBeVisible()
+      await expectNoErrorBanner(page)
+      await shot(page, 'w31-16-child-steered')
+    })
+
+    await test.step('Stop interrupts the child, and the reader can carry on', async () => {
+      // A turn that never ends on its own — the only thing a reader's Stop has to stop.
+      await sendFromComposer(page, '__hold__ keep going')
+      const stop = page.getByRole('button', { name: 'Stop', exact: true })
+      await expect(stop).toBeVisible()
+      await stop.click()
+      await expect(page.getByText('Interrupted')).toBeVisible()
+      await expectNoErrorBanner(page)
+      await shot(page, 'w31-17-child-interrupted')
+
+      // The child is a chat like any other: the next message runs another turn.
+      await sendFromComposer(page, 'carry on then')
+      await waitForAnswer(page, 'carry on then')
+      await expectNoErrorBanner(page)
+    })
+
+    await test.step('the breadcrumb leads back to the parent', async () => {
+      await page.locator('[data-slot="breadcrumb-link"]').first().click()
+      await openChat(page, chat.id)
+      await expectNoErrorBanner(page)
+    })
+
+    expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
+
+  test('W31h a child cannot ask: an ask policy is denied, and no prompt appears (A6)', async ({
+    page,
+    request,
+    consoleErrors,
+  }) => {
+    // The echo tool is this build's own, and a person may set it to `ask`. In a **child** that
+    // policy cannot be honoured, so the call is refused at once with the sentence S1 fixes and
+    // the turn carries on — and nothing on either client is ever offered a confirmation.
+    await setToolSetting(request, 'echo', { enabled: true, policy: 'ask' })
+    try {
+      const chat = await createChat(request)
+      await openChat(page, chat.id)
+      await sendFromComposer(page, `__agent__ ${TYPE} | try the echo tool`)
+      await expect(card(page).locator('[data-slot="task-status"]')).toHaveText('done')
+      const child = (await listChildren(request, chat.id))[0]
+      expect(child, 'the helper has a child session').toBeDefined()
+
+      await card(page).getByRole('link', { name: 'Open' }).click()
+      await expect(page).toHaveURL(/#\/s\/sesn_/)
+      await sendFromComposer(page, '__tool__ hello there')
+
+      const conversation = page.getByRole('log', { name: 'Conversation' })
+      await expect(
+        conversation.getByText(
+          "This tool needs the user's approval, which a non-interactive run cannot ask for.",
+        ),
+      ).toBeVisible()
+      // The turn carried on rather than pausing: no approval prompt, no sign of `ask_user`.
+      await expect(page.getByRole('button', { name: 'Allow once' })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Deny' })).toHaveCount(0)
+      await expectNoErrorBanner(page)
+      await shot(page, 'w31-18-child-ask-denied')
+
+      // The log itself: the call is `is_error` under the permission it was evaluated at, and the
+      // request the child was offered held no `ask_user` (S1).
+      const log = await readEvents(request, child?.id ?? '')
+      const call = log.find((event) => event.type === 'agent.tool_use')
+      const result = log.find(
+        (event) => event.type === 'agent.tool_result' && event.tool_use_id === call?.id,
+      )
+      expect(call?.evaluated_permission).toBe('ask')
+      expect(result?.is_error).toBe(true)
+      expect(await offeredTools(request, child?.id ?? '')).not.toContain('ask_user')
+    } finally {
+      await setToolSetting(request, 'echo', { enabled: true, policy: 'allow' })
+    }
+
+    expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
+
+  test('W31i the types on offer, an unknown one, and an edit between two starts (A7)', async ({
+    request,
+  }) => {
+    // A mode is usable only when its model can be used, and a **mock** stack has no provider
+    // key at all — so every mode here follows "my default model", the same spelling the CLI
+    // spec uses, and the account is given one first.
+    await ensureDefaultModel(request)
+    // Fixed names, brought to the state each case needs: the account is the QA stack's own and a
+    // user holds at most twenty modes, so a spec that created one per run would fail on the
+    // twenty-first (and a re-run would meet its own 409) — `ensureMode` is the re-runnable form.
+    const described = 'qa-reviewer'
+    const describedMode = await ensureMode(request, {
+      name: described,
+      model: 'my-default-model',
+      subagent_description: 'Reviews a diff for correctness bugs.',
+    })
+    const plain = 'qa-preset'
+    await ensureMode(request, {
+      name: plain,
+      model: 'my-default-model',
+      subagent_description: null,
+    })
+
+    await test.step('an unknown type is answered with the types that exist', async () => {
+      const chat = await createChat(request)
+      const asked = await sendMessage(request, chat.id, `__agent__ no-such-type | do the thing`)
+      await waitForTurnEnd(request, chat.id, asked)
+      const [refusal] = await agentToolResults(request, chat.id)
+      expect(refusal?.isError).toBe(true)
+      // `general-purpose` first, and only the modes that carry a description: the plain preset
+      // is a mode, not a kind of helper (S2).
+      expect(refusal?.text).toContain('general-purpose')
+      expect(refusal?.text).toContain(described)
+      expect(refusal?.text).not.toContain(plain)
+      const listed = refusal?.text.slice(refusal.text.indexOf(':') + 1) ?? ''
+      expect(listed.trim().split(',')[0]?.trim()).toBe('general-purpose')
+    })
+
+    await test.step('a mode whose model cannot be used is an is_error the model acts on', async () => {
+      // A mode's model is only usable when the account has a key for its provider, and a mock
+      // stack has none — so every mode here is refused, with a sentence that tells the model what
+      // to do instead rather than throwing (S2). The start that *does* work is `general-purpose`.
+      const chat = await createChat(request)
+      const refusedStart = await sendMessage(
+        request,
+        chat.id,
+        `__agent__ ${described} | start with a mode`,
+      )
+      await waitForTurnEnd(request, chat.id, refusedStart)
+      const [refused] = await agentToolResults(request, chat.id)
+      expect(refused?.isError).toBe(true)
+      expect(refused?.text).toContain(described)
+      expect(refused?.text).toContain('cannot be started')
+
+      // The built-in type always works: it is the parent continued, so it needs no mode.
+      const working = await sendMessage(request, chat.id, `__agent__ ${TYPE} | do it here`)
+      await waitForTurnEnd(request, chat.id, working)
+      await waitForTaskStatus(request, chat.id, 'idle')
+      const results = await agentToolResults(request, chat.id)
+      expect(results.at(-1)?.isError ?? false).toBe(false)
+      expect(results.at(-1)?.text).toContain('Started general-purpose')
+    })
+
+    await test.step('an edit between two calls changes what the next one is offered', async () => {
+      // The mock stack has no provider key, so **no** mode's model is usable here (a type's
+      // availability is a credential question) — but the listing is not: a mode with no
+      // description is a preset, and the resolver runs per call, so describing one between two
+      // `agent` calls makes it a type on the **second** (M6's live-follow, S2; #342).
+      const chat = await createChat(request)
+      const late = 'qa-late-type'
+      const mode = await ensureMode(request, {
+        name: late,
+        model: 'my-default-model',
+        subagent_description: null,
+      })
+
+      const firstAsk = await sendMessage(request, chat.id, '__agent__ no-such-type | who is there?')
+      await waitForTurnEnd(request, chat.id, firstAsk)
+      const [before] = await agentToolResults(request, chat.id)
+      expect(before?.isError).toBe(true)
+      expect(before?.text).toContain('general-purpose')
+      expect(before?.text).not.toContain(late)
+
+      await updateMode(request, mode.id, { subagent_description: 'Handles the late case.' })
+      const secondAsk = await sendMessage(request, chat.id, '__agent__ no-such-type | and now?')
+      await waitForTurnEnd(request, chat.id, secondAsk)
+      const results = await agentToolResults(request, chat.id)
+      expect(results.at(-1)?.text, 'the edited mode is a type on the next call').toContain(late)
+    })
+
+    await test.step('the agent tools are the ones a settings screen can see', async () => {
+      const chat = await createChat(request)
+      const plainTurn = await sendMessage(request, chat.id, 'hello')
+      await waitForTurnEnd(request, chat.id, plainTurn)
+      const offered = await offeredTools(request, chat.id)
+      for (const name of ['agent', 'agent_message', 'agent_wait', 'agent_stop']) {
+        expect(offered, `a top-level chat is offered ${name}`).toContain(name)
+      }
+      // The child's half is not a top-level chat's tool.
+      expect(offered).not.toContain('message_parent')
+      // A type started from a mode leaves the mode as it was — the settings screen reads it.
+      expect((await request.get(`/v1/me/modes/${describedMode.id}`)).status()).toBe(200)
+    })
+  })
+
+  test('W31j nesting to the max depth, and the live-task cap (A8)', async ({ request }) => {
+    test.skip(
+      MAX_DEPTH > 2,
+      'set QA_MAX_AGENT_DEPTH=2 on the stack so a grandchild is already at the limit',
+    )
+    const chat = await createChat(request)
+
+    await test.step('the deepest allowed child is not offered the parent-side tools', async () => {
+      const levelOne = await sendMessage(request, chat.id, `__agent__ ${TYPE} | level one`)
+      await waitForTurnEnd(request, chat.id, levelOne)
+      await waitForTaskStatus(request, chat.id, 'idle')
+      const child = (await listChildren(request, chat.id))[0]
+      expect((await getSession(request, child?.id ?? '')).depth).toBe(1)
+
+      // A child at depth 1 may still start one (the cap is exclusive of the limit), so the
+      // grandchild sits at depth 2 — the limit itself.
+      const levelTwo = await sendMessage(request, child?.id ?? '', `__agent__ ${TYPE} | level two`)
+      await waitForTurnEnd(request, child?.id ?? '', levelTwo)
+      await waitForTaskStatus(request, child?.id ?? '', 'idle')
+      const grandchild = (await listChildren(request, child?.id ?? ''))[0]
+      expect((await getSession(request, grandchild?.id ?? '')).depth).toBe(2)
+
+      const offered = await offeredTools(request, grandchild?.id ?? '')
+      expect(offered, 'the deepest child may not nest further').not.toContain('agent')
+      expect(offered).not.toContain('agent_message')
+      expect(offered).not.toContain('agent_wait')
+      expect(offered).not.toContain('agent_stop')
+      // It is still a child, so it can talk to the chat above it.
+      expect(offered).toContain('message_parent')
+    })
+
+    await test.step('the live-task cap refuses with an is_error', async () => {
+      test.skip(
+        MAX_LIVE_TASKS > 2,
+        'set QA_MAX_LIVE_TASKS=2 on the stack so the cap is reachable in a scenario',
+      )
+      const busy = await createChat(request)
+      const held: string[] = []
+      try {
+        for (let index = 0; index < MAX_LIVE_TASKS; index += 1) {
+          const hold = await sendMessage(
+            request,
+            busy.id,
+            `__agent__ ${TYPE} | __hold__ helper ${String(index)}`,
+          )
+          await waitForTurnEnd(request, busy.id, hold)
+        }
+        const children = await listChildren(request, busy.id)
+        expect(children, 'the cap allows exactly its number of live helpers').toHaveLength(
+          MAX_LIVE_TASKS,
+        )
+        held.push(...children.map((child) => child.id))
+
+        const tooMany = await sendMessage(request, busy.id, `__agent__ ${TYPE} | one too many`)
+        await waitForTurnEnd(request, busy.id, tooMany)
+        const results = await agentToolResults(request, busy.id)
+        const refusal = results.at(-1)
+        expect(refusal?.isError).toBe(true)
+        expect(refusal?.text).toContain('which is the limit')
+        expect(await listChildren(request, busy.id)).toHaveLength(MAX_LIVE_TASKS)
+      } finally {
+        // Leave the stack as it was found: a held turn would otherwise run for ever, and hold
+        // one of the deployment's concurrency slots for every scenario after this one.
+        for (const child of held) {
+          await request.post(`/v1/sessions/${child}/events`, {
+            data: { events: [{ type: 'user.interrupt' }] },
+          })
+        }
+        await deleteChat(request, busy.id)
+      }
+    })
+  })
+
+  test('W31k a stopped parent leaves its helpers running; a rewind stops one (A9, A10)', async ({
+    request,
+  }) => {
+    await test.step('interrupting the parent does not stop its helper', async () => {
+      const chat = await createChat(request)
+      const held = await sendMessage(request, chat.id, `__agent__ ${TYPE} | __hold__ keep working`)
+      await waitForTurnEnd(request, chat.id, held)
+      const child = (await listChildren(request, chat.id))[0]
+
+      // The parent's own reply, interrupted: a person's Stop is about the turn they are looking
+      // at, not about the tree below it (S7).
+      await sendMessage(request, chat.id, '__slow__ a long reply')
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      await request.post(`/v1/sessions/${chat.id}/events`, {
+        data: { events: [{ type: 'user.interrupt' }] },
+      })
+      await waitForIdle(request, chat.id)
+      expect(
+        (await getSession(request, child?.id ?? '')).status,
+        'the helper is still working',
+      ).toBe('running')
+      const statuses = (await taskEvents(request, chat.id)).map((event) => event.status)
+      expect(statuses).not.toContain('stopped')
+      await request.post(`/v1/sessions/${child?.id ?? ''}/events`, {
+        data: { events: [{ type: 'user.interrupt' }] },
+      })
+    })
+
+    await test.step('a rewind past the agent call stops the helper it started (S7)', async () => {
+      const chat = await createChat(request)
+      const first = await sendMessage(request, chat.id, `__agent__ ${TYPE} | __hold__ rewind me`)
+      await waitForTurnEnd(request, chat.id, first)
+      const child = (await listChildren(request, chat.id))[0]
+
+      // Edit and resend: the rewind and the edited message are one batch, so the chat restarts
+      // from the edit — and the helper the taken-back call started is work the reader said did
+      // not happen.
+      const response = await request.post(`/v1/sessions/${chat.id}/events`, {
+        data: {
+          events: [
+            { type: 'session.rewind', from_seq: first },
+            { type: 'user.message', content: [{ type: 'text', text: 'never mind' }] },
+          ],
+        },
+      })
+      expect(response.status(), await response.text()).toBe(200)
+      await waitForIdle(request, chat.id)
+
+      const statuses = (await taskEvents(request, chat.id)).map((event) => event.status)
+      expect(statuses, 'the helper was written stopped').toContain('stopped')
+      // And it stays stopped: nothing the child says afterwards may move the card again — the
+      // news from a task the log no longer names is dropped (S7, the #370 follow-up).
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      const after = (await taskEvents(request, chat.id)).filter(
+        (event) => event.status !== undefined,
+      )
+      expect(after.at(-1)?.status, 'the newest status is still stopped').toBe('stopped')
+      expect((await getSession(request, child?.id ?? '')).status).toBe('idle')
+    })
+  })
+
+  test('W31l deleting a chat takes its whole tree, and usage covers it (A11, A14)', async ({
+    request,
+  }) => {
+    test.skip(MAX_DEPTH < 2, 'set QA_MAX_AGENT_DEPTH=2 on the stack so three levels exist')
+    const chat = await createChat(request)
+    const firstLevel = await sendMessage(request, chat.id, `__agent__ ${TYPE} | level one`)
+    await waitForTurnEnd(request, chat.id, firstLevel)
+    await waitForTaskStatus(request, chat.id, 'idle')
+    const child = (await listChildren(request, chat.id))[0]
+    const secondLevel = await sendMessage(request, child?.id ?? '', `__agent__ ${TYPE} | level two`)
+    await waitForTurnEnd(request, child?.id ?? '', secondLevel)
+    await waitForTaskStatus(request, child?.id ?? '', 'idle')
+    const grandchild = (await listChildren(request, child?.id ?? ''))[0]
+    expect(grandchild, 'three levels of the tree').toBeDefined()
+
+    await test.step("a chat's usage includes its descendants (S8)", async () => {
+      const usage = await sessionUsage(request, chat.id)
+      expect(
+        usage.descendants.totals.output_tokens,
+        'the helpers’ tokens are in the bill',
+      ).toBeGreaterThan(0)
+      // The per-user read is unchanged: it has no `descendants` of its own.
+      const me = await request.get('/v1/me/usage')
+      expect(me.status()).toBe(200)
+      expect(Object.keys((await me.json()) as object)).not.toContain('descendants')
+    })
+
+    await test.step('deleting the parent deletes every descendant (S7)', async () => {
+      await deleteChat(request, chat.id)
+      for (const sessionId of [chat.id, child?.id ?? '', grandchild?.id ?? '']) {
+        expect((await request.get(`/v1/sessions/${sessionId}`)).status(), sessionId).toBe(404)
+      }
+    })
+  })
+
+  test('W31m a chat that never used subagents is unchanged (A17)', async ({ request }) => {
+    const chat = await createChat(request)
+    const ordinary = await sendMessage(request, chat.id, 'an ordinary message')
+    await waitForTurnEnd(request, chat.id, ordinary)
+    const types = (await readEvents(request, chat.id)).map((event) => String(event.type))
+    expect(types).toContain('agent.message')
+    expect(types.filter((type) => type.startsWith('session.task_'))).toHaveLength(0)
+
+    await test.step('turning the agent tools off takes them out of the request', async () => {
+      const names = ['agent', 'agent_message', 'agent_wait', 'agent_stop'] as const
+      for (const name of names) {
+        await setToolSetting(request, name, { enabled: false, policy: 'allow' })
+      }
+      try {
+        const turnedOff = await createChat(request)
+        const withoutTools = await sendMessage(request, turnedOff.id, 'no tools for you')
+        await waitForTurnEnd(request, turnedOff.id, withoutTools)
+        const offered = await offeredTools(request, turnedOff.id)
+        for (const name of names) {
+          expect(offered, `${name} is not offered`).not.toContain(name)
+        }
+        // Everything else is still there: one switch does not empty the offer.
+        expect(offered.length).toBeGreaterThan(0)
+      } finally {
+        for (const name of names) {
+          await setToolSetting(request, name, { enabled: true, policy: 'allow' })
+        }
+      }
+    })
+  })
+})
+
+/**
+ * The real-model half of the pass (A1, A4, A7 with a usable type).
+ *
+ * The mock's markers drive a scripted model; a real provider answers in its own words and calls
+ * the tools because it decided to, which is the one thing no mock can prove. Everything here is
+ * skipped unless `QA_MODEL` names a real model (`isRealModel`), and it runs against a stack
+ * **without** `OPENHARNESS_TEST_MODEL=mock` — the same gate the other `isRealModel` cases use.
+ *
+ * The prompts are explicit about the tools to call: a QA pass is evidence that the tools work
+ * end to end, not a study of how a model chooses them.
+ */
+test.describe('W31 real model (A1, A4)', () => {
+  test.skip(
+    !isRealModel,
+    'set QA_MODEL to a real provider/model and run the stack without the mock',
+  )
+
+  test('W31n two helpers of different types in one chat (A1)', async ({
+    page,
+    request,
+    consoleErrors,
+  }) => {
+    // A type is a mode with a description, and on a real stack the account has the key its model
+    // needs — so this is also A7's "a described mode is startable" case.
+    const name = 'qa-real-researcher'
+    await ensureMode(request, {
+      name,
+      model: QA_MODEL,
+      subagent_description: 'Looks something small up and reports it in one line.',
+    })
+
+    const chat = await createChat(request)
+    await openChat(page, chat.id)
+    await sendFromComposer(
+      page,
+      `Call the agent tool TWICE, in this one turn, starting two background subagents. ` +
+        `The first call: type "${name}", prompt "Reply with exactly: ALPHA". ` +
+        `The second call: type "general-purpose", prompt "Reply with exactly: BETA". ` +
+        `Then reply to me with the single word STARTED.`,
+    )
+
+    await test.step('two helpers start, of two different types', async () => {
+      await expect(page.locator('[data-slot="task-card"]')).toHaveCount(2, { timeout: 120_000 })
+      const types = await page
+        .locator('[data-slot="task-card"]')
+        .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-type')))
+      expect(types).toContain(name)
+      expect(types).toContain('general-purpose')
+      await expectNoErrorBanner(page)
+      await shot(page, 'w31-19-real-two-helpers')
+    })
+
+    await test.step('the reader keeps talking to the parent while they run', async () => {
+      await sendFromComposer(page, 'Anything else I should know? Answer briefly.')
+      await expect
+        .poll(async () => await page.locator('article[data-role="agent"]').count(), {
+          timeout: 120_000,
+        })
+        .toBeGreaterThan(1)
+      await expectNoErrorBanner(page)
+    })
+
+    await test.step('both results reach the parent, which uses them', async () => {
+      const cards = page.locator('[data-slot="task-card"]')
+      for (let index = 0; index < 2; index += 1) {
+        await expect(cards.nth(index).locator('[data-slot="task-status"]')).toHaveText(
+          /done|failed/,
+          { timeout: 240_000 },
+        )
+      }
+      // A real model's two helpers each said something, and both turned up in the parent's own
+      // words — which is what "the parent uses them" means.
+      await expect
+        .poll(
+          async () => {
+            const text = (await transcript(page)).join('\n')
+            return text.includes('ALPHA') && text.includes('BETA')
+          },
+          { timeout: 240_000, message: 'the parent never used both results' },
+        )
+        .toBe(true)
+      // What they spent is in the bill (S8).
+      await expect(page.locator('[data-slot="session-descendants"]')).toContainText(/subagents/)
+      await expectNoErrorBanner(page)
+      await shot(page, 'w31-20-real-parent-used-both')
+    })
+
+    expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
+
+  test('W31o a finished helper is continued with agent_message (A4)', async ({
+    page,
+    request,
+    consoleErrors,
+  }) => {
+    const chat = await createChat(request)
+    await openChat(page, chat.id)
+    await sendFromComposer(
+      page,
+      'Call the agent tool once, with type "general-purpose", prompt "Reply with exactly: FIRST".',
+    )
+    await expect(card(page).locator('[data-slot="task-status"]')).toHaveText(/done|failed/, {
+      timeout: 240_000,
+    })
+    const taskId = await card(page).getAttribute('data-task')
+    expect(taskId).toBeTruthy()
+
+    // The parent continues a child that already reported: the same card, a second result, and the
+    // child's own context intact (its prompt is still in its log).
+    await sendFromComposer(
+      page,
+      `Now call agent_message with task_id ${String(taskId)} and text ` +
+        `"Reply with exactly: SECOND".`,
+    )
+    // Two results for one task is "the same card, continued" — and a second `user.message` in the
+    // child's own log is the proof that its context was carried on rather than restarted (S5).
+    await waitForTaskNotification(request, chat.id, 'result', 2, 240_000)
+    const child = (await listChildren(request, chat.id))[0]
+    const childLog = await readEvents(request, child?.id ?? '')
+    const prompts = childLog.filter((event) => event.type === 'user.message')
+    expect(prompts.length, "the child's context was continued, not replaced").toBeGreaterThan(1)
+    await expect
+      .poll(
+        async () => {
+          const results = await taskEvents(request, chat.id)
+          const newest = results.filter((event) => event.kind === 'result').at(-1)
+          return newest?.text ?? ''
+        },
+        { timeout: 240_000, message: 'the continued helper never reported SECOND' },
+      )
+      .toContain('SECOND')
+    await expectNoErrorBanner(page)
+    await shot(page, 'w31-21-real-child-continued')
+
+    expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
+})
+
+/**
+ * W31q — the code-review fixes, checked against the running system (backend #382, frontend
+ * #381; epic #340).
+ *
+ * The fixes of #363/#365/#371 live *between* a turn and its news, so these cases drive them
+ * through the log and the API rather than the card: a question that must stay open while a
+ * helper reports, a Stop on a helper that has already finished (which must change nothing), a
+ * stop of a running helper and of one parked in its own wait (once each), and a rewind that
+ * takes a running helper back. Each is asserted on the log the deployment really wrote, plus
+ * the one thing no card can show: that a paused parent does not spin.
+ */
+test.describe('W31q the review fixes (#382, #381)', () => {
+  /** The four answers `ask_user` is driven with, in the shape the protocol validates them. */
+  const ASK_ANSWERS = [
+    { question: 'Which environment should I deploy to?', labels: ['staging'] },
+    { question: 'Anything else I should know?', text: 'the release is on Thursday' },
+  ]
+
+  /** Send the reader's Stop to a session — what a card's Stop and `/agents`' `s` write. */
+  async function interrupt(request: APIRequestContext, sessionId: string): Promise<void> {
+    const response = await request.post(`/v1/sessions/${sessionId}/events`, {
+      data: { events: [{ type: 'user.interrupt' }] },
+    })
+    expect(response.status(), await response.text()).toBe(200)
+  }
+
+  /** The newest status event of a log — what the session is doing now. */
+  async function newestStatus(
+    request: APIRequestContext,
+    sessionId: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    return (await readEvents(request, sessionId))
+      .filter((event) => String(event.type).startsWith('session.status_'))
+      .at(-1)
+  }
+
+  /** How many model requests a log holds — what "the session did not spin" is measured with. */
+  async function requestCount(request: APIRequestContext, sessionId: string): Promise<number> {
+    return (await readEvents(request, sessionId)).filter(
+      (event) => event.type === 'span.model_request_start',
+    ).length
+  }
+
+  /** The result notifications of a chat's log, oldest first. */
+  async function resultNotifications(
+    request: APIRequestContext,
+    sessionId: string,
+  ): Promise<Awaited<ReturnType<typeof taskEvents>>> {
+    return (await taskEvents(request, sessionId)).filter(
+      (event) => event.type === 'session.task_notification' && event.kind === 'result',
+    )
+  }
+
+  test('W31q1 a helper reporting does not answer the parent’s question, and the parent does not spin (#363)', async ({
+    request,
+  }) => {
+    const chat = await createChat(request)
+    // A helper that takes about ten seconds, so the question is open while it works.
+    const started = await sendMessage(request, chat.id, `__agent__ ${TYPE} | __slow__ report back`)
+    await waitForTurnEnd(request, chat.id, started)
+    await waitForTaskStatus(request, chat.id, 'running')
+
+    // The parent asks the user a question: the turn ends idle with `requires_action`.
+    const asked = await sendMessage(request, chat.id, '__ask__ which environment?')
+    await waitForTurnEnd(request, chat.id, asked)
+    expect((await newestStatus(request, chat.id))?.stop_reason).toMatchObject({
+      type: 'requires_action',
+    })
+
+    // The helper finishes while the question is open — the news is queued in the parent's log.
+    const [notification] = await waitForTaskNotification(request, chat.id, 'result')
+    expect(notification, 'the helper reported').toBeDefined()
+
+    // The news is **not** the reader moving on (#363): the question stays open, and no request
+    // has folded the notification in. Read the other way the pause would resolve with
+    // "The user sent a message instead.", which is the bug this case exists for.
+    const afterNews = await readEvents(request, chat.id)
+    expect((await newestStatus(request, chat.id))?.stop_reason).toMatchObject({
+      type: 'requires_action',
+    })
+    expect(
+      afterNews.some((event) =>
+        ((event.consumes ?? []) as unknown[]).includes(notification?.id ?? ''),
+      ),
+      'no request claimed the news while the question waited',
+    ).toBe(false)
+
+    // And it does not spin: over twenty seconds the paused session writes nothing at all —
+    // no status, no span, no wake. `findSessionsNeedingWork`/`#hasMoreWork` both read the rule.
+    const before = await readEvents(request, chat.id)
+    const requestsBefore = await requestCount(request, chat.id)
+    await new Promise((resolve) => setTimeout(resolve, 20_000))
+    expect(
+      (await readEvents(request, chat.id)).length,
+      'the paused parent wrote nothing while it waited',
+    ).toBe(before.length)
+    expect(await requestCount(request, chat.id)).toBe(requestsBefore)
+
+    // The reader answers, and the turn the answer starts is the one that carries the news.
+    const call = afterNews.find(
+      (event) => event.type === 'agent.tool_use' && event.name === 'ask_user',
+    )
+    expect(call, 'the question is an ask_user call').toBeDefined()
+    const confirmation = await request.post(`/v1/sessions/${chat.id}/events`, {
+      data: {
+        events: [
+          {
+            type: 'user.tool_confirmation',
+            tool_use_id: call?.id,
+            result: 'allow',
+            answers: ASK_ANSWERS,
+          },
+        ],
+      },
+    })
+    expect(confirmation.status(), await confirmation.text()).toBe(200)
+    // The answer starts a turn of its own, and the session is idle *until* it does — so wait
+    // for the result the confirmation owes rather than for an idle that was already true.
+    const deadline = Date.now() + 30_000
+    let answered = await readEvents(request, chat.id)
+    for (;;) {
+      // The chat already holds the `agent` call's own result, so the wait has to name *this*
+      // call: the question's result is the one that is not there yet.
+      if (
+        answered.some(
+          (event) => event.type === 'agent.tool_result' && event.tool_use_id === call?.id,
+        )
+      ) {
+        break
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`session ${chat.id} never answered the question`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      answered = await readEvents(request, chat.id)
+    }
+
+    const result = answered.find(
+      (event) => event.type === 'agent.tool_result' && event.tool_use_id === call?.id,
+    )
+    expect(result, 'the question was answered').toBeDefined()
+    expect(
+      JSON.stringify(result?.content ?? []),
+      'the answers are the result, not "The user sent a message instead."',
+    ).not.toContain('The user sent a message instead.')
+    expect(
+      answered.some((event) =>
+        ((event.consumes ?? []) as unknown[]).includes(notification?.id ?? ''),
+      ),
+      'the helper’s result reached the parent once the question was answered',
+    ).toBe(true)
+  })
+
+  test('W31q2 a Stop on a helper that already finished changes nothing (#371)', async ({
+    request,
+  }) => {
+    const chat = await createChat(request)
+    const started = await sendMessage(request, chat.id, `__agent__ ${TYPE} | a finished helper`)
+    await waitForTurnEnd(request, chat.id, started)
+    await waitForTaskStatus(request, chat.id, 'idle')
+    const child = (await listChildren(request, chat.id))[0]
+    expect(child, 'the helper has a session').toBeDefined()
+    const before = await resultNotifications(request, chat.id)
+
+    // What a Stop on a **finished** row sends — the web card draws no Stop and `/agents`
+    // refuses the key, so this is the API directly. The child is idle, so the turn the
+    // `user.interrupt` starts is one whose window is empty and which answers nothing: it is not
+    // a turn that ended (#371), so the card stays `done` and the parent model is told nothing.
+    await interrupt(request, child?.id ?? '')
+    await waitForIdle(request, child?.id ?? '')
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+
+    const statuses = (await taskEvents(request, chat.id)).map((event) => event.status)
+    expect(statuses, 'nothing wrote a stop').not.toContain('stopped')
+    expect(statuses.at(-1), 'the card stays done').toBe('idle')
+    expect(await resultNotifications(request, chat.id)).toHaveLength(before.length)
+    expect((await getSession(request, child?.id ?? '')).status).toBe('idle')
+  })
+
+  test('W31q3 a running helper and one parked in a wait are each stopped once (#373)', async ({
+    request,
+  }) => {
+    await test.step('a running helper', async () => {
+      const chat = await createChat(request)
+      const started = await sendMessage(request, chat.id, `__agent__ ${TYPE} | __hold__ keep going`)
+      await waitForTurnEnd(request, chat.id, started)
+      await waitForTaskStatus(request, chat.id, 'running')
+      const child = (await listChildren(request, chat.id))[0]
+
+      await interrupt(request, child?.id ?? '')
+      await waitForTaskStatus(request, chat.id, 'stopped')
+      const results = await resultNotifications(request, chat.id)
+      expect(results, 'one notification, not one per wake').toHaveLength(1)
+      expect(results[0]?.text ?? '').toMatch(/stopped/i)
+      expect((await getSession(request, child?.id ?? '')).status).toBe('idle')
+    })
+
+    await test.step('a helper parked in its own wait', async () => {
+      const chat = await createChat(request)
+      const started = await sendMessage(
+        request,
+        chat.id,
+        `__agent__ ${TYPE} | __wait__ 120 waiting`,
+      )
+      await waitForTurnEnd(request, chat.id, started)
+      await waitForTaskStatus(request, chat.id, 'running')
+      const child = (await listChildren(request, chat.id))[0]
+
+      // A bare signal would start a turn that finds the same open wait and pauses again, so the
+      // stop has to be written into the child — the one case #373 added.
+      await interrupt(request, child?.id ?? '')
+      await waitForTaskStatus(request, chat.id, 'stopped')
+      const results = await resultNotifications(request, chat.id)
+      expect(results, 'one notification for the stop').toHaveLength(1)
+      expect(results[0]?.text ?? '').toMatch(/stopped/i)
+    })
+  })
+
+  test('W31q4 a rewind past a running helper’s call stops it, and its news never comes (#371)', async ({
+    request,
+  }) => {
+    const chat = await createChat(request)
+    const first = await sendMessage(request, chat.id, `__agent__ ${TYPE} | __hold__ rewind me`)
+    await waitForTurnEnd(request, chat.id, first)
+    await waitForTaskStatus(request, chat.id, 'running')
+    const child = (await listChildren(request, chat.id))[0]
+    expect(child, 'the helper has a session').toBeDefined()
+
+    const rewound = await request.post(`/v1/sessions/${chat.id}/events`, {
+      data: {
+        events: [
+          { type: 'session.rewind', from_seq: first },
+          { type: 'user.message', content: [{ type: 'text', text: 'never mind' }] },
+        ],
+      },
+    })
+    expect(rewound.status(), await rewound.text()).toBe(200)
+    await waitForIdle(request, chat.id)
+
+    // The child is stopped **durably**: the interrupt is in its own log, not only a signal a
+    // lost `LISTEN` or a restarting instance could swallow (#371).
+    const childLog = await readEvents(request, child?.id ?? '')
+    expect(
+      childLog.some((event) => event.type === 'user.interrupt'),
+      'the child’s own log holds the stop',
+    ).toBe(true)
+    expect((await getSession(request, child?.id ?? '')).status).toBe('idle')
+    expect((await taskEvents(request, chat.id)).map((event) => event.status)).toContain('stopped')
+
+    // And no stray result arrives later: the news from a task the rewind took back is dropped
+    // rather than framed (`deliverableNotifications`).
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+    expect(
+      (await taskEvents(request, chat.id)).filter(
+        (event) => event.type === 'session.task_notification',
+      ),
+      'a taken-back helper’s news is dropped',
+    ).toHaveLength(0)
+    expect(
+      (await taskEvents(request, chat.id)).map((event) => event.status).at(-1),
+      'the newest status is still the stop',
+    ).toBe('stopped')
+  })
+
+  test('W31q5 an `ask` policy on a subagent tool is refused (#363, #367/#369)', async ({
+    request,
+  }) => {
+    // A call to one of the four is drawn as a task **card**, never as a call, so no client
+    // could render the prompt an `ask` would wait for: the write is refused, naming the reason.
+    const refused = await request.put('/v1/me/tools', {
+      data: { builtin: { agent: { enabled: true, policy: 'ask' } } },
+    })
+    expect(refused.status(), await refused.text()).toBe(400)
+    // The refusal stores nothing: the setting still reads its declared default.
+    const listing = await request.get('/v1/me/tools')
+    expect(listing.status(), await listing.text()).toBe(200)
+    const body = (await listing.json()) as { data: { name: string; policy: string }[] }
+    expect(body.data.find((entry) => entry.name === 'agent')?.policy).toBe('allow')
+
+    // `agent_wait` has a pause of its own — a task wait, which a notification or a deadline
+    // resolves — so it keeps all three values.
+    const allowed = await request.put('/v1/me/tools', {
+      data: { builtin: { agent_wait: { enabled: true, policy: 'ask' } } },
+    })
+    expect(allowed.status(), await allowed.text()).toBe(200)
+    await setToolSetting(request, 'agent_wait', { enabled: true, policy: 'allow' })
   })
 })

@@ -212,10 +212,13 @@ export type {
 
 export {
   NOT_REGISTERED_NOTE,
+  NO_ASK_TOOL_NAMES,
+  SUBAGENT_ASK_NOTE,
   cycleToolPolicy,
   toolAvailabilityNote,
   toolPolicyChoices,
   toolPolicyNote,
+  toolSupportsAsk,
 } from './tool-settings'
 
 export {
@@ -246,7 +249,7 @@ export type { ApprovalChoice, PendingCall, PendingCallKind, QuestionDraft } from
 
 export type { StreamOptions } from './events/stream'
 
-export { TASK_TOOL_NAMES, isTaskToolName, taskCardStatus, tasksFromEvents } from './tasks'
+export { isTaskToolName, taskCardStatus, taskIsLive, tasksFromEvents } from './tasks'
 export type { TaskCard, TaskCardStatus, TaskMessage, TaskResult } from './tasks'
 
 export { taskActivityLabel, taskActivityOf, watchTaskActivity } from './task-activity'

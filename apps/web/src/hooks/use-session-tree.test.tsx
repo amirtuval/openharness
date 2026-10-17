@@ -1,11 +1,11 @@
 import type { Session } from '@openharness/protocol'
 import { makeChildSession, makeSession } from '@openharness/protocol/fixtures'
 import { render, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ClientProvider, useClient } from '../components/client-provider'
 import { makeFake } from '../test-support/render-app'
-import { honourSessionTree, seedChildSession } from '../test-support/session-tree'
 import { useSessionTree, type SessionTreeView } from './use-session-tree'
 
 /**
@@ -61,10 +61,10 @@ function recordChildReads(fake: ReturnType<typeof makeFake>): string[] {
 
 describe('the session tree (#346)', () => {
   it('asks each listed chat once, and remembers one that has no children', async () => {
-    const fake = honourSessionTree(makeFake())
+    const fake = makeFake()
     const parent = makeSession({ title: 'Release notes' })
     const other = makeSession({ title: 'A chat with no helpers' })
-    seedChildSession(fake, parent.id, makeChildSession(parent, { title: 'Check the changelog' }))
+    fake.addSession(makeChildSession(parent, { title: 'Check the changelog' }))
     const asked = recordChildReads(fake)
 
     const first = render(
@@ -96,7 +96,7 @@ describe('the session tree (#346)', () => {
   })
 
   it('re-reads one chat on demand, which is what nests a helper the moment it starts', async () => {
-    const fake = honourSessionTree(makeFake())
+    const fake = makeFake()
     const parent = makeSession({ title: 'Release notes' })
 
     render(
@@ -113,7 +113,7 @@ describe('the session tree (#346)', () => {
 
     // The chat starts a helper, and the shell asks that one chat again.
     const child = makeChildSession(parent, { title: 'Check the changelog' })
-    seedChildSession(fake, parent.id, child)
+    fake.addSession(child)
     view?.refresh(parent.id)
 
     await waitFor(() => {
@@ -122,7 +122,7 @@ describe('the session tree (#346)', () => {
   })
 
   it('says nothing about a chat a read could not answer', async () => {
-    const fake = honourSessionTree(makeFake())
+    const fake = makeFake()
     const parent = makeSession({ title: 'Release notes' })
     fake.sessions.list = vi.fn(() => Promise.reject(new Error('nope')))
 
@@ -138,5 +138,30 @@ describe('the session tree (#346)', () => {
       expect(document.querySelectorAll('[data-chat]')).toHaveLength(1)
     })
     expect(childrenText(parent.id)).toBe('')
+  })
+
+  it('still nests under StrictMode, whose double-invoked effect used to silence it (#369)', async () => {
+    // `apps/web/src/main.tsx` wraps the app in `<StrictMode>`, so every development build runs
+    // React's mount → cleanup → mount again on every effect. The hook's `mounted` ref was left
+    // `false` by that second pass — its cleanup runs and nothing set it back — so `probe` dropped
+    // every answer and this group never appeared in `yarn dev` while every non-StrictMode test
+    // passed. Nothing else in the suite renders the app this way, which is exactly why the bug
+    // survived the hands-on pass.
+    const fake = makeFake()
+    const parent = makeSession({ title: 'Release notes' })
+    const child = makeChildSession(parent, { title: 'Check the changelog' })
+    fake.addSession(child)
+
+    render(
+      <StrictMode>
+        <ClientProvider client={fake}>
+          <TreeProbe sessions={[parent]} />
+        </ClientProvider>
+      </StrictMode>,
+    )
+
+    await waitFor(() => {
+      expect(childrenText(parent.id)).toBe(child.id)
+    })
   })
 })

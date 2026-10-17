@@ -121,6 +121,14 @@ const NOTHING_YET: TaskActivityState = {
 /**
  * What a child's transcript says its activity is, as the card draws it (issue #345).
  *
+ * **Who calls this.** `watchTaskActivity` is the production reader — it folds the child's stream
+ * into a transcript and derives a snapshot with this function after every event — and both
+ * frontends go through the watcher rather than calling this directly, because a card needs a live
+ * line and not a derivation someone recomputes. What is left is the **test** seam the review of
+ * #367 asked to have named: a test that wants to hold a snapshot still, or to check what a log
+ * derives to without a stream, calls this with a transcript it built itself
+ * (`apps/tui/src/components/task-card.test.tsx` does exactly that).
+ *
  * The rules, in the order they are tried:
  *
  * 1. **a running tool call** — the newest call with no result and a turn that is working — is

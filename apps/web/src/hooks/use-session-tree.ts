@@ -48,13 +48,20 @@ export function useSessionTree(client: Client, sessions: readonly Session[]): Se
   // they decide what to fetch, and nothing renders from either.
   const answered = useRef<Answered>(new Set())
   const inFlight = useRef<Set<string>>(new Set())
+  // **`true` is set in the effect's body, not only in the ref's initial value** (#369). Under
+  // React's StrictMode — which `main.tsx` wraps the app in, so every development build runs it —
+  // React mounts the effect, runs its cleanup, then runs the effect again. A ref that is only
+  // initialised to `true` is left `false` for the component's whole life by that second pass, and
+  // `probe`'s guard then drops every answer: the sweep and `refresh` still issue their requests,
+  // but `setChildren` is never called and the sidebar never nests anything. `use-models.ts` and
+  // `use-modes.ts` write the flag the same way, for the same reason.
   const mounted = useRef(true)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true
+    return () => {
       mounted.current = false
-    },
-    [],
-  )
+    }
+  }, [])
   // The ids a list load sweeps, newest first. Keyed by this rather than by the array, so the
   // sweep re-runs when the *list* changes and not on every re-render that rebuilt the same array.
   const wanted = useMemo(
