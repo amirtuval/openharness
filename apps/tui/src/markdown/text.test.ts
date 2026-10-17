@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   padSpans,
+  sanitizeSpans,
+  sanitizeText,
   spanWidth,
   splitToWidth,
   textSpans,
@@ -163,5 +165,81 @@ describe('padSpans', () => {
 
   it('leaves a run that is already wide enough alone', () => {
     expect(textOf(padSpans(PLAIN('abc'), 2))).toBe('abc')
+  })
+})
+
+describe('sanitizeText (#368)', () => {
+  // A child session's output is drawn verbatim, so a terminal escape sequence in it would
+  // execute in the reader's terminal. These are the sequences that matter, spelled for real.
+  it('drops an OSC 52 clipboard write whole', () => {
+    expect(sanitizeText('before \u001b]52;c;cGF3bg==\u0007 after')).toBe('before  after')
+  })
+
+  it('drops an OSC 0 window title whole', () => {
+    expect(sanitizeText('\u001b]0;pwned\u0007safe')).toBe('safe')
+  })
+
+  it('drops a CSI sequence — the clear screen', () => {
+    expect(sanitizeText('one\u001b[2Jtwo')).toBe('onetwo')
+    expect(sanitizeText('one\u001b[1;31mred\u001b[0m')).toBe('onered')
+  })
+
+  it('drops the C1 spellings, which 8-bit terminals act on too', () => {
+    expect(sanitizeText('one\u009b2Jtwo')).toBe('onetwo')
+    expect(sanitizeText('one\u009d0;title\u0007two')).toBe('onetwo')
+  })
+
+  it('drops a DCS sequence, terminated by ST', () => {
+    expect(sanitizeText('a\u001bPq#0;2;0\u001b\\b')).toBe('ab')
+  })
+
+  it('drops the short escapes — a reset, a saved cursor, a character set', () => {
+    expect(sanitizeText('a\u001bcb')).toBe('ab')
+    expect(sanitizeText('a\u001b7b')).toBe('ab')
+    expect(sanitizeText('a\u001b(Bb')).toBe('ab')
+  })
+
+  it('drops every C0 control and DEL, and keeps the newline and the tab', () => {
+    expect(sanitizeText('a\u0000b\u0007c\u000bd\u000ce\u007ff')).toBe('abcdef')
+    expect(sanitizeText('a\nb\tc')).toBe('a\nb\tc')
+    // A carriage return is not a line break here: `\r\n` is normalised by the wrapper, and a
+    // bare one would move the cursor over text already drawn.
+    expect(sanitizeText('a\rb')).toBe('ab')
+  })
+
+  it('drops an unterminated sequence to the end of the text', () => {
+    expect(sanitizeText('kept\u001b]0;half a title')).toBe('kept')
+    expect(sanitizeText('kept\u001b[38;5;')).toBe('kept')
+  })
+
+  it('leaves ordinary text — including brackets and a lone ESC-less `]`', () => {
+    expect(sanitizeText('a [b] c (d) e')).toBe('a [b] c (d) e')
+    expect(sanitizeText('日本 · ok')).toBe('日本 · ok')
+  })
+
+  it('is what every entry point into a span does', () => {
+    const hostile = 'x\u001b]52;c;AAAA\u0007y'
+    expect(textOf(textSpans(hostile))).toBe('xy')
+    expect(textOf(truncateSpans(textSpans(hostile), 40))).toBe('xy')
+    // Built by hand, the way a component builds a card's lines: the cut and the wrapper are
+    // where the text becomes a line, so they are where the sanitiser has to be.
+    expect(textOf(truncateSpans([{ text: hostile }], 40))).toBe('xy')
+    expect(linesOf(wrapSpans([{ text: hostile }], 40))).toEqual(['xy'])
+    expect(linesOf(splitToWidth([{ text: hostile }], 40))).toEqual(['xy'])
+  })
+
+  it('measures what is left, so a line is cut by what the reader sees', () => {
+    // The escape sequence is not columns: `abcdef` fits six, where measuring the raw string
+    // would have counted twelve and cut three columns off the line (issue #368).
+    expect(textOf(truncateSpans([{ text: 'abc\u001b[2Jdef' }], 6))).toBe('abcdef')
+  })
+})
+
+describe('sanitizeSpans (#368)', () => {
+  it('keeps a span it did not have to change, and rewrites the one it did', () => {
+    const clean: Span = { text: 'plain', bold: true }
+    const [rewritten] = sanitizeSpans([clean, { text: 'a\u0007b' }])
+    expect(rewritten).toBe(clean)
+    expect(sanitizeSpans([clean, { text: 'a\u0007b' }])[1]).toEqual({ text: 'ab' })
   })
 })

@@ -1237,10 +1237,23 @@ it — needs a raw (`includeSuperseded`) read of the whole log on every turn. Th
 **children** answer the same question from two indexed reads: a child whose `parent_task_id` no
 visible `session.task_started` accounts for is one the reader took back (only a rewind can
 remove a start from a replay read), so the child is stopped and the status written there and
-then. The news it sends afterwards is dropped by the same rule as it is read — a notification
-whose task the visible log does not name is not a task of this chat — which is also why the
-check is one comparison against the `taskStarts` map the loop already has
+then. The news it sends afterwards is dropped by the same rule — a notification whose task the
+visible log does not name is not a task of this chat
 ([#344](https://github.com/amirtuval/openharness/issues/344)).
+
+**The rule has to be applied where the news is _written_, not only where it is read.** The drop
+above was first implemented at the read: `./tasks`' `deliverableNotifications` filters a log's
+pending notifications against the tasks it names, and the loop applies it when it settles an
+`agent_wait`. But the **steering** path — the per-request `claims` list that folds queued news
+into the next request — takes every pending notification from the store unfiltered, so a helper
+whose `agent` call the reader rewound still had its "the user stopped this subagent" delivered
+to the parent model ([#383](https://github.com/amirtuval/openharness/issues/383)). Filtering it
+at that read is not enough either: a notification nothing may claim stays pending for ever, and
+the store's work scan and `SessionRunner`'s `#hasMoreWork` both find it on every pass, so the
+parent wakes for ever over news it is not allowed to read. `deliverChildTurn`
+(`packages/brain/src/agents.ts`) reads the **parent's** log and returns without writing when it
+no longer names the task. A task's news has two readers and one writer, and the writer is where
+"this task is not mine any more" can be decided once.
 
 **A naming rule that lives at a route is a rule only route-created resources get.** A chat is
 named from its first `user.message` by `nameSessionFromFirstMessage`, and that function is called
@@ -1491,6 +1504,21 @@ against a zero-row window. And a terminal's height changes without Ink re-render
 the window it computed for the old size until some other state changes, which reads as a list that
 stays short in a maximised window; `oh` subscribes in one hook (`useTerminalRows`), so every list
 gets the redraw.
+
+**A `mounted` ref has to be set back to `true` in its effect's body, or StrictMode makes it `false`
+for the component's whole life.** The web app's sidebar-nesting hook kept `const mounted =
+useRef(true)` with an effect whose body was _only_ the cleanup, and `main.tsx` wraps the app in
+`<StrictMode>` — so React mounted the effect, ran its cleanup, then ran the effect again, and the
+second pass left the flag `false` for the life of the component. Every answer the hook's `probe`
+received was dropped by `if (!mounted.current) return`: the requests were still made, `childrenOf`
+always answered `[]`, and the sidebar simply never nested a helper under the chat that started it,
+in `yarn dev` and in any development build. It is invisible in two directions at once — StrictMode
+is development-only, and the QA stack serves a production build, while the unit tests render their
+components without a `<StrictMode>` wrapper — which is why it survived a hands-on pass and a green
+suite. Its sibling hooks (`use-models.ts`, `use-modes.ts`) write the flag the correct way, as
+`mounted.current = true` in the effect body with the cleanup beside it; the test that would have
+caught it renders the hook inside `<StrictMode>`, and is now the first thing in the file
+([#369](https://github.com/amirtuval/openharness/issues/369)).
 
 **A list that can outgrow the screen has to be windowed against the terminal's height, and the
 selected row has to be marked with a glyph.** The `/mcp` tools face drew every tool of the server,

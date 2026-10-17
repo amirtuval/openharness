@@ -72,6 +72,32 @@ function subagentLog(): StoredEvent[] {
   ]
 }
 
+/** The same chat, with a task that has no child session — the shape the protocol allows. */
+function childlessLog(): StoredEvent[] {
+  return subagentLog().map((event) => {
+    if (event.type !== 'session.task_started') {
+      return event
+    }
+    // `child_session_id` is **optional** in the protocol, and absent is the childless shape — the
+    // task kind that starts no session, which is why `stop()` guards it too.
+    const { child_session_id: _omitted, ...childless } = event
+    return childless
+  })
+}
+
+/** The same chat, with its one task finished: the result delivered and the status moved. */
+function finishedLog(): StoredEvent[] {
+  return [
+    ...subagentLog(),
+    makeSessionTaskNotification(TASK_ID, {
+      seq: 7,
+      kind: 'result',
+      text: 'One assertion was flaky; it is fixed now.',
+    }),
+    makeSessionTaskStatus(TASK_ID, 'idle', { seq: 8 }),
+  ]
+}
+
 /**
  * A client whose session log already holds `events`, with a child and a parent to open.
  *
@@ -239,6 +265,37 @@ describe('AgentsScreen (#347)', () => {
     await waitFor(() => interrupted.length === 1)
     expect(interrupted).toEqual([CHILD_ID])
     await waitFor(() => frameOf(view).includes('Stopped researcher'))
+  })
+
+  it('stops nothing on `s` for a task that has already finished, and says why (#368)', async () => {
+    // The guard the web already had, where Stop is drawn only for a live task. An interrupt of a
+    // child that has reported claims a turn of its own that ends on nothing, and the brain's
+    // delivery reads that as a stop — so the parent's log would gain a `result` saying the *user*
+    // stopped a helper that had finished, and the row would flip done → stopped under the reader.
+    const interrupted: string[] = []
+    const { view } = renderScreen(finishedLog(), { interrupted })
+    await waitForScreen(view, 'Agents')
+    await waitFor(() => frameOf(view).includes('● done'))
+
+    view.stdin.write('s')
+
+    await waitFor(() => frameOf(view).includes('nothing left to stop'))
+    expect(interrupted).toEqual([])
+    expect(frameOf(view)).toContain('● done')
+  })
+
+  it('opens nothing for a task with no child session, and says so (#368)', async () => {
+    // `child_session_id` is optional in the protocol — `stop()` already guards the null — and
+    // Enter used to fall back to the row's `task_…` id, which the server answers as a 404 drawn
+    // as a generic error notice. The two verbs now agree about what a childless row can do.
+    const { view, opened } = renderScreen(childlessLog())
+    await waitForScreen(view, 'Agents')
+    await waitFor(() => frameOf(view).includes('◐ running · researcher'))
+
+    pressKey(view, 'enter')
+
+    await waitFor(() => frameOf(view).includes('no chat of its own to open'))
+    expect(opened).toEqual([])
   })
 
   it('goes back up from a task’s own chat on Enter', async () => {
