@@ -154,7 +154,7 @@ empty. Everything the Ingress stack did is preserved, one object at a time:
 | `networking.gke.io/managed-certificates`          | `networking.gke.io/certmap` on the Gateway                                                                                                    |
 | `FrontendConfig` `redirectToHttps`                | an `HTTPRoute` on the `http` listener with a `RequestRedirect` filter, 301                                                                    |
 | `BackendConfig` `healthCheck`                     | `HealthCheckPolicy`, HTTP port 3000 `/ready`                                                                                                  |
-| `BackendConfig` `timeoutSec`/`connectionDraining` | `GCPBackendPolicy`, `timeoutSec: 3600`, `drainingTimeoutSec: 30`                                                                              |
+| `BackendConfig` `timeoutSec`/`connectionDraining` | `GCPBackendPolicy`, `timeoutSec: 3600`, `drainingTimeoutSec: 45` (above the 40 s drain, below the 60 s grace)                                 |
 | `BackendConfig` `cdn` (`USE_ORIGIN_HEADERS`)      | `GCPHTTPFilter` with `cacheMode: USE_ORIGIN_HEADERS`, attached by `ExtensionRef` on the HTTPS route                                           |
 | Service `cloud.google.com/neg`                    | nothing — a Gateway creates **standalone NEGs** itself, and GKE documents that the annotation must not be modified on a Service it references |
 | Service `cloud.google.com/backend-config`         | nothing — the policies above replace it                                                                                                       |
