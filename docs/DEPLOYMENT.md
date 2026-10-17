@@ -792,9 +792,10 @@ means a turn open, a prompt queued, or a child parked waiting for its own helper
 
 The one thing to size against the deployment is the live-task cap: a helper's turn is a session
 turn like any other — the brain signals the scheduler, which runs it as its own pass — so it takes
-one of the `OPENHARNESS_MAX_CONCURRENT_SESSIONS` slots. The default live cap (10) is above that
-limit's default (4), so a chat that starts ten helpers queues them for slots rather than running
-them all at once. A value below `1` on either variable fails the boot.
+one of the `OPENHARNESS_MAX_CONCURRENT_SESSIONS` slots. The default live cap (10) is below the
+slot cap (32), so a chat that starts ten helpers has every one of them running as soon as a pod
+has slots free rather than queuing half of them behind the limit. A value below `1` on either
+variable fails the boot.
 
 ### What is deliberately off
 

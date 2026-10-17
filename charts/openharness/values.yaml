@@ -142,13 +142,28 @@ terminationGracePeriodSeconds: 60
 gcpProject: ''
 
 # Plain, non-secret environment variables, name → string. (TF) Terraform passes
-# BETTER_AUTH_URL, OPENHARNESS_TRUSTED_PROXY_HOPS, OPENHARNESS_KEY_PROVIDER,
+# BETTER_AUTH_URL, SCHEDULER, OPENHARNESS_TRUSTED_PROXY_HOPS, OPENHARNESS_KEY_PROVIDER,
 # OPENHARNESS_KMS_KEY, OPENHARNESS_LOG_FORMAT, OPENHARNESS_TRACING,
 # OPENHARNESS_TRACE_SAMPLE_RATE and any provider client id set for the environment.
 # It never passes OPENHARNESS_DEV_LOGIN: the dev login is off by being unset, and the
 # server refuses to boot on any value other than `1`/`true` (#159). Secrets do not go
 # here — see `secrets` below.
-env: {}
+#
+# `SCHEDULER: postgres` is the chart's own default, not Terraform's, so no environment can
+# forget it. The server's default is `local` (`apps/server/src/config.ts`,
+# `DEFAULT_SCHEDULER`), which is single-instance only: it owns all 64 partitions and writes
+# unfenced, so a pod booting during a rolling deploy recovers every session in every
+# partition — closing turns still running on live pods as `brain_lost` and re-running them,
+# with two brains in one session — and its `signal()` is in-process, so an interrupt that
+# lands on the wrong pod starts a second brain. This chart runs `replicaCount: 2` and its HPA
+# scales to `maxReplicas: 4`; `postgres` is the scheduler that makes that safe, and every
+# deployment of this chart has `DATABASE_URL`, which it needs.
+#
+# `local` is therefore allowed only where exactly one pod can run. A template helper
+# (`_helpers.tpl`, `openharness.validateScheduler`) refuses to render it when `replicaCount`
+# is above 1 or the HPA is enabled with `maxReplicas` above 1.
+env:
+  SCHEDULER: postgres
 
 # Secrets, delivered by the GKE Secret Manager add-on rather than put in the environment. (TF)
 # Each entry mounts the named Secret Manager secret as a file under

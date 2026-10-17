@@ -74,7 +74,11 @@ import {
 } from '../partition-scheduler'
 import type { ResolveSessionCredential } from '../credentials'
 import type { ProviderCredentialValidator } from '../provider-validation'
-import { LocalScheduler, type SessionScheduler } from '../scheduler'
+import {
+  DEFAULT_MAX_CONCURRENT_SESSIONS,
+  LocalScheduler,
+  type SessionScheduler,
+} from '../scheduler'
 import { type AppEnv, type Logger, silentLogger } from '../types'
 import {
   type ScriptedModel,
@@ -800,7 +804,7 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     allowPrivateProviderUrls: options.allowPrivateProviderUrls ?? false,
     trustedProxyHops: options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS,
     corsOrigins: [...(options.corsOrigins ?? [])],
-    maxConcurrentSessions: options.maxConcurrentSessions ?? 4,
+    maxConcurrentSessions: options.maxConcurrentSessions ?? DEFAULT_MAX_CONCURRENT_SESSIONS,
     drainTimeoutMs: options.drainTimeoutMs ?? 5000,
     instanceId: options.instanceId ?? 'test-instance',
     partitions: options.partitions ?? DEFAULT_PARTITION_COUNT,

@@ -131,7 +131,7 @@ export interface PostgresPartitionSchedulerOptions {
    * own.
    */
   readonly runner?: SessionRunner
-  /** How many sessions may have a turn in flight at once; defaults to 4. */
+  /** How many sessions may have a turn in flight at once; defaults to 32. */
   readonly maxConcurrentSessions?: number
   /**
    * How long `stop()` — and giving up a partition — waits for the turns in flight; defaults to

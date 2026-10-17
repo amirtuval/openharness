@@ -51,3 +51,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "openharness.serviceAccountName" -}}
 {{- default (include "openharness.fullname" .) .Values.serviceAccount.name -}}
 {{- end -}}
+
+{{/*
+Refuse a rendering that would run LocalScheduler on more than one pod.
+
+`SCHEDULER=local` — the server's default, not this chart's — owns every partition in the
+process and writes unfenced, so it is safe only where a single pod runs: a second pod, at boot
+or during a rolling update, recovers and re-runs turns the first pod still owns, and an
+interrupt handled on the wrong pod starts a second brain for the session. `values.yaml` defaults
+`env.SCHEDULER` to `postgres` so no environment can forget it; this helper is for the values
+file that sets it back: it fails the render when the Deployment can have more than one pod.
+*/}}
+{{- define "openharness.validateScheduler" -}}
+{{- $env := .Values.env | default dict -}}
+{{- $scheduler := get $env "SCHEDULER" | toString -}}
+{{- $replicas := .Values.replicaCount | int -}}
+{{- $hpaMax := 0 -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- $hpaMax = .Values.autoscaling.maxReplicas | int -}}
+{{- end -}}
+{{- if and (eq $scheduler "local") (or (gt $replicas 1) (gt $hpaMax 1)) -}}
+{{- fail (printf "SCHEDULER=local is single-instance only and cannot run with more than one pod (replicaCount=%d, autoscaling.enabled=%t, autoscaling.maxReplicas=%d). Set SCHEDULER=postgres — the chart default — or run a single replica with autoscaling disabled or maxReplicas=1." $replicas .Values.autoscaling.enabled $hpaMax) -}}
+{{- end -}}
+{{- end -}}

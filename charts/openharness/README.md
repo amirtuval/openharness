@@ -67,38 +67,38 @@ Kubernetes service account is named `openharness`.
 
 ### Values
 
-| key                                          | (TF) | default        | what it does                                                                                 |
-| -------------------------------------------- | :--: | -------------- | -------------------------------------------------------------------------------------------- |
-| `image.repository`                           |  ✔   | `""`           | the image, without a tag: `us-central1-docker.pkg.dev/<project>/openharness/server`          |
-| `image.tag`                                  |  ✔   | `""`           | the tag — a git sha, one image per commit, promoted by digest. **Required in practice**      |
-| `image.pullPolicy`                           |      | `IfNotPresent` | the tag is immutable per commit, so a node never needs to re-pull it                         |
-| `replicaCount`                               |      | `2`            | the pods the Deployment declares; the HPA owns the count when `autoscaling.enabled`          |
-| `autoscaling.enabled`                        |      | `true`         | render the HPA                                                                               |
-| `autoscaling.minReplicas`                    |      | `2`            | the floor                                                                                    |
-| `autoscaling.maxReplicas`                    |  ✔   | `4`            | the ceiling                                                                                  |
-| `autoscaling.targetCPUUtilizationPercentage` |      | `70`           | scale on CPU, as a percentage of the **request** below                                       |
-| `resources.requests.cpu`                     |      | `250m`         | Autopilot schedules and bills on requests; 250m is Autopilot's floor for a container         |
-| `resources.requests.memory`                  |      | `512Mi`        | the other half of Autopilot's floor                                                          |
-| `resources.limits.memory`                    |      | `512Mi`        | equal to the request: a steady footprint, so a higher limit buys nothing                     |
-| `serviceAccount.name`                        |      | `openharness`  | the KSA the pods run as — and the name the Workload Identity binding uses                    |
-| `serviceAccount.gcpServiceAccount`           |  ✔   | `""`           | the app GSA's email → the `iam.gke.io/gcp-service-account` annotation                        |
-| `cloudSqlProxy.enabled`                      |  ✔   | `false`        | render the Cloud SQL Auth Proxy as a native sidecar in the pod                               |
-| `cloudSqlProxy.instanceConnectionName`       |  ✔   | `""`           | `<project>:<region>:<instance>` — the proxy's target. **Required when `enabled`**            |
-| `cloudSqlProxy.image.repository`             |      | the connector  | `gcr.io/cloud-sql-connectors/cloud-sql-proxy`                                                |
-| `cloudSqlProxy.image.tag`                    |      | `2.26.0`       | pinned to a release, never `latest`                                                          |
-| `cloudSqlProxy.port`                         |      | `5432`         | the loopback port the proxy listens on, and the port in `database_url`                       |
-| `cloudSqlProxy.privateIp`                    |      | `true`         | pass `--private-ip`: the instance has no public address                                      |
-| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi` | requests for the forwarder; Autopilot rounds them up to its container floor                  |
-| `gateway.host`                               |  ✔   | `""`           | the serving host. Empty ⇒ none of the Gateway objects is rendered                            |
-| `gateway.staticIpName`                       |  ✔   | `""`           | the `google_compute_global_address` name → the Gateway's `spec.addresses` (`NamedAddress`)   |
-| `gateway.certificateMapName`                 |  ✔   | `""`           | the Certificate Manager map → `networking.gke.io/certmap` on the Gateway                     |
-| `gateway.cdn.enabled`                        |      | `true`         | render the `GCPHTTPFilter` and attach it to the HTTPS route, `cacheMode: USE_ORIGIN_HEADERS` |
-| `backend.timeoutSec`                         |      | `3600`         | the load balancer's request timeout — long, because SSE streams live for a turn              |
-| `backend.drainingTimeoutSec`                 |      | `30`           | connection draining; at least the server's `OPENHARNESS_DRAIN_TIMEOUT_MS`                    |
-| `terminationGracePeriodSeconds`              |      | `60`           | longer than the drain timeout and the connection draining, so shutdown finishes cleanly      |
-| `gcpProject`                                 |  ✔   | `""`           | the GCP project in each Secret Manager `resourceName`; unused when `secrets` is empty        |
-| `env`                                        |  ✔   | `{}`           | plain, non-secret env vars, name → string                                                    |
-| `secrets`                                    |  ✔   | `[]`           | `{ env: NAME, secret: <id> }` — Secret Manager secrets, mounted and read via `<NAME>_FILE`   |
+| key                                          | (TF) | default                   | what it does                                                                                 |
+| -------------------------------------------- | :--: | ------------------------- | -------------------------------------------------------------------------------------------- |
+| `image.repository`                           |  ✔   | `""`                      | the image, without a tag: `us-central1-docker.pkg.dev/<project>/openharness/server`          |
+| `image.tag`                                  |  ✔   | `""`                      | the tag — a git sha, one image per commit, promoted by digest. **Required in practice**      |
+| `image.pullPolicy`                           |      | `IfNotPresent`            | the tag is immutable per commit, so a node never needs to re-pull it                         |
+| `replicaCount`                               |      | `2`                       | the pods the Deployment declares; the HPA owns the count when `autoscaling.enabled`          |
+| `autoscaling.enabled`                        |      | `true`                    | render the HPA                                                                               |
+| `autoscaling.minReplicas`                    |      | `2`                       | the floor                                                                                    |
+| `autoscaling.maxReplicas`                    |  ✔   | `4`                       | the ceiling                                                                                  |
+| `autoscaling.targetCPUUtilizationPercentage` |      | `70`                      | scale on CPU, as a percentage of the **request** below                                       |
+| `resources.requests.cpu`                     |      | `250m`                    | Autopilot schedules and bills on requests; 250m is Autopilot's floor for a container         |
+| `resources.requests.memory`                  |      | `512Mi`                   | the other half of Autopilot's floor                                                          |
+| `resources.limits.memory`                    |      | `512Mi`                   | equal to the request: a steady footprint, so a higher limit buys nothing                     |
+| `serviceAccount.name`                        |      | `openharness`             | the KSA the pods run as — and the name the Workload Identity binding uses                    |
+| `serviceAccount.gcpServiceAccount`           |  ✔   | `""`                      | the app GSA's email → the `iam.gke.io/gcp-service-account` annotation                        |
+| `cloudSqlProxy.enabled`                      |  ✔   | `false`                   | render the Cloud SQL Auth Proxy as a native sidecar in the pod                               |
+| `cloudSqlProxy.instanceConnectionName`       |  ✔   | `""`                      | `<project>:<region>:<instance>` — the proxy's target. **Required when `enabled`**            |
+| `cloudSqlProxy.image.repository`             |      | the connector             | `gcr.io/cloud-sql-connectors/cloud-sql-proxy`                                                |
+| `cloudSqlProxy.image.tag`                    |      | `2.26.0`                  | pinned to a release, never `latest`                                                          |
+| `cloudSqlProxy.port`                         |      | `5432`                    | the loopback port the proxy listens on, and the port in `database_url`                       |
+| `cloudSqlProxy.privateIp`                    |      | `true`                    | pass `--private-ip`: the instance has no public address                                      |
+| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi`            | requests for the forwarder; Autopilot rounds them up to its container floor                  |
+| `gateway.host`                               |  ✔   | `""`                      | the serving host. Empty ⇒ none of the Gateway objects is rendered                            |
+| `gateway.staticIpName`                       |  ✔   | `""`                      | the `google_compute_global_address` name → the Gateway's `spec.addresses` (`NamedAddress`)   |
+| `gateway.certificateMapName`                 |  ✔   | `""`                      | the Certificate Manager map → `networking.gke.io/certmap` on the Gateway                     |
+| `gateway.cdn.enabled`                        |      | `true`                    | render the `GCPHTTPFilter` and attach it to the HTTPS route, `cacheMode: USE_ORIGIN_HEADERS` |
+| `backend.timeoutSec`                         |      | `3600`                    | the load balancer's request timeout — long, because SSE streams live for a turn              |
+| `backend.drainingTimeoutSec`                 |      | `30`                      | connection draining; at least the server's `OPENHARNESS_DRAIN_TIMEOUT_MS`                    |
+| `terminationGracePeriodSeconds`              |      | `60`                      | longer than the drain timeout and the connection draining, so shutdown finishes cleanly      |
+| `gcpProject`                                 |  ✔   | `""`                      | the GCP project in each Secret Manager `resourceName`; unused when `secrets` is empty        |
+| `env`                                        |  ✔   | `{ SCHEDULER: postgres }` | plain, non-secret env vars, name → string; the default runs the partitioned scheduler        |
+| `secrets`                                    |  ✔   | `[]`                      | `{ env: NAME, secret: <id> }` — Secret Manager secrets, mounted and read via `<NAME>_FILE`   |
 
 `helm lint` renders an extra pass for `ci/staging-values.yaml`, and the CI job renders it
 before `kubeconform` validates it, so the examples below are checked on every change to
@@ -111,6 +111,7 @@ Terraform passes, per environment:
 | variable                         | value                                                                 |
 | -------------------------------- | --------------------------------------------------------------------- |
 | `BETTER_AUTH_URL`                | `https://<gateway.host>`                                              |
+| `SCHEDULER`                      | `postgres` — the multi-instance scheduler; see below                  |
 | `OPENHARNESS_TRUSTED_PROXY_HOPS` | `1` — the load balancer appends one entry to `x-forwarded-for` (#151) |
 | `OPENHARNESS_KEY_PROVIDER`       | `gcp-kms` — Cloud KMS wraps the vault's keys (#150)                   |
 | `OPENHARNESS_KMS_KEY`            | the `cryptoKeys/…` resource name (a resource name, not a secret)      |
@@ -122,6 +123,18 @@ Terraform passes, per environment:
 The chart also sets `PORT=3000`, `TMPDIR=/tmp` and `HOME=/tmp` itself: the container's port,
 and where the two writable paths point on a read-only root filesystem. `env` is for the app's
 own settings.
+
+**`SCHEDULER=postgres` is the chart's default, and no environment may forget it.** The server
+defaults to `local` (`apps/server/src/config.ts`), which owns all 64 partitions in one process
+and writes unfenced. That is safe only for a single pod: a second pod — the chart runs
+`replicaCount: 2` and the HPA scales to 4 — recovers every session in every partition on boot,
+closing turns still running on live pods as `brain_lost` and re-running them (two brains in one
+session), and an interrupt that lands on the wrong pod starts a second brain because `signal()`
+is in-process. `postgres` needs `DATABASE_URL`, which every deployment of this chart has. The
+value lives in `values.yaml`, is repeated in Terraform (`infra/modules/app/locals.tf`) so the
+two agree, and a template helper refuses to render `local` when `replicaCount > 1` or the HPA
+is enabled with `maxReplicas > 1`; use `local` only with `replicaCount: 1` and the autoscaler
+off (or at `maxReplicas: 1`).
 
 `OPENHARNESS_DEV_LOGIN` is deliberately **not** among them: the dev login is off by being
 unset, and the server refuses to boot on any value other than `1`/`true`, so setting it to
