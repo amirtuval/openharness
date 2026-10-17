@@ -496,7 +496,8 @@ test.describe('W30 the skills screens', () => {
       // The whole stored body — the markdown heading included — with the arguments appended
       // after it, because this skill's body has no `$ARGUMENTS` to put them in.
       expect(loaded[1]?.content).toBe(
-        '# Summarize a thread\n\nRead the thread and list its decisions.\n\nthe release thread',
+        '# Summarize a thread\n\nRead the thread and list its decisions, following ' +
+          '`references/format.md`.\n\nthe release thread',
       )
     })
 
@@ -558,7 +559,9 @@ test.describe('W30 the skills screens', () => {
         },
       })
       expect(started.status(), await started.text()).toBe(200)
-      await waitForIdle(request, sessionId)
+      // Wait for the thing that really changed — the loaded instructions — rather than for an
+      // idle status the session already had before the turn started.
+      await waitForLoaded(request, sessionId, 1)
 
       // The instructions name `references/format.md`; from this request on the model may read
       // it (the earlier step proved the same tool still refuses a skill the user never ran).
@@ -575,10 +578,7 @@ test.describe('W30 the skills screens', () => {
         },
       })
       expect(asked.status(), await asked.text()).toBe(200)
-      await waitForIdle(request, sessionId)
-
-      const results = (await readEvents(request, sessionId))
-        .filter((event) => event.type === 'agent.tool_result')
+      const results = (await waitForResults(request, sessionId, 1))
         .map((event) => JSON.stringify(event))
         .join('\n')
       expect(results).toContain('One decision per line')
