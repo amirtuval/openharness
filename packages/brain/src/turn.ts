@@ -53,6 +53,7 @@ import {
   toolResultForCall,
 } from './events'
 import { classifyModelError } from './errors'
+import { isHandoffAbort } from './handoff'
 import { assertValidEvents, EventValidationError } from './validate'
 import {
   chunkRangeAfter,
@@ -275,6 +276,21 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  * request's span end, or the turn's idle event when nothing was running. No span is opened
  * for an interrupt, so no span exists without a real model request behind it.
  *
+ * HANDOFF (the signal aborted with a `TurnHandoff` reason — #378, P1)
+ *   ..................................... nothing is written: the turn stays OPEN
+ *
+ *   The scheduler said "this process should not be running this session any more" — a
+ *   shutdown, a surplus partition given back, or a lease somebody else took over — and the
+ *   turn is not the user's to lose. Whatever the turn had already written stays exactly as it
+ *   is: the cut-off request's chunks are superseded by the next owner's `brain_lost` span end,
+ *   the same way a crash's are. No `agent.message`, no span end, no `session.status_idle`, no
+ *   child-to-parent delivery, and no answer to a call that was still waiting. The next owner
+ *   finds the open turn with `findSessionsNeedingWork` and finishes it with the inherited-turn
+ *   START above. The abort is observed only at a boundary between appends, so the handoff never
+ *   splits a step's writes: a tool step that was cut off still has its calls stored (the next
+ *   owner answers them `execution lost`), and a reply that was fully streamed may be re-issued
+ *   once more rather than closed from here.
+ *
  * MODEL FAILURE (a retryable error, attempts left)
  *    ............ span.model_request_end { error: model_error, supersedes: the chunks }
  *    ................................... session.error { retry_status: retrying }
@@ -319,6 +335,15 @@ export type TurnOutcomeKind =
    * scheduler arms a timer from {@link TurnOutcome.waiting} rather than polling for it.
    */
   | 'waiting'
+  /**
+   * The turn was **handed off** rather than ended (#378, P1): the scheduler aborted it because
+   * this process is shutting down, gave the partition up as surplus, or lost its lease. The
+   * turn wrote nothing after the abort and left itself **open** — no partial message, no span
+   * end, no `session.status_idle` — so the partition's next owner finds it with
+   * `findSessionsNeedingWork`, closes the inherited span as `brain_lost` and runs the request
+   * again. The scheduler must stop the pass and must not look for more local work.
+   */
+  | 'handed_off'
   /** The turn was cut short by an interrupt, by `signal` or by a queued `user.interrupt`. */
   | 'interrupted'
   /**
@@ -654,6 +679,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
   // Read through a function: `signal.aborted` is a property TypeScript would otherwise treat
   // as frozen for the rest of the loop, and it is not — a signal aborts when the user says so.
   const isAborted = (): boolean => signal?.aborted === true
+  // The scheduler's abort, as opposed to the user's (#378, P1): a shutdown, a partition given
+  // up, or a lease lost. It leaves the turn open instead of ending it — see HANDOFF above.
+  const handedOff = (): boolean => isHandoffAbort(signal)
 
   // The turn's time source, for the one thing it does with time: a task wait's deadline.
   const clock = options.now ?? systemClock
@@ -672,6 +700,13 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
   const session = await store.getSessionUnscoped(sessionId)
   if (session === null) {
     throw new SessionNotFoundError(sessionId)
+  }
+  // Already handed off before this turn began: the scheduler does not want this process to
+  // run the session at all, so nothing is opened and nothing is written. The work is in the
+  // log, and whoever owns the partition next finds it (a shutdown's drain may still land here
+  // when a pass was queued just before the signal arrived).
+  if (handedOff()) {
+    return { outcome: 'handed_off' }
   }
   const queued = await store.getPendingUserEvents(sessionId)
   const turnState = await store.getTurnState(sessionId)
@@ -985,6 +1020,13 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
   // because a resolver has to be asked with the owner, which the request boundary reads.
   const compactionOption = options.compaction
   for (;;) {
+    // A handoff that arrived before this request started writes nothing at all and leaves the
+    // turn as it is; the next owner carries on from the log. It is checked before the user's
+    // interrupt so a shutdown never claims an interrupt that was queued behind it — that
+    // event stays pending, and the next owner answers it.
+    if (handedOff()) {
+      return { outcome: 'handed_off' }
+    }
     // An interrupt that arrived before this request started — a queued user.interrupt covers
     // the one the user sent while no brain was running to abort.
     if (isAborted()) {
@@ -1288,6 +1330,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
             ...(written.message === undefined ? {} : { message: written.message }),
           }),
         ])
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1554,6 +1599,15 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
     })
     const range: Supersedes = { from_seq: chunkOpen.seq, to_seq: lastChunkSeq }
 
+    // A handoff that stopped the stream is not an interrupt (#378, P1). The request's chunks
+    // stay exactly where they are — nothing supersedes them here — and the next owner closes
+    // this span as `brain_lost` with that range, which is the crash shape every reader already
+    // understands. The check is here, before the first write of the step's ending, so a step is
+    // never left with a stored reply and no span end or the other way round.
+    if (handedOff()) {
+      return { outcome: 'handed_off' }
+    }
+
     if (result.aborted) {
       return await endInterrupted({
         id: eventId,
@@ -1597,6 +1651,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
           }),
           statusRescheduled(),
         ])
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1645,6 +1702,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
           append,
           ...(signal === undefined ? {} : { signal }),
         })
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1684,6 +1744,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         // The backoff is where an interrupt lands next: nothing is in flight, so honoring the
         // signal here closes the turn the same way an abort mid-stream does.
         await retry.sleep(backoffDelay(retriesUsed, retry), signal)
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1724,11 +1787,16 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
           ? undefined
           : agentOpaqueContent(opaque.provider, opaque.model, opaque.parts, opaque.dropped)
       if (result.text.length > 0) {
+        // The reply, its opaque content, the span end and the totals are **one** append: a
+        // handoff (or a crash) can then never leave a stored reply whose span is still open,
+        // or a closed span whose usage totals never landed. The order inside the append is
+        // the lifecycle's — message, opaque content, span end, usage — exactly as before.
         await append([
           agentMessage(eventId, result.text, range),
           ...(stored === undefined ? [] : [stored]),
+          spanEnd(start.id, result.usage, searchSpan(result)),
+          totals,
         ])
-        await append([spanEnd(start.id, result.usage, searchSpan(result)), totals])
       } else {
         await append([
           ...(stored === undefined ? [] : [stored]),
@@ -1751,6 +1819,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         // strategy rebuilds it from the opaque content it stored. The step counts against the
         // turn's budget like any other, so a provider that kept pausing ends the turn rather
         // than looping.
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1798,12 +1869,24 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         ...(signal === undefined ? {} : { signal }),
         append,
       })
+      if (handedOff()) {
+        // The calls are in the log with no answers. They are left that way on purpose: a tool
+        // may already have had an effect nobody recorded, so the next owner answers them
+        // `execution lost` (X3) rather than this turn inventing an answer or a re-run.
+        return { outcome: 'handed_off' }
+      }
       if (isAborted()) {
         return await endInterrupted()
       }
       continue
     }
 
+    // A handoff that landed after the last step but before the turn's idle event leaves the
+    // turn open rather than closing it here: the next owner reads the same log, finds the
+    // reply already stored, and writes the idle itself. Nothing is decided twice.
+    if (handedOff()) {
+      return { outcome: 'handed_off' }
+    }
     const arrived = await store.getPendingUserEvents(sessionId)
     if (arrived.length > 0) {
       continue
