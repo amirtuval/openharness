@@ -1,6 +1,7 @@
-import { skillSettingsOf } from '@openharness/protocol'
+import { skillsInForce, skillSettingsOf } from '@openharness/protocol'
 import type {
   MessageSkill,
+  ModeToolOverride,
   RefreshSkillPreviewResponse,
   ReservedSkillName,
   Skill,
@@ -95,18 +96,30 @@ export interface SlashCommand {
 /**
  * The whole `/` menu: the built-in commands, then the reader's own usable skills (K7).
  *
- * A skill is offered when it is **on** (K8) and **user-invocable** (K1) — a skill whose
- * frontmatter says `user-invocable: false` is one only the model uses, so it is not a command
- * the reader can type and never appears here. `disable-model-invocation` is the other way
- * round and does not filter a row out: a command only the reader runs is exactly what the menu
- * is for.
+ * A skill is offered when it is **on in this chat** and **user-invocable** (K1, K8) — a skill
+ * whose frontmatter says `user-invocable: false` is one only the model uses, so it is not a
+ * command the reader can type and never appears here. `disable-model-invocation` is the other
+ * way round and does not filter a row out: a command only the reader runs is exactly what the
+ * menu is for.
+ *
+ * **"On" is the effective answer**, not the stored switch: when the chat follows a mode, the
+ * mode's `tools.skills` patch applies over the user's `enabled` — the same rule the server's
+ * `assertInvocableSkills` and `listSkillsInForce` apply, read from
+ * `@openharness/protocol`'s `skillsInForce` so a menu row and the server cannot disagree. A
+ * menu built from `skill.enabled` alone offers a skill the server answers 400 for (the mode
+ * turned it off) and hides one the server would accept (the mode turned it on).
  *
  * The skills are listed in the order the caller passes them (the API's own order, oldest
  * first), so two screens reading the same list build the same menu.
  *
- * @param skills the reader's skills, as `GET /v1/me/skills` answered
+ * @param skills the reader's skills, as `GET /v1/me/skills` answered — the stored `enabled`
+ * @param override the tool override of the mode the chat follows (`Mode.tools`), or `null`/absent
+ *   for a chat that follows none
  */
-export function slashCommands(skills: readonly Skill[]): readonly SlashCommand[] {
+export function slashCommands(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null = null,
+): readonly SlashCommand[] {
   return [
     ...BUILTIN_COMMANDS.map((command): SlashCommand => ({
       name: command.name,
@@ -116,23 +129,30 @@ export function slashCommands(skills: readonly Skill[]): readonly SlashCommand[]
       argumentHint: null,
       skillId: null,
     })),
-    ...skills.filter(isInvocableSkill).map((skill): SlashCommand => {
-      const hint = skillSettingsOf(skill).argumentHint
-      return {
-        name: skill.name,
-        kind: 'skill',
-        description: skill.description,
-        usage: hint === null ? `/${skill.name}` : `/${skill.name} <${hint}>`,
-        argumentHint: hint,
-        skillId: skill.id,
-      }
-    }),
+    ...skillsInForce(skills, override)
+      .filter(isInvocableSkill)
+      .map((skill): SlashCommand => {
+        const hint = skillSettingsOf(skill).argumentHint
+        return {
+          name: skill.name,
+          kind: 'skill',
+          description: skill.description,
+          usage: hint === null ? `/${skill.name}` : `/${skill.name} <${hint}>`,
+          argumentHint: hint,
+          skillId: skill.id,
+        }
+      }),
   ]
 }
 
-/** Whether a skill is one the reader can type: on (K8) and `user-invocable` (K1, K7). */
+/**
+ * Whether a skill is one the reader can type: `user-invocable` (K1, K7).
+ *
+ * The on/off half is already answered by {@link skillsInForce} — and must be, because a mode
+ * may turn a stored-off skill on (K8), so reading `skill.enabled` here would undo the override.
+ */
 function isInvocableSkill(skill: Skill): boolean {
-  return skill.enabled && skillSettingsOf(skill).userInvocable
+  return skillSettingsOf(skill).userInvocable
 }
 
 /**

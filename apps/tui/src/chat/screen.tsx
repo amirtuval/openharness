@@ -278,10 +278,21 @@ export function ChatScreen({
     }
   }, [client, skillList])
 
+  // The mode the chat follows — or the one a `/model` pick is about to switch to — and its
+  // tool/skill override. The `/` menu applies it over the reader's switches (K8), so a skill
+  // the mode turns off is not offered and one it turns on is, exactly as the server answers.
+  const menuModeId = view.pendingMode ?? view.modeId
+  const menuModeOverride = useMemo(
+    () => (modeList ?? []).find((mode) => mode.id === menuModeId)?.tools ?? null,
+    [modeList, menuModeId],
+  )
   // The whole `/` menu (#349, K7): the chat's commands and the reader's skills in one list, so a
   // skill is offered, filtered, completed and corrected exactly as `/compact` is. Memoised on the
   // list because the prompt re-renders on every keystroke.
-  const commands = useMemo(() => menuCommands(skillList ?? []), [skillList])
+  const commands = useMemo(
+    () => menuCommands(skillList ?? [], menuModeOverride),
+    [skillList, menuModeOverride],
+  )
 
   // The preferences go with the two lists above and for the same reason: the status line's meter
   // needs one field of them, and a chat must not wait for a read to open. `null` is "not read
