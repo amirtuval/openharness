@@ -1,46 +1,63 @@
 import {
   EVENT_TYPES,
+  type AgentToolResultEvent,
   type ModelRequestEndEvent,
   type ModelRequestStartEvent,
   type SessionStatusIdleEvent,
   type Supersedes,
 } from '@openharness/protocol'
 
-import type { AppendableEvent, CompactOptions } from './store'
+import type { AppendableEvent, CompactOptions, TaskNotificationInput } from './store'
 
 /**
  * What both stores do with the events they store, in one place.
  *
  * The in-memory store and the Postgres store share these rules so they cannot drift: which
- * event types are the user's, what a `supersedes` range has to look like before it is recorded
- * (a reply's chunks, or the tail a `session.rewind` restarts from, #238), which events such a
- * range covers when replay skips them or {@link SessionStore.compact} deletes them, and how a
- * compaction cutoff is read. Everything else about storing is each implementation's own; this
- * is only the part the contract speaks about.
+ * events are queued — {@link isQueuedEventType}, the user's own and since #343 a background
+ * task's notification — what a `supersedes` range has to look like before it is recorded (a reply's chunks, or the
+ * tail a `session.rewind` restarts from, #238), which events such a range covers when replay
+ * skips them or {@link SessionStore.compact} deletes them, and how a compaction cutoff is
+ * read. Everything else about storing is each implementation's own; this is only the part the
+ * contract speaks about.
  *
  * (The keyset cursors and argument checks the stores also share live in `inputs.ts`.)
  */
 
-/** Whether an event type is one the user writes; those are queued until a claim takes them. */
+/**
+ * Whether an event type is one the **user** writes, as opposed to one a task's notification is.
+ *
+ * Both are queued ({@link isQueuedEventType}); the split is what keeps the two pending reads
+ * apart, so a caller that wants "what the user said" cannot silently be handed a task's news.
+ */
 export function isUserEventType(type: string): boolean {
   return type === EVENT_TYPES.userMessage || type === EVENT_TYPES.userInterrupt
 }
 
-/** The event types that can carry a claim on user events, and so change what is pending. */
-export type ClaimsEvent = ModelRequestStartEvent | ModelRequestEndEvent | SessionStatusIdleEvent
+/** The event types that can carry a claim on queued events, and so change what is pending. */
+export type ClaimsEvent =
+  ModelRequestStartEvent | ModelRequestEndEvent | SessionStatusIdleEvent | AgentToolResultEvent
 
 /**
- * Whether an event is one of the three types whose `consumes` claims user events (P4).
+ * Whether an event is one of the four types whose `consumes` claims queued events (P4).
  *
- * The same three everywhere: a `span.model_request_start` claims the messages its request
- * answers, a `span.model_request_end` claims the interrupts that cut its request short, and a
- * `session.status_idle` claims the interrupts a turn that had nothing running ended on.
+ * Three are the turn's own bookkeeping, and each claims what it answers: a
+ * `span.model_request_start` claims the messages (and, since #343, the notifications) its
+ * request folds in, a `span.model_request_end` claims the interrupts that cut its request
+ * short, and a `session.status_idle` claims the interrupts a turn that had nothing running
+ * ended on.
+ *
+ * The fourth is the **task wait's result** (epic #340, S5; #343). A wait is resolved by the
+ * notifications that answer it, and those notifications must be claimed by the event that
+ * consumes them: the result *is* the notification, so it is the result that says the model has
+ * been told. Without it the parent's next request would be handed the same notification a
+ * second time, as steering.
  */
 export function carriesConsumes(event: { readonly type: string }): event is ClaimsEvent {
   return (
     event.type === EVENT_TYPES.modelRequestStart ||
     event.type === EVENT_TYPES.modelRequestEnd ||
-    event.type === EVENT_TYPES.sessionStatusIdle
+    event.type === EVENT_TYPES.sessionStatusIdle ||
+    event.type === EVENT_TYPES.agentToolResult
   )
 }
 
@@ -308,4 +325,53 @@ export function cutoffOf(options: CompactOptions): number {
     )
   }
   return cutoff
+}
+
+/**
+ * The event an {@link SessionStore.appendTaskNotification} writes, as the caller's input plus
+ * the store's envelope (epic #340, S4; issue #343).
+ *
+ * Both stores build it here, so the shape a notification is written in is stated once: the
+ * queued-ness comes from {@link isQueuedEventType} on the append path, and this is only the
+ * body. It is deliberately not validated here — the in-memory store parses through the
+ * protocol like every other event it keeps, and the Postgres store stores what it is given —
+ * but it is *built* here, so a field the protocol adds is a change in one place.
+ */
+export function taskNotificationEvent(input: TaskNotificationInput): AppendableEvent {
+  return {
+    type: EVENT_TYPES.sessionTaskNotification,
+    task_id: input.taskId,
+    kind: input.kind,
+    text: input.text,
+    source_key: input.sourceKey,
+  }
+}
+
+/**
+ * The batch {@link SessionStore.appendTaskNotification} appends: the notification, and — when
+ * the caller named one — the `session.task_status` it moves the card to (#363).
+ *
+ * Two facts about one turn, written as **one** append. As two appends there was a window no
+ * recovery could repair: a crash (or a fence) between them delivered the news and lost the
+ * status, so the card stayed `running` for the rest of the session, the parent model acted on a
+ * result whose task looked unfinished, and the scan saw nothing to repair because the news had
+ * landed. The store's own idempotency (one append per `sourceKey`) then makes the status
+ * exactly-once by construction, which is why the pair lives here rather than at the caller.
+ *
+ * The status goes **after** the notification in the batch, so the log reads news-then-move and
+ * "the newest status for this task" is the delivery's.
+ */
+export function taskNotificationEvents(input: TaskNotificationInput): AppendableEvent[] {
+  return [
+    taskNotificationEvent(input),
+    ...(input.status === undefined
+      ? []
+      : [
+          {
+            type: EVENT_TYPES.sessionTaskStatus,
+            task_id: input.taskId,
+            status: input.status,
+          } satisfies AppendableEvent,
+        ]),
+  ]
 }

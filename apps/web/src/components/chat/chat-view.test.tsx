@@ -1,3 +1,4 @@
+import type { TaskCard } from '@openharness/client'
 import type { TodoList } from '@openharness/protocol'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -23,7 +24,12 @@ import { ChatView } from './chat-view'
  */
 
 /** The task list the hook answers with, when a test wants one — `null` means none. */
-const hookState = vi.hoisted(() => ({ todos: null as TodoList | null }))
+const hookState = vi.hoisted(() => ({
+  todos: null as TodoList | null,
+  // The tasks the session hook answers with — one card per background task (#340). A case sets
+  // this to the list it is about.
+  tasks: [] as TaskCard[],
+}))
 
 vi.mock('../client-provider', () => ({ useClient: () => ({}) }))
 
@@ -55,6 +61,10 @@ vi.mock('../../hooks/use-session', () => ({
       truncation: null,
       toolCalls: [],
       todos: hookState.todos,
+      // A case that is not about tasks leaves the list empty: the screen draws no card, reads no
+      // subtree usage and watches no child (#346). The cards themselves are
+      // `task-card.test.tsx`'s and `message-list`'s.
+      tasks: hookState.tasks,
       truncatedToolResults: [],
       clearedToolResults: null,
       confirmations: [],
@@ -73,6 +83,7 @@ vi.mock('../../hooks/use-session', () => ({
       send: () => Promise.resolve(true),
       compact: () => Promise.resolve(true),
       interrupt: () => Promise.resolve(undefined),
+      stopTask: () => Promise.resolve(undefined),
       respond: () => Promise.resolve(undefined),
       dismissError: () => undefined,
     }) as unknown as SessionView,
@@ -118,6 +129,23 @@ function renderChat(todos: TodoList | null): { readonly container: HTMLElement }
     />,
   )
   return { container }
+}
+
+/** One background task, as the card's data — the fields the sidebar's report is about. */
+function task(status: TaskCard['status']): TaskCard {
+  return {
+    id: 'task_1',
+    kind: 'subagent',
+    // No child session: the card draws no Open and the activity watcher (which needs a real
+    // client) is not started — this case is about the report, not about the card.
+    childSessionId: null,
+    type: 'general-purpose',
+    description: 'A helper',
+    status,
+    messages: [],
+    result: null,
+    position: 3,
+  }
 }
 
 /** The one element the transcript and the composer block are both supposed to live in. */
@@ -173,5 +201,41 @@ describe('the chat column and the task list (#316)', () => {
     expect(
       column.contains(container.querySelector('[data-slot="composer-column"]') as HTMLElement),
     ).toBe(true)
+  })
+})
+
+describe("the shell hears that a chat's tasks moved (epic #340; #348)", () => {
+  it('reports again when a helper finishes, not only when one is started', () => {
+    // The sidebar nests a chat's helpers and draws their **status** beside the count, so the
+    // shell has to hear when one stops as well as when one starts (#348): a report keyed on the
+    // count alone left a chat with a finished helper still claiming "1 running".
+    const onTasksChanged = vi.fn()
+    const view = (): React.ReactElement => (
+      <ChatView
+        sessionId="ses_1"
+        catalog={CATALOG}
+        modes={MODES}
+        onDelete={() => Promise.resolve({ ok: true })}
+        onDeleted={() => undefined}
+        onTasksChanged={onTasksChanged}
+      />
+    )
+
+    hookState.tasks = [task('running')]
+    const { rerender } = render(view())
+    expect(onTasksChanged).toHaveBeenCalledTimes(1)
+
+    // The same task, finished: nothing about the count moved.
+    hookState.tasks = [task('done')]
+    rerender(view())
+    expect(
+      onTasksChanged,
+      'the status moved, and so the sidebar has to read again',
+    ).toHaveBeenCalledTimes(2)
+
+    // A re-render that changes nothing is still nothing: the report is keyed by the tasks, not by
+    // the render.
+    rerender(view())
+    expect(onTasksChanged).toHaveBeenCalledTimes(2)
   })
 })

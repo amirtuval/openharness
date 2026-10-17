@@ -58,6 +58,11 @@ export interface CommandContext {
    * permission a call runs under, written one change at a time.
    */
   readonly openToolSettings: () => void
+  /**
+   * Open the chat's background tasks in the prompt slot — `/agents` (epic #340, S9; #347). The
+   * list switches into a task's own chat, back to the chat above, and stops a task.
+   */
+  readonly openAgents: () => void
   /** Wipe the screen, the session untouched — the Ctrl+L wipe, by another name. */
   readonly clearScreen: () => void
   /** Leave the chat, the way the second idle Ctrl+C does. */
@@ -138,6 +143,13 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     },
   },
   {
+    name: 'agents',
+    description: "this chat's tasks: switch into one, or stop it",
+    run: (context) => {
+      context.openAgents()
+    },
+  },
+  {
     name: 'clear',
     description: 'clear the screen; the session stays',
     run: (context) => {
@@ -180,7 +192,11 @@ export const CHAT_KEYS: readonly { readonly keys: string; readonly description: 
       "the menu's commands while it is open, otherwise the buffer's lines and the history",
   },
   { keys: 'Tab', description: 'complete the command the menu has selected' },
-  { keys: 'Esc', description: 'close the command menu, keeping what is typed' },
+  {
+    keys: 'Esc',
+    description:
+      'close the command menu, keeping what is typed — and in a task’s own chat, stop its turn',
+  },
   { keys: 'Ctrl+L', description: 'clear the screen; the session stays' },
   {
     keys: 'Ctrl+T',

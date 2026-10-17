@@ -1,6 +1,14 @@
 import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
-import { MOCK_TOOL_MARKER, TEST_TOOL_NAME } from '@openharness/server'
-import { ASK_USER_TOOL_NAME, EVENT_TYPES, WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
+import { MOCK_TOOL_MARKER, TEST_TASK_TOOL_NAME, TEST_TOOL_NAME } from '@openharness/server'
+import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
+  ASK_USER_TOOL_NAME,
+  EVENT_TYPES,
+  TASK_WAIT_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+} from '@openharness/protocol'
 import type {
   AgentToolResultEvent,
   AgentToolUseEvent,
@@ -75,14 +83,22 @@ describe('a tool turn', () => {
     // second request — which is where the model's reply to the result comes from.
     //
     // The offer is the process's registry (epic #303, #305, #309) — `ask_user`, which every
-    // deployment gets, beside the test `echo` tool and the built-ins — and beside it the one
-    // tool no registry carries (#335): this chat runs a Claude, whose provider has a native
-    // search tool, so the request carries `web_search` too. Nothing here runs it.
+    // deployment gets, beside the test `echo` tool, the task the mock model can start (#343)
+    // and the built-ins — then the five **subagent** tools the loop builds per request (epic
+    // #340, S5; #344), and beside them the one tool no registry carries (#335): this chat runs
+    // a Claude, whose provider has a native search tool, so the request carries `web_search`
+    // too. Nothing here runs it, and `message_parent` is absent because a top-level chat has
+    // nobody above it — the one tool a child is offered.
     const offered = [
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: TEST_TOOL_NAME, source: 'builtin' },
+      { name: TEST_TASK_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
       { name: 'todo_write', source: 'builtin' },
+      { name: AGENT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_MESSAGE_TOOL_NAME, source: 'builtin' },
+      { name: TASK_WAIT_TOOL_NAME, source: 'builtin' },
+      { name: AGENT_STOP_TOOL_NAME, source: 'builtin' },
       { name: WEB_SEARCH_TOOL_NAME, source: 'provider' },
     ]
     expect(spans).toHaveLength(2)
