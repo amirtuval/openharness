@@ -68,6 +68,7 @@ import {
 import type { Tracer, TracingMode } from '../observability/tracing'
 import { startServer } from '../main'
 import {
+  DEFAULT_BALANCE_STABILITY_MS,
   DEFAULT_HEARTBEAT_MS,
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_SWEEP_MS,
@@ -331,6 +332,8 @@ export interface TestOptions {
   readonly heartbeatMs?: number
   /** How often owned partitions are re-scanned. */
   readonly sweepMs?: number
+  /** How long the membership must be unchanged before surplus is released (#378, P3). */
+  readonly balanceStabilityMs?: number
   /** How long superseded chunks are kept before compaction deletes them. */
   readonly deltaRetentionMs?: number
   /** How often the compaction job runs; `0` disables it. */
@@ -811,6 +814,9 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     leaseTtlMs: options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
     heartbeatMs: options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
     sweepMs: options.sweepMs ?? DEFAULT_SWEEP_MS,
+    // The default is the deployment's; a test that runs the partition scheduler with several
+    // instances and expects an immediate rebalance sets 0 or a window it can wait out.
+    balanceStabilityMs: options.balanceStabilityMs ?? DEFAULT_BALANCE_STABILITY_MS,
     deltaRetentionMs: options.deltaRetentionMs ?? DEFAULT_DELTA_RETENTION_MS,
     // Off unless a test asks: a compaction timer running under every test's feet would make
     // "the chunks are still there" assertions a race. The job's own suite turns it on.

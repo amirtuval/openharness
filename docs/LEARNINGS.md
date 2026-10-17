@@ -293,6 +293,31 @@ template helper refuses to render `local` when `replicaCount > 1` or the HPA's `
 Because Helm deep-merges a values file into the chart's defaults, a Terraform `env` map that omits
 `SCHEDULER` can no longer fall through to the server's unsafe default.
 
+**A rolling update's join is a leave waiting to happen, so balancing on the join is work undone.**
+With `maxSurge: 1, maxUnavailable: 0`, the surge pod's arrival shrinks every share and makes the
+old members release surplus; a moment later the pod it replaces is terminated and the shares grow
+straight back. Measured over three replacements on 64 partitions, that cost **92–94 partition
+moves, up to three per partition** — each move a drain, and for a long step a re-run. Waiting
+until the membership has been unchanged for a window (`OPENHARNESS_BALANCE_STABILITY_MS`, 30 s)
+before giving surplus up took it to **66 moves: 62 partitions once, 2 twice**. The residual two
+are capacity, not churn: when the first original leaves, a _surviving_ original that is one
+partition under its share can take one of the released partitions, and is itself replaced later.
+Removing those would need the newcomer to have priority on released leases; every simple version
+of that either delays crash/scale-down takeover (an expired lease must still be taken at once) or
+needs a lease-transfer API (#378, P3; `apps/server/src/partition-scheduler.ts`;
+`e2e/src/rolling-restart.test.ts` counts the moves off `partition_leases`).
+
+**A test that resumes a paused instance re-joins the membership, and a peer can rebalance under
+it.** The lease-loss tests pause an instance, let a survivor take its partition, then resume it so
+its renewal is refused. Under the old immediate balancing, the resumed instance's announcement
+made the survivor over its share, and the survivor could give up the very partition whose turn it
+was recovering — the turn then moved to the resumed instance, whose scripted model had already
+spent its reply, and the assertion saw no reply (or the wrong one). It was a test interleaving,
+not a product race, but it was real under load; running those two tests with a deployment-sized
+stability window removes it, and a separate `stop()` race — a heartbeat's scan still adopting a
+lease when the caller began truncating/ closing the store — is closed by awaiting the refresh in
+flight before `stop()` answers (#378, P3; `apps/server/src/partition-scheduler.test.ts`).
+
 ## Authentication and identity providers
 
 **Identity is the provider-verified email, and boolean-shaped claims are not booleans.** Microsoft

@@ -19,7 +19,12 @@ import type { TracingMode } from './observability/tracing'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
-import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
+import {
+  DEFAULT_BALANCE_STABILITY_MS,
+  DEFAULT_HEARTBEAT_MS,
+  DEFAULT_LEASE_TTL_MS,
+  DEFAULT_SWEEP_MS,
+} from './partition-scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 
@@ -59,6 +64,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_LEASE_TTL_MS`          | how long a partition lease lasts; `30000` by default             |
  * | `OPENHARNESS_HEARTBEAT_MS`          | how often leases are renewed; `10000` by default                 |
  * | `OPENHARNESS_SWEEP_MS`              | how often owned partitions are re-scanned; `60000` by default    |
+ * | `OPENHARNESS_BALANCE_STABILITY_MS`  | how long membership must be unchanged before surplus is released; `30000` (#378, P3) |
  * | `OPENHARNESS_DELTA_RETENTION_MS`    | how long superseded chunks are kept before compaction deletes them; `3600000` |
  * | `OPENHARNESS_COMPACT_INTERVAL_MS`   | how often compaction runs; `300000` by default, `0` disables it  |
  * | `OPENHARNESS_COMPACTION_THRESHOLD`  | the share of the chat model's context budget at which history is summarized; `0.7` (epic #277, C2) |
@@ -118,6 +124,7 @@ export const ENV_VARS = {
   leaseTtlMs: 'OPENHARNESS_LEASE_TTL_MS',
   heartbeatMs: 'OPENHARNESS_HEARTBEAT_MS',
   sweepMs: 'OPENHARNESS_SWEEP_MS',
+  balanceStabilityMs: 'OPENHARNESS_BALANCE_STABILITY_MS',
   deltaRetentionMs: 'OPENHARNESS_DELTA_RETENTION_MS',
   compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
   compactionThreshold: 'OPENHARNESS_COMPACTION_THRESHOLD',
@@ -207,6 +214,13 @@ export interface ServerConfig {
   readonly heartbeatMs: number
   /** How often owned partitions are re-scanned for work a signal may have missed. */
   readonly sweepMs: number
+  /**
+   * How long the live membership must be unchanged before surplus partitions are released
+   * (#378, P3). The default covers the gap between a surge pod becoming ready and the old pod
+   * receiving `SIGTERM` in a rolling update, so the join's share shrink is undone by the leave
+   * instead of moving partitions twice; `0` releases on the next heartbeat.
+   */
+  readonly balanceStabilityMs: number
   /** How long superseded chunks are kept before compaction deletes them. */
   readonly deltaRetentionMs: number
   /** How often the compaction job runs; `0` disables it. */
@@ -466,6 +480,15 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     leaseTtlMs,
     heartbeatMs,
     sweepMs: readInteger(env, ENV_VARS.sweepMs, DEFAULT_SWEEP_MS, { min: 1 }),
+    // Zero is meaningful: release surplus on the first heartbeat after a join, the pre-P3
+    // behaviour — useful for a deployment that deliberately wants the fastest possible
+    // rebalance and does not run rolling updates.
+    balanceStabilityMs: readInteger(
+      env,
+      ENV_VARS.balanceStabilityMs,
+      DEFAULT_BALANCE_STABILITY_MS,
+      { min: 0 },
+    ),
     // Zero is meaningful for both: no retention window at all (delete as soon as the range is
     // superseded), and no compaction job at all.
     deltaRetentionMs: readInteger(env, ENV_VARS.deltaRetentionMs, DEFAULT_DELTA_RETENTION_MS, {
@@ -538,7 +561,8 @@ export function describeConfig(config: ServerConfig): string[] {
     config.scheduler === 'postgres'
       ? `scheduler: postgres partitions (instance ${config.instanceId}, ` +
           `${config.partitions} partitions, lease ${config.leaseTtlMs}ms, ` +
-          `heartbeat ${config.heartbeatMs}ms, sweep ${config.sweepMs}ms)`
+          `heartbeat ${config.heartbeatMs}ms, sweep ${config.sweepMs}ms, ` +
+          `balance stability ${config.balanceStabilityMs}ms)`
       : 'scheduler: local (this process owns every session)',
   )
   // Which key provider wraps users' credentials (#150): a name, and for Cloud KMS the key's
