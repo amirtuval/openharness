@@ -1,5 +1,5 @@
 import type { ToolRegistry, ToolResult, ToolRunContext } from '@openharness/hands'
-import { createToolRegistry, errorResult } from '@openharness/hands'
+import { cannotAskForApproval, createToolRegistry, errorResult } from '@openharness/hands'
 import type {
   JsonValue,
   ModeToolOverride,
@@ -365,7 +365,7 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
         : agentMcpToolUse(remote.serverName, remote.toolName, input, permission)
     }),
   )
-  const context: ToolRunContext = {
+  const baseContext: ToolRunContext = {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
   }
@@ -395,6 +395,14 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
         return problem === null ? null : errorResult(problem)
       }
       if (runs(registry, call.name, decision.permission)) {
+        // The call's own id — the event just stored for it, which *is* its id (X1) — so a tool
+        // that writes an event naming the call that caused it (the `agent` tool's
+        // `session.task_started`, #345) has it without having to guess.
+        const storedCall = stored[index]
+        const context: ToolRunContext = {
+          ...baseContext,
+          ...(storedCall === undefined ? {} : { toolUseId: storedCall.id }),
+        }
         return await registry.execute(call.name, input, context)
       }
       return errorResult(refusal(call.name))
@@ -545,7 +553,13 @@ function decisionFor(
   approved: ReadonlySet<string>,
 ): CallDecision {
   const tool = registry.get(name)
-  const permission = settings?.[name]?.permission ?? tool?.permission ?? 'deny'
+  const stored = settings?.[name]?.permission ?? tool?.permission ?? 'deny'
+  // A stored `ask` on a subagent tool is read as `allow` (#363): no client renders a subagent
+  // tool call — the parent's transcript draws a task **card**, and a child's transcript is the
+  // child's own — so a pause on one could never be answered. The rule is #335's, one tool
+  // family over: the switch that could never ask is not honoured, `PUT /v1/me/tools` refuses a
+  // new one, and the call is recorded `allow` because that is the decision it really ran under.
+  const permission = stored === 'ask' && cannotAskForApproval(name) ? 'allow' : stored
   if (permission === 'deny') {
     return { permission, waiting: false }
   }

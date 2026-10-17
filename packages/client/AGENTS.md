@@ -78,6 +78,17 @@ src/
                         `user.tool_confirmation` each builds, the ask_user form's drafts
                         turned into answers and checked with the protocol's validator, and
                         the words a decision is drawn with
+  tasks.ts              the task view both frontends share (#340, S9; #345): the cards a
+                        parent's log holds — the status, the conversation between the two
+                        sessions, the latest result — the status refinement the child's own
+                        stream supplies ("waiting"), and the four `agent*` tools a card
+                        stands in for
+  task-activity.ts      a child's live activity (#340, S9; #345): the one line a card draws
+                        from the child's own stream — its current tool call, its task list as
+                        "2 of 5", or "writing…" — plus its tokens and cost, followed while
+                        something watches and dropped when nothing does
+  session-tree.ts       the session tree (#340, S1/S3; #345): one session's children, and the
+                        breadcrumb from a child up to the root of the chat it hangs off
   providers.ts          PROVIDERS: the frontends' view of the shared provider list — the
                         protocol's id/name/key URL/credential type, plus free-tier and
                         key-format hints (#209, #245)
@@ -99,7 +110,6 @@ src/
   internal/events.ts    isEventList: one user event or a list, shared by the client and the fake
   testing/index.ts      createFakeClient
   testing/fake-brain.ts the fake's turn loop: log, scripts, subscribers
-  testing/titles.ts     the server's session-naming rule, restated for the fake
   testing/freeze.ts     deepFreeze: the fakes hand out frozen events (D9)
   test-support/         test-only helpers (mock fetch, response builders)
 ```
@@ -137,10 +147,13 @@ src/
 | `selectTranscriptEntries()`, `transcriptEntries()`, `TranscriptEntry`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | the messages, the tool calls and the summary dividers as one ordered list a frontend renders (#280; #308)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `TranscriptSummary`, `TranscriptSummarizing`, `TranscriptContext`, `TranscriptTruncation`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | the four shapes that state is kept in (#280)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `selectToolCalls()`, `selectTodos()`, `selectTruncatedToolResults()`, `selectClearedToolResults()`, `selectSearchCount()`, `TranscriptToolCall`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | the tool calls a conversation holds — a built-in's or a remote MCP server's, with `server` naming the latter — the chat's task list, the newest request's result notices and its search count (#303, X1/X5/X9; #308; #312)                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `selectTasks()`, `tasksFromEvents()`, `taskCardStatus()`, `taskIsLive()`, `isTaskToolName()`, `TaskCard`, `TaskCardStatus`, `TaskMessage`, `TaskResult`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | the background tasks a chat ran (#340, S9; #345): one card per task — its type, its description, its status, the messages it exchanged with the parent and its latest result — derived from the parent's log, the status the child's own stream refines to `waiting`, the four `agent*` tools a card stands in for, and whether a task is still working (`running`/`waiting`) — the one state a card follows its child's stream for and offers **Stop** in (#368)                                                                                                                                                                                                        |
+| `watchTaskActivity()`, `taskActivityOf()`, `taskActivityLabel()`, `TaskActivityWatcher`, `TaskActivityState`, `TaskActivityLine`, `TaskActivityLog`, `TaskActivityOptions`, `TaskActivityWatchOptions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | a child's live activity (#340, S9; #345): the one line its card draws from the child's own stream — the current tool call, the task list as `2 of 5`, or `writing…` — with its tokens and cost, followed while something watches and unsubscribed when nothing does                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `listChildren()`, `sessionBreadcrumb()`, `SessionTreeSource`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | the session tree (#340, S1/S3; #345): one session's children (`?parent_session_id=`), the whole list, and the chain from a child up to the root of the chat it hangs off, root first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `selectConfirmations()`, `selectConfirmation()`, `TranscriptConfirmation`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | the reader's decisions about calls that waited on them, and one call's own answer — how a call came to be allowed (#303, X6; #309; #310)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `toolCallStatus()`, `toolCallSummary()`, `toolStatusLabel()`, `formatToolInput()`, `mcpServerMarker()`, `ToolCallStatus`, `ToolCallResult`, `TruncatedToolResult`, `ClearedToolResults`, `ToolResultsNotice`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | one call's derived status, its short summary, the words for a status, the pretty-printed input, the marker naming a remote call’s server (#312), and the shapes those are kept in (#308)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `MCP_AUTH_TYPES`, `mcpAuthLabel()`, `mcpAuthHint()`, `mcpStatusLabel()`, `mcpStatusTone()`, `mcpStatusDetail()`, `mcpTestOutcome()`, `mcpServerById()`, `mcpServerByName()`, `mcpServerTools()`, `mcpToolEntriesByServer()`, `mcpToolPolicyBody()`, `mcpServerPolicyBody()`, `mcpToolPolicyState()`, `mcpToolPolicyStateLabel()`, `toolPolicyLabel()`, `TOOL_POLICIES`, `estimatedTokensLabel()`, `mcpFailureNotice()`, `mcpServerFromError()`, `mcpConnectedServerId()`, `MCP_CONNECTED_PARAM`, `waitForMcpConnection()`, `MCP_CONNECT_POLL_INTERVAL_MS`, `MCP_CONNECT_TIMEOUT_MS`, `McpServerTone`, `McpServerTool`, `McpToolPolicyState`, `McpFailureNotice`, `McpConnectionWait`, `WaitForMcpConnectionOptions` | the remote-MCP view both frontends share (#303, X10; #313): what a server's auth and status are called and how they read, what its tools cost, which server a `mcp_*` error names, which server a web callback connected, a server's tools with the permission each runs under, the one write that sets every tool of a server at once and the aggregate state a control shows for it (#313), and the poll `oh` waits on after opening the authorization page, and what a **Test** came to (`mcpTestOutcome`: the tools a check listed, or the reason the server recorded — status and body — with "connect first" for an `oauth` server that has no token at all, #314) |
-| `toolPolicyChoices()`, `cycleToolPolicy()`, `toolPolicyNote()`, `toolAvailabilityNote()`, `NOT_REGISTERED_NOTE`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | the settings view of a tool both frontends share (epic #303, X4; #335): which permissions a cycling key walks — `ask` is **not** one of them for a provider-executed `web_search`, which the server refuses — where ←/→ take a permission from, the permission column a row draws (`allow`, `deny (default ask)`, `ask (default)`), and why a tool cannot be used here (the server's own `reason` where it sent one)                                                                                                                                                                                                                                                     |
+| `toolPolicyChoices()`, `toolSupportsAsk()`, `NO_ASK_TOOL_NAMES`, `SUBAGENT_ASK_NOTE`, `cycleToolPolicy()`, `toolPolicyNote()`, `toolAvailabilityNote()`, `NOT_REGISTERED_NOTE`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | the settings view of a tool both frontends share (epic #303, X4; #335): which permissions a cycling key walks — `ask` is **not** one of them for a provider-executed `web_search` (the server refuses it) nor for the four subagent calls no client could draw a prompt for (#368), and `NO_ASK_TOOL_NAMES`/`SUBAGENT_ASK_NOTE`/`toolSupportsAsk` are how a settings screen says which rows those are and why — where ←/→ take a permission from, the permission column a row draws (`allow`, `deny (default ask)`, `ask (default)`), and why a tool cannot be used here (the server's own `reason` where it sent one)                                                   |
 | `pendingCalls()`, `pendingCallKind()`, `askUserQuestions()`, `pendingCallHeading()`, `PendingCall`, `PendingCallKind`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | the calls the reader owes an answer to, which of the two prompts each needs, and the questions an `ask_user` call asked, and the heading both prompts name a call (and a remote call’s server) with (#303, X6; #310; #312)                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `APPROVAL_CHOICES`, `ApprovalChoice`, `approvalChoiceLabel()`, `approvalConfirmation()`, `approvalConfirmations()`, `declineConfirmation()`, `answerConfirmation()`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | the four things a reader can say about a waiting call, and the one `user.tool_confirmation` each sends — one event per call, and one batch for several (#303, #310)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `QuestionDraft`, `emptyDraft()`, `emptyDrafts()`, `withLabel()`, `withOther()`, `withText()`, `withConfirmed()`, `answersFrom()`, `draftProblems()`, `draftComplete()`, `OTHER_CHOICE_LABEL`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | an `ask_user` form's state, the wire's answers it becomes, and the protocol's own check that holds a Submit — so a client cannot send what the server refuses (#303, #310)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -155,14 +168,14 @@ src/
 
 ### `@openharness/client/testing`
 
-| export                                                                                                       | what it is                                                                                                                                                                 |
-| ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `createFakeClient(options?)`                                                                                 | an in-memory `Client` with a scriptable brain and device flow; it stamps `context_budget` and `tool_call` on a catalog entry it is given that lacks them (#280; epic #303) |
-| `FakeClient`, `FakeClientOptions`, `FakeModelEntry`, `FakeReplyOptions`, `FakeFailureOptions`, `FakeMcpTool` | the fake's interface and the options its scripting takes, and one remote MCP tool it may be asked to offer (#312)                                                          |
-| `FakeDeviceFlowOptions`                                                                                      | the script `scriptDeviceLogin` takes                                                                                                                                       |
-| `FakeReply`, `FakeFailure`, `FakeScript`                                                                     | one scripted reply, one scripted failure, and the queue entry they compose                                                                                                 |
-| `ModelListCall`                                                                                              | one `models.list` call the fake answered, and its `refresh` flag                                                                                                           |
-| `FAKE_MODEL_USAGE`, `FAKE_SESSION_TOKEN`                                                                     | the token usage every fake model request reports; the token the fake's device flow returns                                                                                 |
+| export                                                                                                       | what it is                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createFakeClient(options?)`                                                                                 | an in-memory `Client` with a scriptable brain and device flow; it stamps `context_budget` and `tool_call` on a catalog entry it is given that lacks them (#280; epic #303)                                                                                        |
+| `FakeClient`, `FakeClientOptions`, `FakeModelEntry`, `FakeReplyOptions`, `FakeFailureOptions`, `FakeMcpTool` | the fake's interface and the options its scripting takes, and one remote MCP tool it may be asked to offer (#312). Its `addSession(session)` puts another session in the store — a **child** above all, since the fake starts none of its own (#340, S1/S3; #361) |
+| `FakeDeviceFlowOptions`                                                                                      | the script `scriptDeviceLogin` takes                                                                                                                                                                                                                              |
+| `FakeReply`, `FakeFailure`, `FakeScript`                                                                     | one scripted reply, one scripted failure, and the queue entry they compose                                                                                                                                                                                        |
+| `ModelListCall`                                                                                              | one `models.list` call the fake answered, and its `refresh` flag                                                                                                                                                                                                  |
+| `FAKE_MODEL_USAGE`, `FAKE_SESSION_TOKEN`                                                                     | the token usage every fake model request reports; the token the fake's device flow returns                                                                                                                                                                        |
 
 ## The client
 
@@ -522,6 +535,7 @@ interface TranscriptState {
   pendingRequests: PendingModelRequest[] // bookkeeping for `meta`; empty between turns (#201)
   toolCalls: TranscriptToolCall[] // the model's calls — built-in and MCP — and their results (#303, #308, #312)
   todos: TodoList | null // the last successful `todo_write` call's list (#305, #308)
+  tasks: TaskCard[] // the background tasks the chat ran, one card each (#340, S9; #345)
   // plus the compaction state (summaries, summarizing, context, truncation, manualCompaction,
   // the newest request's truncated/cleared tool results) — see "Context visibility" and "The
   // tool-call view"
@@ -841,6 +855,73 @@ decisions; and the fake can produce a pause, so a prompt is testable end to end.
   waiting on you." — and `statusFromResult` reads the brain's `The user sent a message instead.`
   as `dismissed` rather than as a failure: the reader moving on is not a tool that broke.
 
+## Background tasks (epic #340, S4/S9; issue #345)
+
+A chat can hand work to a **background task** — a subagent today, a sandboxed `bash` later — and
+both frontends draw the same card for one. `src/tasks.ts` is the card, `src/task-activity.ts` is
+what the child is doing right now, and `src/session-tree.ts` is the tree the tasks hang off; this
+is the whole of it.
+
+| state                     | set by                                                                                            | cleared by                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `tasks` (`selectTasks`)   | `session.task_started` / `task_status` / `task_notification`, and the `agent*` calls between them | a `session.rewind` whose range covers the events the card was built from |
+| the child's live activity | the child's own stream, followed by `watchTaskActivity`                                           | the last watcher unsubscribing, or `close()`                             |
+
+- **The parent's log is the whole card.** Three events carry a task's life in the parent's log
+  (S4): `session.task_started` names it — its kind, its child session, its type, its description
+  and the call that started it (`tool_use_id`, #345) — `session.task_status` says what it is
+  doing (`running | idle | failed |
+stopped`), and `session.task_notification` is the one way anything reaches the parent model
+  from it (`result` / `message` / `failed`). `tasksFromEvents` folds them into `TaskCard`s and
+  is the one reading of them, exactly as `readTodoList` is for the todo list: the transcript
+  keeps the events (`taskEvents`) and recomputes the cards, so a rewind that takes an event back
+  takes the card it built with it rather than leaving a tree the log no longer has.
+- **The card's five words are four from the parent and one from the child.** The parent's status
+  maps onto the card's: `stopped` and `failed` are themselves, `running` is `running`, and
+  `idle` is **done** once a `result` has been delivered (S9) — or still `running` before one has,
+  because a turn that ended without telling the parent anything is not a completion. **waiting**
+  is not in the parent's log at all: the child is paused in an `agent_wait`, which its own
+  `session.status_idle` records as `stop_reason: waiting_on_tasks`, so a frontend that watches
+  the child passes it to `taskCardStatus`. That is the whole reason the two are separate.
+- **A card is state, not a transcript entry.** `TranscriptEntry` is a three-member union both
+  frontends switch on exhaustively — the web app's final branch draws `entry.message` and the
+  TUI's draws `<MessageView message={entry.message} />` — so a fourth member would be a compile
+  error in `apps/web` and `apps/tui`, which are #346's and #347's to change. The card therefore
+  lives in `TranscriptState.tasks` with a `position`, and a frontend merges it with
+  `selectTranscriptEntries` by that position: the card draws exactly where its `agent` call was,
+  because the call is not drawn at all (below).
+- **The `agent*` calls are not tool lines.** `agent`, `agent_message`, `agent_wait` and
+  `agent_stop` are a task's own machinery rather than work the model did worth a line (S9), so
+  the reducer keeps them as `taskEvents` and never as `toolCalls` — which is what leaves the card
+  the only thing drawn there. An `agent_message`'s `text` becomes the parent's half of the
+  conversation; the child's half is a `message` notification. A remote MCP tool cannot collide
+  with them: it is offered as `<server>__<tool>`.
+- **The card sits at the call its start names, and the description is only the fallback.** A
+  `session.task_started` carries `tool_use_id` — the id of the `agent.tool_use` whose result was
+  the handle — so `tasksFromEvents` places the card at that exact call (#345). Two calls may
+  share a description, which is what the earlier join-by-description got wrong; the field is
+  optional (a task kind nothing of this log called, and a log stored before it existed), so a
+  start **without** one still falls back to the nearest unmatched `agent` call **with its own
+  description** — the one field the two share there — and a start whose call is not in the
+  events it was handed (a trimmed replay) falls back to its own `seq`. A call that started
+  nothing (the live-task limit refused it) therefore cannot steal a later task's place either
+  way.
+- **The child's activity is read from the child's own stream.** A task does not report progress
+  (S4), so `watchTaskActivity(client.sessions.events, childSessionId, { prices })` reads the
+  child's history and then follows it, folds it into a transcript of its own, and answers the one
+  line a card draws: the current tool call (`name: summary`), the task list as `2 of 5`, or
+  `writing…` — plus the child's tokens and what they cost. It is a store with a **reference
+  count**: the first `subscribe` starts the follower and the last unsubscribe drops the
+  connection, so a chat with six finished subagents holds no streams. `getState` is stable
+  between changes, so React's `useSyncExternalStore` takes the pair; reading it opens nothing.
+- **The tree is two reads.** `listChildren(sessions, parentSessionId)` is
+  `GET /v1/sessions?parent_session_id=`, walked page by page like any other list; a child is a
+  real session (S3) and is not a top-level chat, which is what lets a sidebar nest it under its
+  parent instead of listing it. `sessionBreadcrumb(sessions, session)` follows
+  `parent_session_id` up and answers the chain **root first**, stopping on a parent it has
+  already seen — a server that answered a cycle would otherwise hang the walk. Both take a
+  client's `sessions`, or a two-method double in a test.
+
 ## The remote MCP servers (epic #303, X10; issue #313)
 
 A user registers the remote MCP servers they operate, and the two frontends have to agree about
@@ -1003,9 +1084,11 @@ and the created session runs the model it was created from, so a turn's
 **A session is named by its first message, in the fake too** (#29, #105). The request that
 stores the first `user.message` — `sendMessage`, `events.send` and the `initial_events` of
 `sessions.create` alike — derives the title from it with the server's rule (the first
-non-empty line, whitespace collapsed, cut to `SESSION_TITLE_MAX_LENGTH` with an ellipsis;
-`src/testing/titles.ts` restates `apps/server/src/titles.ts` for the fake), and never over a
-title that exists. The naming _replaces_ the brain's session object rather than mutating it,
+non-empty line, whitespace collapsed, cut to `SESSION_TITLE_MAX_LENGTH` with an ellipsis — it
+**is** the protocol's `deriveSessionTitle`, which is what `apps/server/src/titles.ts` and the
+brain's `agent` handler call too — one rule, three callers, and no third copy in the fake, #380),
+and never over a title that exists. The naming _replaces_ the brain's session object rather than
+mutating it,
 so a caller holding an earlier read keeps its stale `title: null` until it re-reads — the
 one-re-read flow the frontends have (#35) — while `fake.session` and later reads carry the
 title immediately.
@@ -1013,7 +1096,16 @@ title immediately.
 `sessions.delete(id)` deletes a session the way the route does (#111): one final
 `session.deleted` event is delivered to that session's subscribers — the streams close behind
 it — the log is dropped, and from then on `sessions.get`, the events routes and `sendMessage`
-answer the 404 `not_found_error` an unknown id gets, as does deleting it a second time. A
+answer the 404 `not_found_error` an unknown id gets, as does deleting it a second time. It also
+reaches the session's **descendants** (#341; epic #340, S7), each announcing its own
+`session.deleted` to its own subscribers, so the store holds no session left pointing at one
+that is gone.
+
+`sessions.list` answers what the route answers (#340, S1/S3; #361): the caller's **top-level**
+chats by default, and one chat's **children** with `parent_session_id` — both applied inside the
+store, so `parent_session_id: null` and an omitted filter are the same top-level read and a chat
+nothing hangs off answers `[]`. A fake that answered the whole list to any filter is what made the
+web app carry a test-support shim re-implementing the rule (deleted in #368). A
 `user.message` sent with a `model` stores the choice on the event and switches the fake
 session's live `model`, so the next turn's `span.model_request_start` carries it — while a
 session created with a model still runs the model it was created with.
@@ -1313,6 +1405,23 @@ Its MCP half (#312) is in the same two files: a waiting `agent.mcp_tool_use` rea
 whose confirmation names the call's own id, a built-in headed by its name alone, and a remote
 tool called `ask_user` read as an approval rather than a question — plus `mcpServerMarker` in
 `src/tools.test.ts`.
+
+Background tasks (epic #340, S4/S9; #345) are `src/tasks.test.ts` (a card opened at its `agent`
+call and falling back to the start's own position, the description join that keeps a refused call
+from stealing a later task's place, every status — including an idle task with no result yet
+still `running` — the messages in order with a continuation's second result newest, the ordering
+of two cards, an orphan notification ignored, and `taskCardStatus`'s refinement) plus the task
+half of `src/transcript-tasks.test.ts` (the `agent*` calls drawn as no tool line at all, the card
+at the call's `seq`, the conversation and the result, every status, and a rewind dropping a card
+it covers and keeping one it does not); `src/task-activity.test.ts` is the live half, over a
+transcript for the derivation (a running call, the task list, `writing…`, `idle`, the tokens and
+their priced cost, and no cost for a caller with no catalog) and over a scripted log for the
+watcher (nothing followed until something watches, the history then the stream, one unsubscribe
+dropping the connection and the other not, `close`, waiting and un-waiting from the child's own
+stop reason, and an unreadable child reported through `onDebug` rather than thrown);
+`src/session-tree.test.ts` is the tree (one page and several, a repeated cursor ending the walk,
+an empty child list, a breadcrumb that is just the session for a top-level chat and root-first
+for a nested one, and a cycle stopping the walk).
 
 `src/transcript.test.ts` also holds the epics #277/#280 half — and, since #314, the attribution
 of a request's truncation record: a cut of a **tool result** (a `seq` the record's own `results`

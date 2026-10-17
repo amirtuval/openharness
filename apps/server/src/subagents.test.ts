@@ -274,6 +274,48 @@ describe('starting a helper (S3/S4/S5; #344)', () => {
   })
 })
 
+describe('the title a child is created with (epic #340)', () => {
+  it('is the description the parent model gave, through both session reads', async () => {
+    const context = test()
+    const session = await createSession(context)
+    const parent = await say(
+      context,
+      session.id,
+      `${MOCK_AGENT_MARKER} general-purpose | Check the rewind path.`,
+    )
+    const child = childId(parent)
+    expect(of(parent, EVENT_TYPES.sessionTaskStarted)[0]?.description).toBe(
+      'Check the rewind path.',
+    )
+
+    // The list a client nests the helpers under their parent with.
+    const listed = await context.request(`${SESSIONS}?parent_session_id=${session.id}`)
+    const page = (await listed.json()) as { readonly data: readonly Session[] }
+    expect(page.data.map((entry) => entry.title)).toEqual(['Check the rewind path.'])
+
+    // And the one session read a child's own chat opens with.
+    const read = await context.request(`${SESSIONS}/${child}`)
+    expect(read.status).toBe(200)
+    expect(((await read.json()) as Session).title).toBe('Check the rewind path.')
+  })
+
+  it('is not replaced by a message a person later sends the child', async () => {
+    const context = test()
+    const session = await createSession(context)
+    const parent = await say(context, session.id, `${MOCK_AGENT_MARKER} general-purpose | Keep it.`)
+    const child = childId(parent)
+
+    // The route's auto-titling names a session from its first message and only ever fills a
+    // hole — a child created with a title keeps it, which is what makes the title a name rather
+    // than a race between the parent's call and the next message.
+    await send(context, child, 'Actually, also do this.')
+    await waitForIdle(context.store, child)
+
+    const read = await context.request(`${SESSIONS}/${child}`)
+    expect(((await read.json()) as Session).title).toBe('Keep it.')
+  })
+})
+
 describe('steering, stopping and continuing (S5; #344)', () => {
   it('steers a child with a message, and it answers with the context it already had', async () => {
     const context = test()

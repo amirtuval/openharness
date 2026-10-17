@@ -110,6 +110,8 @@ describe('a background task through the real server', () => {
     // and the `running` status are written when the call lands, and the conversation has already
     // gone on past both — that is what makes it a background task (S4).
     expect(of(log, EVENT_TYPES.sessionTaskStarted).map((event) => event.task_id)).toEqual([taskId])
+    // And the start names the call that caused it (#345): the test tool's own call event id.
+    expect(of(log, EVENT_TYPES.sessionTaskStarted)[0]?.tool_use_id).toBe(callId)
     expect(of(log, EVENT_TYPES.sessionTaskStatus).map((event) => event.status)).toEqual(['running'])
     expect(notificationsOf(log, taskId)).toEqual([])
 

@@ -59,6 +59,13 @@ export async function signInFake(fake: FakeClient): Promise<void> {
 export interface ListRequest {
   readonly limit: number | undefined
   readonly page: string | undefined
+  /**
+   * The parent a child read names, or `undefined` for a chat-list read.
+   *
+   * The sidebar asks each of the newest chats for its children since #346, so the recorded
+   * requests hold both kinds; a test about the chat list's paging filters these out.
+   */
+  readonly parentSessionId: string | undefined
 }
 
 /**
@@ -115,7 +122,11 @@ export function recordListRequests(fake: FakeClient): { readonly sessions: ListR
   const listSessions = fake.sessions.list.bind(fake.sessions)
 
   fake.sessions.list = (params, options) => {
-    sessions.push({ limit: params?.limit, page: params?.page })
+    sessions.push({
+      limit: params?.limit,
+      page: params?.page,
+      parentSessionId: params?.parent_session_id,
+    })
     return listSessions(params, options)
   }
 

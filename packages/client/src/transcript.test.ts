@@ -133,6 +133,8 @@ describe('reduceTranscript', () => {
       toolSources: {},
       todos: null,
       todoEvents: [],
+      tasks: [],
+      taskEvents: [],
     })
   })
 

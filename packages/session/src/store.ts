@@ -24,6 +24,7 @@ import type {
   StreamEvent,
   TaskId,
   TaskNotificationKind,
+  TaskStatus,
   Timestamp,
   UpdateAgentRequest,
   UpdateModeRequest,
@@ -742,6 +743,15 @@ export interface SessionStore {
    * notice it. No fence is needed, for the same reason a user event needs none: the event is
    * durable the moment it is stored, and the owner's brain is what claims it.
    *
+   * **A `status` lands with it, in the same append** (epic #340, S4; #363). A child's turn end
+   * owes its parent two facts — the news, and the `session.task_status` that moves the card —
+   * and writing them as two appends left a window no recovery could repair: a crash (or a fence)
+   * between them delivered the news and nothing else, the parent's card stayed `running` for the
+   * rest of the session, and the child was not "work" for the scan because its news had landed.
+   * One append keyed by the same `sourceKey` is what makes them land together: a second call
+   * naming that key stores **neither**, so the status is written exactly once, by the one writer
+   * that also wrote the notification.
+   *
    * @returns the stored notification, and whether this call is the one that wrote it
    * @throws SessionNotFoundError when the session does not exist
    * @throws RangeError when the input is not a notification the protocol would accept
@@ -1312,7 +1322,23 @@ export interface TaskNotificationInput {
    * nothing.
    */
   readonly sourceKey: string
+  /**
+   * The status this news moves the task's card to, appended **with** the notification (#363).
+   *
+   * Optional because not every notification moves a card (`message_parent`'s notes, and the
+   * inbox's own `notify`, carry news and no status), and narrow because only a finished turn's
+   * delivery has one to write: `running` belongs to the child's own turn start, and `stopped`
+   * written by an `agent_stop` is the tool's fact, not a delivery's.
+   */
+  readonly status?: TaskDeliveryStatus
 }
+
+/**
+ * The statuses a **delivery** moves a task's card to (epic #340, S4/S7; #363): a turn that
+ * ended, errored, or was stopped. `running` is not one — it is the child's own turn start — and
+ * neither is a `stopped` an `agent_stop` wrote before the child's turn ended.
+ */
+export type TaskDeliveryStatus = Extract<TaskStatus, 'idle' | 'failed' | 'stopped'>
 
 /** What {@link SessionStore.appendTaskNotification} wrote — or found already written. */
 export interface TaskNotificationAppend {
@@ -1335,6 +1361,24 @@ export interface PartitionFence {
   /** The epoch the writer's lease gave it. */
   readonly epoch: number
 }
+
+/**
+ * How deep the tree walks go before they stop: the ceiling on a session tree's depth (#361).
+ *
+ * `listDescendants`, `countLiveDescendants` and the delete cascade all walk `parent_session_id`
+ * recursively, and the Postgres store bounds the walk so a table somebody hand-edited into a
+ * cycle terminates rather than looping (SQL has no cheap cycle check, and a `with recursive`
+ * that loops hangs the connection rather than failing). It is **not** meant to be reached: the
+ * deployment's own nesting limit is `OPENHARNESS_MAX_AGENT_DEPTH`, whose default is 3 and whose
+ * maximum the server bounds with this number, so a tree the API can build never comes near it.
+ *
+ * It lives here, in the contract, rather than in the Postgres store, precisely because the
+ * server's configuration has to know it: a nesting limit above this would let a tree be built
+ * whose bottom a walk cannot see, and a delete would leave descendants behind. The in-memory
+ * store needs no bound of its own for a tree this shape — it walks with a `seen` set that
+ * terminates on a cycle — and the configuration is what keeps the two stores' answers identical.
+ */
+export const MAX_DESCENDANT_DEPTH = 64
 
 /** A lease on a partition: who holds it, at which epoch, until when. */
 export interface PartitionLease {

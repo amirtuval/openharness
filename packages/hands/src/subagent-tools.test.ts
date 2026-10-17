@@ -1,4 +1,4 @@
-import { newTaskId } from '@openharness/protocol'
+import { newEventId, newTaskId } from '@openharness/protocol'
 import { describe, expect, it, vi } from 'vitest'
 
 import { createToolRegistry } from './registry'
@@ -95,17 +95,26 @@ describe('the subagent tools (S5; #344)', () => {
   it('runs a call through the handler, with the input its own schema parsed', async () => {
     const { handlers, spies } = testHandlers()
     const registry = registryFacing(handlers)
-    const result = await registry.execute('agent', {
-      type: 'general-purpose',
-      description: 'Check the rewind path',
-      prompt: 'Read the rewind code and report what it does.',
-    })
+    // The call's own id rides the context, so the handler can name the call it started (#345).
+    const toolUseId = newEventId()
+    const result = await registry.execute(
+      'agent',
+      {
+        type: 'general-purpose',
+        description: 'Check the rewind path',
+        prompt: 'Read the rewind code and report what it does.',
+      },
+      { toolUseId },
+    )
     expect(spies.start).toHaveBeenCalledTimes(1)
-    expect(spies.start).toHaveBeenCalledWith({
-      type: 'general-purpose',
-      description: 'Check the rewind path',
-      prompt: 'Read the rewind code and report what it does.',
-    })
+    expect(spies.start).toHaveBeenCalledWith(
+      {
+        type: 'general-purpose',
+        description: 'Check the rewind path',
+        prompt: 'Read the rewind code and report what it does.',
+      },
+      expect.objectContaining({ toolUseId }),
+    )
     expect(textOf(result)).toBe('task_handle')
     expect(result.isError).not.toBe(true)
   })

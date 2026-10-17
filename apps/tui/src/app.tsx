@@ -361,6 +361,10 @@ function AppScreen({
           // `/new` opens a session the way a first chat does — `openModel` — and the screen
           // for the old one unmounts with it, which disposes its stream (the effect below).
           onNewChat={openModel}
+          // `/agents` switches into a task's own chat the same way (epic #340, S9; #347): the
+          // child is a real session the picker has already read, so this is one `beginChat`,
+          // and the screen for the parent unmounts with its stream.
+          onOpenSession={beginChat}
           onExit={() => {
             const { session } = screen
             session.dispose()

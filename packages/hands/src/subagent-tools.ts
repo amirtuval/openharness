@@ -19,7 +19,7 @@ import type {
 } from '@openharness/protocol'
 
 import { errorResult } from './tool'
-import type { ToolDefinition, ToolResult } from './tool'
+import type { ToolDefinition, ToolExecutionContext, ToolResult } from './tool'
 
 /**
  * The subagent tools (epic #340, S5; issue #344): the five definitions the model is offered —
@@ -49,8 +49,15 @@ import type { ToolDefinition, ToolResult } from './tool'
  * one frame up and turned into that same sentence.
  */
 export interface SubagentToolHandlers {
-  /** Start a helper of the named type and answer its handle. */
-  start(input: AgentToolInput): Promise<ToolResult> | ToolResult
+  /**
+   * Start a helper of the named type and answer its handle.
+   *
+   * `context` is the call's own: it carries `toolUseId` — the `agent.tool_use` event the loop
+   * stored for this call — which the starter writes onto the `session.task_started` it
+   * appends, so a client places the task's card at that exact call rather than matching by
+   * description (#345).
+   */
+  start(input: AgentToolInput, context: ToolExecutionContext): Promise<ToolResult> | ToolResult
   /** Send a task a message. */
   message(input: AgentMessageToolInput): Promise<ToolResult> | ToolResult
   /** Interrupt a task and mark it stopped. */
@@ -161,7 +168,7 @@ export function createSubagentTools(options: SubagentToolsOptions): ToolDefiniti
       name: AGENT_TOOL_NAME,
       description: agentToolDescription(options.types),
       inputSchema: AgentToolInputSchema,
-      run: (input) => handlers.start(input),
+      run: (input, context) => handlers.start(input, context),
     }),
     subagentTool({
       name: AGENT_MESSAGE_TOOL_NAME,
@@ -231,4 +238,34 @@ export const SUBAGENT_TOOL_NAMES = [
 /** Whether a tool name is one of the subagent tools. */
 export function isSubagentToolName(name: string): boolean {
   return (SUBAGENT_TOOL_NAMES as readonly string[]).includes(name)
+}
+
+/**
+ * The subagent tools a call is **never paused** on (epic #340, S5/S7; #363).
+ *
+ * `ask` is a pause: the turn ends `requires_action` and a client draws the call for the user to
+ * answer. That is possible for a tool with a call of ours behind it, and impossible for these
+ * four — **no client renders a subagent tool call**. The parent's transcript draws a task
+ * *card*, and a child's transcript is the child's own: the call is not on any screen a person is
+ * looking at, so a pause on one could never be answered. S5 says these four run or refuse.
+ *
+ * `agent_wait` is deliberately not here: its pause is a **task wait** (`@openharness/brain`'s
+ * `waitsForTasks`), which a notification, a deadline or a user message resolves — no person has
+ * to answer it, and it is how a parent waits at all.
+ *
+ * Two readers share this list, which is why it lives with the definitions: `PUT /v1/me/tools`
+ * refuses a new `ask` on one of these names, and both the settings listing and the loop read a
+ * stored one as `allow` — a switch that says "ask me" and can never ask is worse than no switch,
+ * the rule #335's provider-native tool already follows.
+ */
+export const SUBAGENT_TOOLS_WITHOUT_ASK = [
+  AGENT_TOOL_NAME,
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  MESSAGE_PARENT_TOOL_NAME,
+] as const
+
+/** Whether a call to this tool name is never held for the user's answer (`ask` reads as `allow`). */
+export function cannotAskForApproval(name: string): boolean {
+  return (SUBAGENT_TOOLS_WITHOUT_ASK as readonly string[]).includes(name)
 }

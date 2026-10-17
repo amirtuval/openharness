@@ -51,6 +51,40 @@ describe('Settings → Tools (#308)', () => {
     expect(stored.data.find((entry) => entry.name === 'web_fetch')?.enabled).toBe(true)
   })
 
+  it('does not offer “Ask me first” for a subagent tool, and says why (#368)', async () => {
+    // The five subagent tools are listed here like any other built-in (epic #340, S9), but a call
+    // to four of them is kept out of the transcript's tool calls — a card stands in for the
+    // `agent` call — so there is no prompt any client could draw and an `ask` would pause the
+    // parent's turn with nothing to answer it. The server refuses the write; the card does not
+    // offer the value. `agent_wait` keeps it: its own pause outranks the permission.
+    // The fake registers three built-ins, so a stored setting for `agent` is how its row appears
+    // here at all — the real listing is checked against the mock server by `w31-subagents.spec.ts`.
+    renderSettings({
+      toolSettings: {
+        builtin: {
+          agent: { enabled: true, policy: 'allow' },
+          agent_wait: { enabled: true, policy: 'allow' },
+        },
+        mcp: {},
+      },
+    })
+
+    const agent = await toolRow('agent')
+    const options = within(agent)
+      .getAllByRole('option')
+      .map((option) => option.textContent)
+    expect(options).toEqual(['Allow', 'Deny'])
+    expect(within(agent).getByText(/Subagents run in the background/)).toBeInTheDocument()
+
+    // The control: the wait is a tool that can pause, so its row still offers the third value.
+    const wait = await toolRow('agent_wait')
+    expect(
+      within(wait)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['Allow', 'Ask me first', 'Deny'])
+  })
+
   it('changes the permission a call is evaluated under', async () => {
     const fake = makeFake()
     renderApp(fake, { hash: '#/settings' })

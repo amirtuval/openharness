@@ -71,7 +71,9 @@ then — becomes the message's first non-empty line, whitespace collapsed and cu
 `SESSION_TITLE_MAX_LENGTH`, so a list of chats shows what each one is about rather than the
 agent's name. That happens once. A title passed to `POST /v1/sessions`, and one an earlier
 message produced, is never overwritten; a session created with `initial_events` is named the
-same way, in the same request.
+same way, in the same request. A **child** is created with its title already set (epic #340):
+the brain titles it with the description the parent model gave in its `agent` call, normalised
+by the same rule, because no route ever sees a child's first message.
 
 A session is **interactive** unless the request asks for one that is not (`interactive: false`):
 a non-interactive session's model cannot stop to ask the user anything — `ask_user` is never
@@ -96,49 +98,49 @@ the only way an event is ever removed together with its session.
 
 ## Routes
 
-| method   | path                                            | what it does                                                                                                                                              |
-| -------- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                       | liveness — always `{ status: 'ok' }` while the process lives; open                                                                                        |
-| `GET`    | `/ready`                                        | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open                                                           |
-| `GET`    | `/v1/auth-config`                               | unauthenticated: which providers are on, and whether dev login is                                                                                         |
-| `GET`    | `/v1/me`                                        | the signed-in user                                                                                                                                        |
-| `GET`    | `/v1/me/preferences`                            | the caller's preferences — the default model, the web theme and the context settings                                                                      |
-| `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit                                                                         |
-| `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`                                                               |
-| `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all                                                                            |
-| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode; a `subagent_description` makes it a subagent type                                     |
-| `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                                                                             |
-| `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                                                                             |
-| `POST`   | `/v1/me/modes/{mode_id}`                        | update a mode; omitted fields keep their value, `null` clears one                                                                                         |
-| `DELETE` | `/v1/me/modes/{mode_id}`                        | delete one; answers `204`, and the chats that followed it keep their last model                                                                           |
-| `POST`   | `/v1/agents`                                    | create an agent                                                                                                                                           |
-| `GET`    | `/v1/agents`                                    | list agents, oldest first                                                                                                                                 |
-| `GET`    | `/v1/agents/{agent_id}`                         | read one agent                                                                                                                                            |
-| `POST`   | `/v1/agents/{agent_id}`                         | update an agent; sessions already created keep their snapshot                                                                                             |
-| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one); `interactive` may ask for one that cannot pause (epic #340, S1)                             |
-| `GET`    | `/v1/sessions`                                  | list the caller's top-level chats, newest first (`agent_id` and `parent_session_id` filter)                                                               |
-| `GET`    | `/v1/sessions/{session_id}`                     | read one session                                                                                                                                          |
-| `DELETE` | `/v1/sessions/{session_id}`                     | delete it, its whole log and its descendants; answers `204` with no body                                                                                  |
-| `POST`   | `/v1/sessions/{session_id}/events`              | append user events; the server owns every other event type                                                                                                |
-| `GET`    | `/v1/sessions/{session_id}/events`              | read the log, with `types[]`, `after_seq`, `limit` and `page`                                                                                             |
-| `GET`    | `/v1/sessions/{session_id}/events/stream`       | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                                                                                      |
-| `POST`   | `/v1/sessions/{session_id}/compact`             | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                                                                                |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | AI SDK `useChat` compatibility — an extension, not the protocol                                                                                           |
-| `PUT`    | `/v1/provider-credentials/{name}`               | add or replace one of the caller's credentials, under that name (write-only)                                                                              |
-| `GET`    | `/v1/provider-credentials`                      | list the caller's credential metadata; never the secrets                                                                                                  |
-| `DELETE` | `/v1/provider-credentials/{name}`               | delete one; answers `204` with no body                                                                                                                    |
-| `POST`   | `/v1/me/mcp_servers`                            | register a remote MCP server — a URL, and the auth is **detected** (epic #303, X10; #314); `409` for a duplicate name or the twenty-first                 |
-| `GET`    | `/v1/me/mcp_servers`                            | list the caller's servers, oldest first (no cursor: at most 20)                                                                                           |
-| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | read one server                                                                                                                                           |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | update one; omitted fields keep their value, a `headers` map replaces the sealed one and implies `headers`                                                |
-| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | delete one and its pending OAuth states; `204`                                                                                                            |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | run the connection check now: initialize, list tools, price their definitions                                                                             |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                                                                           |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                                                                              |
-| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                                              |
-| `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                                                                                   |
-| `GET`    | `/v1/sessions/{session_id}/usage`               | what one session **and its descendants** spent: totals, cost, the per-model breakdown, and the subtree's own share as `descendants` (epic #340, S8; #344) |
-| `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day                                                                    |
+| method   | path                                            | what it does                                                                                                                                                                                                                                     |
+| -------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET`    | `/health`                                       | liveness — always `{ status: 'ok' }` while the process lives; open                                                                                                                                                                               |
+| `GET`    | `/ready`                                        | readiness — `{ status: 'ok' }`, or `503` while draining or when the store does not answer; open                                                                                                                                                  |
+| `GET`    | `/v1/auth-config`                               | unauthenticated: which providers are on, and whether dev login is                                                                                                                                                                                |
+| `GET`    | `/v1/me`                                        | the signed-in user                                                                                                                                                                                                                               |
+| `GET`    | `/v1/me/preferences`                            | the caller's preferences — the default model, the web theme and the context settings                                                                                                                                                             |
+| `PUT`    | `/v1/me/preferences`                            | merge fields in; model ids, four theme names, the compaction share and pass limit                                                                                                                                                                |
+| `GET`    | `/v1/me/tools`                                  | the caller's tools: on/off and permission per tool, effective for a mode named by `mode_id`                                                                                                                                                      |
+| `PUT`    | `/v1/me/tools`                                  | merge per tool; `allow`, `ask` or `deny`, and whether a tool is offered at all. `ask` is refused for a tool whose call cannot be shown to the user — the provider-native `web_search` and the four subagent tools — with a 400 naming the reason |
+| `POST`   | `/v1/me/modes`                                  | create a mode; `409` for a duplicate name or the twenty-first mode; a `subagent_description` makes it a subagent type (a mode named `general-purpose` keeps working as a preset but is not offered as a type — the built-in owns that name)      |
+| `GET`    | `/v1/me/modes`                                  | list the caller's modes, oldest first (no cursor: at most 20)                                                                                                                                                                                    |
+| `GET`    | `/v1/me/modes/{mode_id}`                        | read one mode                                                                                                                                                                                                                                    |
+| `POST`   | `/v1/me/modes/{mode_id}`                        | update a mode; omitted fields keep their value, `null` clears one                                                                                                                                                                                |
+| `DELETE` | `/v1/me/modes/{mode_id}`                        | delete one; answers `204`, and the chats that followed it keep their last model                                                                                                                                                                  |
+| `POST`   | `/v1/agents`                                    | create an agent                                                                                                                                                                                                                                  |
+| `GET`    | `/v1/agents`                                    | list agents, oldest first                                                                                                                                                                                                                        |
+| `GET`    | `/v1/agents/{agent_id}`                         | read one agent                                                                                                                                                                                                                                   |
+| `POST`   | `/v1/agents/{agent_id}`                         | update an agent; sessions already created keep their snapshot                                                                                                                                                                                    |
+| `POST`   | `/v1/sessions`                                  | create a session from a model and/or an agent (at least one); `interactive` may ask for one that cannot pause (epic #340, S1)                                                                                                                    |
+| `GET`    | `/v1/sessions`                                  | list the caller's top-level chats, newest first (`agent_id` and `parent_session_id` filter)                                                                                                                                                      |
+| `GET`    | `/v1/sessions/{session_id}`                     | read one session                                                                                                                                                                                                                                 |
+| `DELETE` | `/v1/sessions/{session_id}`                     | delete it, its whole log and its descendants; answers `204` with no body                                                                                                                                                                         |
+| `POST`   | `/v1/sessions/{session_id}/events`              | append user events; the server owns every other event type                                                                                                                                                                                       |
+| `GET`    | `/v1/sessions/{session_id}/events`              | read the log, with `types[]`, `after_seq`, `limit` and `page`                                                                                                                                                                                    |
+| `GET`    | `/v1/sessions/{session_id}/events/stream`       | follow it live over SSE; `event_deltas[]` opts into a reply's chunks                                                                                                                                                                             |
+| `POST`   | `/v1/sessions/{session_id}/compact`             | ask for a manual compaction; optional `instructions` (epic #277, K8; #283)                                                                                                                                                                       |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | AI SDK `useChat` compatibility — an extension, not the protocol                                                                                                                                                                                  |
+| `PUT`    | `/v1/provider-credentials/{name}`               | add or replace one of the caller's credentials, under that name (write-only)                                                                                                                                                                     |
+| `GET`    | `/v1/provider-credentials`                      | list the caller's credential metadata; never the secrets                                                                                                                                                                                         |
+| `DELETE` | `/v1/provider-credentials/{name}`               | delete one; answers `204` with no body                                                                                                                                                                                                           |
+| `POST`   | `/v1/me/mcp_servers`                            | register a remote MCP server — a URL, and the auth is **detected** (epic #303, X10; #314); `409` for a duplicate name or the twenty-first                                                                                                        |
+| `GET`    | `/v1/me/mcp_servers`                            | list the caller's servers, oldest first (no cursor: at most 20)                                                                                                                                                                                  |
+| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | read one server                                                                                                                                                                                                                                  |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | update one; omitted fields keep their value, a `headers` map replaces the sealed one and implies `headers`                                                                                                                                       |
+| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | delete one and its pending OAuth states; `204`                                                                                                                                                                                                   |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | run the connection check now: initialize, list tools, price their definitions                                                                                                                                                                    |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                                                                                                                                                                  |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                                                                                                                                                                     |
+| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                                                                                                                                     |
+| `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                                                                                                                                                                          |
+| `GET`    | `/v1/sessions/{session_id}/usage`               | what one session **and its descendants** spent: totals, cost, the per-model breakdown, and the subtree's own share as `descendants` (epic #340, S8; #344)                                                                                        |
+| `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day                                                                                                                                                           |
 
 Every `/v1` resource belongs to the caller and is scoped to them.
 
@@ -198,8 +200,9 @@ on, and the task's whole life in _this_ session's log is three events:
 ```json
 // 1. it was started: the handle, what kind it is, and what it is for
 { "type": "session.task_started", "id": "sevt_…", "seq": 6, "processed_at": "…",
-  "task_id": "task_…", "kind": "subagent", "child_session_id": "sesn_…",
-  "task_type": "researcher", "description": "Research how a rewind works" }
+  "task_id": "task_…", "kind": "subagent", "tool_use_id": "sevt_…",
+  "child_session_id": "sesn_…", "task_type": "researcher",
+  "description": "Research how a rewind works" }
 // 2. what it is doing — written as it changes state, so a client draws the card from here
 { "type": "session.task_status", "id": "sevt_…", "seq": 7, "processed_at": "…",
   "task_id": "task_…", "status": "running" }
@@ -209,6 +212,11 @@ on, and the task's whole life in _this_ session's log is three events:
   "source_key": "sesn_child:3" }
 ```
 
+- **The call that started it is in the log.** `tool_use_id` is the id of the `agent.tool_use`
+  whose result was the handle, so a client draws the card at that exact call rather than
+  matching on the `description` both sides happen to share two calls wrote. It is optional: a
+  task kind nothing of this log called carries none, and so does a log stored before the field
+  existed — a reader that finds none falls back to the description.
 - **Live activity is the child's own stream.** This log says what a task is _doing_; what it is
   doing now, in detail, is the events of the session its `child_session_id` names.
 - **A notification is queued, once.** Its `processed_at` is `null` until a turn claims it — the
@@ -241,7 +249,7 @@ a mode — the epic's S5):
 | `agent`         | `{ type, description, prompt }` | resolves the type, creates the child, writes `session.task_started` + a `running` status and answers the handle (`task_id`) at once. The tool's description lists the types |
 | `agent_message` | `{ task_id, text }`             | a `user.message` in the child: it steers a running child, and starts another turn on one that has already reported, with its context intact                                 |
 | `agent_wait`    | `{ task_ids?, timeout_s? }`     | the durable wait above                                                                                                                                                      |
-| `agent_stop`    | `{ task_id }`                   | interrupts the child and writes `session.task_status { status: "stopped" }`                                                                                                 |
+| `agent_stop`    | `{ task_id }`                   | writes `session.task_status { status: "stopped" }` and interrupts the child — a `user.interrupt` in its log when it has a turn open, and a signal either way                |
 
 A **child** is offered one more — `message_parent { text }` — which writes a `message`
 notification to its parent without ending its turn. Its final message reaches the parent anyway:
@@ -249,20 +257,51 @@ when any child turn ends, its last reply is delivered as a `result` notification
 turn (`<child_session_id>:<idle seq>`), a turn that ended in an error as `failed` with the
 provider's sentence, a turn that said nothing as a `result` saying so, and a turn that _paused_
 (did not end) as nothing at all. The `session.task_status` a card follows is the child's own:
-`running` when its turn opens, `idle`/`failed` with the news, `stopped` when it is stopped.
+`running` when its turn opens, `idle`/`failed`/`stopped` with the news. The news and the status
+are **one append**, keyed by the same `<child_session_id>:<idle seq>`: a crash (or a fence)
+between two writes would otherwise deliver the result and leave the card `running` for the rest
+of the session, and nothing the recovery scan looks at would repair it.
+
+**A stopped turn is announced as a stop.** A child turn that ended because of a `user.interrupt`
+— a person's Stop in a frontend, `oh`'s `/agents` → `s`, Esc in a child, or the interrupt
+`agent_stop` writes — delivers a `result` whose text says the user stopped the subagent (with
+whatever partial reply the turn had after it) and moves the parent's status to `stopped`, never
+`idle`. Read as `idle` the card would say **done** and the parent model would believe the helper
+finished, which is what S4's `stopped` signal and S7's "a card's Stop, `agent_stop`, or
+interrupting the child itself" are for (#348). The notification is keyed by the turn, so a stop
+and an `agent_stop` for the same turn are **one** notification and one status. A later
+`agent_message` (or a message a person sends the child) restarts it as `running`, as any turn
+does.
+
+**Only a claimed `user.interrupt` is the user's stop.** A turn the **server** aborted — a rolling
+deploy's drain, a shutdown — ends the same way in the log (an `interrupted` span end) with no
+event anybody's hand wrote, so it is announced for what it was: a `result` saying the turn was
+interrupted by the server and that `agent_message` continues the helper, with the card left
+`idle`. The user is not credited with a stop they did not make.
+
+**An interrupt that stopped nothing is not a turn.** A person's Stop on a helper that has already
+reported opens a turn which immediately ends with nothing in flight; it is announced as nothing
+at all — no notification, no status — so a card that reads **done** is not flipped to `stopped`
+after the fact. The same rule is what the recovery scan reads, so the child is not woken for news
+that does not exist.
 
 - **A type** is one of the owner's modes that carries a `subagent_description`, or the built-in
   `general-purpose` — the parent's own model, effort and tool set in a fresh context. A child
-  created on a mode follows it live, exactly as a chat does.
+  created on a mode follows it live, exactly as a chat does. A **deployment that wired no
+  subagent runtime offers none of the five tools** to anybody, however its process registry is
+  built: they are not calls a chat could use, and an offered `agent_wait` would park a turn for
+  its whole deadline with no task in existence to resolve it. The settings listing still shows
+  them (a user's stored choices and a mode's override are about names).
 - **Nesting is bounded** (S6). A session at depth `OPENHARNESS_MAX_AGENT_DEPTH` (default 3) is
   not offered the four parent-side tools; a chat's live descendants are capped by
   `OPENHARNESS_MAX_LIVE_TASKS` (default 10), past which `agent` answers an `is_error` the model
   acts on. A child parked in its own wait still counts as live.
 - **A handle this chat does not have is an `is_error`** — including another session's task id —
   and so is a type the resolver refuses, with a sentence naming what to do instead.
-- **An interrupt of the parent does not stop its children**; a card's Stop (`agent_stop`), the
-  child's own interrupt or a `DELETE` of the parent do. Rewinding past an `agent` call stops the
-  child that call started and drops its news, and deleting a session deletes its whole subtree.
+- **An interrupt of the parent does not stop its children**; a card's Stop, `agent_stop`, the
+  child's own interrupt or a `DELETE` of the parent do — and each of them leaves the child's
+  status `stopped`. Rewinding past an `agent` call stops the child that call started and drops
+  its news, and deleting a session deletes its whole subtree.
 - **`GET /v1/sessions/{session_id}/usage`** covers the tree: see [Usage and cost](#usage-and-cost).
 
 It may carry a `reasoning_effort` (`"low"`, `"medium"` or `"high"`) the same way: the effort
