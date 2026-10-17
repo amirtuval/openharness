@@ -1,3 +1,4 @@
+import { DEFAULT_STALL_MS } from '@openharness/client'
 import { makeModelEntry } from '@openharness/protocol/fixtures'
 import { cleanup, render } from 'ink-testing-library'
 import { setImmediate as realSetImmediate } from 'node:timers/promises'
@@ -66,6 +67,8 @@ function spansOf(
     status: line.status,
     runningSince: line.runningSince ?? null,
     lastTextAt: line.lastTextAt ?? null,
+    lastEventAt: line.lastEventAt ?? null,
+    reconnecting: line.reconnecting === true,
     retrying: line.retrying,
     summarizing: line.summarizing ?? null,
     interrupted: line.interrupted ?? false,
@@ -241,6 +244,8 @@ describe('statusField', () => {
     status: 'idle',
     runningSince: null,
     lastTextAt: null,
+    lastEventAt: undefined,
+    reconnecting: false,
     retrying: undefined,
     interrupted: false,
   }
@@ -273,6 +278,49 @@ describe('statusField', () => {
     // …and the number beside it is the turn's age, not the length of the silence: the reader
     // is waiting on the turn, and `Working… 6s` is how long they have been waiting.
     expect(field({ ...quiet, now: 4000 + WORKING_QUIET_MS }).text).toBe('Working… 6s')
+  })
+
+  it('says it is waiting for the server when a running turn goes quiet (#378, P4)', () => {
+    const quiet = {
+      status: 'running' as const,
+      runningSince: 1000,
+      lastTextAt: 4000,
+      lastEventAt: 10_000,
+    }
+    expect(field({ ...quiet, now: 10_000 + DEFAULT_STALL_MS - 1 }).text).not.toBe(
+      'Waiting for the server…',
+    )
+    expect(field({ ...quiet, now: 10_000 + DEFAULT_STALL_MS })).toEqual({
+      text: 'Waiting for the server…',
+      spinner: true,
+      tone: 'busy',
+    })
+    // The reader's own stop and a specific server state still say their own, newer thing.
+    expect(field({ ...quiet, now: 30_000, summarizing: { pass: 1, passes: 2 } }).text).toBe(
+      'Summarizing… 1 of 2',
+    )
+    expect(field({ ...quiet, status: 'idle', now: 30_000 }).text).toBe('idle')
+  })
+
+  it('says it is reconnecting, whatever else was happening (#378, P4)', () => {
+    expect(
+      field({
+        status: 'running',
+        runningSince: 1000,
+        lastEventAt: 2000,
+        reconnecting: true,
+        now: 3000,
+      }),
+    ).toEqual({ text: 'Reconnecting…', spinner: true, tone: 'busy' })
+    expect(
+      field({
+        status: 'running',
+        runningSince: 1000,
+        summarizing: { pass: 1, passes: 2 },
+        reconnecting: true,
+        now: 3000,
+      }).text,
+    ).toBe('Reconnecting…')
   })
 
   it('says the reason a retrying turn gave, and spins while the server does it', () => {

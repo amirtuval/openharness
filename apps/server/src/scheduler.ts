@@ -130,6 +130,8 @@ export interface LocalSchedulerOptions {
   /** The clearing threshold and the todo nudge (#331), passed to every turn. */
   readonly clearThreshold?: number
   readonly todoNudge?: boolean
+  /** How many takeovers one turn may survive before recovery gives up (#378, P4). */
+  readonly maxRecoveryAttempts?: number
   /**
    * How many partitions the server's sessions are spread over; the protocol's 64 by default.
    *
@@ -193,6 +195,9 @@ export class LocalScheduler implements SessionScheduler {
         ...(options.tools === undefined ? {} : { tools: options.tools }),
         ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
         ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+        ...(options.maxRecoveryAttempts === undefined
+          ? {}
+          : { maxRecoveryAttempts: options.maxRecoveryAttempts }),
       })
     this.#queue = new PassQueue({
       runner,

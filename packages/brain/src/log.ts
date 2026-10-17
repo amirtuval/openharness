@@ -86,6 +86,49 @@ export function lastStatusEventType(events: readonly StoredEvent[]): StoredEvent
 }
 
 /**
+ * How many times the **open turn** has already been recovered, with no step completed since.
+ *
+ * A recovering brain closes the span its predecessor left open as `brain_lost` and runs the
+ * request again. A turn that takes every owner down with it — a poison input that crashes the
+ * process on every attempt — leaves a run of those closures and nothing else, so the run is
+ * the count of failed recoveries. The walk stops at the last `session.status_idle` (that is
+ * the previous turn) and at any other `span.model_request_end`: a request that ended normally,
+ * or with a model error, is evidence the turn made progress, and the count starts again from
+ * there. A graceful hand-off ends in the same `brain_lost` closure as a crash (#378, P1), which
+ * is why the rule is cause-agnostic rather than counting crashes.
+ *
+ * The open span of the attempt that died most recently is skipped by type: its start is in the
+ * log, but its end is the one the caller is about to write. Returning the count **before** that
+ * write is what lets the caller decide whether this takeover would be one recovery too many.
+ *
+ * @param events the log, as the turn's replay read handed it over
+ */
+export function consecutiveRecoveryClosures(events: readonly StoredEvent[]): number {
+  let closures = 0
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined) {
+      continue
+    }
+    // The turn boundary: closures before the previous idle belong to an earlier turn.
+    if (event.type === EVENT_TYPES.sessionStatusIdle) {
+      break
+    }
+    if (event.type !== EVENT_TYPES.modelRequestEnd) {
+      continue
+    }
+    if (event.error?.type === 'brain_lost') {
+      closures += 1
+      continue
+    }
+    // Any other ending is a completed attempt — a reply, a model error, an interrupt — so the
+    // turn did reach and finish a step. Whatever happened before it is not a recovery loop.
+    break
+  }
+  return closures
+}
+
+/**
  * Whether the log still owes an answer: some claimed `user.message` has no reply of its own, or
  * the newest chat request left a tool step open.
  *

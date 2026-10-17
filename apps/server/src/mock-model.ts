@@ -16,7 +16,7 @@ import { MockLanguageModelV4 } from 'ai/test'
 import type { ModelFactory } from '@openharness/brain'
 
 import { TEST_TASK_TOOL_NAME } from './test-tasks'
-import { TEST_TOOL_NAME } from './tools'
+import { TEST_SLOW_TOOL_NAME, TEST_TOOL_NAME } from './tools'
 
 /**
  * The deterministic test model: what the server streams from when
@@ -40,6 +40,10 @@ import { TEST_TOOL_NAME } from './tools'
  * |                          | can be interrupted, killed and resumed mid-stream                                 |
  * | `__slow_tool__`          | the same slow reply, then a call to the test `echo` tool (#378): one turn long    |
  * |                          | enough to span a rolling restart **and** with a tool step in it                   |
+ * | `__delayed_tool__ <ms> <text>` | calls `echo_slow` — registered only when                   |
+ * |                          | `OPENHARNESS_TEST_TOOL_EXECUTION_LOG` is set — which logs one execution and waits  |
+ * |                          | `ms`: the call a crash test kills its owner against (#378, P4)                     |
+ * | `__crash_owner__`        | one chunk, then `SIGKILL` this process: the deterministic poison input (#378, P4) |
  * | `__hold__`               | one chunk, and then nothing: the request stays open until it is aborted, so a     |
  * |                          | test can hold a turn open as long as it needs and release it itself               |
  * | `__fail_retryable__`     | HTTP 503 (`model_overloaded_error`) on the *first* attempt, then the echo         |
@@ -113,6 +117,33 @@ export const MOCK_TERMINAL_MARKER = '__fail_terminal__'
  * is called with.
  */
 export const MOCK_TOOL_MARKER = '__tool__'
+
+/**
+ * The marker that calls the slow test tool (#378, P4): `__delayed_tool__ <delay_ms> <text>`.
+ *
+ * The call is stored, then the tool runs for the delay it names. A test kills the owning
+ * process while that is happening and asserts the recovering brain answers the inherited call
+ * `execution lost` rather than running it again.
+ *
+ * The tool is registered only when `OPENHARNESS_TEST_TOOL_EXECUTION_LOG` is set
+ * (`createTurnRegistry`), so a mock server that does not opt in has no `echo_slow` to call:
+ * the marker's plan still names it, and the crash suite is the one that sets the variable.
+ */
+export const MOCK_DELAYED_TOOL_MARKER = '__delayed_tool__'
+
+/**
+ * The marker that kills the process running the request (#378, P4).
+ *
+ * It is the deterministic poison input: every owner that takes the turn over runs this same
+ * request and dies on it, which is exactly the crash loop the recovery cap bounds. Streaming
+ * one chunk first leaves an open span and a stored delta behind, so the next owner's
+ * `brain_lost` closure has something to supersede. Only the mock model can do this — it is
+ * reachable only with `OPENHARNESS_TEST_MODEL=mock`, never in a deployment.
+ */
+export const MOCK_CRASH_MARKER = '__crash_owner__'
+
+/** The one chunk a {@link MOCK_CRASH_MARKER} reply streams before the process dies. */
+export const MOCK_CRASH_TEXT = 'the test model is about to kill this process'
 
 /**
  * The marker that makes the model ask the user a question (epic #303, X6; #309).
@@ -423,6 +454,12 @@ interface ModelPlan {
    * travel as JSON text, the way a provider sends them.
    */
   readonly toolCalls?: readonly { readonly name: string; readonly input: unknown }[]
+  /**
+   * Whether to `SIGKILL` this process after the chunks (#378, P4). The deterministic poison
+   * input: the request leaves an open span behind, and every owner that re-runs it dies the
+   * same way.
+   */
+  readonly crash?: boolean
 }
 
 /**
@@ -433,6 +470,9 @@ interface ModelPlan {
  * @param attempt 1 for the first request of this prompt, 2 for the next, ...
  */
 export function planFor(message: string, attempt: number): ModelPlan {
+  if (message.startsWith(MOCK_CRASH_MARKER)) {
+    return { chunks: [MOCK_CRASH_TEXT], delayMs: 0, crash: true }
+  }
   if (message.startsWith(MOCK_TERMINAL_MARKER)) {
     return { chunks: [], delayMs: 0, error: providerError(400, 'the test model was told to fail') }
   }
@@ -441,6 +481,26 @@ export function planFor(message: string, attempt: number): ModelPlan {
       chunks: [],
       delayMs: 0,
       error: providerError(503, 'the test model is briefly overloaded'),
+    }
+  }
+  if (message.startsWith(MOCK_DELAYED_TOOL_MARKER)) {
+    const rest = message.slice(MOCK_DELAYED_TOOL_MARKER.length).trim()
+    const [first, ...words] = rest.split(/\s+/)
+    const delay = Number(first)
+    const hasDelay = first !== undefined && first !== '' && Number.isInteger(delay) && delay >= 0
+    const text = hasDelay ? words.join(' ') : rest
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [
+        {
+          name: TEST_SLOW_TOOL_NAME,
+          input: {
+            text: text.length > 0 ? text : message,
+            ...(hasDelay ? { delay_ms: delay } : {}),
+          },
+        },
+      ],
     }
   }
   // Before `__slow__`: the two markers share a prefix, and the longer one has to win.
@@ -712,6 +772,9 @@ function streamOf(
       return { type: 'text-delta', id: TEXT_ID, delta: chunk }
     }),
     ...toolSteps(plan.toolCalls ?? []),
+    // The poison marker (#378, P4): give the streamed chunk a moment to be stored, then take
+    // the process down the way `kill -9` does. Nothing below it runs.
+    ...(plan.crash === true ? [crashProcess] : []),
     ...(plan.hold === true ? [] : [closing, () => finishing(plan)]),
   ]
   let step = 0
@@ -749,6 +812,18 @@ function toolSteps(
       () => Promise.resolve({ type: 'tool-input-end', id }),
       () => Promise.resolve({ type: 'tool-call', toolCallId: id, toolName: call.name, input }),
     ]
+  })
+}
+
+/**
+ * Kill this process after a short pause, so the chunk streamed before it has been stored
+ * (#378, P4). The promise never settles: the process is gone.
+ */
+function crashProcess(): Promise<LanguageModelV4StreamPart> {
+  return new Promise<LanguageModelV4StreamPart>(() => {
+    setTimeout(() => {
+      process.kill(process.pid, 'SIGKILL')
+    }, 100)
   })
 }
 

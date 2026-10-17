@@ -318,6 +318,34 @@ stability window removes it, and a separate `stop()` race — a heartbeat's scan
 lease when the caller began truncating/ closing the store — is closed by awaiting the refresh in
 flight before `stop()` answers (#378, P3; `apps/server/src/partition-scheduler.test.ts`).
 
+**Crash recovery needs a count, and the count has to be cause-agnostic.** A turn whose owner dies
+is closed `brain_lost` and re-run by the next owner — and since the handoff work, a graceful deploy
+leaves exactly the same closure. So "count crashes" would be wrong twice: it would miss a turn that
+keeps being handed off without finishing a step, and it would need a reason the log does not carry.
+Counting the run of `brain_lost` span closures for the open turn, reset by any completed request,
+is one rule for both and reads entirely off the log. The cap (3, `OPENHARNESS_MAX_RECOVERY_ATTEMPTS`)
+is per turn, and the idle event that ends an exhausted turn **claims the queued user input** — leave
+it queued and the scheduler finds the poison message and runs the same turn again, which is the loop
+the cap exists to stop (#378, P4; `packages/brain/src/turn.ts`,
+`packages/brain/src/log.ts`'s `consecutiveRecoveryClosures`).
+
+**A crash stall is a client problem, not only a server one.** The lease TTL bounds when a peer can
+take over, but the screen shows nothing while it waits: the transcript just stops moving, which is
+indistinguishable from a slow model. The stall indicator is deliberately a pure rule over an
+arrival clock the frontend keeps — the transcript reducer stays replayable — with a threshold equal
+to the server's SSE keep-alive cadence (15 s) and a separate "Reconnecting…" state for the moment
+the client's own stream loop knows the socket is gone. It is also why a keep-alive must not reset
+the clock: it proves the connection is alive, not that the turn is (#378, P4;
+`packages/client/src/stall.ts`, `packages/client/src/events/stream.ts`).
+
+**The end-to-end crash tests need deterministic crash shapes, not timing guesses.** Two mock-model
+fixtures make them reliable: one that `SIGKILL`s its own process on a marker (a poison input that
+takes every owner down), and one that calls a slow test tool which appends a line to a file per
+execution (so "the recovering brain did not re-run the call" is counted, not inferred). Both live
+behind `OPENHARNESS_TEST_MODEL=mock`; a deployment never reaches them. Without them a crash test
+is a race between a `kill` and a reply, and the recovery-cap test has no way to keep killing the
+new owner (#378, P4; `apps/server/src/mock-model.ts`, `e2e/src/crash.test.ts`).
+
 ## Authentication and identity providers
 
 **Identity is the provider-verified email, and boolean-shaped claims are not booleans.** Microsoft
@@ -1762,6 +1790,18 @@ uses ([`e2e/AGENTS.md`](../e2e/AGENTS.md)).
 ([#79](https://github.com/amirtuval/openharness/issues/79)) and once again through environment
 inheritance, which is the general lesson — an escape hatch meant for a test runner leaks into
 anything the test spawns.
+
+**A test tool registered "under the mock model" is registered for every mock server.** P4's
+`echo_slow` was added for the crash suite's `__delayed_tool__` fixture but pushed whenever
+`OPENHARNESS_TEST_MODEL=mock`, so every e2e test that asserts a request's exact offer — `tools`,
+`tool-settings` — started failing on the extra `{ name: 'echo_slow', source: 'builtin' }`, and
+the in-process tests that enumerate the registry had the same hidden change. The fix is to gate
+the fixture tool on the variable the fixture already needs
+(`OPENHARNESS_TEST_TOOL_EXECUTION_LOG`, which also names its execution log): a tool no test can
+call should not be in the offer that test asserts. The general rule is that the mock model is a
+**shared** test surface, so anything one suite adds to it must be opt-in, not implied by a
+setting every suite has set ([#378](https://github.com/amirtuval/openharness/issues/378), P4;
+`apps/server/src/tools.ts`).
 
 **An assertion that cannot fail is worse than no assertion, because it is counted as coverage.** A
 test review of every package found them everywhere: `expect(p.partitionOf(id)).toBe(p.partitionOf(id))`,

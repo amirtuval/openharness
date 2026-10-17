@@ -298,7 +298,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // routes (`createApp`) — so a tool the settings screen calls available is one a chat can
   // really call. `web_search` is not in it (#335): the brain attaches the chat model's own
   // provider's search tool per request, and nothing of ours runs a search.
-  const turnRegistry = createTurnRegistry({ kind: resolvedModel.kind })
+  const turnRegistry = createTurnRegistry({
+    kind: resolvedModel.kind,
+    executionLog: config.testToolExecutionLog,
+  })
   // The remote-MCP-server resource (epic #303, X10; the loop's half: #312). Built once here and
   // handed to **both** readers — the turn options, whose provider lists a chat's in-force
   // servers and calls their tools, and `createApp`, whose routes manage them — so a settings
@@ -561,6 +564,7 @@ function createScheduler(
       ...(tools === undefined ? {} : { tools }),
       clearThreshold: config.clearThreshold,
       todoNudge: config.todoNudge,
+      maxRecoveryAttempts: config.maxRecoveryAttempts,
       instanceId: config.instanceId,
       partitions: config.partitions,
       ttlMs: config.leaseTtlMs,
@@ -586,6 +590,7 @@ function createScheduler(
     ...(tools === undefined ? {} : { tools }),
     clearThreshold: config.clearThreshold,
     todoNudge: config.todoNudge,
+    maxRecoveryAttempts: config.maxRecoveryAttempts,
     maxConcurrentSessions: config.maxConcurrentSessions,
     drainTimeoutMs: config.drainTimeoutMs,
     partitionCount: config.partitions,
