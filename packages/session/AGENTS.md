@@ -60,7 +60,8 @@ src/
   clock.ts              Clock, systemClock, timestampAt()
   errors.ts             FencedError, SessionNotFoundError, AgentNotFoundError, DuplicateEventIdError, ClaimConflictError, DuplicateModeNameError, ModeLimitReachedError, DuplicateMcpServerNameError, McpServerLimitReachedError
   inputs.ts             the argument checks both stores share (limits, cursors, lease ttls)
-  events.ts             the event rules both stores share (claims' types, supersession ranges)
+  events.ts             the event rules both stores share (which event types are queued, the
+                          claims' types, supersession ranges, the notification builder)
   freeze.ts             deepFreeze(): how the immutability of the log is enforced at runtime
   postgres/
     index.ts            the `@openharness/session/postgres` entry point
@@ -99,7 +100,14 @@ migrations/             the SQL the Postgres stores need, applied by `migrate()`
                         0029 a user's remote MCP servers and their pending OAuth states
                           (#303, X10),
                         0030 where a pending OAuth flow was started — `web` or `cli` (#311),
-                        0031 the per-tool policies a user has for remote MCP tools (#312)
+                        0031 the per-tool policies a user has for remote MCP tools (#312),
+                        0032 the session tree, and whether a person is on the other end (#340,
+                          #341),
+                        0033 the subagent description that makes a mode a subagent type
+                          (epic #340, S2; #342),
+                        0034 the two indexes behind background-task notifications: the pending
+                          read and the unique `(session, source_key)` that makes the append
+                          idempotent (#343)
 docs/postgres.md        the Postgres stores: schema, migrations, delivery, local setup
 ```
 
@@ -107,32 +115,35 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 
 ### `@openharness/session`
 
-| export                                                                                                                                                                                                             | what it is                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SessionStore`                                                                                                                                                                                                     | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log), `getToolSettings`/`putToolSettings` (the per-user tool choices, epic #303 X4; #307) and `deleteSession` (the owner-scoped hard delete); since #122 the scheduler membership (`heartbeatInstance`, `listLiveInstances`, `removeInstance`) |
-| `UserToolSettings`                                                                                                                                                                                                 | a user's stored tool choices, `{ builtin: Record<tool name, { enabled, policy }> }` (epic #303, X4; #307) — the vocabulary of `getToolSettings`/`putToolSettings`                                                                                                                                                                                                                                                              |
-| `UserPreferences`                                                                                                                                                                                                  | a user's stored preferences, `{ default_model: string \| null, theme, compaction_threshold: number \| null, summary_model, summary_max_passes: number \| null }` (#111, epic #116 U1; theme: #203; compaction: epic #277 C3, #282) — the vocabulary of `getPreferences`/`putPreferences`                                                                                                                                       |
-| `AppendableEvent`, `AppendableStoredEvent`, `AppendableRewind`                                                                                                                                                     | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at` (plus an optional `id` the caller supplies), or a `session.rewind` input that names the message the session restarts from (#238)                                                                                                                                                                                                                     |
-| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                                                                                            | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system`, #93)                                                                                                                                                                                                                                                                                                        |
-| `OwnerScope`                                                                                                                                                                                                       | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract)                                                                                                                                                                                                                                                                                       |
-| `UnscopedListEventsOptions`                                                                                                                                                                                        | the filters of `listEventsUnscoped`, the brain's replay                                                                                                                                                                                                                                                                                                                                                                        |
-| `CredentialStore`                                                                                                                                                                                                  | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                                                                                                                                                                                                                                                                                                                |
-| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                                                                                     | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns                                                                                                                                                                                                                                                                                                                   |
-| `UpdateSessionRequest`                                                                                                                                                                                             | what `updateSession()` changes: the title, or nothing                                                                                                                                                                                                                                                                                                                                                                          |
-| `Mode`                                                                                                                                                                                                             | a user's mode (#245, M6): a named preset of a model, a reasoning effort and a system-prompt addition — the vocabulary of the mode methods                                                                                                                                                                                                                                                                                      |
-| `AppendEventsOptions`, `PartitionFence`                                                                                                                                                                            | the optional fence a brain attaches to a write                                                                                                                                                                                                                                                                                                                                                                                 |
-| `CompactOptions`                                                                                                                                                                                                   | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                                                                                                                                                                                                                                                                                                                     |
-| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                                                                                                 | leases over a partition, and the signals sent to its owner                                                                                                                                                                                                                                                                                                                                                                     |
-| `TurnState`, `TurnStateKind`                                                                                                                                                                                       | what `getTurnState()` answers                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `ListModelRequestsOptions`, `ModelRequestUsage`                                                                                                                                                                    | the per-user usage read (#247; the search count: #335): its `{ ownerId, from, to }` half-open UTC window, and one request as it answers it — the model, the usage, the instant it finished, and how many web searches the provider ran inside it (the end's `searches`, or `0` for one that carried none)                                                                                                                      |
-| `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                                                                                                  | subscription plumbing                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `AuthSessionId`                                                                                                                                                                                                    | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                                                                                                                                                                                                                                                                                                              |
-| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                                                                                              | the in-memory implementation and its `{ now, partitionCount }` options                                                                                                                                                                                                                                                                                                                                                         |
-| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                                                                                        | the in-memory credential store and its `{ now }` option                                                                                                                                                                                                                                                                                                                                                                        |
-| `Clock`, `systemClock`, `timestampAt()`                                                                                                                                                                            | the injectable time source, and how an instant is written as a timestamp                                                                                                                                                                                                                                                                                                                                                       |
-| `FencedError`, `FencedErrorDetails`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `DuplicateModeNameError`, `ModeLimitReachedError`, `isFencedError()`             | the typed failures a store raises, and what a fence reports                                                                                                                                                                                                                                                                                                                                                                    |
-| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE`, `DUPLICATE_MODE_NAME_ERROR_CODE`, `MODE_LIMIT_REACHED_ERROR_CODE` | the stable `code` of each error, for detection across bundles                                                                                                                                                                                                                                                                                                                                                                  |
-| `PACKAGE_NAME`                                                                                                                                                                                                     | this package's name; lets a dependent prove the import resolved                                                                                                                                                                                                                                                                                                                                                                |
+| export                                                                                                                                                                                                                                                                                              | what it is                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SessionStore`                                                                                                                                                                                                                                                                                      | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log), `getToolSettings`/`putToolSettings` (the per-user tool choices, epic #303 X4; #307) and `deleteSession` (the owner-scoped hard delete); since #341 the session tree |
+| (`listDescendants`, `countLiveDescendants`, and the cascade the delete performs); since #122 the scheduler membership (`heartbeatInstance`, `listLiveInstances`, `removeInstance`); since #343 the background-task half — `getPendingTaskNotifications` and the idempotent `appendTaskNotification` |
+| `TaskNotificationInput`, `TaskNotificationAppend`, `TaskDeliveryStatus`                                                                                                                                                                                                                             | what `appendTaskNotification` writes (the task, the kind, the text, the `sourceKey` the append is idempotent on, and the optional `status` it writes **with** the notification, #363) and what it answers (the stored notification, and whether this call is the one that wrote it) — epic #340 S4; #343                                                  |
+| `MAX_DESCENDANT_DEPTH`                                                                                                                                                                                                                                                                              | `64` — how deep the tree walks go before they stop (#361): the deployment's `OPENHARNESS_MAX_AGENT_DEPTH` is bounded by it, because a tree past it is one a walk cannot see the bottom of                                                                                                                                                                 |
+| `UserToolSettings`                                                                                                                                                                                                                                                                                  | a user's stored tool choices, `{ builtin: Record<tool name, { enabled, policy }> }` (epic #303, X4; #307) — the vocabulary of `getToolSettings`/`putToolSettings`                                                                                                                                                                                         |
+| `UserPreferences`                                                                                                                                                                                                                                                                                   | a user's stored preferences, `{ default_model: string \| null, theme, compaction_threshold: number \| null, summary_model, summary_max_passes: number \| null }` (#111, epic #116 U1; theme: #203; compaction: epic #277 C3, #282) — the vocabulary of `getPreferences`/`putPreferences`                                                                  |
+| `AppendableEvent`, `AppendableStoredEvent`, `AppendableRewind`                                                                                                                                                                                                                                      | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at` (plus an optional `id` the caller supplies), or a `session.rewind` input that names the message the session restarts from (#238)                                                                                                                                                |
+| `CreateSessionOptions`, `ListAgentsOptions`, `ListSessionsOptions`, `ListEventsOptions`                                                                                                                                                                                                             | the options objects of the list and create methods (`CreateSessionOptions` carries the effective `model`/`system` #93, and since #341 `interactive` and the parent a session is created under; `ListSessionsOptions.parentSessionId` is which parent's children to list)                                                                                  |
+| `OwnerScope`                                                                                                                                                                                                                                                                                        | `{ ownerId }`: how a read is scoped to one owner (A4) — required, so forgetting it is a compile error; see [the contract](#the-contract)                                                                                                                                                                                                                  |
+| `UnscopedListEventsOptions`                                                                                                                                                                                                                                                                         | the filters of `listEventsUnscoped`, the brain's replay                                                                                                                                                                                                                                                                                                   |
+| `CredentialStore`                                                                                                                                                                                                                                                                                   | the sealed-blob credential contract; see [The CredentialStore](#the-credentialstore-epic-65-a5)                                                                                                                                                                                                                                                           |
+| `SealedSecret`, `CredentialKey`, `UpsertCredentialInput`, `ListCredentialsOptions`, `SealedProviderCredential`                                                                                                                                                                                      | the credential contract's vocabulary: the sealed form, the key, what `upsert` writes, and what `get` returns                                                                                                                                                                                                                                              |
+| `UpdateSessionRequest`                                                                                                                                                                                                                                                                              | what `updateSession()` changes: the title, or nothing                                                                                                                                                                                                                                                                                                     |
+| `Mode`                                                                                                                                                                                                                                                                                              | a user's mode (#245, M6): a named preset of a model, a reasoning effort and a system-prompt addition — the vocabulary of the mode methods                                                                                                                                                                                                                 |
+| `AppendEventsOptions`, `PartitionFence`                                                                                                                                                                                                                                                             | the optional fence a brain attaches to a write                                                                                                                                                                                                                                                                                                            |
+| `CompactOptions`                                                                                                                                                                                                                                                                                    | what `compact()` takes: the retention cutoff (`olderThan: Date \| number`)                                                                                                                                                                                                                                                                                |
+| `PartitionLease`, `PartitionSignal`, `PartitionSignalInput`, `PartitionSignalKind`                                                                                                                                                                                                                  | leases over a partition, and the signals sent to its owner                                                                                                                                                                                                                                                                                                |
+| `TurnState`, `TurnStateKind`                                                                                                                                                                                                                                                                        | what `getTurnState()` answers                                                                                                                                                                                                                                                                                                                             |
+| `ListModelRequestsOptions`, `ModelRequestUsage`                                                                                                                                                                                                                                                     | the per-user usage read (#247; the search count: #335): its `{ ownerId, from, to }` half-open UTC window, and one request as it answers it — the model, the usage, the instant it finished, and how many web searches the provider ran inside it (the end's `searches`, or `0` for one that carried none)                                                 |
+| `SessionEventListener`, `PartitionSignalListener`, `AuthSessionRevocationListener`, `Unsubscribe`                                                                                                                                                                                                   | subscription plumbing                                                                                                                                                                                                                                                                                                                                     |
+| `AuthSessionId`                                                                                                                                                                                                                                                                                     | a Better Auth session id (A2) — deliberately not a `SessionId`, which names a log                                                                                                                                                                                                                                                                         |
+| `InMemorySessionStore`, `InMemorySessionStoreOptions`                                                                                                                                                                                                                                               | the in-memory implementation and its `{ now, partitionCount }` options                                                                                                                                                                                                                                                                                    |
+| `InMemoryCredentialStore`, `InMemoryCredentialStoreOptions`                                                                                                                                                                                                                                         | the in-memory credential store and its `{ now }` option                                                                                                                                                                                                                                                                                                   |
+| `Clock`, `systemClock`, `timestampAt()`                                                                                                                                                                                                                                                             | the injectable time source, and how an instant is written as a timestamp                                                                                                                                                                                                                                                                                  |
+| `FencedError`, `FencedErrorDetails`, `SessionNotFoundError`, `AgentNotFoundError`, `DuplicateEventIdError`, `ClaimConflictError`, `DuplicateModeNameError`, `ModeLimitReachedError`, `isFencedError()`                                                                                              | the typed failures a store raises, and what a fence reports                                                                                                                                                                                                                                                                                               |
+| `FENCED_ERROR_CODE`, `SESSION_NOT_FOUND_ERROR_CODE`, `AGENT_NOT_FOUND_ERROR_CODE`, `DUPLICATE_EVENT_ID_ERROR_CODE`, `CLAIM_CONFLICT_ERROR_CODE`, `DUPLICATE_MODE_NAME_ERROR_CODE`, `MODE_LIMIT_REACHED_ERROR_CODE`                                                                                  | the stable `code` of each error, for detection across bundles                                                                                                                                                                                                                                                                                             |
+| `PACKAGE_NAME`                                                                                                                                                                                                                                                                                      | this package's name; lets a dependent prove the import resolved                                                                                                                                                                                                                                                                                           |
 
 ### `@openharness/session/postgres`
 
@@ -190,15 +201,16 @@ forgetting the owner is a compile error, not a silent unscoped read (#61's secur
 a resource belonging to somebody else is answered as if it did not exist, because a 404 must
 not leak that it does:
 
-| method                                  | scoped form                                                                                                                                                                                                                       |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `getAgent(agentId, { ownerId })`        | `null` for another owner's agent                                                                                                                                                                                                  |
-| `listAgents({ ownerId, … })`            | `data: []` for another owner; `[]`, never somebody else's                                                                                                                                                                         |
-| `getSession(sessionId, { ownerId })`    | `null` for another owner's session                                                                                                                                                                                                |
-| `listSessions({ ownerId, … })`          | only the owner's sessions; the `agentId` filter narrows inside them                                                                                                                                                               |
-| `listEvents(sessionId, { ownerId, … })` | `SessionNotFoundError` for another owner's session — the user-facing events route's 404                                                                                                                                           |
-| `createSession(agentId, options)`       | `ownerId` is **required**, and the agent — when one is passed — must belong to that owner or it is an `AgentNotFoundError`; a session may not snapshot somebody else's agent. `agentId: null` creates a model-first session (#93) |
-| `deleteSession(sessionId, { ownerId })` | `false` for another owner's session — the same answer as for an id nothing has, so the refusal leaks nothing (#111)                                                                                                               |
+| method                                    | scoped form                                                                                                                                                                                                                       |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getAgent(agentId, { ownerId })`          | `null` for another owner's agent                                                                                                                                                                                                  |
+| `listAgents({ ownerId, … })`              | `data: []` for another owner; `[]`, never somebody else's                                                                                                                                                                         |
+| `getSession(sessionId, { ownerId })`      | `null` for another owner's session                                                                                                                                                                                                |
+| `listSessions({ ownerId, … })`            | only the owner's sessions; the `agentId` filter narrows inside them, and `parentSessionId` (`null` = top-level chats) narrows by the tree (#341)                                                                                  |
+| `listEvents(sessionId, { ownerId, … })`   | `SessionNotFoundError` for another owner's session — the user-facing events route's 404                                                                                                                                           |
+| `createSession(agentId, options)`         | `ownerId` is **required**, and the agent — when one is passed — must belong to that owner or it is an `AgentNotFoundError`; a session may not snapshot somebody else's agent. `agentId: null` creates a model-first session (#93) |
+| `deleteSession(sessionId, { ownerId })`   | `false` for another owner's session — the same answer as for an id nothing has, so the refusal leaks nothing (#111)                                                                                                               |
+| `listDescendants(sessionId, { ownerId })` | `[]` for another owner's session, and for an id nothing has — the same empty answer the list methods give (#341)                                                                                                                  |
 
 Everything else is **unscoped**, and deliberately so:
 
@@ -247,15 +259,22 @@ throws instead of forking a reader's copy from the log the store wrote. The two 
 compaction and `deleteSession`, below — each a deliberate, documented exception and nothing
 else. A brain reads what it needs and appends what it learns; nothing rewrites history.
 
-**`processed_at` is derived from a claim.** A user event is stored with `processed_at: null` —
-the stored event never changes — and the claim taken on it is a fact recorded beside it: the
-`consumes` list of the event that answers it. Three event types carry the list (P4): a
-`span.model_request_start` claims the `user.message`s its request folds in, a
-`span.model_request_end` claims the `user.interrupt`s that cut its request short, and a
-`session.status_idle` claims the `user.interrupt`s a turn that had nothing running ended on.
-Every read — the events list, the pending list, a subscription payload — returns a user
+**`processed_at` is derived from a claim.** A **queued** event is stored with
+`processed_at: null` — the stored event never changes — and the claim taken on it is a fact
+recorded beside it: the `consumes` list of the event that answers it. Two families are queued
+(`isQueuedEventType`): the user's own events, and — since epic #340 S4 (#343) — a background
+task's `session.task_notification`, which is addressed to the parent **model** exactly as a
+message is. Four event types carry the list (P4): a `span.model_request_start` claims the
+messages and notifications its request folds in, a `span.model_request_end` claims the
+`user.interrupt`s that cut its request short, a `session.status_idle` claims the
+`user.interrupt`s a turn that had nothing running ended on, and — the fourth, #343 — an
+`agent.tool_result` claims the notifications a **task wait** was resolved by (the result _is_
+what they said, so it is the event that ends the work they were consumed for).
+Every read — the events list, the pending list, a subscription payload — returns a queued
 event's `processed_at` as the claim's `claimed_at`, or `null` while no claim has it.
-"Pending" means exactly "no claim"; `getPendingUserEvents` lists those in `seq` order.
+"Pending" means exactly "no claim"; `getPendingUserEvents` lists the user's own in `seq` order
+and `getPendingTaskNotifications` the notifications, deliberately as two reads: a caller that
+wants one must not silently get the other.
 Claiming twice is a no-op and two callers racing for the same event cannot both win — claims
 are insert-only and the event id's primary key decides. A `consumes` claim that cannot be
 made refuses the whole append with `ClaimConflictError`, because an event may not say it
@@ -310,7 +329,10 @@ when the session existed and belonged to `options.ownerId`, and `false` for an i
 and for somebody else's session alike, exactly as `getSession` answers `null` for both. It is
 irreversible — one transaction removes the session row and every row keyed by the session in
 every table that has a session column: its `events`, their `event_claims` and their
-`event_supersessions` — so afterwards `getSession` and `getSessionUnscoped` answer `null`,
+`event_supersessions` — **and every session below it in the tree** (epic #340, S7; #341): a
+child belongs to its parent, so the subtree goes with it, each session announced to its own
+subscribers with its own final `session.deleted` — so afterwards `getSession` and
+`getSessionUnscoped` answer `null`,
 `listEvents`, `appendEvents`, `getPendingUserEvents` and `getTurnState` throw
 `SessionNotFoundError`, and an event id the deleted session held is free again for a later
 append. A deleted session's subscribers receive one final `session.deleted` `StreamEvent`
@@ -347,7 +369,9 @@ The log stays the source of truth: the events' fields are stored on them either 
 
 **Creation, and what a session runs** (issue #93). A session is created from an agent, a
 model, or both, and always stores the configuration it _runs_ — `model` and `system` — beside
-the agent preset it snapshotted, if there was one:
+the agent preset it snapshotted, if there was one. Since #341 it also stores **whether a person
+is on the other end** (`options.interactive`, default `true`) and, when it is created as a
+child, where it sits in the tree — both fixed at creation:
 
 | caller                            | stored `agent`                            | stored `model` / `system`                                            |
 | --------------------------------- | ----------------------------------------- | -------------------------------------------------------------------- |
@@ -371,6 +395,58 @@ has. It is the piece a frontend that only learns what a chat is about after the 
 needs (the server derives a title from that message and calls this — see `apps/server`). The
 title is stored as given — the protocol's `SESSION_TITLE_MAX_LENGTH` is the caller's business,
 like every other bound this package does not enforce.
+
+**The session tree** (epic #340, S3/S7; #341). A subagent is a real session that belongs to
+another one, and the tree is four columns beside the rest of the header: `parent_session_id`
+(the session it belongs to, `null` for a top-level chat), `parent_task_id` (the `task_` id the
+parent started it for, #343), `root_session_id` (the top-level chat the whole tree hangs off —
+a session's own id when it _is_ that chat) and `depth` (`0` at the top, one more than the
+parent's below). Everything else about a child is an ordinary session — the brain, the
+scheduler, compaction, usage, replay, SSE and crash recovery work on it unchanged — and it
+inherits no history: its first `user.message` is the prompt its parent wrote.
+
+- **Creation derives the tree, and the caller cannot contradict it.** `CreateSessionOptions`
+  takes `parentSessionId` (omitted for a top-level chat) and `parentTaskId`; `root_session_id`
+  and `depth` are never passed, because `sessionTree` — one rule both stores share, the split
+  `effectiveSessionConfig` uses — derives them from the parent the caller looked up. A child
+  therefore cannot be given a root or a depth that does not add up, and the parent is looked up
+  **owner-scoped**: hanging a child off a session the caller cannot see is
+  `SessionNotFoundError`, the same answer an id nothing names gets, so nothing leaks (A4). A
+  `parentTaskId` with no parent is a `RangeError` — a task is what a parent started this
+  session for — and S6's nesting limit is the caller's to enforce _before_ it asks: a limit
+  that lived here would be a deployment's policy in a contract.
+- **Listing narrows by the tree** (#341). `ListSessionsOptions.parentSessionId` is the filter:
+  a session id answers that session's children, `null` answers only the top-level chats — what
+  `GET /v1/sessions` defaults to, because a child is not a chat of its own — and omitting the
+  field does not filter by parent at all. Like every other narrowing it is applied inside the
+  owner scope, so another user's parent id is an empty page rather than an error.
+- **`listDescendants(sessionId, { ownerId })`** answers every session below one, oldest first
+  and level by level: what the delete cascade and the server's delete route walk. Two
+  recursive reads answer it — a `with recursive` walk over `parent_session_id` in Postgres, a
+  level-by-level filter in memory — because `root_session_id` alone cannot answer a subtree:
+  it names the top to the whole tree, not the branch under an arbitrary session. Both are
+  bounded (`MAX_DESCENDANT_DEPTH`), so a table somebody hand-edited into a cycle terminates
+  rather than looping.
+- **`countLiveDescendants(sessionId)`** is how much of a tree is live (epic #340, S6; #341):
+  the number a caller compares against `OPENHARNESS_MAX_LIVE_TASKS` before it starts another
+  subagent (#344). A descendant is **live while its turn is not finished** — a turn is open,
+  a user event is waiting for a turn that has not started, or the last turn ended paused on the
+  user (`requires_action`, #309) — and the paused case is the one that matters: a child parked
+  in `agent_wait` (#344) is still a running task to S4/S5's vocabulary, and a cap that could
+  not see one would let a chat park ten children and start ten more. It is derived from the
+  **log**, not the `status` column: that projection says `running` or `idle`, and a paused
+  session and a session whose turn has not started both read `idle`. The predicates are the
+  ones `findSessionsNeedingWork` uses, in one query over the subtree instead of a partition
+  scan; the count excludes the named session itself, so passing a top-level chat counts its
+  whole tree.
+- **Deleting takes the subtree** (S7; #341). One transaction removes the session, its log and
+  every descendant's — the Postgres delete collects the ids with the same recursive walk, locks
+  them in id order (which is what serializes it against an append to any of them and keeps two
+  concurrent cascades from deadlocking), and announces `session.deleted` on **each** session's
+  channel; the in-memory store removes them in one synchronous pass and ends each one's
+  subscribers the same way. The server stops every descendant's turn before the rows go, the
+  session's own first — so the turn that could still start a child is over before the subtree
+  is read.
 
 **Turn state** (`getTurnState`) is derived from the log alone — no lease, no clock, no
 in-memory bookkeeping — so it means the same thing in every store, and a server that has just
@@ -448,6 +524,47 @@ The partition scheduler computes each instance's fair share from that list; the 
 promises nothing more than the rows, and a membership that is lost costs one heartbeat's
 announcement.
 
+**A child whose finished turn its parent was never told about is work** (epic #340, S4; #344).
+`findSessionsNeedingWork` reports it, in both stores: the child's newest status event is a
+`session.status_idle` whose stop reason is `end_turn` (a pause is not an end), and its parent's
+log holds no `session.task_notification` whose `source_key` is `<child_session_id>:<idle seq>` —
+the key S4's delivery is exactly-once on. A turn that **did nothing** is not one whose end owes
+an announcement (#371): an interrupt written into an idle child opens a turn of its own that the
+loop ends with nothing in flight, and its idle — empty window, claiming nothing but that
+interrupt — would otherwise keep this scan waking the child for news the delivery refuses to
+write.
+
+**A task's notification is work only where the session is not waiting on a person** (#363).
+`findSessionsNeedingWork` counts a pending `session.task_notification` as work — the parent
+reacts on its own — **except** while the session's last turn ended `requires_action`: a
+notification answers no question, so the turn it started would find the same `ask_user`/`ask`
+call waiting and pause again with the news still pending, and this scan would find work again —
+a spin. The pause stands until the user answers, and the turn their answer starts is the one
+that folds the news in. A wait on **tasks** (`waiting_on_tasks`) is the opposite case: nothing
+about it waits for a person, and the notification is what resolves it. Nothing else would reach such a session: the turn did
+finish, so it has no queued event and no open turn, and the parent is idle waiting for news that
+will never come. The delivery itself is the brain's (a turn on the child writes the notification
+and nothing to its own log); this is what finds the child, the way the passed-deadline case finds
+a wait nothing else would resume. The predicate is a child's only — a top-level chat owes no
+announcement — and the child's parent is read in the same query.
+
+**A task notification is appended from outside the session, once per key** (epic #340, S4;
+#343). `appendTaskNotification` is the one way anything reaches a session from outside it — a
+child session finishing its turn — and it is a store method rather than an `appendEvents` call
+the caller assembles because the guarantee is _exactly once_ and only the log can give it: the
+append is idempotent on the caller's `sourceKey` (`<child_session_id>:<idle seq>` for a
+subagent), so a second call stores nothing and answers the notification that is already there,
+however many instances make it or however often a recovery path runs. The uniqueness is a
+partial index over `(session_id, payload->>'source_key') where type =
+'session.task_notification'` (`0034`), which is what makes it true under concurrency rather
+than only in one writer's memory. The notification is stored **queued**, so nothing waits for
+a turn; appending needs **no fence**, for the same reason a user event needs none. Since #363
+the input may carry a `status`, and the store writes the `session.task_status` **with** the
+notification in the same append: a child's turn end owes its parent both facts, and as two
+appends a crash or a fence between them delivered the news and lost the status — a card stuck
+`running` for ever, with nothing for the work scan to repair. One key, one pair: a second call
+under the key writes neither.
+
 **Signals are hints.** `signalPartition` delivers a signal to the listeners attached to that
 partition at that moment, once each; a signal nobody is listening for is dropped, because
 signals are a latency optimization and not a durable queue. No flow may depend on one
@@ -517,7 +634,12 @@ conformance suite fires `MAX_MODES_PER_USER + 5` creates at once and asserts it.
 store is serial by construction and needs nothing. `deleteMode` is the one cross-table write: in the same transaction as
 the delete it clears the column on every session that followed the mode, which is what lands
 those chats on the model they last ran rather than orphaning them (a mode is never a foreign
-key on a session, so deleting one can never delete a chat).
+key on a session, so deleting one can never delete a chat). A mode also carries a
+**`subagent_description`** — one bounded sentence, or `null` for a mode that is not a type
+(epic #340, S2; #342) — which the store writes and returns like any other nullable field: what
+a description _means_ (which modes a parent model is offered, and what starting one runs) is
+the server's and the brain's, and the store stores what it is given, as it does for every other
+bound the protocol owns.
 
 **Errors.** `SessionNotFoundError` (every session-scoped method except `getSession`,
 `getSessionUnscoped` and `updateSession`, which answer `null`),
@@ -642,8 +764,10 @@ version; this is the shape of it.
 `model jsonb`/`system` the session runs, the `mode` a chat follows (#245, M6), and the nullable
 agent snapshot columns beside them — `agent_id`, `agent_name`, `agent_model_id`, `agent_system`,
 all NULL together for a model-first session; #93), `modes` (a user's named presets: `name`
-unique per `owner_id`, the `model`, the effort, the prompt addition and the `tools jsonb` a
-mode's tool override holds — NULL for a mode that says nothing about tools (#307); #245, M6),
+unique per `owner_id`, the `model`, the effort, the prompt addition, the `tools jsonb` a
+mode's tool override holds — NULL for a mode that says nothing about tools (#307) — and the
+`subagent_description` that makes a mode a **subagent type** — NULL for a mode that is not one
+(epic #340, S2; #342); #245, M6),
 `events` (`id`,
 `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`, `unique
 (session_id, seq)`, an index on `(session_id, seq)`, a partial index for queued user
@@ -1056,7 +1180,17 @@ dependency table.
   the acceptance tests of this package. The session
   suite now also asks for the per-user preferences (#111), the model projection a
   `user.message` carrying one applies, `deleteSession` — its rows gone from every read,
-  the ids it held free again, and the final `session.deleted` a subscriber receives — and the
+  the ids it held free again, and the final `session.deleted` a subscriber receives — and,
+  since #341, **the session tree**: an interactive top-level chat beside an `interactive: false`
+  one, a child taking the parent's root one level deeper (and a grandchild of that), a parent
+  the caller does not own (or an id nothing has) refused, a task id with no parent, the
+  top-level default and the children filter of a list, the descendants walk — level by level,
+  owner-scoped, subtree from wherever it is asked — the live count (a queued message, an open
+  turn, a pause on the user and a wait on tasks each counting; a finished turn leaving), the cascade a delete performs over
+  three levels (and from the middle, leaving the parent), and one `session.deleted` delivered
+  per session of the subtree. Both stores run it, and `postgres.test.ts` adds the `0032`
+  backfill over a session row written the pre-tree way, beside the ordered list of every
+  migration file — and the
   scheduler membership (#122): a heartbeat's row, the window that keeps it live (gone at
   exactly the edge), a re-heartbeat refreshing it, removal, and the window's argument check.
   The per-user usage read (#247) is in the suite too: the start/end pairing that names each
@@ -1074,13 +1208,32 @@ dependency table.
   unique-name rule (on create and on rename) and the `MAX_MODES_PER_USER` cap, a delete leaving
   the chats that followed the mode an ordinary chat, and the projections — a message's `mode`,
   a span's resolved `model`, and a `purpose: 'summary'` span projecting nothing (epic #277, C2).
+  A mode's `subagent_description` (#342) is there beside them: the round trip of a description
+  through both stores, that a mode created without one reads `null` rather than an invented
+  string, and the merge an update follows — omitted keeps it, `null` clears it, a new one
+  replaces it.
   The per-user tool settings (epic #303, X4; #307) are there too: no choices for a user who has
   saved none, the round trip of a map of `{ enabled, policy }`, replace-in-place on a second
   put, two users kept apart, and deep-frozen answers; and a mode's tool override — both halves
   of it (#311's `mcp_servers` map beside `builtin`) carried on create, kept by an update that
   omits it, cleared by an explicit `null`, and replaced whole by a new map, with an override
   that has only `builtin` round-tripping to exactly that (the shape every mode stored before
-  #311 has).
+  #311 has). The background-task notifications (#343) have their own block, because they are
+  the one thing a session is told from outside it: an append that reads back queued and stops
+  being pending once a request claims it, a **second append of the same `source_key`** storing
+  nothing and answering the first event, two keys under one session kept apart and in `seq`
+  order, the split between the user's pending events and a task's, a claim naming a
+  notification the log does not hold refused with `ClaimConflictError` and storing nothing, two
+  racing claims settling as one winner, a notification a `session.rewind` covered leaving the
+  pending list while staying in the raw log, and `SessionNotFoundError` from both methods. The
+  work scan's cases are beside them: a session a task just wrote to is work, a task wait is
+  work **only once its deadline has passed**, and a wait something has since answered is not
+  (resolving one writes its result and carries the turn on, so the log's newest status event is
+  a later idle). Since #344 a **child whose finished turn its parent was never told about** is
+  work as well — until the notification keyed by that turn is in the parent's log — and a turn
+  that **paused** is not. The live count's own cases are beside those: a child parked in
+  `agent_wait` counts as live exactly as one paused on the user does, which is what makes
+  S6's cap a cap on work rather than on open turns.
 - `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
   durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that

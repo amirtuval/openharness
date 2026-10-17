@@ -8,9 +8,10 @@ import {
   type ModelConfig,
   type SeqCursor,
   type SessionId,
+  type TaskId,
 } from '@openharness/protocol'
 
-import { DuplicateEventIdError } from './errors'
+import { DuplicateEventIdError, SessionNotFoundError } from './errors'
 
 /**
  * The checks every store applies to a caller's arguments before it touches its own state.
@@ -74,6 +75,63 @@ export function effectiveSessionConfig(
   return {
     model: { id: model.id },
     system: options.system === undefined ? (agent?.system ?? null) : options.system,
+  }
+}
+
+/** The four tree fields a created session carries (epic #340, S3). */
+export interface SessionTreeFields {
+  /** The session this one belongs to, or `null` for a top-level chat. */
+  readonly parent_session_id: SessionId | null
+  /** The `task_` id the parent started it for, or `null`. */
+  readonly parent_task_id: TaskId | null
+  /** The top-level chat the whole tree hangs off — the session's own id when it is that chat. */
+  readonly root_session_id: SessionId
+  /** `0` for a top-level chat, one more than the parent's for a child. */
+  readonly depth: number
+}
+
+/**
+ * Where a new session sits in the tree (epic #340, S3), from the options the caller gave and
+ * the parent it looked up — or `null` when it looked and found none.
+ *
+ * A top-level chat is its own root at depth `0`, and a child takes the parent's root, one
+ * level deeper, with the task id the parent named. The caller does the lookup — in memory a
+ * map, in Postgres a row read inside the creation transaction — and passes `null` when it
+ * found nothing, so the one rule about what a tree means lives here rather than in two
+ * implementations that could disagree, the split {@link effectiveSessionConfig} uses.
+ *
+ * The parent must be **the caller's own**: hanging a child off a session somebody else owns
+ * would leak that it exists, so it is refused exactly as an agent of another owner is (A4),
+ * and which the owner check is the caller's to make (both stores pass `null` for a parent
+ * that is not theirs).
+ *
+ * @param id the id the new session will be stored under: its own root when it is top-level
+ * @throws SessionNotFoundError when `options.parentSessionId` names no session the caller owns
+ * @throws RangeError when a task id is given with no parent session beside it
+ */
+export function sessionTree(
+  id: SessionId,
+  options: { readonly parentSessionId?: SessionId; readonly parentTaskId?: TaskId | null },
+  parent: {
+    readonly id: SessionId
+    readonly root_session_id: SessionId
+    readonly depth: number
+  } | null,
+): SessionTreeFields {
+  if (options.parentSessionId === undefined) {
+    if (options.parentTaskId !== undefined && options.parentTaskId !== null) {
+      throw new RangeError('a task id needs a parent session: pass "parentSessionId" too')
+    }
+    return { parent_session_id: null, parent_task_id: null, root_session_id: id, depth: 0 }
+  }
+  if (parent === null || parent.id !== options.parentSessionId) {
+    throw new SessionNotFoundError(options.parentSessionId)
+  }
+  return {
+    parent_session_id: parent.id,
+    parent_task_id: options.parentTaskId ?? null,
+    root_session_id: parent.root_session_id,
+    depth: parent.depth + 1,
   }
 }
 

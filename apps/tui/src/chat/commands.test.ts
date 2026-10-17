@@ -56,6 +56,7 @@ function fakeContext(session: ChatSession) {
     exits: 0,
     mcp: 0,
     tools: 0,
+    agents: 0,
     notices: [] as { readonly kind: string; readonly text: string }[],
   }
   const context: CommandContext = {
@@ -74,6 +75,9 @@ function fakeContext(session: ChatSession) {
     },
     openToolSettings: () => {
       calls.tools += 1
+    },
+    openAgents: () => {
+      calls.agents += 1
     },
     compact: (instructions) => {
       calls.compactions.push(instructions)
@@ -336,6 +340,15 @@ describe('running a command', () => {
     await run('tools', context)
 
     expect(calls.tools).toBe(1)
+  })
+
+  it('/agents opens the chat’s tasks (#340, S9; #347)', async () => {
+    const { session } = chatSession()
+    const { context, calls } = fakeContext(session)
+
+    await run('agents', context)
+
+    expect(calls.agents).toBe(1)
   })
 
   it('/compact asks for a manual compaction, with the guidance it was given (#283)', async () => {

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { isQueuedEventType } from '@openharness/protocol'
 import type {
   Agent,
   McpAuthType,
@@ -26,7 +27,7 @@ import type { ColumnType, Selectable } from 'kysely'
 
 import { timestampAt } from '../clock'
 import type { SealedProviderCredential, SealedSecret } from '../credentials'
-import { isUserEventType } from '../events'
+
 import { deepFreeze } from '../freeze'
 import type { AppendableEvent, ModelRequestUsage, PartitionSignal, ToolUseRecord } from '../store'
 
@@ -71,6 +72,12 @@ export interface ModesTable {
   reasoning_effort: string | null
   system_prompt_addition: string | null
   /**
+   * What the mode is good for when it is offered to a parent model as a subagent type, or
+   * `null` for a mode that is not one (`0033_mode_subagent_description.sql`; epic #340, S2;
+   * #342).
+   */
+  subagent_description: string | null
+  /**
    * Which built-in tools a chat on this mode has on or off, or `null` for no override
    * (`0027_tool_settings.sql`; epic #303, X4; #307). `jsonb`, so its shape is the writer's —
    * the protocol's `ModeToolOverrideSchema` is the only spelling of it.
@@ -110,6 +117,23 @@ export interface SessionsTable {
   agent_name: string | null
   agent_model_id: string | null
   agent_system: string | null
+  /**
+   * Whether a person is on the other end (epic #340, S1): written once from the creation
+   * request and never updated, like `owner_id`. `false` is a session whose model cannot stop
+   * to ask anything — `ask_user` is never offered to it and an `ask` call is answered at once.
+   */
+  interactive: boolean
+  /** The session this one belongs to (#340, S3), or `null` for a top-level chat. */
+  parent_session_id: string | null
+  /** The `task_` id the parent started this session for (#340, S3/S4), or `null`. */
+  parent_task_id: string | null
+  /**
+   * The top-level chat the whole tree hangs off (#340, S3) — the session's own id when it is
+   * that chat, which the `0032` migration backfills for every session created before it.
+   */
+  root_session_id: string
+  /** `0` for a top-level chat, one more than the parent's for a child (#340, S3). */
+  depth: number
   created_at: Date
   updated_at: Date
 }
@@ -531,6 +555,9 @@ export function modeFromRow(row: ModeRow): Mode {
     model: row.model,
     reasoning_effort: row.reasoning_effort as Mode['reasoning_effort'],
     system_prompt_addition: row.system_prompt_addition,
+    // A `null` column is a mode that is not a subagent type, which is what the protocol's
+    // `null` means — never an invented description (#342).
+    subagent_description: row.subagent_description,
     // A `null` column is a mode with no override, so it reads as the protocol's `null` — never
     // an invented `{ builtin: {} }`, which would say the mode decided the tool set is empty.
     tools: row.tools === null ? null : { ...row.tools },
@@ -555,6 +582,13 @@ export function sessionFromRow(row: SessionRow): Session {
     system: row.system,
     mode: row.mode as Session['mode'],
     agent: sessionAgentFromRow(row),
+    interactive: row.interactive,
+    // A `null` column is a top-level chat, so the tree fields read as the protocol's own
+    // "no parent" rather than as an id nothing has (#340, S3).
+    parent_session_id: row.parent_session_id as Session['parent_session_id'],
+    parent_task_id: row.parent_task_id as Session['parent_task_id'],
+    root_session_id: row.root_session_id as Session['root_session_id'],
+    depth: row.depth,
     created_at: timestampOf(row.created_at),
     updated_at: timestampOf(row.updated_at),
   }
@@ -644,7 +678,9 @@ export function credentialFromRow(row: ProviderCredentialRow): SealedProviderCre
  */
 export function eventFromRow(row: EventWithClaimRow): StoredEvent {
   const payload = row.payload as AppendableEvent
-  const processed_at = isUserEventType(row.type)
+  // A queued event's `processed_at` is the claim's instant, never the column's: the column is
+  // left NULL for one, and a notification (#343) is queued exactly as a user event is.
+  const processed_at = isQueuedEventType(row.type)
     ? row.claimed_at === null
       ? null
       : timestampOf(row.claimed_at)

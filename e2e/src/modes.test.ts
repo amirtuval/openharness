@@ -97,6 +97,32 @@ describe('a chat that follows a mode (M6)', () => {
     expect(span?.reasoning_effort?.requested).toBe('high')
   })
 
+  it('carries the subagent description that makes a mode a subagent type (#342)', async () => {
+    const server = await harness.server()
+    const me = await person(server, 'described')
+    // No turn, so no credential: this is the resource's own round trip, through the real route
+    // and a real Postgres — what a mode is *for* when a parent model is offered it as a type
+    // (epic #340, S2) is the server's resolver, in process.
+    const mode: Mode = await me.client.modes.create({
+      name: 'reviewer',
+      model: FIRST_MODEL,
+      subagent_description: 'Reviews a diff for correctness bugs.',
+    })
+    expect(mode.subagent_description).toBe('Reviews a diff for correctness bugs.')
+    expect((await me.client.modes.get(mode.id)).subagent_description).toBe(
+      'Reviews a diff for correctness bugs.',
+    )
+    // An update that says nothing keeps it; `null` clears it — a mode that is no longer a type.
+    expect(
+      (await me.client.modes.update(mode.id, { reasoning_effort: 'low' })).subagent_description,
+    ).toBe('Reviews a diff for correctness bugs.')
+    expect(
+      (await me.client.modes.update(mode.id, { subagent_description: null })).subagent_description,
+    ).toBeNull()
+    const listed = (await me.client.modes.list()).data
+    expect(listed.map((one) => one.subagent_description)).toEqual([null])
+  })
+
   it('follows an edit made between messages: the next request uses the mode as it is now', async () => {
     const server = await harness.server()
     const me = await person(server, 'edited')

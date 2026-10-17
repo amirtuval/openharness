@@ -7,6 +7,7 @@ import {
   ModeIdSchema,
   ProviderCredentialIdSchema,
   SessionIdSchema,
+  TaskIdSchema,
   ULID_LENGTH,
   generateId,
   isAgentId,
@@ -15,12 +16,14 @@ import {
   isModeId,
   isProviderCredentialId,
   isSessionId,
+  isTaskId,
   isUlid,
   newAgentId,
   newEventId,
   newModeId,
   newProviderCredentialId,
   newSessionId,
+  newTaskId,
   parseId,
   tryParseId,
   ulid,
@@ -202,5 +205,14 @@ describe('id schemas', () => {
     ).toBe(false)
     expect(ModeIdSchema.safeParse(newAgentId()).success).toBe(false)
     expect(ModeIdSchema.safeParse(`${ID_PREFIXES.mode}nope`).success).toBe(false)
+  })
+
+  it('accept a `task_` id, which is a kind of its own (#340, S4)', () => {
+    const task = newTaskId()
+    expect(TaskIdSchema.parse(task)).toBe(task)
+    expect(TaskIdSchema.safeParse(newSessionId()).success).toBe(false)
+    expect(TaskIdSchema.safeParse(`${ID_PREFIXES.task}nope`).success).toBe(false)
+    expect(isTaskId(task)).toBe(true)
+    expect(isTaskId(newSessionId())).toBe(false)
   })
 })

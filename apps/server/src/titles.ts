@@ -1,6 +1,6 @@
 import {
   EVENT_TYPES,
-  SESSION_TITLE_MAX_LENGTH,
+  deriveSessionTitle,
   type Session,
   type SessionId,
   type EventInput,
@@ -16,39 +16,12 @@ import type { SessionStore } from '@openharness/session'
  * The title is derived from the first user message instead, where it is stored, and that is
  * the only thing this module does.
  *
- * Derivation is deliberately dumb, because a title is a label rather than a summary: the first
- * non-empty line of the message, whitespace collapsed, cut to fit the protocol's
- * `SESSION_TITLE_MAX_LENGTH`. Something smarter (a model, a keyword extractor) would name
- * sessions better and is not the point — this has to be instant, free, offline and the same
- * every time, because a list that renames itself under its reader is worse than one that shows
- * a truncated first line.
+ * The derivation itself is the protocol's (`deriveSessionTitle`), because a **child** session
+ * is named by the same rule and not by this module: the brain creates one straight through the
+ * store, so no route here ever sees its first message (epic #340; the `agent` tool titles a
+ * child from its task's description). One rule, one place — a title that fits one call site's
+ * idea of the limit but not the log's is a write the store refuses.
  */
-
-/** What a title that had to be cut ends with. Part of the length, not extra. */
-const ELLIPSIS = '…'
-
-/** Half a code point, at the end of a string: a cut that must not land there. */
-const HIGH_SURROGATE_END = /[\uD800-\uDBFF]$/
-
-/**
- * The title for a session whose first user message is `text`, or `null` when the message has
- * no text to name it after.
- *
- * The first non-empty line wins: a message that opens with `Fix the SSE reload bug` and then
- * explains itself for forty lines is listed under the first line. Whitespace inside that line
- * is collapsed to single spaces and the ends are trimmed, so a title is one clean line whatever
- * the message looked like. A line longer than {@link SESSION_TITLE_MAX_LENGTH} is cut to fit,
- * the ellipsis included; the cut never lands in the middle of a surrogate pair.
- *
- * @param text the message's text: its blocks, in order
- */
-export function deriveSessionTitle(text: string): string | null {
-  const line = text.split(/\r\n|\r|\n/).find((candidate) => candidate.trim() !== '')
-  if (line === undefined) {
-    return null
-  }
-  return truncateTitle(line.trim().replace(/\s+/gu, ' '))
-}
 
 /**
  * Give a session the title its first message suggests, unless it already has one.
@@ -83,20 +56,4 @@ export async function nameSessionFromFirstMessage(
     return null
   }
   return store.updateSession(sessionId, { title })
-}
-
-/**
- * Cut a title to the protocol's limit.
- *
- * The ellipsis takes the place of the last character rather than extending the string, so the
- * result is at most `SESSION_TITLE_MAX_LENGTH` — a title a client can always store.
- */
-function truncateTitle(title: string): string {
-  if (title.length <= SESSION_TITLE_MAX_LENGTH) {
-    return title
-  }
-  const kept = title.slice(0, SESSION_TITLE_MAX_LENGTH - 1)
-  // A code point can be two UTF-16 units — an emoji, a rare ideograph. Keeping the high
-  // surrogate without its low half would put the ellipsis after half a character.
-  return (HIGH_SURROGATE_END.test(kept) ? kept.slice(0, -1) : kept) + ELLIPSIS
 }
