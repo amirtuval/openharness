@@ -25,6 +25,11 @@ import {
   SessionUsageEventSchema,
 } from './session'
 import { ModelRequestEndEventSchema, ModelRequestStartEventSchema } from './span'
+import {
+  SessionTaskNotificationEventSchema,
+  SessionTaskStartedEventSchema,
+  SessionTaskStatusEventSchema,
+} from './task'
 import { StoredEventDeltaSchema, StoredEventStartSchema } from './stream'
 import {
   UserToolConfirmationEventInputSchema,
@@ -81,6 +86,9 @@ const StoredEventCoreSchema = z.discriminatedUnion('type', [
   SessionCompactEventSchema,
   SessionCompactionEventSchema,
   SessionSkillLoadedEventSchema,
+  SessionTaskStartedEventSchema,
+  SessionTaskStatusEventSchema,
+  SessionTaskNotificationEventSchema,
 ])
 
 /**

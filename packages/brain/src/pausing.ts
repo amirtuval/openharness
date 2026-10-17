@@ -12,6 +12,7 @@ import type {
 import {
   ASK_USER_TOOL_NAME,
   EVENT_TYPES,
+  TASK_WAIT_TOOL_NAME,
   askUserAnswerProblems,
   askUserInputProblems,
   formatAskUserAnswers,
@@ -68,6 +69,11 @@ export const RESOLVED_BY_MESSAGE = 'The user sent a message instead.'
  * waiting was a call the brain never got to run, and a brain that inherits it must not run it
  * now.
  *
+ * A **task wait** (#340, S5; #343) is left out: its call is recorded `ask` like a question's,
+ * because the turn ends on it the same way, but what it waits for is a background task and not
+ * the reader. `./tasks`' `awaitingTasks` is where those are found, and the loop settles the two
+ * separately — a call is the user's to answer or a task's to resolve, never both.
+ *
  * Built-in calls and remote MCP ones alike (#312): a remote tool's default policy is `ask`, so
  * this is the read that a remote tool's pause is found by.
  *
@@ -77,7 +83,12 @@ export function awaitingUser(events: readonly StoredEvent[]): ToolCallEvent[] {
   const answered = answeredCallIds(events)
   return events.filter(
     (event): event is ToolCallEvent =>
-      isToolCallEvent(event) && toolCallPermission(event) === 'ask' && !answered.has(event.id),
+      isToolCallEvent(event) &&
+      toolCallPermission(event) === 'ask' &&
+      // ...but not a wait for a background task: it is a pause of the same shape and a different
+      // thing (S5; #343).
+      toolCallOfferedName(event) !== TASK_WAIT_TOOL_NAME &&
+      !answered.has(event.id),
   )
 }
 

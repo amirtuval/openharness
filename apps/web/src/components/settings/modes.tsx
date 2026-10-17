@@ -8,6 +8,7 @@ import type { ModelsView } from '../../hooks/use-models'
 import { useTools } from '../../hooks/use-tools'
 import { modeLabel } from '../../lib/modes'
 import { useClient } from '../client-provider'
+import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card'
 import { ModeFormDialog } from './mode-form-dialog'
@@ -77,7 +78,9 @@ export function ModesCard({
         </div>
         <CardDescription>
           A mode is a name for a model, a reasoning effort and a system-prompt addition. Pick one
-          instead of a model to run a chat the same way every time.
+          instead of a model to run a chat the same way every time. A mode with a{' '}
+          <strong>subagent description</strong> is also a kind of helper a chat&apos;s model can
+          start.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -118,8 +121,26 @@ export function ModesCard({
               className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2"
             >
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{mode.name}</p>
+                <p className="flex items-center gap-1.5 text-sm font-medium">
+                  <span className="truncate">{mode.name}</span>
+                  {/* A mode with a description is a **subagent type** (#342; #346): the mark is
+                      what tells the two kinds of mode apart at a glance in a list where the
+                      difference is otherwise one empty field. */}
+                  {mode.subagent_description === null ? null : (
+                    <Badge variant="coral" className="text-2xs" data-slot="mode-subagent">
+                      subagent type
+                    </Badge>
+                  )}
+                </p>
                 <p className="truncate text-xs text-muted-foreground">{modeLabel(mode)}</p>
+                {mode.subagent_description === null ? null : (
+                  <p
+                    data-slot="mode-subagent-description"
+                    className="line-clamp-2 text-xs text-muted-foreground italic"
+                  >
+                    {mode.subagent_description}
+                  </p>
+                )}
                 {mode.tools === null ? null : (
                   <p className="truncate text-xs text-muted-foreground" data-slot="mode-tools">
                     tools: {describeModeTools(mode, servers, skills.skills)}

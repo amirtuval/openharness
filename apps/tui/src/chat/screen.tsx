@@ -15,22 +15,27 @@ import {
   selectManualCompaction,
   selectMcpFailure,
   selectSessionUsage,
+  selectTasks,
+  sessionBreadcrumb,
   sessionCost,
   stepLimitNotice,
   stuckNotice,
   truncatedResultsNotice,
 } from '@openharness/client'
-import type { Client, TranscriptError } from '@openharness/client'
+import type { Client, TaskCard, TranscriptError, TranscriptToolCall } from '@openharness/client'
 import type {
   GetPreferencesResponse,
   Mode,
   ModelEntry,
   Skill,
+  Session,
   UserToolConfirmationEventInput,
 } from '@openharness/protocol'
 import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
+import { AgentsScreen } from '../components/agents-screen'
+import { BreadcrumbLine } from '../components/breadcrumb'
 import { CompactionNotice } from '../components/compaction-notice'
 import { McpServersScreen } from '../components/mcp-servers'
 import { ModelPicker } from '../components/model-picker'
@@ -99,6 +104,15 @@ export interface ChatScreenProps {
    * screen with one for it; disposing this chat is the app's business, not this screen's.
    */
   readonly onNewChat: (modelId: string) => void
+  /**
+   * Chat in another session in place of this one — `/agents` (epic #340, S9; #347).
+   *
+   * A task's child is a real session (S3), so switching into one is the same move `/new` makes
+   * with a session it has just created: the app mounts a screen for it and this one unmounts
+   * with its stream. The session is already read — the picker fetched it — so this takes a
+   * {@link Session} rather than an id.
+   */
+  readonly onOpenSession: (session: Session) => void
 }
 
 /**
@@ -125,6 +139,7 @@ export function ChatScreen({
   catalog: known,
   onExit,
   onNewChat,
+  onOpenSession,
 }: ChatScreenProps) {
   const view = useSyncExternalStore(session.subscribe, session.getState, session.getState)
   const { request, element } = usePromptSlot()
@@ -148,6 +163,14 @@ export function ChatScreen({
   // frontend makes, through the same `compactionThreshold`, and a failure — or a server that
   // predates the field — leaves the 0.7 default in place.
   const [preferences, setPreferences] = useState<GetPreferencesResponse | null>(null)
+  /**
+   * The chain from the root chat down to this one, root first (epic #340, S9; issue #347).
+   *
+   * `null` while it is being read and for a top-level chat, which has nothing above it and so
+   * draws no line at all. The walk is the client's (`sessionBreadcrumb`), one read per step, so
+   * a chat three levels down costs three requests and no more.
+   */
+  const [crumb, setCrumb] = useState<readonly Session[] | null>(null)
   /**
    * The reader has asked to write a message instead of answering (epic #303, #310).
    *
@@ -184,6 +207,11 @@ export function ChatScreen({
   // A clear is in flight. A second Ctrl+L while the first is being handed over has nowhere
   // to go — Ink refuses to suspend a suspended terminal — so it is dropped instead.
   const clearing = useRef(false)
+
+  // Whether the prompt's command menu is up, published by the prompt on every render (issue
+  // #368). The key handler below binds Esc and so does the menu, and a keypress reaches both —
+  // see the Esc branch for what the reader meant.
+  const menuOpen = useRef(false)
 
   /**
    * Read the catalog once, in the background, for the two things beyond the picker it is good
@@ -273,6 +301,28 @@ export function ChatScreen({
       cancelled = true
     }
   }, [client])
+
+  // Where this chat sits, read once (issue #347): a chat with no parent has nothing above it and
+  // asks for nothing, and a child costs one read per step up. A walk that fails leaves no line,
+  // which is the honest answer — the chat is still perfectly usable without it.
+  useEffect(() => {
+    if (session.session.parent_session_id === null) {
+      setCrumb(null)
+      return undefined
+    }
+    let cancelled = false
+    void sessionBreadcrumb(client.sessions, session.session)
+      .then((chain) => {
+        if (!cancelled) setCrumb(chain)
+      })
+      .catch(() => {
+        // Nothing drew a line before this issue existed, and a chat whose chain cannot be read
+        // is in the same place.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client, session])
 
   // The catalog's prices: what every cost on screen — a reply's, the session's — is computed
   // with. A model the catalog does not carry has none, and its cost reads `—`; a catalog that
@@ -438,12 +488,13 @@ export function ChatScreen({
    * (`transcript-view.tsx`), so the band above it is what the section is set off from.
    */
   const above = lastDrawn(view.transcript.messages)
-  // A tool call after the last drawn message is the last block: it ends in its own line, so the
-  // section below owes a blank line — the same statement an agent message makes (epic #303, #308).
-  const lastToolCall = view.transcript.toolCalls.at(-1)
+  // A tool call or a task card after the last drawn message is the last block: each ends in its
+  // own lines, so the section below owes a blank line — the same statement an agent message
+  // makes (epic #303, #308; a card: epic #340, #347).
+  const tasks = selectTasks(view.transcript)
+  const lastStructure = lastStructureAt(view.transcript.toolCalls, tasks)
   const owesBlank =
-    (lastToolCall !== undefined &&
-      (above === undefined || lastToolCall.position > above.position)) ||
+    (lastStructure !== undefined && (above === undefined || lastStructure > above.position)) ||
     (above !== undefined && above.role !== 'user')
 
   /**
@@ -603,6 +654,33 @@ export function ChatScreen({
   }, [client, context, request])
 
   /**
+   * Open the chat's background tasks in the prompt slot — `/agents` (epic #340, S9; #347).
+   *
+   * The list is the same one the cards in the transcript draw from, and its two verbs are the
+   * two a reader has: switch into a task's own chat (or back to the chat above), and stop a task
+   * — which is one `user.interrupt` to the child session, the only stop a person has. The flow
+   * settles with the session to open, or `null` when the reader left without picking one; a
+   * switch is the app's to make (`onOpenSession`), exactly as `/new`'s is.
+   */
+  const openAgents = useCallback((): void => {
+    void (async () => {
+      const picked = await request<Session | null>((settle) => (
+        <AgentsScreen
+          client={client}
+          session={session}
+          current={session.session}
+          context={context}
+          onOpen={settle}
+          onDone={() => {
+            settle(null)
+          }}
+        />
+      ))
+      if (picked !== null && picked.id !== session.session.id) onOpenSession(picked)
+    })()
+  }, [client, context, onOpenSession, request, session])
+
+  /**
    * Reconnect the server a turn's `mcp_*` failure named (epic #303, X10; #313).
    *
    * The log carries the server's **name** and nothing else — an error says a server failed, not
@@ -709,6 +787,7 @@ export function ChatScreen({
       openMcpServers,
       openToolSettings,
       openSkills,
+      openAgents,
       compact: (instructions) => void session.compact(instructions),
       clearScreen: clear,
       exit: onExit,
@@ -750,6 +829,30 @@ export function ChatScreen({
   // picker then, and cancelling it must not also arm (or trigger) the chat's exit.
   useInput((input, key) => {
     if (element !== null) return
+
+    // **Esc stops a task's own turn** (epic #340, S9; #347). A child's model never asks the user
+    // (S1), so the one thing a reader does to one is stop it — and in a chat that is itself a
+    // task, Esc is that key: the child chat's Ctrl+C still interrupts and still leaves on the
+    // second idle press, but the whole reason a reader is in here is to steer or stop a helper.
+    // Outside a child chat Esc is the prompt's alone (it closes the command menu), so nothing
+    // here changes for a top-level chat.
+    //
+    // **But the menu's Esc is the menu's** (issue #368). Ink delivers one keypress to every
+    // mounted handler, so an Esc that closed the command menu also stopped the helper: a reader
+    // who typed `/` to look at the commands and pressed Esc to dismiss the list interrupted the
+    // turn they were watching. The prompt publishes whether its menu is up (`menuOpenRef`), and
+    // an Esc that dismissed it is spent — the next one stops the turn, which is what the reader
+    // who meant it presses.
+    if (key.escape) {
+      if (menuOpen.current) {
+        return
+      }
+      if (session.session.parent_session_id !== null && view.transcript.status === 'running') {
+        void session.interrupt()
+      }
+      return
+    }
+
     if (!key.ctrl) return
 
     if (input === 'r') {
@@ -798,6 +901,11 @@ export function ChatScreen({
         messages={view.transcript.messages}
         summaries={view.transcript.summaries}
         toolCalls={view.transcript.toolCalls}
+        // The background tasks this chat ran (epic #340, S9; #347). Each card draws where its
+        // `agent` call was, which is why the call is not a tool line, and the log is passed so a
+        // card can follow its own child for the activity line and the cost.
+        tasks={tasks}
+        taskLog={client.sessions.events}
         // How a call that waited on the reader came to run (epic #303, #310): the decision is
         // the log's own record, and the words are the client's, so `oh` and the page agree.
         decisionOf={(call) => {
@@ -867,10 +975,22 @@ export function ChatScreen({
       {todos !== null && (
         <TodoPanel todos={todos} folded={todoFolded ?? todos.length > TODO_AUTO_FOLD_THRESHOLD} />
       )}
+      {/* Where this chat sits, when it is a task's own (epic #340, S9; #347): a child is a real
+          session opened as a full chat, and this is the one line that says so — and that Esc
+          stops it while `/agents` goes back up. Nothing is drawn for a top-level chat, which has
+          nothing above it. It is chrome about where the reader is rather than part of the
+          conversation, so it sits with the notices and the task list, just above the rule. */}
+      {crumb !== null && (
+        <>
+          {(owesBlank || hasNotice || todos !== null) && <Text> </Text>}
+          <BreadcrumbLine chain={crumb} />
+        </>
+      )}
       {/* The input area is its own section (issue #233): a blank line, a dim full-width rule,
           and everything the console is — the status line, the prompt, and whatever has taken
-          the prompt's place — under it. */}
-      <InputRule blankAbove={owesBlank || hasNotice || todos !== null} />
+          the prompt's place — under it. The breadcrumb above has already brought the blank line
+          the section owes when it is up. */}
+      <InputRule blankAbove={(owesBlank || hasNotice || todos !== null) && crumb === null} />
       <StatusLine
         agentName={agentName}
         model={model}
@@ -901,6 +1021,7 @@ export function ChatScreen({
           // row. With nothing waiting — or once that row is picked — the prompt reads keys as
           // it always did.
           captureKeys={waiting.length === 0 || composing}
+          menuOpenRef={menuOpen}
           onSubmit={onSubmit}
           onActivity={() => {
             session.dismissHint()
@@ -988,6 +1109,27 @@ function ModelSlot({
  * would be two lines about one thing. What is left here is every error the status line cannot
  * say itself — one that ended its turn, and one read back out of history.
  */
+/**
+ * Where the last *structure* block of the transcript sits, or `undefined` when there is none
+ * (epic #303, #308; a card: epic #340, #347).
+ *
+ * A tool call and a task card are drawn as structure rather than as banded messages: a call ends
+ * in its `⎿` line and a card in its result line, and neither brings a trailing blank line the way
+ * a user's message's band does. So when one of them is the last block, the section under the
+ * transcript owes the blank line — which is the question {@link ChatScreen} asks before it draws
+ * its rule. The answer is the newest of the two, which is the newest block of either kind.
+ */
+function lastStructureAt(
+  toolCalls: readonly TranscriptToolCall[],
+  tasks: readonly TaskCard[],
+): number | undefined {
+  const call = toolCalls.at(-1)?.position
+  const task = tasks.at(-1)?.position
+  if (call === undefined) return task
+  if (task === undefined) return call
+  return Math.max(call, task)
+}
+
 function turnErrorNotice(error: TranscriptError): Notice {
   return {
     kind: 'error',

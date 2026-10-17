@@ -485,7 +485,11 @@ describe('App', () => {
     expect(
       screen.getByRole('link', { name: /a chat about the release checklist/ }),
     ).toHaveAttribute('href', `#/s/${sessionId}`)
-    expect(lists.sessions).toHaveLength(1)
+    // One read of the chat list — no reload and no second walk. The sidebar's own question about
+    // each chat's subagents (#346) is a different query and is filtered out here.
+    expect(lists.sessions.filter((request) => request.parentSessionId === undefined)).toHaveLength(
+      1,
+    )
   })
 
   it('names a chat by a first message it did not send', async () => {

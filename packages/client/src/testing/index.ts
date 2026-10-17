@@ -626,6 +626,32 @@ export interface FakeClient extends Client {
   completeMcpOAuth(serverId: string): FakeClient
 
   /**
+   * Put another session into the fake — a **child** of a chat above all (epic #340, S1/S3).
+   *
+   * The fake starts no children of its own: a child is the server's to create (#344), and the
+   * routes that do it are the brain's, not a client's. A test of the sidebar's nesting, of a
+   * child's chat or of a tree read therefore states the child it wants, and this is how: the
+   * session goes into the fake's store like any other, so `GET /v1/sessions` filters it the way
+   * the route does — a top-level chat when its `parent_session_id` is `null`, a child of that
+   * chat when it names one.
+   *
+   * The caller builds it with `@openharness/protocol/fixtures`' `makeChildSession(parent)`, so a
+   * test states the title, the model and the status it wants to read rather than inheriting
+   * whatever a helper decided.
+   *
+   * ```ts
+   * const fake = createFakeClient()
+   * const child = makeChildSession(fake.session, { title: 'Check the changelog' })
+   * fake.addSession(child)
+   * const { data } = await fake.sessions.list({ parent_session_id: fake.session.id })
+   * // data === [child]
+   * ```
+   *
+   * @param session the session to add; an id the fake already holds is replaced
+   */
+  addSession(session: Session): FakeClient
+
+  /**
    * Script the device flow `oh login` runs.
    *
    * The next {@link Client.auth} login answers the script; the codes it reports are
@@ -931,6 +957,32 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       : Promise.resolve(brain)
   }
 
+  /**
+   * Every session hanging off `rootId`, at any depth, in the order the walk finds them.
+   *
+   * The tree is the sessions' own `parent_session_id` links — the same field the route's
+   * cascade follows and the list filters by — so a fake that seeded a grandchild deletes it
+   * with its grandparent, exactly as `DELETE /v1/sessions/{id}` does (#341; epic #340, S7).
+   * Nothing loops: a server that answered a cycle would only make the walk visit a session
+   * twice, and the `seen` set is what keeps that from being a hang.
+   */
+  const descendantIdsOf = (rootId: string): string[] => {
+    const seen = new Set<string>([rootId])
+    const found: string[] = []
+    const queue: string[] = [rootId]
+    while (queue.length > 0) {
+      const parentId = queue.shift() as string
+      for (const [id, candidate] of brains) {
+        if (!seen.has(id) && candidate.session.parent_session_id === parentId) {
+          seen.add(id)
+          found.push(id)
+          queue.push(id)
+        }
+      }
+    }
+    return found
+  }
+
   const requireAgent = (agentId: string): Promise<Agent> => {
     const found = agents.get(agentId)
     return found === undefined
@@ -1174,8 +1226,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       // What the session runs (issue #93): the request's model and system, or the agent's when
       // the request named none — the protocol's refinement guarantees one of the two exists.
       const timestamp = now().toISOString()
+      const id = newSessionId()
       const session = SessionSchema.parse({
-        id: newSessionId(),
+        id,
         type: 'session',
         // Required since #61 (A4); the same signed-in user the agent belongs to.
         owner_id: user.id,
@@ -1197,6 +1250,17 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
                 model: agent.model,
                 system: agent.system,
               },
+        // The flag and the tree (epic #340, S1/S3). The fake is a server: it answers sessions
+        // the real `SessionSchema` accepts. `interactive` is the request's, defaulting to an
+        // interactive chat; the tree fields are the fake's to write exactly as they are the
+        // real server's, and a fake session is always a top-level chat — no route creates a
+        // child yet (#344), so `parent_session_id` in a request is stripped like any unknown
+        // field, and this is the shape such a session is stored in.
+        interactive: request.data.interactive ?? true,
+        parent_session_id: null,
+        parent_task_id: null,
+        root_session_id: id,
+        depth: 0,
         created_at: timestamp,
         updated_at: timestamp,
       })
@@ -1237,6 +1301,14 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         // A deleted session (#111) is gone, log and all: it is not listed any more.
         .filter((candidate) => !candidate.deleted)
         .map((candidate) => candidate.session)
+        // **A child is a real session with a parent, and never a chat of its own** (epic #340,
+        // S1/S3; #361). The route answers the caller's **top-level** chats and narrows that to
+        // one chat's children with `?parent_session_id=`, both inside the owner scope, so the
+        // fake applies the same two halves in the same place. A fake that answered the whole
+        // list here is what made the web app carry a shim re-implementing this filter
+        // (`apps/web/src/test-support/session-tree.ts`, now deleted) — a test double that
+        // disagrees with the server is a test that lies in the direction of green.
+        .filter((session) => session.parent_session_id === (params?.parent_session_id ?? null))
         // A model-first session has no agent and no agent id to match (issue #93).
         .filter(
           (session) => params?.agent_id === undefined || session.agent?.id === params.agent_id,
@@ -1253,6 +1325,15 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       const brain = await requireBrain(sessionId)
       // The 204 has no body: the effect is the deletion — one final `session.deleted` event
       // to the subscribers, the streams closed behind it, and the log dropped.
+      //
+      // **A child belongs to its parent** (#341; epic #340, S7), so the deletion reaches every
+      // session hanging off this one: each announces its own `session.deleted` to its own
+      // subscribers, the way the route's cascade does. A `session.deleted` lands on the stream
+      // of the session it names and no other, so the walk's order is not a stream fact — the
+      // store simply holds no session the parent's deletion did not reach.
+      for (const descendantId of descendantIdsOf(sessionId)) {
+        brains.get(descendantId)?.markDeleted()
+      }
       brain.markDeleted()
     },
 
@@ -1404,6 +1485,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         model: request.data.model,
         reasoning_effort: request.data.reasoning_effort ?? null,
         system_prompt_addition: request.data.system_prompt_addition ?? null,
+        // The subagent description that makes a mode a subagent type (#342, epic #340 S2); a
+        // mode that names none is not one.
+        subagent_description: request.data.subagent_description ?? null,
         // The tool override a mode may carry (#307); a mode that names none has none.
         tools: request.data.tools ?? null,
         created_at: timestamp,
@@ -1481,6 +1565,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           request.data.system_prompt_addition === undefined
             ? mode.system_prompt_addition
             : request.data.system_prompt_addition,
+        // An update that says nothing about the subagent description keeps it (#342).
+        subagent_description:
+          request.data.subagent_description === undefined
+            ? mode.subagent_description
+            : request.data.subagent_description,
         // The tool override a mode may carry (#307): an update that says nothing keeps it.
         tools: request.data.tools === undefined ? mode.tools : request.data.tools,
         updated_at: now().toISOString(),
@@ -2403,6 +2492,10 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
       return SessionUsageSchema.parse({
         session_id: sessionId,
         ...fakeUsage(fakeRequestsOf(brain), priceOf),
+        // The fake starts no child sessions — a child is the **server's** to create (epic #340,
+        // S3; #344) — so a chat it serves never delegated anything and the subtree's share is
+        // zeroed. The field is carried because it is part of the protocol's answer.
+        descendants: fakeUsage([], priceOf),
       })
     },
 
@@ -2462,6 +2555,11 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     usage: usageResource,
     auth: authResource,
     preferences: preferencesResource,
+
+    addSession(session: Session): FakeClient {
+      brains.set(session.id, new FakeBrain(session, delayMs, now))
+      return fake
+    },
 
     completeMcpOAuth(serverId: string): FakeClient {
       const found = mcpServers.get(serverId)
