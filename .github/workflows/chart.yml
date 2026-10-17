@@ -43,6 +43,18 @@ jobs:
       - name: Lint the chart
         run: helm lint charts/openharness
 
+      # The chart runs 2–4 pods, so SCHEDULER=local — the server's own default — is safe only
+      # where one pod can run. `values.yaml` defaults it to postgres; this proves the template
+      # helper still refuses to render local with the chart's default replicaCount/HPA (#378).
+      - name: Refuse SCHEDULER=local on more than one pod
+        run: |
+          if helm template openharness charts/openharness \
+            --set env.SCHEDULER=local > /dev/null 2> render-error.txt; then
+            echo "helm template accepted SCHEDULER=local with replicaCount: 2" >&2
+            exit 1
+          fi
+          grep -q 'SCHEDULER=local is single-instance only' render-error.txt
+
       # The rendering this job validates — and the same command the README documents. Written to
       # a file so kubeconform sees exactly what was rendered and the log shows it.
       - name: Render with the ci staging values
