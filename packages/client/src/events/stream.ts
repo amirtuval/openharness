@@ -52,6 +52,21 @@ const MAX_RECONNECT_DELAY_MS = 15_000
 /** How much of the delay is jitter, either way, as a fraction. */
 const JITTER_FRACTION = 0.25
 
+/**
+ * What the reconnect loop is doing, for a screen that tells the reader (#378, P4).
+ *
+ * The loop treats a dropped connection as an ordinary event and silently backs off and
+ * reconnects, which is right for the transcript — the `seq` resume makes it invisible — but
+ * leaves the UI unable to tell "the model is thinking" from "the server is unreachable". The
+ * callback reports the transition; it is optional and the loop behaves identically without it.
+ */
+export interface StreamConnection {
+  /** `connected` once a connection is open, `reconnecting` when one drops and will be retried. */
+  readonly state: 'connected' | 'reconnecting'
+  /** How many reconnect attempts have failed, when the state is `reconnecting`. */
+  readonly attempt?: number
+}
+
 /** What a caller can say about the stream it wants. */
 export interface StreamOptions {
   /**
@@ -71,6 +86,11 @@ export interface StreamOptions {
   afterSeq?: number
   /** Stop iterating when this aborts; the iteration ends quietly rather than throwing. */
   signal?: AbortSignal
+  /**
+   * Watch the connection: `connected` when a stream opens, `reconnecting` when one drops and
+   * the loop is about to back off. Optional; omitted, the loop is exactly as quiet as before.
+   */
+  onConnection?: ((connection: StreamConnection) => void) | undefined
 }
 
 /**
@@ -109,6 +129,7 @@ export async function* followSessionEvents(
       // Only a request that reached the stream resets the backoff: a server that accepts and
       // drops immediately is still worth slowing down for.
       attempt = 0
+      options.onConnection?.({ state: 'connected' })
       for await (const message of parseSseStream(body)) {
         if (isAborted(signal)) {
           // The caller has stopped listening; the events still buffered are no longer wanted.
@@ -145,6 +166,12 @@ export async function* followSessionEvents(
       }
       transport.debug('the event stream disconnected; reconnecting', error)
     }
+    if (isAborted(signal)) {
+      return
+    }
+    // The connection is gone and the next iteration will try again: tell a screen before the
+    // backoff, so it can say "Reconnecting…" for the whole wait rather than after it.
+    options.onConnection?.({ state: 'reconnecting', attempt })
     await sleep(reconnectDelayMs(attempt), signal)
     attempt += 1
   }
