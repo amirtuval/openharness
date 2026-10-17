@@ -1,5 +1,6 @@
 import type { NativeToolDeclaration, ToolSettings, ToolSettingsResolver } from '@openharness/brain'
 import { NATIVE_TOOL_DECLARATIONS, modelSearches } from '@openharness/brain'
+import { SUBAGENT_TOOLS_WITHOUT_ASK, cannotAskForApproval } from '@openharness/hands'
 import type { ToolDefinition, ToolRegistry } from '@openharness/hands'
 import {
   DEFAULT_MCP_TOOL_PERMISSION,
@@ -119,11 +120,14 @@ export function effectiveTools(
   const offeredNatives = registry === undefined ? [] : natives
   const builtin: EffectiveTool[] = registered.map((tool) => {
     const setting = stored.builtin[tool.name]
+    const policy = setting?.policy ?? tool.permission
     return {
       name: tool.name,
       source: 'builtin',
       enabled: override?.builtin[tool.name] ?? setting?.enabled ?? true,
-      policy: setting?.policy ?? tool.permission,
+      // A stored `ask` on a tool whose call is never shown to the user reads as `allow` (#363):
+      // the listing and the loop must give one answer, and the switch could never ask.
+      policy: policy === 'ask' && cannotAskForApproval(tool.name) ? 'allow' : policy,
       tool,
     }
   })
@@ -175,7 +179,10 @@ export function effectiveTools(
         name,
         source: 'builtin' as const,
         enabled: override?.builtin[name] ?? stored.builtin[name]?.enabled ?? true,
-        policy: stored.builtin[name]?.policy ?? 'deny',
+        policy:
+          (stored.builtin[name]?.policy ?? 'deny') === 'ask' && cannotAskForApproval(name)
+            ? 'allow'
+            : (stored.builtin[name]?.policy ?? 'deny'),
         tool: undefined,
       })),
     ...Object.keys(stored.mcp)
@@ -365,6 +372,14 @@ export async function listToolSettings(
  * `web_search` has a tool that really can be paused, and its policy is its own to set. What is
  * refused is the name of a tool that would be the provider's.
  *
+ * The **subagent tools** are refused `ask` for a different impossibility (#363): no client
+ * renders one of their calls — the parent's transcript draws a task **card**, and a child's
+ * transcript is the child's own — so a pause on one could never be answered. `agent`,
+ * `agent_message`, `agent_stop` and `message_parent` are refused; `agent_wait` is not, because
+ * its pause is a task wait that a notification or a deadline resolves, not a person. A stored
+ * `ask` on one of the four is read as `allow` by `effectiveTools` and by the brain's
+ * `decisionFor`, the rule `web_search` follows here.
+ *
  * @throws HttpError 400 `invalid_request_error` naming the tool and why
  */
 export function assertWritableToolSettings(
@@ -380,6 +395,20 @@ export function assertWritableToolSettings(
       throw invalidRequest(
         `${native.name} cannot be set to "ask": the model's provider runs the search inside ` +
           'the request, so there is no moment at which it could be held for your answer. ' +
+          'Use "allow" or "deny".',
+      )
+    }
+  }
+  // The subagent tools a call is never paused on (#363), for the same reason and a different
+  // one: nothing renders a subagent tool call, so a pause on one could never be answered —
+  // the parent's transcript draws a task **card**, and a child's transcript is the child's own.
+  // A stored `ask` from before this check existed reads as `allow` (`effectiveTools` and the
+  // brain's `decisionFor`), because a switch that can never ask is worse than no switch.
+  for (const name of SUBAGENT_TOOLS_WITHOUT_ASK) {
+    if (body.builtin?.[name]?.policy === 'ask') {
+      throw invalidRequest(
+        `${name} cannot be set to "ask": its call is never shown to you — a subagent is a task ` +
+          'card, not a tool call you can answer — so it could never be held for your approval. ' +
           'Use "allow" or "deny".',
       )
     }

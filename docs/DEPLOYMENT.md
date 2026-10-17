@@ -770,6 +770,32 @@ wrote it, which by default is the model the chat is running. The compaction job 
 on its own schedule (`OPENHARNESS_COMPACT_INTERVAL_MS`) is unrelated: it deletes the chunk rows
 replay already skips and never summarizes anything.
 
+### Subagents, and the two limits they carry
+
+A chat can hand work to a background **subagent**, and a helper may start helpers of its own
+(epic #340). Two limits bound that tree, and neither is set anywhere in this infrastructure —
+every environment takes the defaults:
+
+```
+OPENHARNESS_MAX_AGENT_DEPTH=3
+OPENHARNESS_MAX_LIVE_TASKS=10
+```
+
+`OPENHARNESS_MAX_AGENT_DEPTH` is how deep a tree of helpers may get: a session at that depth is
+not offered the tools that start another one, so a top-level chat (depth 0) may nest two levels
+below it by default. It is bounded above by `MAX_DESCENDANT_DEPTH` (64), the ceiling every tree
+walk stops at, and below by `1`; a value outside that stops the server with a message naming the
+variable. `OPENHARNESS_MAX_LIVE_TASKS` is how many of one **root** chat's live descendants there
+may be before an `agent` call is answered with an error the model acts on rather than starting
+anything — a cap the model can see and work with, not a chat that quietly runs out of room. Live
+means a turn open, a prompt queued, or a child parked waiting for its own helpers.
+
+The one thing to size against the deployment is the live-task cap: a helper's turn is a session
+turn like any other — the brain signals the scheduler, which runs it as its own pass — so it takes
+one of the `OPENHARNESS_MAX_CONCURRENT_SESSIONS` slots. The default live cap (10) is above that
+limit's default (4), so a chat that starts ten helpers queues them for slots rather than running
+them all at once. A value below `1` on either variable fails the boot.
+
 ### What is deliberately off
 
 **Load-balancer request logging stays off.** It is the single most expensive thing in this

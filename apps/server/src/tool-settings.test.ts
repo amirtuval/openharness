@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { WEB_FETCH_TOOL_NAME, createToolRegistry, textResult } from '@openharness/hands'
 import type { ToolDefinition } from '@openharness/hands'
 import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
   API_VERSION_PREFIX,
   ASK_USER_TOOL_NAME,
   EVENT_TYPES,
+  MESSAGE_PARENT_TOOL_NAME,
+  TASK_WAIT_TOOL_NAME,
   ListToolSettingsResponseSchema,
   ModeSchema,
   SessionSchema,
@@ -485,10 +490,17 @@ describe('the built-in tools under the settings (#305 × #307; #335)', () => {
       replies: [{ text: ['ok'] }],
     })
 
-    // `web_search` is listed although nothing registers it (#335): it is a provider's own tool,
-    // and the settings are where a user's choice about it lives.
+    // The five subagent tools are registered by every deployment since #344 — a settings screen
+    // lists them, and a mode can override one — `web_search` is listed although nothing
+    // registers it (#335), and the two built-ins come last. **Listing** is all this is: the
+    // offer below is what a chat really gets, and this harness wired no subagent runtime.
     expect((await getTools(test)).map((entry) => entry.name)).toEqual([
       ASK_USER_TOOL_NAME,
+      AGENT_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
+      TASK_WAIT_TOOL_NAME,
+      AGENT_STOP_TOOL_NAME,
+      MESSAGE_PARENT_TOOL_NAME,
       WEB_FETCH_TOOL_NAME,
       'todo_write',
       WEB_SEARCH_TOOL_NAME,
@@ -500,6 +512,9 @@ describe('the built-in tools under the settings (#305 × #307; #335)', () => {
     await send(test, session.id, message('hello'))
     await waitForIdle(test.store, session.id)
 
+    // A deployment that wired **no** `SubagentRuntime` has no subagents, so none of the five is
+    // offered however the registry is built (#365): four of them could only answer "the harness
+    // answers this", and a live `agent_wait` would park the turn with no task to resolve it.
     expect((await spans(test, session.id))[0]?.tools).toEqual([
       { name: ASK_USER_TOOL_NAME, source: 'builtin' },
       { name: WEB_FETCH_TOOL_NAME, source: 'builtin' },
@@ -612,6 +627,65 @@ describe('the built-in tools under the settings (#305 × #307; #335)', () => {
     expect(stored.find((entry) => entry.name === WEB_SEARCH_TOOL_NAME)).toMatchObject({
       policy: 'allow',
       available: true,
+    })
+  })
+
+  it('refuses an ask policy on a subagent tool, and reads a stored one as allow (#363; #367)', async () => {
+    const test = createTestApp({ tools: builtins(), subagents: true })
+
+    // No client renders a subagent tool call — the parent's transcript draws a task **card**, and
+    // a child's transcript is the child's own — so a pause on one could never be answered. The
+    // write is refused with the reason, exactly as a provider-native `ask` is.
+    for (const name of [AGENT_TOOL_NAME, AGENT_MESSAGE_TOOL_NAME, AGENT_STOP_TOOL_NAME]) {
+      const refused = await putJson(test, TOOLS, {
+        builtin: { [name]: { enabled: true, policy: 'ask' } },
+      })
+      expect(refused.status).toBe(400)
+      const body = (await refused.json()) as { error?: { type?: string; message?: string } }
+      expect(body.error?.type).toBe('invalid_request_error')
+      expect(body.error?.message).toContain('cannot be set to "ask"')
+    }
+    // The child's one tool is refused the same way.
+    const refused = await putJson(test, TOOLS, {
+      builtin: { [MESSAGE_PARENT_TOOL_NAME]: { enabled: true, policy: 'ask' } },
+    })
+    expect(refused.status).toBe(400)
+    // Nothing was stored: the switch that could never ask is not in the settings.
+    const listed = await getTools(test)
+    for (const name of [
+      AGENT_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
+      AGENT_STOP_TOOL_NAME,
+      MESSAGE_PARENT_TOOL_NAME,
+    ]) {
+      expect(listed.find((entry) => entry.name === name)?.policy).toBe('allow')
+    }
+    // `agent_wait` is deliberately **not** refused: its pause is a task wait, which a
+    // notification or a deadline resolves and no person has to answer.
+    const wait = await putJson(test, TOOLS, {
+      builtin: { [TASK_WAIT_TOOL_NAME]: { enabled: true, policy: 'ask' } },
+    })
+    expect(wait.status).toBe(200)
+
+    // A choice stored before this check existed reads as `allow` in the listing, the one answer
+    // the settings and the loop share.
+    const stored = toolSettingEntries(
+      createTurnRegistry({ kind: 'provider' }),
+      {
+        builtin: {
+          [AGENT_TOOL_NAME]: { enabled: true, policy: 'ask' },
+          [MESSAGE_PARENT_TOOL_NAME]: { enabled: true, policy: 'ask' },
+        },
+        mcp: {},
+      },
+      null,
+    )
+    expect(stored.find((entry) => entry.name === AGENT_TOOL_NAME)).toMatchObject({
+      policy: 'allow',
+      available: true,
+    })
+    expect(stored.find((entry) => entry.name === MESSAGE_PARENT_TOOL_NAME)).toMatchObject({
+      policy: 'allow',
     })
   })
 })

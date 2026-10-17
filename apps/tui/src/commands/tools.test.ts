@@ -181,6 +181,28 @@ describe('runTools (#308)', () => {
     expect(entry?.enabled).toBe(true)
   })
 
+  it('refuses `ask` for a subagent tool the settings screen does not offer it for (#368)', async () => {
+    // Epic #340, S9: the `agent` call is drawn as a card rather than as a tool line, so there is
+    // no prompt any client could draw for a pause on it — the server refuses the write, and this
+    // command refuses it before sending one. The fake registers three built-ins and no subagent
+    // tools, so a stored setting is how the row exists here at all; the real listing is the
+    // server's.
+    const fake = createFakeClient({
+      toolSettings: {
+        builtin: { agent: { enabled: true, policy: 'allow' } },
+        mcp: {},
+      },
+    })
+    const { io, err, out } = recorder()
+
+    expect(await runTools(fake, io, { name: 'agent', policy: 'ask' })).toBe(2)
+    expect(err[0]).toContain('agent cannot take `ask`')
+    expect(out).toEqual([])
+    // Nothing was written: the stored permission is what it was.
+    const stored = await fake.tools.list()
+    expect(stored.data.find((entry) => entry.name === 'agent')?.policy).toBe('allow')
+  })
+
   it('refuses a name this server does not register', async () => {
     const fake = createFakeClient()
     const { io, err } = recorder()

@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-12._
+_Last updated: 2026-10-17._
 
 ## Where we are
 
@@ -60,8 +60,9 @@ _Last updated: 2026-10-12._
 5. Model selection and provider keys ([epic #245](https://github.com/amirtuval/openharness/issues/245)) — done,
    followed by context compaction ([epic #277](https://github.com/amirtuval/openharness/issues/277)) — done
 6. Tools: the loop, pausing for the user and remote MCP ([epic #303](https://github.com/amirtuval/openharness/issues/303)) — done
-7. Extensibility and multiple agents: subagents ([epic #340](https://github.com/amirtuval/openharness/issues/340)) and
-   skills ([epic #349](https://github.com/amirtuval/openharness/issues/349), which also replace custom slash commands), then sandboxed tools
+7. Multiple agents: subagents and background tasks ([epic #340](https://github.com/amirtuval/openharness/issues/340)) — done,
+   then extensibility: skills ([epic #349](https://github.com/amirtuval/openharness/issues/349), which also replace
+   custom slash commands), and sandboxed tools
 
 **Why this order:** identity and a running deployment are the foundations. Every later feature
 needs to know who owns what. The features that cost money or can act on the world (paid model
@@ -326,6 +327,83 @@ tools.
 **Not in this phase:** client-defined custom tools (they wait for programmatic access), local
 (stdio) MCP servers, tool search, and an `auto` permission mode.
 
+## 7. Subagents and background tasks (done: [epic #340](https://github.com/amirtuval/openharness/issues/340))
+
+A chat can hand work to another chat and keep the conversation going. The second session is a
+**real** session — its own log, model, turn, streams, usage and crash recovery — that belongs to
+the first one, and its news reaches the parent as a background-task notification.
+
+**Status:** done (2026-10-17) — the session tree
+([#341](https://github.com/amirtuval/openharness/issues/341)), the subagent types
+([#342](https://github.com/amirtuval/openharness/issues/342)), the inbox and task waits
+([#343](https://github.com/amirtuval/openharness/issues/343)), the tools and the lifecycle
+([#344](https://github.com/amirtuval/openharness/issues/344)), the shared client view
+([#345](https://github.com/amirtuval/openharness/issues/345)), the web app
+([#346](https://github.com/amirtuval/openharness/issues/346)) and `oh`
+([#347](https://github.com/amirtuval/openharness/issues/347)) are **built**, and the epic's test
+plan ([#348](https://github.com/amirtuval/openharness/issues/348)) was run hands-on — the web
+with Playwright and `oh` in a real terminal, on the mock model and on DeepSeek for the
+real-model cases — until clean. The pass's one defect (a subagent parked in `agent_wait` was not
+stopped, and a stop read as `done`) is
+[#373](https://github.com/amirtuval/openharness/issues/373), fixed with regression tests.
+
+The final round is done too. A child is **titled with the description its parent model gave it**
+([#379](https://github.com/amirtuval/openharness/issues/379),
+[#380](https://github.com/amirtuval/openharness/pull/380)): the brain creates a child straight
+through the store, so the naming rule had to move to the protocol
+(`deriveSessionTitle`) and be applied at the start — the sidebar listed a helper under its
+model's name until then. Then every PR in the stack was code-reviewed, and its fixes
+([#382](https://github.com/amirtuval/openharness/pull/382) backend,
+[#381](https://github.com/amirtuval/openharness/pull/381) frontend) changed behaviour in the
+places a reader notices: a task's news never answers a question waiting on the user, and a
+session paused on one is not woken for it; one notification is claimed by exactly one open
+`agent_wait`, so two waits cannot wedge a turn on one append; a task's result and its
+`session.task_status` are written in **one** append, so a crash between them cannot leave a card
+`running` for ever; Stop on a finished helper changes nothing rather than flipping `done` →
+`stopped` and telling the parent the user stopped it; a turn a server drain aborted is announced
+as the server's doing — _interrupted by the server (a restart or shutdown)_, with what to do
+next — rather than as a user stop, and the card stays `idle`; the four subagent tools
+(`agent`, `agent_message`, `agent_stop`, `message_parent`) take `allow`/`deny` only, never
+`ask`, because their calls are drawn as a card and nothing a client could draw would answer the
+pause (`agent_wait` is exempt — its pause is a task wait); rewinding past a running helper stops
+it **durably**, with a `user.interrupt` in the child's log as well as a signal; `oh` sanitises
+the terminal escape sequences a child's output can carry, so a helper cannot retitle the
+reader's window or clear their screen; and the web sidebar nests again under `StrictMode`. The
+QA of those fixes ([#384](https://github.com/amirtuval/openharness/pull/384)) found one defect —
+the news of a task the reader had rewound away still reached the parent model
+([#383](https://github.com/amirtuval/openharness/issues/383)) — now dropped at the write, and
+was otherwise clean on the mock stack and on DeepSeek.
+
+1. **The tree** ([#341](https://github.com/amirtuval/openharness/issues/341)): `parent_session_id`,
+   `parent_task_id`, `root_session_id`, `depth` and `interactive` on a session, derived by the
+   store from the parent — a client cannot place itself in somebody's tree, a child is not a
+   top-level chat in the list, and deleting a parent deletes its whole subtree with a final
+   `session.deleted` on each session's channel.
+2. **Types** ([#342](https://github.com/amirtuval/openharness/issues/342)): a mode with a
+   `subagent_description` is a **subagent type**, plus the built-in `general-purpose` (the
+   parent continued). A type resolves exactly as a chat on that mode does — model, effort,
+   prompt addition and tool set — live, so an edit applies to the next start.
+3. **The inbox** ([#343](https://github.com/amirtuval/openharness/issues/343)):
+   `session.task_started` / `task_status` / `task_notification` in the parent's log, a
+   notification queued and claimed like a user message, delivered exactly once (idempotent on
+   `<child_session_id>:<idle seq>`), and `agent_wait` — a pause resolved by a notification, its
+   deadline, or the reader moving on.
+4. **The tools and the lifecycle** ([#344](https://github.com/amirtuval/openharness/issues/344)):
+   `agent`, `agent_message`, `agent_wait`, `agent_stop` and the child's `message_parent`, the
+   depth cap and the live-task cap, a non-interactive child that is never offered `ask_user`,
+   and a stop that is a stop (S7) — including a helper parked in a task wait, which is what the
+   #348 pass found and [#373](https://github.com/amirtuval/openharness/issues/373) fixed.
+5. **The clients** ([#345](https://github.com/amirtuval/openharness/issues/345),
+   [#346](https://github.com/amirtuval/openharness/issues/346),
+   [#347](https://github.com/amirtuval/openharness/issues/347)): one card per task (status,
+   activity, tokens, cost, Open, Stop), the child as a full chat under a breadcrumb, the
+   sidebar's nesting, the modes editor's field, `oh`'s cards and `/agents`, and a chat's usage
+   including its descendants.
+
+**Not in this phase:** sandboxed (`bash`) task kinds and scheduled tasks — the background-task
+vocabulary is built to take them ([#343](https://github.com/amirtuval/openharness/issues/343)),
+and they arrive with the sandbox.
+
 ## Later: not ordered yet
 
 - **Programmatic access:** personal API keys, SDK and script access (no static server key
@@ -349,12 +427,16 @@ tools.
   log), export and share.
 - **Extensibility:** skills (epic #349; they replace custom slash commands), custom agents, hooks,
   plugins.
-- **Multiple agents:** subagents and background tasks (epic #340).
+- **Multiple agents:** subagents and background tasks — **done**
+  ([epic #340](https://github.com/amirtuval/openharness/issues/340)); the kind a task is beyond
+  `subagent` (a sandboxed subprocess, a scheduled job) waits for the sandbox.
 - **Sandboxed tools** (`bash`, files) behind the same `hands` interface, after extensibility and
   multiple agents. The sandbox technology, and whether hands run in-process or as a separate
   worker, are decided then; re-injecting files after a compaction (#276) comes with them.
 - **Smaller follow-ups:**
   - merge streamed deltas (e.g. every ~50 ms) to cut writes, when performance matters;
+  - a parent's `taskOf` reads the whole log per call, and the per-session usage route walks every
+    descendant one page at a time (#340); both want a narrower read when a tree gets big;
   - a tab watching a session started in another tab may not show the new title until reload;
   - the session list has no live stream, so a chat created in one tab or in `oh` appears in
     another tab's sidebar only after it refetches the list.

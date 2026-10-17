@@ -81,7 +81,9 @@ export interface SessionsResource {
   /**
    * Read one page of sessions, newest first.
    *
-   * @param params `limit`, `page` and the `agent_id` filter
+   * @param params `limit`, `page`, the `agent_id` filter and the `parent_session_id` one —
+   *   which lists one session's children rather than the caller's top-level chats (epic #340,
+   *   S3)
    * @param options request options (cancellation)
    */
   list(params?: ListSessionsQuery, options?: RequestOptions): Promise<ListSessionsResponse>
@@ -228,7 +230,12 @@ export function createSessionsResource(transport: Transport): SessionsResource {
       return transport.json(ListSessionsResponseSchema, {
         method: 'GET',
         path,
-        query: { limit: params?.limit, page: params?.page, agent_id: params?.agent_id },
+        query: {
+          limit: params?.limit,
+          page: params?.page,
+          agent_id: params?.agent_id,
+          parent_session_id: params?.parent_session_id,
+        },
         signal: options?.signal,
       })
     },

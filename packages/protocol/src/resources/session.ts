@@ -7,7 +7,7 @@ import {
   type SessionCompactEvent,
 } from '../events/session'
 import { UserEventInputSchema } from '../events/user'
-import { AgentIdSchema, ModeIdSchema, SessionIdSchema } from '../ids'
+import { AgentIdSchema, ModeIdSchema, SessionIdSchema, TaskIdSchema } from '../ids'
 import { NextPageSchema, PageCursorStringSchema } from '../pagination'
 import { AGENT_NAME_MAX_LENGTH, ModelConfigSchema } from './agent'
 import { UserIdSchema } from './user'
@@ -32,6 +32,11 @@ import { UserIdSchema } from './user'
  * owner-scoped operation, so another user's session answers `404`. It is the explicit
  * exception to the append-only rule, alongside compaction, and it is irreversible; open
  * streams for the session receive a final `session.deleted` event and close.
+ *
+ * Since epic #340 a session may belong to another one: `parent_session_id`, `parent_task_id`,
+ * `root_session_id` and `depth` place it in a tree, and `interactive` says whether a person is
+ * on the other end. Both are fixed at creation, and the tree is the server's to write — no
+ * request carries it.
  */
 
 /** Longest session title Anthropic accepts. */
@@ -129,6 +134,64 @@ export const SessionSchema = z.object({
    * session. `model` and `system` above are what the session runs; this is where it came from.
    */
   agent: SessionAgentSchema.nullable(),
+  /**
+   * // extension: whether a person is on the other end (epic #340, S1).
+   *
+   * Set when the session is created (a `POST /v1/sessions` may ask for a non-interactive one)
+   * and **never changed**. A non-interactive session's model cannot stop to ask the user
+   * anything: `ask_user` is not offered to it at all, and a call whose effective policy is
+   * `ask` is answered at once with an error result rather than pausing the turn. A person may
+   * still send it messages and interrupt it — "non-interactive" is about the model asking,
+   * not about the user being locked out.
+   *
+   * Subagents are its first user (#344); `oh -p`, API runs and scheduled runs reuse it later.
+   * Anthropic has no equivalent: there a session is as interactive as its client makes it.
+   */
+  interactive: z.boolean(),
+  /**
+   * // extension: the session this one belongs to, or `null` for a top-level chat
+   * (epic #340, S3).
+   *
+   * A subagent is a real session — the brain, the scheduler, compaction, usage, replay and
+   * crash recovery work on it unchanged — that belongs to another session. Children are not
+   * top-level chats: `GET /v1/sessions` lists `parent_session_id: null` by default and
+   * `?parent_session_id=` lists one session's children. A child inherits no history: its
+   * first `user.message` is the prompt its parent wrote.
+   *
+   * Read-only, and **not client-settable**: only the server creates children (#344).
+   */
+  parent_session_id: SessionIdSchema.nullable(),
+  /**
+   * // extension: the task this session was started for, or `null` (epic #340, S3; S4).
+   *
+   * The `task_` id the parent's `session.task_started` carries (#343), so a child session can
+   * be traced back to the card it belongs to. `null` for a top-level chat and for a child the
+   * server created outside a task.
+   *
+   * Read-only, and **not client-settable**: only the server creates children.
+   */
+  parent_task_id: TaskIdSchema.nullable(),
+  /**
+   * // extension: the top-level chat this session belongs to — its own id when it *is* the
+   * top-level chat (epic #340, S3).
+   *
+   * Every session in a tree shares one root, which is what says which tree a session belongs
+   * to: S6's live cap is asked **from** the root (`countLiveDescendants(root_session_id)`), and
+   * "every live descendant of this root" is one walk of the subtree. It is **not** a filter any
+   * query makes: a tree read is a recursion over `parent_session_id`, because a root column
+   * cannot answer "every descendant of *this* session" — the branch under a middle child — and
+   * the walks are what `listDescendants`, the live count and the delete cascade share.
+   * Read-only, and not client-settable: the store derives it from the parent at creation.
+   */
+  root_session_id: SessionIdSchema,
+  /**
+   * // extension: how far below the top-level chat this session sits (epic #340, S3).
+   *
+   * `0` for a top-level chat, and one more than its parent's depth for a child, so it is what
+   * S6's nesting limit compares against. Read-only, and not client-settable: the store derives
+   * it from the parent at creation.
+   */
+  depth: z.number().int().nonnegative(),
   created_at: TimestampSchema,
   updated_at: TimestampSchema,
 })
@@ -169,6 +232,18 @@ export const CreateSessionRequestSchema = z
      * server resolves it to the session's header model; the chat then follows the mode live.
      */
     mode: ModeIdSchema.optional(),
+    /**
+     * // extension: whether a person is on the other end (epic #340, S1). Omitted, the session
+     * is interactive — a chat someone is typing into. `false` creates one whose model cannot
+     * stop to ask anything: `ask_user` is never offered to it and an `ask` call is answered
+     * with an error instead of pausing. Set once, at creation; there is no way to change it.
+     *
+     * The session's **tree** fields (`parent_session_id`, `parent_task_id`,
+     * `root_session_id`, `depth`) are deliberately absent here: only the server creates a
+     * child session (#344), and a value a client sent would be stripped like any unknown
+     * field.
+     */
+    interactive: z.boolean().optional(),
     title: z.string().max(SESSION_TITLE_MAX_LENGTH).nullable().optional(),
     metadata: MetadataSchema.optional(),
     /**
@@ -226,6 +301,10 @@ export interface CompactSessionResponse {
  * The list is ordered by `(created_at, id)`, newest first, and `page` resumes at a keyset
  * position in it — not at an item offset, which would shift while a client pages through a
  * list that sessions are still being added to.
+ *
+ * The list is also **the top-level chats** by default: a session a chat started (#344) is
+ * part of its parent, not a chat of its own, so it is left out unless it is asked for. Naming
+ * a `parent_session_id` answers that session's children instead.
  */
 export const ListSessionsQuerySchema = z.object({
   /** Maximum results per page. Defaults to `DEFAULT_PAGE_LIMIT`, capped at `MAX_PAGE_LIMIT`. */
@@ -234,6 +313,11 @@ export const ListSessionsQuerySchema = z.object({
   page: PageCursorStringSchema.optional(),
   /** Return only sessions created with this agent. Anthropic's `agent_id` filter. */
   agent_id: AgentIdSchema.optional(),
+  /**
+   * // extension: return only this session's children (epic #340, S3). Omitted, the list is
+   * the caller's top-level chats — every session whose `parent_session_id` is `null`.
+   */
+  parent_session_id: SessionIdSchema.optional(),
 })
 
 export type ListSessionsQuery = z.infer<typeof ListSessionsQuerySchema>

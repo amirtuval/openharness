@@ -65,6 +65,10 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
           : { model: body.model }
         : { model: { id: mode.model } }),
       ...(mode === null ? {} : { mode: mode.mode.id }),
+      // A non-interactive session (#340, S1) is the caller's to ask for and the store's to
+      // default: omitted, the session is a chat someone is typing into. It is set here and
+      // never changed, so the turn that reads it can rely on it.
+      ...(body.interactive === undefined ? {} : { interactive: body.interactive }),
       ...(body.system === undefined ? {} : { system: body.system }),
       ...(body.title === undefined ? {} : { title: body.title }),
       ...(body.metadata === undefined ? {} : { metadata: body.metadata }),
@@ -99,6 +103,12 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
       ...(query.limit === undefined ? {} : { limit: query.limit }),
       ...(query.page === undefined ? {} : { page: query.page }),
       ...(query.agent_id === undefined ? {} : { agentId: query.agent_id }),
+      // Children are not top-level chats (epic #340, S3): a request that names no parent is
+      // asking for the caller's chats, which is the store's `null` — the every-owner sessions
+      // that have no parent — and `?parent_session_id=` answers one session's children
+      // instead. The filter is inside the owner scope like the others, so somebody else's
+      // parent id is an empty page rather than an error.
+      parentSessionId: query.parent_session_id ?? null,
     }
     return c.json(await deps.store.listSessions(options))
   })
@@ -119,8 +129,11 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
    * In order, so the one promise it makes — nothing lands in the log after it returns — holds:
    *
    * 1. the scoped read is the ownership check;
-   * 2. the scheduler stops the turn in flight and waits for its pass to finish writing
-   *    (`SessionScheduler.stopSession`; on another instance that is a partition signal);
+   * 2. the scheduler stops the turn in flight — and, since a session's descendants go with it
+   *    (epic #340, S7), every descendant's too — and waits for each pass to finish writing
+   *    (`SessionScheduler.stopSession`; on another instance that is a partition signal). The
+   *    session itself is stopped first, so the turn that could still start a child is over
+   *    before the subtree is read;
    * 3. `store.deleteSession` removes the session and every row keyed by it in one transaction,
    *    and notifies the session's subscribers — every open stream for it gets a final
    *    `session.deleted` and closes, on whichever instance it runs.
@@ -135,6 +148,9 @@ export function registerSessionRoutes(app: Hono<AppEnv>, deps: RouteDeps): void 
       throw notFoundError(`no session with id ${sessionId}`)
     }
     await deps.scheduler.stopSession(sessionId)
+    for (const descendant of await deps.store.listDescendants(sessionId, { ownerId })) {
+      await deps.scheduler.stopSession(descendant)
+    }
     if (!(await deps.store.deleteSession(sessionId, { ownerId }))) {
       throw notFoundError(`no session with id ${sessionId}`)
     }

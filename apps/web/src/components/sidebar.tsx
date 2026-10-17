@@ -1,5 +1,6 @@
 import type { Session, User } from '@openharness/protocol'
 import {
+  ChevronRight,
   ChevronsUpDown,
   LogOut,
   MoreHorizontal,
@@ -85,6 +86,7 @@ export function Sidebar({
   panelRef,
   nameOf,
   onDelete,
+  childrenOf,
 }: {
   sessions: readonly Session[]
   loading: boolean
@@ -119,11 +121,24 @@ export function Sidebar({
    * action (the sidebar tests render the list on its own).
    */
   onDelete?: ((sessionId: string) => Promise<DeleteSessionResult>) | undefined
+  /**
+   * The children of one chat (epic #340, S1/S3; issue #346), or `[]`.
+   *
+   * A child is a session with a parent, and the server never lists one as a chat of its own — so
+   * this is what makes a subagent reachable from the sidebar at all: the chats that have some get
+   * a group under them, with the count and whether one is working. Omitted, no chat nests, which
+   * is what a test that only cares about the list wants.
+   */
+  childrenOf?: ((sessionId: string) => readonly Session[]) | undefined
 }) {
   // Which row is confirming a delete and which delete is in flight.
   const [confirming, setConfirming] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState<{ id: string; message: string } | null>(null)
+  // Which chats have their subagents open (epic #340, S9; #346). Collapsed by default — a chat
+  // that started helpers is still one row in a list of chats — and the choice is this window's
+  // rather than the account's, the way the sidebar's own collapse is.
+  const [openChildren, setOpenChildren] = useState<readonly string[]>([])
 
   // One moment for the whole list: every row is judged against the same "today", so two rows
   // either side of midnight cannot land in different buckets in the same render.
@@ -228,6 +243,7 @@ export function Sidebar({
             <ul className="flex flex-col gap-0.5">
               {group.sessions.map((session) => {
                 const active = session.id === activeSessionId
+                const children = childrenOf?.(session.id) ?? []
                 return (
                   <li key={session.id} className="group/row relative">
                     {confirming === session.id && onDelete !== undefined ? (
@@ -293,6 +309,27 @@ export function Sidebar({
                             }}
                           />
                         )}
+                        {/* The chat's subagents, under it rather than beside it (epic #340, S9;
+                            #346). A child is a real session with a parent and the server never
+                            the lists one as a chat of its own, so this group is the only way to
+                            reach one from here. */}
+                        <ChildChats
+                          children={children}
+                          open={
+                            openChildren.includes(session.id) ||
+                            children.some((child) => child.id === activeSessionId)
+                          }
+                          onToggle={() => {
+                            setOpenChildren((current) =>
+                              current.includes(session.id)
+                                ? current.filter((id) => id !== session.id)
+                                : [...current, session.id],
+                            )
+                          }}
+                          activeSessionId={activeSessionId}
+                          onNavigate={onNavigate}
+                          nameOf={nameOf}
+                        />
                       </>
                     )}
                     {deleteError !== null && deleteError.id === session.id ? (
@@ -320,6 +357,108 @@ export function Sidebar({
         </div>
       )}
     </aside>
+  )
+}
+
+/**
+ * The subagents one chat started, nested under its row (epic #340, S1/S3/S9; issue #346).
+ *
+ * The server never lists a child as a chat of its own — `GET /v1/sessions` answers the top-level
+ * ones — so without this group a helper would be reachable only from the card that started it.
+ * The group is **collapsed by default** and its header is the control: a chat that delegated work
+ * is still one row in a list of chats, and what the row has to say about it is the count and
+ * whether one of them is working (the running dot, the same coral the status marks use).
+ *
+ * It is a plain disclosure rather than a Radix `Collapsible`, because it lives inside a list row
+ * and its content is the only thing under it — the chevron, `aria-expanded` and the count are the
+ * whole of the interaction. The rows themselves are ordinary chat links, so Back, middle-click
+ * and a reload land where they always do, and the open child is marked the way the open chat is
+ * (`aria-current` **and** a bar) — a reader can be inside a subagent's chat.
+ */
+function ChildChats({
+  children,
+  open,
+  onToggle,
+  activeSessionId,
+  onNavigate,
+  nameOf,
+}: {
+  /** The chat's children, in the order the server listed them. */
+  children: readonly Session[]
+  open: boolean
+  onToggle: () => void
+  activeSessionId: string | undefined
+  onNavigate: (() => void) | undefined
+  nameOf: ModelNameLookup | undefined
+}) {
+  if (children.length === 0) {
+    return null
+  }
+  const running = children.filter((child) => child.status === 'running').length
+  return (
+    <div data-slot="chat-children" className="mt-0.5 ml-2 border-l border-border pl-2">
+      <button
+        type="button"
+        data-slot="chat-children-toggle"
+        aria-expanded={open}
+        onClick={onToggle}
+        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-2xs text-muted-foreground outline-none hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
+        <ChevronRight
+          aria-hidden="true"
+          className={cn('size-3 shrink-0 transition-transform', open && 'rotate-90')}
+        />
+        {/* The running dot, before the words: a glance says "one of these is working" without
+            reading a count. Decorative — the sentence carries the same fact. */}
+        {running === 0 ? null : (
+          <span
+            aria-hidden="true"
+            data-slot="chat-children-running"
+            className="size-1.5 shrink-0 rounded-full bg-coral"
+          />
+        )}
+        <span className="truncate">
+          {children.length === 1 ? '1 subagent' : `${String(children.length)} subagents`}
+          {running === 0 ? '' : ` · ${String(running)} running`}
+        </span>
+      </button>
+      {!open ? null : (
+        <ul className="flex flex-col gap-0.5 pb-0.5">
+          {children.map((child) => {
+            const active = child.id === activeSessionId
+            return (
+              <li key={child.id} className="relative">
+                {active ? (
+                  <span
+                    aria-hidden="true"
+                    data-slot="active-marker"
+                    className="absolute top-1/2 left-0 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary"
+                  />
+                ) : null}
+                <a
+                  href={chatHash(child.id)}
+                  onClick={onNavigate}
+                  aria-current={active ? 'page' : undefined}
+                  className={cn(
+                    'flex min-w-0 items-center gap-1.5 rounded-md py-1 pr-2 pl-2 text-xs',
+                    active ? 'bg-accent font-medium text-accent-foreground' : 'hover:bg-accent/60',
+                  )}
+                >
+                  {child.status === 'running' ? (
+                    <span
+                      aria-hidden="true"
+                      data-slot="child-running"
+                      className="size-1.5 shrink-0 rounded-full bg-coral"
+                    />
+                  ) : null}
+                  <span className="truncate">{sessionLabel(child, nameOf)}</span>
+                </a>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
   )
 }
 

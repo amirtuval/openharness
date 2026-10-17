@@ -1,0 +1,24 @@
+-- 0035_drop_sessions_root_idx.sql — the root index nothing ever read (#361)
+--
+-- `0032_session_tree.sql` created two partial indexes beside the tree columns, and one of them
+-- promised something no query does: `sessions_root_idx on sessions (root_session_id) where
+-- depth > 0` was written for "the live descendants of a root", described there as "one indexed
+-- query". No query filters on `root_session_id`. Every tree read in this repo is a recursion
+-- over `parent_session_id` — `listDescendants`, `countLiveDescendants` and `deleteSession`'s
+-- cascade all walk the subtree that way, because a root column cannot answer "every descendant
+-- of *this* session" (the branch under a middle child), and the live cap asks that same walk
+-- **from** the root id rather than filtering by it. So the index cost a write on every child a
+-- deployment ever created and returned nothing, and a reader who trusted the comment would hunt
+-- for a query that is not there.
+--
+-- Dropping it is the honest end of the promise rather than making the walks into what the
+-- comment described: `countLiveDescendants` takes any session id (a middle child's subtree is a
+-- legitimate question, and the conformance suite asks it), so the walk is the shape the
+-- contract needs. `sessions_parent_idx` — the other half of `0032` — is what those walks seek
+-- on and stays.
+--
+-- `0032` itself is not edited: a migration that has been applied anywhere is never changed
+-- (see `docs/LEARNINGS.md`), and every file re-runs on every `migrate()` call, so this one is
+-- written as `if exists` and is a no-op on a database that never had the index.
+
+drop index if exists sessions_root_idx;
