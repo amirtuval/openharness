@@ -199,7 +199,9 @@ describe('a crashed owner', () => {
 
   it('answers an inherited tool call execution lost and never runs it (#378, P4)', async () => {
     // A real execution counter, shared by every instance: the tool appends one line when it
-    // starts. The recovering brain must not add a second.
+    // starts. The recovering brain must not add a second. Setting the variable is also what
+    // registers `echo_slow` — every other mock server runs without it and offers the ordinary
+    // test tools alone.
     const directory = await mkdtemp(join(tmpdir(), 'openharness-crash-'))
     const executionLog = join(directory, 'executions.log')
     try {

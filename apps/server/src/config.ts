@@ -186,10 +186,12 @@ export interface ServerConfig {
   readonly testModel: string | undefined
   /**
    * `OPENHARNESS_TEST_TOOL_EXECUTION_LOG`: a file the mock model's slow test tool appends one
-   * line to per execution.
+   * line to per execution — and the variable that **registers** that tool.
    *
    * A test hook and nothing else — it exists so an e2e test can prove a tool whose owner was
-   * killed was **not** run a second time by the recovering brain. It is only read when
+   * killed was **not** run a second time by the recovering brain. Setting it is what puts
+   * `echo_slow` in the process's registry, so only the crash suite's mock servers offer it;
+   * every other mock server's offer is unchanged. It is only read when
    * `OPENHARNESS_TEST_MODEL=mock`, and a deployment never sets it.
    */
   readonly testToolExecutionLog: string | undefined

@@ -40,8 +40,9 @@ import { TEST_SLOW_TOOL_NAME, TEST_TOOL_NAME } from './tools'
  * |                          | can be interrupted, killed and resumed mid-stream                                 |
  * | `__slow_tool__`          | the same slow reply, then a call to the test `echo` tool (#378): one turn long    |
  * |                          | enough to span a rolling restart **and** with a tool step in it                   |
- * | `__delayed_tool__ <ms> <text>` | calls `echo_slow`, which logs one execution and waits `ms` — the call a crash |
- * |                          | test kills its owner against (#378, P4)                                           |
+ * | `__delayed_tool__ <ms> <text>` | calls `echo_slow` — registered only when                   |
+ * |                          | `OPENHARNESS_TEST_TOOL_EXECUTION_LOG` is set — which logs one execution and waits  |
+ * |                          | `ms`: the call a crash test kills its owner against (#378, P4)                     |
  * | `__crash_owner__`        | one chunk, then `SIGKILL` this process: the deterministic poison input (#378, P4) |
  * | `__hold__`               | one chunk, and then nothing: the request stays open until it is aborted, so a     |
  * |                          | test can hold a turn open as long as it needs and release it itself               |
@@ -123,6 +124,10 @@ export const MOCK_TOOL_MARKER = '__tool__'
  * The call is stored, then the tool runs for the delay it names. A test kills the owning
  * process while that is happening and asserts the recovering brain answers the inherited call
  * `execution lost` rather than running it again.
+ *
+ * The tool is registered only when `OPENHARNESS_TEST_TOOL_EXECUTION_LOG` is set
+ * (`createTurnRegistry`), so a mock server that does not opt in has no `echo_slow` to call:
+ * the marker's plan still names it, and the crash suite is the one that sets the variable.
  */
 export const MOCK_DELAYED_TOOL_MARKER = '__delayed_tool__'
 

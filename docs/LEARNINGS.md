@@ -1791,6 +1791,18 @@ uses ([`e2e/AGENTS.md`](../e2e/AGENTS.md)).
 inheritance, which is the general lesson — an escape hatch meant for a test runner leaks into
 anything the test spawns.
 
+**A test tool registered "under the mock model" is registered for every mock server.** P4's
+`echo_slow` was added for the crash suite's `__delayed_tool__` fixture but pushed whenever
+`OPENHARNESS_TEST_MODEL=mock`, so every e2e test that asserts a request's exact offer — `tools`,
+`tool-settings` — started failing on the extra `{ name: 'echo_slow', source: 'builtin' }`, and
+the in-process tests that enumerate the registry had the same hidden change. The fix is to gate
+the fixture tool on the variable the fixture already needs
+(`OPENHARNESS_TEST_TOOL_EXECUTION_LOG`, which also names its execution log): a tool no test can
+call should not be in the offer that test asserts. The general rule is that the mock model is a
+**shared** test surface, so anything one suite adds to it must be opt-in, not implied by a
+setting every suite has set ([#378](https://github.com/amirtuval/openharness/issues/378), P4;
+`apps/server/src/tools.ts`).
+
 **An assertion that cannot fail is worse than no assertion, because it is counted as coverage.** A
 test review of every package found them everywhere: `expect(p.partitionOf(id)).toBe(p.partitionOf(id))`,
 `expect(history.data).toHaveLength(history.data.length)`, re-parsing a schema's own output, and a
