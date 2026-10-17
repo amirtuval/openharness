@@ -121,9 +121,13 @@ export const SKILLS_FILES: GitFileMap = {
     '',
     '# Summarize a thread',
     '',
-    'Read the thread and list its decisions.',
+    'Read the thread and list its decisions, following `references/format.md`.',
     '',
   ].join('\n'),
+  // The reference a user-run `disable-model-invocation` skill names: once the user has run the
+  // command, the model may read the files its instructions point at (K1, K7).
+  'skills/summarize-thread/references/format.md':
+    '# Thread format\n\nOne decision per line, newest first.\n',
   'skills/house-style/SKILL.md': [
     '---',
     'name: house-style',

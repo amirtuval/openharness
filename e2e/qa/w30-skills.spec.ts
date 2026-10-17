@@ -542,6 +542,49 @@ test.describe('W30 the skills screens', () => {
       expect(JSON.stringify(result)).toContain('disable-model-invocation')
     })
 
+    await test.step('the model reads a command-only skill’s reference once the user has run it', async () => {
+      const sessionId = await chatOn(page, request)
+      // The user runs the command themselves — the one way a `disable-model-invocation` skill
+      // is meant to be started. Its body lands in the log.
+      const started = await request.post(`/v1/sessions/${sessionId}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [{ type: 'text', text: '/summarize-thread the thread' }],
+              skill: { name: 'summarize-thread', arguments: 'the thread' },
+            },
+          ],
+        },
+      })
+      expect(started.status(), await started.text()).toBe(200)
+      await waitForIdle(request, sessionId)
+
+      // The instructions name `references/format.md`; from this request on the model may read
+      // it (the earlier step proved the same tool still refuses a skill the user never ran).
+      const asked = await request.post(`/v1/sessions/${sessionId}/events`, {
+        data: {
+          events: [
+            {
+              type: 'user.message',
+              content: [
+                { type: 'text', text: '__skill_read__ summarize-thread references/format.md' },
+              ],
+            },
+          ],
+        },
+      })
+      expect(asked.status(), await asked.text()).toBe(200)
+      await waitForIdle(request, sessionId)
+
+      const results = (await readEvents(request, sessionId))
+        .filter((event) => event.type === 'agent.tool_result')
+        .map((event) => JSON.stringify(event))
+        .join('\n')
+      expect(results).toContain('One decision per line')
+      expect(results).not.toContain('disable-model-invocation')
+    })
+
     await test.step('a user-invocable: false skill typed anyway is a 400 that stores nothing', async () => {
       const sessionId = await chatOn(page, request)
       const before = (await readEvents(request, sessionId)).length
