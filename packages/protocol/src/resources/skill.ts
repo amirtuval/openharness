@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { TimestampSchema } from '../common'
 import { SkillIdSchema } from '../ids'
+import type { ModeToolOverride } from './mode'
 import { UserIdSchema } from './user'
 
 /**
@@ -165,6 +166,39 @@ export function skillSettingsOf(skill: Skill): SkillSettings {
 }
 
 /**
+ * Whether one skill is **on** for a request, given the mode's override (epic #349, K8).
+ *
+ * The rule is the one every reader must apply: **a mode that names the skill wins; a skill it
+ * does not name follows the user's `enabled`**. A map entry naming a skill the user no longer
+ * has never matches anything, so a mode that named a deleted skill is simply ignored. It is
+ * exported from the protocol — rather than written once in the server and once in each
+ * frontend — because the server's `assertInvocableSkills` and the `/` menu have to answer with
+ * the same effective set: a menu row the server refuses, or a missing row the server would
+ * accept, is a bug that only one shared rule can prevent.
+ *
+ * @param skill the skill as the store lists it (its stored `enabled`, never an effective one)
+ * @param override the resolved mode's `tools` patch, or `null` for no override
+ */
+export function skillInForce(skill: Skill, override: ModeToolOverride | null): boolean {
+  return override?.skills?.[skill.id] ?? skill.enabled
+}
+
+/**
+ * The effective skills of a list, in its own order (K8) — {@link skillInForce} applied to
+ * every one of them.
+ *
+ * The order is deliberately the input's (the store lists a user's skills oldest first), so a
+ * frontend that shows the effective set and one that shows the stored list agree on
+ * everything but the on/off answer.
+ */
+export function skillsInForce(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null,
+): Skill[] {
+  return skills.filter((skill) => skillInForce(skill, override))
+}
+
+/**
  * `argument-hint` as the text a `/` menu shows, or `null` for a value that is not one.
  *
  * A string is the hint itself, trimmed; an empty one names nothing. An **array** is the
@@ -272,15 +306,58 @@ export const MAX_SKILLS_PER_USER = 50
 export const SKILL_CLONE_MAX_BYTES = 20 * 1024 * 1024
 
 /**
+ * Largest total of **unpacked** blob bytes one clone may read: 100 MB.
+ *
+ * The download cap above bounds the compressed pack, and a pack of highly compressible content
+ * can inflate to orders of magnitude more than its download size — `SKILL_CLONE_MAX_BYTES` of
+ * zeros is gigabytes once read. The clone therefore also caps the sum of the blobs it really
+ * inflates, and refuses past it with `over_limit`.
+ *
+ * The number is the most a legitimate import could need: fifty skills (§
+ * {@link MAX_SKILLS_PER_USER}) each at the whole-skill limit (§ {@link SKILL_MAX_BYTES}). A
+ * caller that reads only a folder's own blobs — the import passes its `path` to the clone —
+ * therefore cannot reach it with skills that pass K4, while a repository whose content unpacks
+ * past it is refused rather than left to exhaust the process.
+ */
+export const SKILL_INFLATE_MAX_BYTES = SKILL_MAX_BYTES * MAX_SKILLS_PER_USER
+
+/**
  * The size of a file's content in bytes — what {@link SkillFile.size} counts.
  *
  * Bytes rather than characters, because a limit of "20 KB" has to mean the same thing for a
  * file of ASCII and a file of CJK or emoji: `TextEncoder` counts what would really be stored,
  * and it is a Web API both a browser and Node 24 have, so this package stays browser-safe.
+ *
+ * A base64 file's `size` is the number of bytes it decodes to, not the length of the base64
+ * text: the limits of K4 count the file itself, and a base64 string is a third larger than the
+ * bytes it carries. The arithmetic below is exact for the canonical base64 the import writes
+ * (including a final group padded with `=` or `==`), and requires no `atob` — which keeps this
+ * function usable in `@openharness/protocol`'s browser-safe program.
  */
-export function skillFileSize(content: string): number {
+export function skillFileSize(content: string, encoding: SkillFileEncoding = 'utf8'): number {
+  if (encoding === 'base64') {
+    const padding = content.endsWith('==') ? 2 : content.endsWith('=') ? 1 : 0
+    return Math.floor((content.length * 3) / 4) - padding
+  }
   return new TextEncoder().encode(content).length
 }
+
+/**
+ * How a file's content is spelled in storage (K4).
+ *
+ * A skill's files are not all text: a folder may ship an icon, a font or a `.docx`, and the
+ * import stores those losslessly rather than decoding them into mojibake. `utf8` is the
+ * ordinary case — `content` is the file's text; `base64` is a non-text file — `content` is the
+ * file's bytes, base64-encoded — and `size` is the original byte length either way.
+ *
+ * The encoding is what Postgres needs: its `text` type rejects a NUL byte outright, so a
+ * binary file cannot be stored as text at all (`invalid byte sequence for encoding "UTF8":
+ * 0x00`), and a file that is not valid UTF-8 cannot be kept faithfully as a string. Base64 is
+ * the lossless spelling every store accepts.
+ */
+export const SkillFileEncodingSchema = z.enum(['utf8', 'base64'])
+
+export type SkillFileEncoding = z.infer<typeof SkillFileEncodingSchema>
 
 /**
  * // extension: the frontmatter fields besides `name` and `description`, as parsed.
@@ -398,9 +475,15 @@ export type Skill = z.infer<typeof SkillSchema>
 export const SkillFileContentSchema = z.object({
   /** The file's path inside the skill folder, the one that was asked for. */
   path: z.string().min(1),
-  /** The content's size in bytes (see {@link skillFileSize}). */
+  /** The content's size in bytes (see {@link skillFileSize}) — the original file's, in bytes. */
   size: z.number().int().min(0),
-  /** The file's content, as the snapshot holds it. */
+  /**
+   * How `content` is spelled: the file's text (`utf8`), or its bytes base64-encoded
+   * (`base64`). Required, because a reader that assumed text would show mojibake for a
+   * binary file — and a model that read one as base64 would be told nothing useful.
+   */
+  encoding: SkillFileEncodingSchema,
+  /** The file's content, as the snapshot holds it — see `encoding`. */
   content: z.string(),
 })
 

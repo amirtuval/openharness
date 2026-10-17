@@ -78,14 +78,20 @@ function provider(contents: {
   readonly extra?: string
 }): SkillProvider {
   return () => {
+    const file = (path: string, content: string) => ({
+      path,
+      size: new TextEncoder().encode(content).length,
+      encoding: 'utf8' as const,
+      content,
+    })
     const offered: OfferedSkill = {
       skill: skill(contents.name ?? 'release-notes'),
       readFile: (path) =>
         Promise.resolve(
           path === 'SKILL.md'
-            ? contents.current
-            : path === 'reference/tone.md'
-              ? (contents.extra ?? null)
+            ? file(path, contents.current)
+            : path === 'reference/tone.md' && contents.extra !== undefined
+              ? file(path, contents.extra)
               : null,
         ),
     }
@@ -301,6 +307,90 @@ describe('a slash invocation in the turn loop (K7)', () => {
     const span = events.find((event) => event.type === EVENT_TYPES.modelRequestStart)
     // The request offers no tools at all: with no registry to attach it to, the native search
     // tool is not offered either (#335) — a chat with no skills is a chat with no tools.
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toBeUndefined()
+  })
+
+  it('lets the model read a user-run skill whose flag forbids model invocation (K1)', async () => {
+    // The user ran `/secret-notes`; its body is in the request, and an instruction in it that
+    // says "read reference/tone.md" is exactly what `skill_read` is for. The flag keeps the
+    // model from *picking* the skill, not from following the user's own instructions.
+    const chat = mockModel(
+      {
+        toolCalls: [
+          {
+            name: SKILL_READ_TOOL_NAME,
+            input: { name: 'secret-notes', path: 'reference/tone.md' },
+          },
+        ],
+      },
+      { text: ['done'] },
+    )
+    const session = await newSession([invocation('secret-notes')])
+    const file = (path: string, content: string) => ({
+      path,
+      size: new TextEncoder().encode(content).length,
+      encoding: 'utf8' as const,
+      content,
+    })
+
+    await runTurn(session.sessionId, {
+      store: session.store,
+      model: chat.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      skills: () =>
+        Promise.resolve([
+          {
+            skill: skill('secret-notes', {
+              frontmatter: { 'disable-model-invocation': true },
+            }),
+            readFile: (path) =>
+              Promise.resolve(
+                path === 'SKILL.md'
+                  ? file(path, '---\nname: secret-notes\n---\n\nRead reference/tone.md.')
+                  : path === 'reference/tone.md'
+                    ? file(path, 'Be terse.')
+                    : null,
+              ),
+          },
+        ]),
+    })
+
+    const events = await logOf(session.store, session.sessionId)
+    const span = events.find((event) => event.type === EVENT_TYPES.modelRequestStart)
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toEqual([
+      { name: SKILL_TOOL_NAME, source: 'builtin' },
+      { name: SKILL_READ_TOOL_NAME, source: 'builtin' },
+      NATIVE_SEARCH_TOOL,
+    ])
+    const results = events
+      .filter((event) => event.type === EVENT_TYPES.agentToolResult)
+      .map(resultText)
+    expect(results[0]).toBe('Be terse.')
+  })
+
+  it('still offers neither tool when the user has not run the user-only skill', async () => {
+    const chat = mockModel({ text: ['ok'] })
+    const session = await newSession([
+      { type: 'user.message', content: [{ type: 'text', text: 'hello' }] },
+    ])
+
+    await runTurn(session.sessionId, {
+      store: session.store,
+      model: chat.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      skills: () =>
+        Promise.resolve([
+          {
+            skill: skill('secret-notes', {
+              frontmatter: { 'disable-model-invocation': true },
+            }),
+            readFile: () => Promise.resolve(null),
+          },
+        ]),
+    })
+
+    const events = await logOf(session.store, session.sessionId)
+    const span = events.find((event) => event.type === EVENT_TYPES.modelRequestStart)
     expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toBeUndefined()
   })
 })

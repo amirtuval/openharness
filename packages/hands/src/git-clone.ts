@@ -43,7 +43,7 @@
 
 import git, { TREE } from 'isomorphic-git'
 
-import { SKILL_CLONE_MAX_BYTES } from '@openharness/protocol'
+import { SKILL_CLONE_MAX_BYTES, SKILL_INFLATE_MAX_BYTES } from '@openharness/protocol'
 
 import { createMemoryFileSystem, type MemoryFileSystem } from './memory-fs'
 import {
@@ -114,12 +114,32 @@ export interface CloneRepositoryOptions {
   readonly url: string
   /** The branch, tag or commit to read, or absent for the repository's default branch. */
   readonly ref?: string | null
+  /**
+   * Only read the blobs under this folder (or at it), from the repository's root, or every
+   * blob when omitted or `null`.
+   *
+   * An import names a `path`, and everything it can store lies under it — so reading only
+   * those blobs is what keeps a repository's unrelated (possibly enormous) content from being
+   * inflated into this process. The **root** case is the one path that still reads the whole
+   * tree: a `SKILL.md` at the repository's root makes the whole repository the candidate (K3).
+   */
+  readonly path?: string | null
   /** A caller's abort signal — a request that was cancelled — combined with the deadline. */
   readonly signal?: AbortSignal
   /** Whether a private, loopback or link-local address may be dialled (the self-host setting). */
   readonly allowPrivate?: boolean
   /** The total download cap in bytes; {@link DEFAULT_CLONE_MAX_BYTES} by default. */
   readonly maxBytes?: number
+  /**
+   * The total **unpacked** blob bytes one clone may read; {@link SKILL_INFLATE_MAX_BYTES} by
+   * default.
+   *
+   * The download cap bounds the compressed pack, which is not the same number: a pack of
+   * highly compressible content inflates to far more than it downloaded. Reading stops at this
+   * total and fails with `over_limit`. Injectable so a test can prove the bound with a small
+   * fixture rather than a multi-megabyte one.
+   */
+  readonly maxInflatedBytes?: number
   /** The deadline for the whole clone; {@link DEFAULT_CLONE_TIMEOUT_MS} by default. */
   readonly timeoutMs?: number | null
   /** How many redirects to follow; {@link DEFAULT_CLONE_MAX_REDIRECTS} by default. */
@@ -231,9 +251,17 @@ export async function cloneRepository(options: CloneRepositoryOptions): Promise<
       'upload-pack',
     )
 
-    // 3. Which commit that was, and its whole tree.
+    // 3. Which commit that was, and the blobs under the requested path — never the whole tree
+    // when a path was named, and never more unpacked bytes than the cap allows.
     const commitSha = await run(() => peelToCommit(fs, CLONE_GITDIR, target), 'upload-pack')
-    const files = await run(() => readTree(fs, CLONE_GITDIR, commitSha), 'upload-pack')
+    const files = await run(
+      () =>
+        readTree(fs, CLONE_GITDIR, commitSha, {
+          path: options.path ?? null,
+          maxInflatedBytes: options.maxInflatedBytes ?? SKILL_INFLATE_MAX_BYTES,
+        }),
+      'upload-pack',
+    )
     return { commit_sha: commitSha, files }
   } catch (error) {
     if (isGitCloneError(error)) {
@@ -330,18 +358,36 @@ async function peelToCommit(fs: MemoryFileSystem, gitdir: string, ref: string): 
 }
 
 /**
- * Every blob of a commit's tree, contents read, in path order.
+ * The blobs of a commit's tree under `path`, contents read, in path order.
  *
  * The walk is this module's rather than `git.listFiles`' for one reason: a tree entry of type
  * `commit` is a **submodule**, whose object lives in another repository — the walker reports
  * the type without reading it, so it can be skipped, while a listing that reads every entry
  * fails the whole clone on one. "No submodules" (K3) is then a property of this function, and
  * a repository that uses one still imports its own files.
+ *
+ * The walk reads **tree objects only** — the entry type is reported without inflating a blob —
+ * so the path list is cheap, and the blobs are read afterwards, one at a time, only for the
+ * paths `path` selects. Two bounds apply to what is read:
+ *
+ * - **Only what the caller asked for.** With a `path`, a blob outside it — a huge asset in
+ *   another folder of the same repository — is never inflated. With no path the whole tree is
+ *   read, because a root `SKILL.md` makes the whole repository the candidate (K3).
+ * - **A cumulative cap.** A download cap bounds the compressed pack, not what it unpacks to;
+ *   `maxInflatedBytes` bounds the sum of the blobs really read, and crossing it fails the
+ *   clone with `over_limit` before another blob is read. A single blob larger than the cap
+ *   still has to be inflated to learn its size — a git tree entry carries no size — but the
+ *   total is bounded, and discovery still reports that file's own K4 problem when it fits.
+ *
+ * A file over `SKILL_FILE_MAX_BYTES` is therefore read and reported as an `over-limit`
+ * candidate problem (the preview shows it) rather than silently skipped: skipping would make a
+ * skill look importable when it is not.
  */
 async function readTree(
   fs: MemoryFileSystem,
   gitdir: string,
   commitSha: string,
+  options: { readonly path: string | null; readonly maxInflatedBytes: number },
 ): Promise<ClonedFile[]> {
   const paths: string[] = []
   await git.walk({
@@ -360,8 +406,15 @@ async function readTree(
     },
   })
 
+  const requested = options.path === null || options.path === '' ? null : options.path
+  const prefix = requested === null ? null : `${requested}/`
+  const selected = paths
+    .filter((path) => prefix === null || path === requested || path.startsWith(prefix))
+    .sort()
+
   const files: ClonedFile[] = []
-  for (const path of paths.sort()) {
+  let inflated = 0
+  for (const path of selected) {
     const { blob } = await git.readBlob({
       fs,
       dir: CLONE_DIR,
@@ -369,6 +422,13 @@ async function readTree(
       oid: commitSha,
       filepath: path,
     })
+    inflated += blob.length
+    if (inflated > options.maxInflatedBytes) {
+      throw new GitCloneError(
+        'over_limit',
+        `the clone unpacks to more than ${options.maxInflatedBytes} bytes`,
+      )
+    }
     files.push({ path, content: blob })
   }
   return files

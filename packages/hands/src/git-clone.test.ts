@@ -194,6 +194,72 @@ describe.skipIf(!GIT)('cloneRepository', () => {
     expect(clone.ok ? Object.keys(clone.files) : []).not.toContain('vendor/thing')
   })
 
+  it('reads only the blobs under the path the caller names', async () => {
+    const repo = await fixture({
+      ...REPOSITORY,
+      // A sibling whose name merely starts with the requested path must not be taken for one.
+      'skills/release-notes-extra/SKILL.md': '---\nname: release-notes-extra\n---\n\nNo.\n',
+    })
+    const clone = await attempt({
+      url: repo.url,
+      allowPrivate: true,
+      path: 'skills/release-notes',
+    })
+    expect(clone.ok).toBe(true)
+    expect(Object.keys(clone.ok ? clone.files : {}).sort()).toEqual([
+      'skills/release-notes/SKILL.md',
+      'skills/release-notes/reference/tone.md',
+    ])
+  })
+
+  it('keeps the root-SKILL.md case reading the whole tree', async () => {
+    const repo = await fixture({
+      'SKILL.md': '---\nname: skills\n---\n\nRoot.\n',
+      'reference/tone.md': 'Be brief.\n',
+    })
+    // A root skill is the repository, so `path: null` still reads everything.
+    const clone = await attempt({ url: repo.url, allowPrivate: true, path: null })
+    expect(Object.keys(clone.ok ? clone.files : {}).sort()).toEqual([
+      'SKILL.md',
+      'reference/tone.md',
+    ])
+  })
+
+  it('never reads a blob outside the requested path, however large it is', async () => {
+    // Two megabytes of a single character compresses to almost nothing, and would be inflated
+    // if the walk read the whole tree. The cap is below its size, so reading it at all would
+    // refuse the clone rather than pass silently.
+    const repo = await fixture({
+      'skills/release-notes/SKILL.md':
+        '---\nname: release-notes\ndescription: Writes them.\n---\n\nWrite them.\n',
+      'elsewhere/enormous.txt': 'x'.repeat(2 * 1024 * 1024),
+    })
+    const clone = await attempt({
+      url: repo.url,
+      allowPrivate: true,
+      path: 'skills/release-notes',
+      maxInflatedBytes: 64 * 1024,
+    })
+    expect(clone.ok).toBe(true)
+    expect(Object.keys(clone.ok ? clone.files : {})).toEqual(['skills/release-notes/SKILL.md'])
+  })
+
+  it('refuses a clone whose blobs unpack past the cumulative cap', async () => {
+    // The download is tiny — one repeated character — while the file unpacks to 2 MB. The
+    // unpacked cap is what bounds it, which is the bound the compressed-pack cap cannot make.
+    const repo = await fixture({
+      'skills/release-notes/SKILL.md': '---\nname: release-notes\n---\n\nWrite them.\n',
+      'skills/release-notes/huge.txt': 'x'.repeat(2 * 1024 * 1024),
+    })
+    const clone = await attempt({
+      url: repo.url,
+      allowPrivate: true,
+      path: 'skills/release-notes',
+      maxInflatedBytes: 64 * 1024,
+    })
+    expect(clone).toEqual({ ok: false, code: 'over_limit' })
+  })
+
   it('refuses a ref the repository does not have', async () => {
     const repo = await fixture()
     expect(await attempt({ url: repo.url, ref: 'nope', allowPrivate: true })).toEqual({
