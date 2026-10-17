@@ -147,7 +147,10 @@ describe('startServer', () => {
     expect(await readHistory(store, session.id)).toHaveLength(3)
   })
 
-  it('drains a turn in flight on shutdown', async () => {
+  it('hands a turn in flight off on shutdown, rather than ending it', async () => {
+    // A shutdown is a deploy (#378, P1): the turn is left **open** for the next process, not
+    // ended with a partial reply and an idle. The next owner closes the span as `brain_lost`
+    // and finishes the request.
     const store = new InMemorySessionStore()
     const server = await startServer({
       config: testConfig({ drainTimeoutMs: 3000 }),
@@ -172,8 +175,11 @@ describe('startServer', () => {
 
     await server.shutdown()
 
-    expect((await store.getTurnState(session.id)).state).toBe('idle')
-    expect((await readHistory(store, session.id)).at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+    const history = await readHistory(store, session.id)
+    expect((await store.getTurnState(session.id)).state).not.toBe('idle')
+    expect(history.some((event) => event.type === EVENT_TYPES.sessionStatusIdle)).toBe(false)
+    expect(history.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(false)
+    expect(history.some((event) => event.type === EVENT_TYPES.modelRequestEnd)).toBe(false)
   })
 
   it('runs the partitioned scheduler when SCHEDULER=postgres, and hands its leases back', async () => {

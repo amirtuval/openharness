@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { Pool } from 'pg'
 import {
   EVENT_TYPES,
+  TASK_WAIT_TOOL_NAME,
   partitionOf,
   type ModelRequestEndEvent,
   type Session,
@@ -9,7 +10,7 @@ import {
   type StoredEvent,
   type UserEvent,
 } from '@openharness/protocol'
-import { isFencedError, type SessionStore } from '@openharness/session'
+import { isFencedError, timestampAt, type SessionStore } from '@openharness/session'
 import { createTestClock } from '@openharness/session/testing'
 import { PostgresSessionStore } from '@openharness/session/postgres'
 
@@ -826,6 +827,157 @@ if (SOURCE === null) {
     })
   })
 
+  describe('handing a turn off instead of interrupting it (#378, P1)', () => {
+    /** A reply long enough that a turn is still streaming while a partition moves. */
+    const slowReply = (): readonly string[] =>
+      Array.from({ length: 30 }, (_, index) => `part ${index + 1} `)
+
+    it('hands a turn off on shutdown, and the peer finishes it with no interrupt', async () => {
+      // Long leases, so only the release can move the partition inside the test; no sweep.
+      const first = instance('first', { ttlMs: LONG_TTL_MS })
+      const second = instance('second', { ttlMs: LONG_TTL_MS })
+      await Promise.all([first.scheduler.start(), second.scheduler.start()])
+
+      const store = db.store()
+      const session = await sessionIn(store, 0)
+      const owner = await waitForOwner([first, second], session.id)
+      const other = otherThan([first, second], owner)
+      owner.model.push({ text: slowReply(), delayMs: 50 })
+      other.model.push({ text: ['finished by the peer'] })
+
+      await appendMessage(store, session.id, 'a long one')
+      owner.scheduler.signal(session.id, 'work')
+      await owner.model.waitForRequests(1)
+
+      // SIGTERM: the drain hands the turn off and the lease goes back at once.
+      await owner.scheduler.stop()
+
+      // The turn was **not** ended: no partial reply, no `interrupted` span, no idle. The peer
+      // finds an open turn, closes its span as `brain_lost` and finishes the request.
+      await waitForIdle(store, session.id, WAIT_MS * 2)
+      const history = await readHistory(store, session.id)
+      expect(spanErrors(history)).toEqual(['brain_lost', null])
+      expect(repliesIn(history)).toEqual(['finished by the peer'])
+      expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+      expect(await store.getTurnState(session.id)).toEqual({ state: 'idle', openSpan: null })
+    })
+
+    it('hands a surplus partition off, and the instance that takes it finishes the turn', async () => {
+      // One instance takes the whole space and starts a turn; a second joins, so the first is
+      // over its share and gives the newest partition up — the one this test aimed the session
+      // at. The handoff is what lets the taker finish the request instead of inheriting an
+      // interrupted turn.
+      const first = instance('first', { ttlMs: LONG_TTL_MS })
+      await first.scheduler.start()
+      await waitFor(() => first.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the single instance never claimed the whole space',
+      })
+      const held = first.scheduler.heldPartitions()
+      const partition = held[held.length - 1]
+      expect(partition).toBeDefined()
+      const store = db.store()
+      const session = await sessionIn(store, partition as number)
+      first.model.push({ text: slowReply(), delayMs: 50 })
+
+      await appendMessage(store, session.id, 'a long one')
+      first.scheduler.signal(session.id, 'work')
+      await first.model.waitForRequests(1)
+
+      const second = instance('second', { ttlMs: LONG_TTL_MS })
+      second.model.push({ text: ['finished by the taker'] })
+      await second.scheduler.start()
+
+      await waitForIdle(store, session.id, WAIT_MS * 3)
+      const history = await readHistory(store, session.id)
+      expect(spanErrors(history)).toEqual(['brain_lost', null])
+      expect(repliesIn(history)).toEqual(['finished by the taker'])
+      expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+    })
+
+    it('hands a turn off when its lease is lost, and the taker finishes it', async () => {
+      const victim = instance('victim')
+      const survivor = instance('survivor')
+      await Promise.all([victim.scheduler.start(), survivor.scheduler.start()])
+
+      const store = db.store()
+      const session = await sessionIn(store, 0)
+      const partition = partitionOf(session.id, PARTITIONS)
+      const owner = await waitForOwner([victim, survivor], session.id)
+      const other = otherThan([victim, survivor], owner)
+      owner.model.push({ text: slowReply(), delayMs: 50 })
+      other.model.push({ text: ['finished by the taker'] })
+
+      await appendMessage(store, session.id, 'a long one')
+      owner.scheduler.signal(session.id, 'work')
+      await owner.model.waitForRequests(1)
+
+      // Stop heartbeating: the lease lapses, the survivor takes the partition over and starts
+      // the inherited turn. Then the victim wakes and learns its lease is gone — a handoff,
+      // not the user's interrupt.
+      owner.scheduler.pause()
+      await waitFor(() => other.scheduler.heldPartitions().includes(partition), {
+        timeoutMs: WAIT_MS,
+        message: 'the survivor never took the lapsed partition over',
+      })
+      owner.scheduler.resume()
+
+      await waitForIdle(store, session.id, WAIT_MS * 2)
+      const history = await readHistory(store, session.id)
+      expect(spanErrors(history)).toEqual(['brain_lost', null])
+      expect(repliesIn(history)).toEqual(['finished by the taker'])
+      expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+      // The victim's abort wrote nothing: the only reply is the taker's — the streaming one
+      // never became a message.
+      expect(repliesIn(history)).toHaveLength(1)
+    })
+
+    it('arms a recovered task wait at the instant the log recorded', async () => {
+      // A wait holds no timer in the process that ran it (#378, P1). The partition's first
+      // owner reads the deadline from the log and arms it, so the wait resumes on time — no
+      // sweep is configured in this suite, and the deadline is only 300 ms away.
+      const owner = instance('owner', { ttlMs: LONG_TTL_MS })
+      const store = db.store()
+      const session = await sessionIn(store, 0)
+      const deadlineMs = Date.now() + 300
+      await store.appendEvents(session.id, [{ type: EVENT_TYPES.sessionStatusRunning }])
+      await store.appendEvents(session.id, [
+        {
+          type: EVENT_TYPES.agentToolUse,
+          name: TASK_WAIT_TOOL_NAME,
+          input: { timeout_s: 1 },
+          evaluated_permission: 'ask',
+        },
+      ])
+      await store.appendEvents(session.id, [
+        {
+          type: EVENT_TYPES.sessionStatusIdle,
+          stop_reason: {
+            type: 'waiting_on_tasks',
+            task_ids: [],
+            deadline: timestampAt(deadlineMs),
+          },
+        },
+      ])
+
+      await owner.scheduler.start()
+
+      await waitFor(
+        async () =>
+          (await readHistory(store, session.id)).some(
+            (event) => event.type === EVENT_TYPES.agentToolResult,
+          ),
+        { timeoutMs: WAIT_MS, message: 'the recovered task wait never reached its deadline' },
+      )
+      await waitForIdle(store, session.id, WAIT_MS)
+      const history = await readHistory(store, session.id)
+      const result = history.find((event) => event.type === EVENT_TYPES.agentToolResult)
+      expect(result !== undefined ? JSON.stringify(result.content) : '').toContain('timed out')
+      expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+      expect(Date.now() - deadlineMs).toBeLessThan(4_000)
+    })
+  })
+
   describe('interrupts across instances', () => {
     it('stops a turn through an interrupt raised at the instance that does not own it', async () => {
       const first = instance('first', { ttlMs: LONG_TTL_MS })
@@ -844,7 +996,17 @@ if (SOURCE === null) {
           deltas.push(event.delta.content.text)
         }
       })
-      owner.model.push({ text: ['one ', 'two ', 'three'], delayMs: 40 })
+      // A reply long enough that the interrupt's round trip cannot lose a race with the end of
+      // the stream. The flake this replaces used a 120 ms reply: on a loaded runner the model
+      // finished between the first delta and the signal, and the turn ended with a **null**
+      // span end (the request really did complete) just before the queued interrupt was claimed
+      // — which is honest behaviour, but not what this test is about. Two seconds is orders of
+      // magnitude more than the append-plus-NOTIFY it has to beat.
+      const chunks = Array.from({ length: 40 }, (_, index) =>
+        index === 0 ? 'one ' : `chunk ${index + 1} `,
+      )
+      const full = chunks.join('')
+      owner.model.push({ text: chunks, delayMs: 50 })
 
       await appendMessage(store, session.id, 'stream something long')
       owner.scheduler.signal(session.id, 'work')
@@ -852,6 +1014,9 @@ if (SOURCE === null) {
         timeoutMs: WAIT_MS,
         message: 'the model never started streaming',
       })
+      // The premise, stated: the request is open, so the abort below is an interrupt of work
+      // in flight rather than of a turn that has already answered.
+      expect((await store.getTurnState(session.id)).state).toBe('running')
       await store.appendEvents(session.id, [{ type: EVENT_TYPES.userInterrupt }])
 
       // The user interrupts through the wrong instance on purpose: the signal is routed to the
@@ -875,7 +1040,7 @@ if (SOURCE === null) {
       // so nothing is left queued.
       const partial = repliesIn(history)
       expect(partial).toHaveLength(1)
-      expect('one two three'.startsWith(partial[0] ?? 'x')).toBe(true)
+      expect(full.startsWith(partial[0] ?? '\u0000')).toBe(true)
       const pending: UserEvent[] = await store.getPendingUserEvents(session.id)
       expect(pending).toEqual([])
     })

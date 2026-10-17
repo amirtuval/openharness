@@ -97,7 +97,7 @@ acquiring partition p
 heartbeat
   announce this instance        → upsert scheduler_instances, read the live members
   renew every held lease        → a refusal means the lease is somebody else's: drop it at once
-  give up the surplus           → finish the turns in it first, then release
+  give up the surplus           → hand its turns off, then release
   scan for free/expired leases  → take them up to the share, never a live one;
                                   recover each as above
 
@@ -110,8 +110,9 @@ are hints with no durability: one that arrives between the acquire and the subsc
 forever. So listening starts first, and whatever was in the log before that is found by the
 scan — which is also exactly how a partition whose owner died is recovered. A `FencedError` out
 of a turn means the same thing as a refused renewal, arriving the other way round: the lease is
-not this instance's any more, so the partition is dropped, its turns are aborted, its
-subscription is ended, and nothing more is started for it.
+not this instance's any more, so the partition is dropped, its turns are **handed off** (the
+abort carries a `TurnHandoff('lease_lost')` reason, so the brain leaves the turn open for the
+new owner — #378, P1), its subscription is ended, and nothing more is started for it.
 
 ## Balancing
 
@@ -128,10 +129,11 @@ follows from that share:
   it booted a moment before them — may claim more first; its next heartbeat counts the truth
   and gives the surplus back.)
 - **An instance over its share gives the surplus up**, newest tenure first: the turns running
-  in those partitions are allowed to finish writing (up to the drain timeout) and only then is
-  the lease released, so the peer that takes them over inherits closed turns. Released
-  partitions are left alone by this instance for a heartbeat, so the peer gets the chance to
-  take them instead of watching them bounce back.
+  in those partitions are allowed to reach a safe point (up to the drain timeout) and are then
+  **handed off** — a `TurnHandoff('partition_released')` abort leaves each open for the peer
+  that takes the partition over, which finishes it (#378, P1). Released partitions are left
+  alone by this instance for a heartbeat, so the peer gets the chance to take them instead of
+  watching them bounce back.
 - **The membership ages out with the leases.** Both windows are one lease TTL: a crash stops
   the heartbeats, so the row is out of every peer's count at the instant the dead instance's
   leases stop being renewed and start being stealable — the survivors' shares grow back to the
@@ -175,14 +177,15 @@ has just changed hands gets the same answer as one that has been running all alo
 
 ## Shutdown and crashes
 
-`stop()` stops the timers, drains the turns in flight (they are aborted, so a brain cuts its
-model request short and writes the partial reply, the closed span and `session.status_idle`
-before it stops), **deletes its membership row** — peers stop counting the instance at once, so
-their shares grow immediately — and then **releases every lease it still holds**. The next
-instance takes the partitions over at its next heartbeat rather than waiting out the TTL. An
-acquire that was already in flight when the stop began is included: it cannot be cancelled, so
-the scan that holds it releases it the moment it sees the instance stopped — a stopping
-instance never leaves a live lease behind.
+`stop()` stops the timers, drains the turns in flight — they are **handed off**, not
+interrupted: the abort carries a `TurnHandoff('shutdown')` reason, the brain writes nothing more
+and leaves the turn open, and the partition's next owner finishes it with the same
+inherited-turn machinery a crash uses (#378, P1) — **deletes its membership row** — peers stop
+counting the instance at once, so their shares grow immediately — and then **releases every
+lease it still holds**. The next instance takes the partitions over at its next heartbeat
+rather than waiting out the TTL. An acquire that was already in flight when the stop began is
+included: it cannot be cancelled, so the scan that holds it releases it the moment it sees the
+instance stopped — a stopping instance never leaves a live lease behind.
 
 A crash is the other half of that: nothing is released and nothing keeps the membership row
 fresh, so both age out together — after `OPENHARNESS_LEASE_TTL_MS` the row is out of every
@@ -256,5 +259,9 @@ that stalls a cycle past the TTL cannot make a healthy instance look dead.
 | the sweep finds work no signal mentioned          | the safety net, with the heartbeat slowed down                                                           |
 | died mid-turn → taken over → turn finished        | `brain_lost`, re-run, correct order, every span closed                                                   |
 | the zombie that wakes up cannot write             | a `FencedError`, nothing stored, the process still alive                                                 |
-| a lease that cannot be renewed is dropped         | the turn is aborted and the partition stops being this work                                              |
-| interrupts routed across instances                | partial reply, closed span, idle, nothing left queued                                                    |
+| a lease that cannot be renewed is dropped         | the turn is handed off and the partition stops being this work                                           |
+| shutdown mid-turn                                 | handed off, the peer finishes it: `brain_lost`, then a complete reply, no `interrupted`                  |
+| a surplus partition released mid-turn             | the taker finishes the turn the same way                                                                 |
+| a lost lease mid-turn                             | the taker finishes the turn the same way; the old owner's abort writes nothing                           |
+| a recovered task wait                             | the acquire scan arms the deadline the log recorded, not the next sweep                                  |
+| interrupts routed across instances                | partial reply, closed span, idle, nothing left queued — a user's abort is still an interrupt             |

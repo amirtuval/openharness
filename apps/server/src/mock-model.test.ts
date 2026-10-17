@@ -34,6 +34,7 @@ import {
   MOCK_RETRYABLE_MARKER,
   MOCK_SLOW_CHUNKS,
   MOCK_SLOW_MARKER,
+  MOCK_SLOW_TOOL_MARKER,
   MOCK_SLOW_TOTAL_MS,
   MOCK_TERMINAL_MARKER,
   MOCK_TODO_DEFAULT_COUNT,
@@ -247,6 +248,25 @@ describe('__slow__', () => {
 
   it('is the same text on every run', () => {
     expect(slowReplyText()).toBe(slowReplyText())
+  })
+})
+
+describe('__slow_tool__', () => {
+  it('streams the slow reply and then calls the echo tool (#378)', () => {
+    const plan = planFor(`${MOCK_SLOW_TOOL_MARKER} hello`, 1)
+
+    expect(plan.chunks).toHaveLength(MOCK_SLOW_CHUNKS)
+    expect(plan.delayMs).toBeGreaterThan(0)
+    expect(plan.chunks.join('')).toBe(slowReplyText())
+    expect(plan.toolCalls).toEqual([{ name: TEST_TOOL_NAME, input: { text: 'hello' } }])
+  })
+
+  it('is matched before the `__slow__` marker it shares a prefix with', () => {
+    // `__slow_tool__` is not `__slow__` plus something under `startsWith`, but the markers are
+    // close enough that a reordered check would be a silent regression: assert the plan, not
+    // the ordering, so what a test sees is a slow turn that calls a tool.
+    expect(planFor(MOCK_SLOW_TOOL_MARKER, 1).toolCalls).toHaveLength(1)
+    expect(planFor(MOCK_SLOW_MARKER, 1).toolCalls).toBeUndefined()
   })
 })
 
