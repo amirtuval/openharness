@@ -439,6 +439,9 @@ export function createTestApp(options: TestOptions = {}): TestContext {
           tools: options.tools,
           store,
           registry,
+          // The skills a chat has (epic #349, K6; #352): the same store the `/v1/me/skills`
+          // routes read, so a test seeds one through it and drives the tools over HTTP.
+          skills,
           ...(options.mcpTools === true ? { mcp: { service: mcpServers, fetch: mcpFetch } } : {}),
           // The subagent half (#344), built the way `main.ts` builds it — the resolver over the
           // same store, credentials and registry, and the signals the scheduler below receives.

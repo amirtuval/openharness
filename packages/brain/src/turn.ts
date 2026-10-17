@@ -1,7 +1,9 @@
 import {
   EVENT_TYPES,
+  SKILL_MD_FILENAME,
   WEB_SEARCH_TOOL_NAME,
   newEventId,
+  skillBody,
   toolCallInput,
   toolCallName,
 } from '@openharness/protocol'
@@ -25,7 +27,7 @@ import type {
 } from '@openharness/protocol'
 import type { AppendableEvent, PartitionFence, SessionStore, Clock } from '@openharness/session'
 import { SessionNotFoundError, systemClock } from '@openharness/session'
-import type { ToolRegistry } from '@openharness/hands'
+import type { OfferedSkill, ToolRegistry } from '@openharness/hands'
 
 import type { LanguageModel, ToolSet } from 'ai'
 
@@ -45,6 +47,7 @@ import {
   eventStart,
   sessionError,
   sessionUsage,
+  skillLoaded,
   spanEnd,
   spanStart,
   statusIdle,
@@ -100,6 +103,8 @@ import { captureOpaque, opaqueTargetOf } from './opaque'
 import type { OpaqueTarget } from './opaque'
 import { planReasoning, type ReasoningSupportFor, requestedReasoningEffort } from './reasoning'
 import { redactSecrets } from './redact'
+import type { SkillProvider } from './skills'
+import { resolveSkills, skillInvocationBody, unloadedSkillMessages } from './skills'
 import { stuckEnd } from './stuck'
 import {
   awaitingTasks,
@@ -519,6 +524,24 @@ export interface RunTurnOptions {
    * at all, which is a request that offers only the deployment's own tools.
    */
   readonly mcpTools?: McpToolProvider
+  /**
+   * Where this request's skills come from (epic #349, K8; the tools and the slash invocation:
+   * #352), asked once per request with the session's owner and the tool override of the mode the
+   * request resolved to — the same answer {@link RunTurnOptions.toolSettings} and the MCP
+   * provider are asked with.
+   *
+   * A resolver rather than a list, for the MCP provider's reason: which skills are on is the
+   * session owner's settings, their snapshots live in the host's store, and the host is what
+   * knows how to read one. What comes back is each skill's resource and a way to read a file of
+   * it, which is everything the two tools this request may offer need — and asked per request so
+   * a skill switched off, deleted, or a mode edited applies from the next request on.
+   *
+   * It answers two questions with one answer: which skills the request may read (`skill` and
+   * `skill_read`, offered only where there is one the model may invoke, K6), and what a
+   * `user.message` carrying a `skill` loads into the chat (K7). Absent means this host has no
+   * skills at all.
+   */
+  readonly skills?: SkillProvider
   /**
    * // extension: what this deployment knows about subagents (epic #340, S5/S6; #344) — the
    * types a parent may start, the depth and live-task limits, and how the host is signalled.
@@ -1064,14 +1087,28 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
       mode?.toolOverride ?? null,
     )
     await reportMcpFailures(mcp.failures)
-    // One registry for this request, this build's tools and the remote ones together: everything
-    // downstream is keyed by a tool's name and knows nothing about where it came from — and, for
-    // a non-interactive session, `ask_user` is not in it at all (epic #340, S1). The session's
-    // own flag decides, because it is fixed at creation: the request is built without the
-    // question tool, the span records an offer without it, and a call to it is answered by the
+    // The skills this request has (epic #349, K6/K8), resolved once here with the same owner and
+    // the same mode override the settings and the MCP listing were asked with — so what this
+    // request offers, what its listing says and what a slash invocation loads cannot disagree.
+    // The tools are built from this answer only: a chat with no skill the model may invoke has
+    // neither `skill` nor `skill_read` in the offer at all.
+    const skills = await resolveSkills(
+      options.skills,
+      current.owner_id,
+      mode?.toolOverride ?? null,
+      options.tools,
+    )
+    // One registry for this request, this build's tools, the remote ones and the skills together:
+    // everything downstream is keyed by a tool's name and knows nothing about where it came from —
+    // and, for a non-interactive session, `ask_user` is not in it at all (epic #340, S1). The
+    // session's own flag decides, because it is fixed at creation: the request is built without
+    // the question tool, the span records an offer without it, and a call to it is answered by the
     // registry as one naming a tool this step was not handed.
     const available = await withSubagentTools(
-      withoutAskUser(combineTools(options.tools, mcp.registry), session.interactive),
+      withoutAskUser(
+        combineTools(combineTools(options.tools, mcp.registry), skills.registry),
+        session.interactive,
+      ),
       {
         store,
         session: current,
@@ -1113,6 +1150,24 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         ...(opaqueTarget === undefined ? {} : { opaqueTarget }),
       })
     let read = await readLog(store, sessionId)
+    // ---- The skills this request's messages invoked (epic #349, K7).
+    //
+    // `/name arguments` arrives as an ordinary `user.message` carrying a `skill`; the brain that
+    // first handles it loads the skill's instructions into the log, and from then on the chat is
+    // built from what the model was really given rather than from whatever the skill says now.
+    // Written **before** the request is measured and built — both the manual compaction below and
+    // the prompt itself have to see the same text the model will — and once per message: one the
+    // log already holds a `session.skill_loaded` for was loaded by an earlier brain or an earlier
+    // request of this turn, and writing a second would rewrite what the chat ran on.
+    //
+    // A message whose skill is no longer in force — the user turned it off, deleted it, or a mode
+    // stopped naming it between the append and this turn — loads nothing and is sent as the text
+    // the user typed, which is also what the log holds. The server refuses the invocation at the
+    // append when the skill is not in force *then*, so this is the narrow race rather than a case
+    // to design around; the chat degrades to the command line rather than failing.
+    if (await loadSkills(read, claims, skills.byName, append)) {
+      read = await readLog(store, sessionId)
+    }
     // ---- The user's answers, and the calls still waiting on them (epic #303, X6; #309).
     //
     // Three questions, all asked of the same log and settled in this order, because each one
@@ -1814,6 +1869,65 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
 }
 
 /**
+ * Write the `session.skill_loaded` events this request's slash invocations are owed (epic #349,
+ * K7).
+ *
+ * One append for however many messages invoked a skill in this batch, and one event per message:
+ * `content` is the skill's body with the message's arguments substituted in — exactly what the
+ * request that follows is built from — and `message_seq` points at the message, which is how
+ * every later reader of the chat renders it as instructions rather than as the command the user
+ * typed.
+ *
+ * Three things leave a message out, and all three are the same answer — the message is sent as
+ * the text the user typed: it names a skill this request does not have (a race against a delete
+ * or a toggle, or a mode that no longer names it), its snapshot cannot be read at all, or its
+ * `SKILL.md` is missing — which the store refuses to store, so it is a broken invariant rather
+ * than a missing name.
+ *
+ * @param events the log as this request boundary read it
+ * @param claims the ids of the `user.message` events this request is about to claim
+ * @param byName the skills in force, by name
+ * @param append the turn's one write path
+ * @returns whether anything was written — the caller re-reads the log when it was
+ */
+async function loadSkills(
+  events: readonly StoredEvent[],
+  claims: readonly EventId[],
+  byName: ReadonlyMap<string, OfferedSkill>,
+  append: (events: AppendableEvent[]) => Promise<StoredEvent[]>,
+): Promise<boolean> {
+  if (claims.length === 0 || byName.size === 0) {
+    return false
+  }
+  const loaded: AppendableEvent[] = []
+  for (const message of unloadedSkillMessages(events, claims)) {
+    const offered = byName.get(message.name)
+    if (offered === undefined) {
+      continue
+    }
+    const content = await offered.readFile(SKILL_MD_FILENAME)
+    if (content === null) {
+      continue
+    }
+    loaded.push(
+      skillLoaded(
+        message.seq,
+        message.name,
+        offered.skill.id,
+        offered.skill.source.commit_sha,
+        skillInvocationBody(skillBody(content), message.arguments),
+      ),
+    )
+  }
+  if (loaded.length === 0) {
+    return false
+  }
+  await append(loaded)
+  return true
+}
+
+/**
+ * What a completed request's span end says about the searches it ran (epic #303, X14; #335).
  * The result one open wait is answered with, whatever resolved it (epic #340, S5; #343).
  *
  * Four endings, and three of them are a sentence the model reads:

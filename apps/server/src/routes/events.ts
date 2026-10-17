@@ -22,6 +22,7 @@ import { conflictError, notFoundError } from '../http/errors'
 import { parseBody, parseQuery, sessionIdParam } from '../http/request'
 import { requireUsableMode } from '../modes'
 import { assertConfirmations, isConfirmation, rememberAlwaysApprovals } from '../pausing'
+import { assertInvocableSkills } from '../skills'
 import { SSE_HEADERS, createSessionEventStream } from '../sse'
 import { nameSessionFromFirstMessage } from '../titles'
 import type { RouteDeps } from './deps'
@@ -69,6 +70,14 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: RouteDeps): void {
     if (modeAfter !== null) {
       await requireUsableMode(modeDeps(deps), ownerId, modeAfter)
     }
+    // A `user.message` may invoke one of the owner's skills as a slash command (epic #349, K7),
+    // and the server is what decides whether it may land: an unknown, turned-off or
+    // non-user-invocable name is the protocol's 400 and **nothing is stored**, so no log holds a
+    // message whose body the brain would then have to skip. Which skills are in force is the
+    // state the batch leaves the chat in — the user's own `enabled` with the mode it will be on
+    // (K8) — which is the same answer the next request's resolver gives.
+    const skillDeps = { skills: deps.skills, modes: deps.store }
+    await assertInvocableSkills(skillDeps, ownerId, modeAfter, body.events)
     // A rewind restarts the session from a message the reader edited (#238). It is accepted
     // only while the session is idle, and that is checked before anything is stored: the
     // rewind and the message that follows it are one append.

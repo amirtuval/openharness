@@ -37,6 +37,7 @@ import type {
   SessionAgent,
   SessionCompactEvent,
   SessionCompactionEvent,
+  SessionSkillLoadedEvent,
   SessionDeletedEvent,
   SessionError,
   SessionErrorEvent,
@@ -999,6 +1000,34 @@ export function makeSessionCompaction(
     outcome: 'summarized',
     instructions: 'keep the API decisions in detail',
     summary_seq: 8,
+  }
+  return { ...event, ...overrides }
+}
+
+// ------------------------------------------------- skill invocation (epic #349)
+
+/**
+ * A stored `session.skill_loaded`: what a slash invocation gave the model (epic #349, K7).
+ *
+ * The default loads the `release-notes` skill of {@link makeSkill} for the message at `seq` 4 —
+ * a chat whose second turn was `/release-notes v1.2` — with the body the arguments were
+ * substituted into. Override `message_seq` to point at the message the test's own log holds.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionSkillLoaded(
+  overrides: Partial<SessionSkillLoadedEvent> = {},
+): SessionSkillLoadedEvent {
+  const event: SessionSkillLoadedEvent = {
+    id: newEventId(),
+    type: 'session.skill_loaded',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    message_seq: 4,
+    name: 'release-notes',
+    skill_id: newSkillId(),
+    commit_sha: '9f2c1b4e5a6d7c8b9a0f1e2d3c4b5a69788796a5',
+    content: 'Write the release notes for v1.2, one paragraph per change.',
   }
   return { ...event, ...overrides }
 }

@@ -78,6 +78,8 @@ repo.
 | `createWebFetchTool(options?)`, `WebFetchOptions`, `PageFetch`, `safePageFetch`, `WEB_FETCH_TOOL_NAME`                                                                                                                                                                                                                                            | `web_fetch`: a GET of a model-chosen URL through `safeFetch`, as Markdown                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `WebFetchInputSchema`, `WebFetchInput`, `DEFAULT_MAX_FETCH_CHARS`, `WEB_FETCH_MAX_BYTES`, `WEB_FETCH_MAX_REDIRECTS`, `WEB_FETCH_MAX_RESULT_TOKENS`, `WEB_FETCH_TIMEOUT_MS`, `WEB_FETCH_USER_AGENT`                                                                                                                                                | its input, and the caps it declares: 50,000 characters of output, 2 MiB of response, 5 redirect hops, 16,384 tokens of a result a request keeps (its `maxResultTokens`), a 20 s call                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `htmlToMarkdown(html, url)`                                                                                                                                                                                                                                                                                                                       | the conversion `web_fetch` runs: main content first, chrome/consent and script and style dropped, a headline fallback for a page with no article, `charset` sniffed when the response names none, relative links resolved against `url`                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `createSkillTool(options)`, `createSkillReadTool(options)`, `createSkillTools(options)`, `skillToolsOffered(skills)`, `skillListingDescription(skills)`, `looksBinary(content)`, `SkillToolOptions`, `OfferedSkill`                                                                                                                               | `skill` and `skill_read` (epic #349, K6; #352): the two tools that read a user's imported skills — built **per request** over the skills that request has, one answering a skill's instructions and the file list, the other one file of it. The description `skill` carries **is** the listing ({@link skillListingDescription}): every skill the model may invoke, descriptions cut to a shared budget, plus the K2 note that nothing in a skill's folder is executed                                                                                                                                                                                                        |
+| `SKILL_TOOL_NAME`, `SKILL_READ_TOOL_NAME`, `SKILL_SCRIPTS_NOTICE`, `SKILL_LISTING_MAX_CHARS`, `SKILL_LISTING_MIN_DESCRIPTION_CHARS`, `SKILL_TOOL_MAX_RESULT_TOKENS`, `SKILL_READ_MAX_RESULT_TOKENS`, `SkillInputSchema`, `SkillInput`, `SkillReadInputSchema`, `SkillReadInput`                                                                   | the two names, the K2 sentence, the listing's budget **and** the shortest description still worth showing, the result caps each tool declares (a `SKILL.md` against a file of a skill, #306), and their input schemas                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `todoWriteTool`                                                                                                                                                                                                                                                                                                                                   | `todo_write`: the whole list, replacing the previous one                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `createSubagentTools(options)`, `SubagentToolsOptions`, `SubagentToolHandlers`, `SubagentTypeSummaryLike`, `agentToolDescription(types)`, `AGENT_TOOL_DESCRIPTION`, `agentWaitTool()`, `SUBAGENT_TOOL_NAMES`, `SUBAGENT_TOOLS_WITHOUT_ASK`, `isSubagentToolName(name)`, `cannotAskForApproval(name)`, `HARNESS_ANSWERED`, `HARNESS_TOOL_HANDLERS` | the five subagent tools (epic #340, S5; #344) — `agent`, `agent_message`, `agent_wait`, `agent_stop` and the child's `message_parent` — as a **surface**: the names and schemas (`@openharness/protocol`), the words a model reads (the `agent` description lists the types it is handed), and the `allow` default. What a call _does_ is a `SubagentToolHandlers` the caller supplies, because it needs the store and the session and a `ToolDefinition` is handed neither; `HARNESS_TOOL_HANDLERS` is what a process registry carries before a turn replaces them (its `run` answers `HARNESS_ANSWERED`, the sentence a harness-answered tool answers, as `ask_user`'s does) |
 
@@ -164,6 +166,47 @@ package no longer exports. The loop's half (which model families have a native t
 tool is attached and how a provider's refusal is answered) is `@openharness/brain`'s
 `native-search.ts`, and the settings list it as a tool no registry holds
 (`@openharness/protocol`'s `WEB_SEARCH_TOOL_NAME`).
+
+### The skill tools (epic #349, K6; issue #352)
+
+Two more tools ship with this package, and they are the first that are **not** a deployment's: a
+**skill** is a folder of instructions one user imported and reviewed (K1, K3, K4), so which ones
+a chat has is the user's own answer, resolved per request (K8). `skill.ts` holds them, and they
+are ordinary `ToolDefinition`s like every other — the registry runs them, the brain stores their
+results, the caps of #306 apply.
+
+- **The description _is_ the listing** (K6). `skill` tells the model what it can read: every
+  skill the model may invoke, by name and description, then the K2 sentence — a skill is
+  instructions and files only and **nothing in a folder is executed**, so a model does not waste
+  a turn trying to run a script. The descriptions share `SKILL_LISTING_MAX_CHARS` equally,
+  because the listing is paid for on every request of every chat that has a skill and a user may
+  hold fifty; a cut one ends in an ellipsis, and a name is never cut — a name the model cannot
+  read back is one it cannot call. A skill marked `disable-model-invocation: true` is **not in
+  the listing at all** (K6), and both tools refuse it by name with the reason: the field means
+  the user runs this command and the model does not, and `skill_read` could not be a way round
+  it without being the same bypass from the other side.
+- **Reading is reading.** `skill { name }` answers `SKILL.md` with its frontmatter stripped
+  (`@openharness/protocol`'s `skillBody`) and the files the folder holds, each with its size;
+  `skill_read { name, path }` answers one of those files. A file whose bytes are not text — an
+  image, an archive, a compiled script — is answered with a marker naming the path and the size
+  rather than its content, because the protocol's messages are text and storing mojibake as if
+  it were readable is worse than saying what it is. The test is `looksBinary`: a NUL, a
+  replacement character (a byte that was not valid UTF-8), or a tenth of the content in control
+  characters.
+- **A name or a path the model got wrong is an `is_error` that says what is there.** An unknown
+  skill answers the names this chat has; an unknown path answers the files that skill holds. A
+  model that guessed needs the list, not a refusal it can only repeat.
+- **A skill is the user's own instructions, not third-party data** (K10). There is no
+  untrusted-content notice here — the frame a slash invocation is rendered with
+  (`@openharness/brain`'s `skillInvocationText`) says whose instructions they are — and a skill
+  cannot grant a permission: `allowed-tools` and its like are frontmatter this build stores and
+  otherwise ignores, so a call's `evaluated_permission` comes from the settings in force and
+  nothing else.
+- **The tools are built from what a request has, so a host's listing declares them.** They are
+  not in any registry a deployment builds (`@openharness/brain`'s `SKILL_TOOL_DECLARATIONS` is
+  what the settings add beside `web_search`, #335), and a chat with no skill the model may
+  invoke is offered neither of them. The host hands one file's read as a closure
+  (`OfferedSkill.readFile`), so listing fifty skills never reads a snapshot.
 
 **`todo_write`** (`src/todo.ts`) replaces the **whole list** every time, which is what makes
 the list one value and the storage the log itself: the newest call's own input is the list, and

@@ -827,6 +827,44 @@ pairs differ only in their event type strings, their id field and `mcp_server_na
 branch is exactly how a reader silently handles one pair and not the other
 ([#312](https://github.com/amirtuval/openharness/issues/312)).
 
+## Skills
+
+**A tool built per request is not a registry tool, and the settings have to be told it exists.**
+The two tools that read a skill are built from the skills _that request_ has — the user's
+`enabled`, with the mode's override — so nothing a deployment registers holds them, and
+`GET /v1/me/tools` would list neither and offer no switch for one. `SKILL_TOOL_DECLARATIONS`
+(`packages/brain/src/skills.ts`) is what the settings add beside `web_search`'s declaration
+(#335). The trap is that the first such list was written for `web_search` and carries two
+behaviours that suit only it: a **model-gated** availability (the chat model's provider decides)
+and `ask` rewritten to `allow` (a provider-executed search has no moment to pause at). Declaring
+the skill tools through it unchanged made both wrong — a chat on a model with no web search was
+told it had no skills, and a user could not ask to approve a skill read. The fix was to make the
+gate a field of the declaration (`modelGated`) rather than a property of the list, so one list
+can hold a tool the provider runs and a tool this build runs
+([#349](https://github.com/amirtuval/openharness/issues/349),
+[#352](https://github.com/amirtuval/openharness/issues/352)).
+
+**What the model was given is written down, never recomputed.** A skill's instructions reach a
+request through `session.skill_loaded`, whose `content` is the skill's body with the message's
+arguments already substituted in — written once, by the brain that first handles the message, and
+read by the context builder, the size accounting and the summarizer from then on. The tempting
+simpler design (resolve the skill per request and build the text then) loses twice: a refresh or
+an edit of the skill would silently rewrite a conversation that had already run, and the two
+readers that must agree — the request the strategy builds and the request the compaction trigger
+measures — would be reading a snapshot that can move between them. The same reasoning is why the
+`user.message` keeps the text the user typed while the _instructions_ live in their own event:
+the transcript is the user's, the prompt is the model's
+([#349](https://github.com/amirtuval/openharness/issues/349) K5/K7).
+
+**A schema-level refusal refuses the whole batch, and the e2e database is shared.** Two things
+that cost a debugging round. A `user.message` may not land half-checked: the slash-invocation
+check runs before the append, so a batch naming a skill the chat cannot run stores nothing at all
+— which is the property the log needs, and which means a test that expects "the message is there
+but the skill is not" is testing the wrong thing. And in `e2e/` a file's tests share **one**
+database and, unless they ask otherwise, **one** dev account: a skill seeded for one test is in
+force for every later test in the file, so per-test accounts are not politeness but the fixture
+([#352](https://github.com/amirtuval/openharness/issues/352)).
+
 ## Pausing for the user
 
 **A pause is written down, not held in memory.** A call evaluated as `ask` (or any `ask_user` call)
