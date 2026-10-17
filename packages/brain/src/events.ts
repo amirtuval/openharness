@@ -64,9 +64,11 @@ export interface StatusIdleOptions {
   /**
    * Why the turn stopped, when it is not `end_turn`.
    *
-   * The pause is the one case (epic #303, X6; #309): the turn ended because calls are waiting
-   * on the user, and the stop reason names them. Omitted for every other ending, `end_turn`
-   * included — a stop reason no reader has to look for is one the log does not carry.
+   * Two cases, and both are pauses (epic #303, X6; #309; the task wait: epic #340, S5; #343):
+   * the turn ended because calls are waiting on the user, and the stop reason names them, or
+   * because the model asked to wait for background tasks, and it names those and the deadline.
+   * Omitted for every other ending, `end_turn` included — a stop reason no reader has to look
+   * for is one the log does not carry.
    */
   readonly stopReason?: StopReason
 }
@@ -74,8 +76,8 @@ export interface StatusIdleOptions {
 /**
  * The agent finished its turn. Closes one, whatever the reason.
  *
- * `consumes` claims the queued user events the turn is ending on; `stop_reason` says why it
- * ended when that is not `end_turn` — the pause, which names the calls the user has to answer.
+ * `consumes` claims the queued events the turn is ending on; `stop_reason` says why it ended
+ * when that is not `end_turn` — the pause on the user, or the wait for background tasks.
  */
 export function statusIdle(options: StatusIdleOptions = {}): AppendableEvent {
   const { consumes, stopReason } = options
@@ -516,6 +518,7 @@ export function agentToolResult(
   content: readonly TextBlock[],
   isError: boolean,
   sources?: readonly Source[],
+  consumes?: readonly EventId[],
 ): AppendableEvent {
   return {
     type: EVENT_TYPES.agentToolResult,
@@ -523,6 +526,10 @@ export function agentToolResult(
     content: [...content],
     is_error: isError,
     ...(sources === undefined || sources.length === 0 ? {} : { sources: [...sources] }),
+    // A **task wait**'s result is the notifications it was resolved by, so it claims them
+    // (epic #340, S5; #343): the claim is what stops the next request being handed the same
+    // news a second time as steering. Absent for every other result.
+    ...(consumes === undefined || consumes.length === 0 ? {} : { consumes: [...consumes] }),
   }
 }
 
@@ -585,10 +592,11 @@ export function toolResultForCall(
   call: ToolCallEvent,
   content: readonly TextBlock[],
   isError: boolean,
+  consumes?: readonly EventId[],
 ): AppendableEvent {
   return isMcpToolCall(call)
     ? agentMcpToolResult(call.id, content, isError)
-    : agentToolResult(call.id, content, isError)
+    : agentToolResult(call.id, content, isError, undefined, consumes)
 }
 
 /**

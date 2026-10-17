@@ -1,5 +1,10 @@
 import type { SessionStore } from '@openharness/session'
-import { EVENT_TYPES, isToolCallEvent, MAX_PAGE_LIMIT } from '@openharness/protocol'
+import {
+  EVENT_TYPES,
+  isQueuedEventType,
+  isToolCallEvent,
+  MAX_PAGE_LIMIT,
+} from '@openharness/protocol'
 import type {
   EventId,
   ModelRequestPurpose,
@@ -99,6 +104,10 @@ export function lastStatusEventType(events: readonly StoredEvent[]): StoredEvent
  * no `agent.message`, and would otherwise take over the "answer set" its own start recorded — a
  * message that arrived while the summarizer was running would read as answered.
  *
+ * A **task notification** queues up exactly as a message does (epic #340, S4; #343): it is the
+ * news a request answers, it is claimed by that request's span start, and the reply closes it.
+ * That is what makes "the model has been told" a fact of the log rather than of the process.
+ *
  * Since epic #303 a request can also end a step without answering anything: a step that called
  * a tool owes the next request whatever came back, so {@link awaitingToolStep} is the second
  * half of this question. A step that streamed **text and** a call is the case that makes it
@@ -110,7 +119,10 @@ export function needsModelRequest(events: readonly StoredEvent[]): boolean {
   let waiting: StoredEvent[] = []
   let answeredByRequest: readonly StoredEvent[] = []
   for (const event of events) {
-    if (event.type === EVENT_TYPES.userMessage) {
+    if (
+      event.type === EVENT_TYPES.userMessage ||
+      event.type === EVENT_TYPES.sessionTaskNotification
+    ) {
       waiting.push(event)
     } else if (event.type === EVENT_TYPES.modelRequestStart) {
       // A copy: a message that arrives while this request streams must not join its answer set.
@@ -203,20 +215,20 @@ export function lastModelRequest(events: readonly StoredEvent[]): LastModelReque
 }
 
 /**
- * The log as one model request sees it: everything except the user events that are still
+ * The log as one model request sees it: everything except the **queued** events that are still
  * waiting to be claimed.
  *
- * A turn claims the pending user events at the start of every model request (see `runTurn`),
- * and this is the other half of that: what the request answers is the log *after* the claim, so
- * a message the user sends while the request is already in flight stays out of it. Without that,
- * the steering message would be answered twice — once by the request in flight, and once by the
- * request the loop runs for it afterwards.
+ * A turn claims the pending events at the start of every model request (see `runTurn`), and this
+ * is the other half of that: what the request answers is the log *after* the claim, so a message
+ * the user sends — or a background task's notification arrives (#343) — while the request is
+ * already in flight stays out of it. Without that, the steering message would be answered twice:
+ * once by the request in flight, and once by the request the loop runs for it afterwards.
  *
  * @param events the log, as {@link readLog} handed it over
  * @param claimed ids the caller is about to claim in the same step — the span start the request
- *   is built for. A pending user event among them counts as processed, which is what lets the
- *   loop build the prompt *before* it appends the claim (the span start carries the truncation
- *   record the strategy produced, so the prompt has to exist first) without the claimed messages
+ *   is built for. A pending event among them counts as processed, which is what lets the loop
+ *   build the prompt *before* it appends the claim (the span start carries the truncation record
+ *   the strategy produced, so the prompt has to exist first) without the claimed messages
  *   dropping out of it. Omitted, nothing is admitted and this is the post-claim view.
  */
 export function contextView(
@@ -225,7 +237,7 @@ export function contextView(
 ): StoredEvent[] {
   return events.filter(
     (event) =>
-      (event.type !== EVENT_TYPES.userMessage && event.type !== EVENT_TYPES.userInterrupt) ||
+      !isQueuedEventType(event.type) ||
       event.processed_at !== null ||
       claimed?.has(event.id) === true,
   )

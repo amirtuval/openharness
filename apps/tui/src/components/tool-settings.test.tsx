@@ -155,6 +155,32 @@ describe('/tools: the keys', () => {
     expect(put).toHaveBeenCalledTimes(2)
   })
 
+  it('skips `ask` for a subagent tool too, which has no prompt to answer it (#368)', async () => {
+    // Epic #340, S9: a card stands in for the `agent` call and the call never reaches the
+    // transcript's tool calls, so an `ask` would pause the turn with nothing any client could
+    // draw. The fake registers three built-ins and no subagent tools, so a stored setting is how
+    // the row appears here (a real deployment registers the five); the point is the cycle, which
+    // is the client's one rule for every tool that cannot pause.
+    const fake = createFakeClient({
+      toolSettings: { builtin: { agent: { enabled: true, policy: 'allow' } }, mcp: {} },
+    })
+    const put = vi.spyOn(fake.tools, 'put')
+    const { app } = renderTools(fake)
+    await waitForScreen(app, 'Tools')
+    await waitForFrame(app, '❯ web_fetch')
+
+    pressKey(app, 'down')
+    pressKey(app, 'down')
+    pressKey(app, 'down')
+    await waitForFrame(app, '❯ agent')
+    pressKey(app, 'right')
+
+    await waitForPolicy(fake, 'agent', 'deny')
+    expect(put.mock.calls[0]?.[0]).toEqual({
+      builtin: { agent: { enabled: true, policy: 'deny' } },
+    })
+  })
+
   it('turns a tool off and on with space', async () => {
     const fake = createFakeClient()
     const { app } = renderTools(fake)

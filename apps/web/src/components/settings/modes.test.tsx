@@ -280,4 +280,51 @@ describe('Settings → Modes', () => {
     expect(within(dialog).queryByLabelText('notes__search in this mode')).toBeNull()
     expect(within(dialog).getByLabelText('web_search in this mode')).toBeInTheDocument()
   })
+
+  it('saves what makes a mode a subagent type, and marks it in the list (#342; #346)', async () => {
+    const fake = makeFake({ ...TWO_PROVIDERS })
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: 'Create mode' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Name'), 'researcher')
+    await user.click(within(dialog).getByLabelText(/My default model/))
+    await user.type(
+      within(dialog).getByLabelText('Subagent description'),
+      'Reviews a diff for correctness bugs.',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Create mode' }))
+
+    // The description is what the server stores — the field the parent model chooses a type by —
+    // and the row says so, because a list of modes that did not mark it would hide the one
+    // difference between a preset and a kind of helper.
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.subagent_description).toBe('Reviews a diff for correctness bugs.')
+    })
+    expect(await screen.findByText('subagent type')).toBeInTheDocument()
+    expect(screen.getByText('Reviews a diff for correctness bugs.')).toBeInTheDocument()
+  })
+
+  it('clears the description, which is how a mode stops being a type (#346)', async () => {
+    const fake = makeFake({
+      ...TWO_PROVIDERS,
+      modes: [makeMode({ name: 'researcher', subagent_description: 'Reads issues.' })],
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    expect(await screen.findByText('subagent type')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByLabelText('Subagent description')).toHaveValue('Reads issues.')
+
+    await user.clear(within(dialog).getByLabelText('Subagent description'))
+    await user.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.subagent_description).toBeNull()
+    })
+    expect(screen.queryByText('subagent type')).toBeNull()
+  })
 })

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { EventId } from '../ids'
-import { newEventId, newSkillId } from '../ids'
+import { newEventId, newSessionId, newSkillId, newTaskId } from '../ids'
 import {
   AgentEventSchema,
   AgentMessageEventSchema,
@@ -285,6 +285,36 @@ const storedSamples = {
     outcome: 'summarized',
     instructions: 'keep the API decisions in detail',
     summary_seq: 14,
+  },
+  'session.task_started': {
+    id: eventId(),
+    type: 'session.task_started',
+    seq: 17,
+    processed_at: '2026-03-15T10:00:00Z',
+    task_id: newTaskId(),
+    kind: 'subagent',
+    tool_use_id: eventId(),
+    child_session_id: newSessionId(),
+    task_type: 'researcher',
+    description: 'Research how the event log handles a rewind',
+  },
+  'session.task_status': {
+    id: eventId(),
+    type: 'session.task_status',
+    seq: 18,
+    processed_at: '2026-03-15T10:00:00Z',
+    task_id: newTaskId(),
+    status: 'idle',
+  },
+  'session.task_notification': {
+    id: eventId(),
+    type: 'session.task_notification',
+    seq: 19,
+    processed_at: null,
+    task_id: newTaskId(),
+    kind: 'result',
+    text: 'The rewind supersedes the tail of the log from the edited message.',
+    source_key: 'sesn_child:3',
   },
 } as const
 
@@ -663,6 +693,38 @@ describe('session.status_idle stop_reason', () => {
         stop_reason: { type: 'end_turn' },
       }).success,
     ).toBe(true)
+  })
+
+  it('carries the task wait, with the tasks and the deadline (S5; #343)', () => {
+    const parsed = SessionStatusIdleEventSchema.parse({
+      ...storedSamples['session.status_idle'],
+      stop_reason: {
+        type: 'waiting_on_tasks',
+        task_ids: [newTaskId()],
+        deadline: '2026-03-15T10:10:00Z',
+      },
+    })
+    expect(parsed.stop_reason).toEqual({
+      type: 'waiting_on_tasks',
+      task_ids: [expect.stringMatching(/^task_/)],
+      deadline: '2026-03-15T10:10:00Z',
+    })
+  })
+
+  it('refuses a task wait with no deadline or a task id that is not one', () => {
+    for (const stop_reason of [
+      { type: 'waiting_on_tasks', task_ids: [] },
+      { type: 'waiting_on_tasks', task_ids: ['sevt_x'], deadline: '2026-03-15T10:10:00Z' },
+      { type: 'waiting_on_tasks', task_ids: [], deadline: 'in a while' },
+    ]) {
+      expect(
+        SessionStatusIdleEventSchema.safeParse({
+          ...storedSamples['session.status_idle'],
+          stop_reason,
+        }).success,
+        JSON.stringify(stop_reason),
+      ).toBe(false)
+    }
   })
 
   it('rejects the stop reasons v1 cannot emit', () => {
