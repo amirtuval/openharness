@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-12._
+_Last updated: 2026-10-17._
 
 ## Where we are
 
@@ -333,7 +333,7 @@ A chat can hand work to another chat and keep the conversation going. The second
 **real** session — its own log, model, turn, streams, usage and crash recovery — that belongs to
 the first one, and its news reaches the parent as a background-task notification.
 
-**Status:** done (2026-10-13) — the session tree
+**Status:** done (2026-10-17) — the session tree
 ([#341](https://github.com/amirtuval/openharness/issues/341)), the subagent types
 ([#342](https://github.com/amirtuval/openharness/issues/342)), the inbox and task waits
 ([#343](https://github.com/amirtuval/openharness/issues/343)), the tools and the lifecycle
@@ -346,6 +346,33 @@ with Playwright and `oh` in a real terminal, on the mock model and on DeepSeek f
 real-model cases — until clean. The pass's one defect (a subagent parked in `agent_wait` was not
 stopped, and a stop read as `done`) is
 [#373](https://github.com/amirtuval/openharness/issues/373), fixed with regression tests.
+
+The final round is done too. A child is **titled with the description its parent model gave it**
+([#379](https://github.com/amirtuval/openharness/issues/379),
+[#380](https://github.com/amirtuval/openharness/pull/380)): the brain creates a child straight
+through the store, so the naming rule had to move to the protocol
+(`deriveSessionTitle`) and be applied at the start — the sidebar listed a helper under its
+model's name until then. Then every PR in the stack was code-reviewed, and its fixes
+([#382](https://github.com/amirtuval/openharness/pull/382) backend,
+[#381](https://github.com/amirtuval/openharness/pull/381) frontend) changed behaviour in the
+places a reader notices: a task's news never answers a question waiting on the user, and a
+session paused on one is not woken for it; one notification is claimed by exactly one open
+`agent_wait`, so two waits cannot wedge a turn on one append; a task's result and its
+`session.task_status` are written in **one** append, so a crash between them cannot leave a card
+`running` for ever; Stop on a finished helper changes nothing rather than flipping `done` →
+`stopped` and telling the parent the user stopped it; a turn a server drain aborted is announced
+as the server's doing — _interrupted by the server (a restart or shutdown)_, with what to do
+next — rather than as a user stop, and the card stays `idle`; the four subagent tools
+(`agent`, `agent_message`, `agent_stop`, `message_parent`) take `allow`/`deny` only, never
+`ask`, because their calls are drawn as a card and nothing a client could draw would answer the
+pause (`agent_wait` is exempt — its pause is a task wait); rewinding past a running helper stops
+it **durably**, with a `user.interrupt` in the child's log as well as a signal; `oh` sanitises
+the terminal escape sequences a child's output can carry, so a helper cannot retitle the
+reader's window or clear their screen; and the web sidebar nests again under `StrictMode`. The
+QA of those fixes ([#384](https://github.com/amirtuval/openharness/pull/384)) found one defect —
+the news of a task the reader had rewound away still reached the parent model
+([#383](https://github.com/amirtuval/openharness/issues/383)) — now dropped at the write, and
+was otherwise clean on the mock stack and on DeepSeek.
 
 1. **The tree** ([#341](https://github.com/amirtuval/openharness/issues/341)): `parent_session_id`,
    `parent_task_id`, `root_session_id`, `depth` and `interactive` on a session, derived by the
@@ -408,6 +435,8 @@ and they arrive with the sandbox.
   worker, are decided then; re-injecting files after a compaction (#276) comes with them.
 - **Smaller follow-ups:**
   - merge streamed deltas (e.g. every ~50 ms) to cut writes, when performance matters;
+  - a parent's `taskOf` reads the whole log per call, and the per-session usage route walks every
+    descendant one page at a time (#340); both want a narrower read when a tree gets big;
   - a tab watching a session started in another tab may not show the new title until reload;
   - the session list has no live stream, so a chat created in one tab or in `oh` appears in
     another tab's sidebar only after it refetches the list.
