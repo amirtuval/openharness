@@ -16,6 +16,7 @@ import { useModes } from './hooks/use-modes'
 import { useModels } from './hooks/use-models'
 import { useNotice } from './hooks/use-notice'
 import { useRoute } from './hooks/use-route'
+import { useSessionTree } from './hooks/use-session-tree'
 import { useSessions, type DeleteSessionResult } from './hooks/use-sessions'
 import { useSettings } from './hooks/use-settings'
 import { useShortcuts } from './hooks/use-shortcuts'
@@ -172,6 +173,9 @@ function AppFrame({
 }) {
   const client = useClient()
   const { sessions, loading, error, truncated, create, remove, forget } = useSessions(client)
+  // The chats' children, for the sidebar's nesting (epic #340, S1/S3; #346): a child is a real
+  // session the server never lists as a chat of its own, so the tree is read beside the list.
+  const tree = useSessionTree(client, sessions)
   // The catalog is loaded once here, for the whole shell: the composer's model selector and
   // Settings' default-model picker offer it, and the sidebar and the chat header label
   // untitled sessions with its display names (#91).
@@ -190,6 +194,17 @@ function AppFrame({
   // Deleting from wherever the action was: the row or the header goes away with the session,
   // and deleting the *open* chat leaves it — New chat is where a reader without a chat
   // belongs (U5).
+  // The open chat's children are re-read when its tasks move (and when it is opened), so the
+  // sidebar nests a helper the moment the chat shows its card. Stable by session: an effect in
+  // `ChatView` depends on it, and a fresh closure per render would make it re-fire forever.
+  const refreshOpenChatChildren = useCallback((): void => {
+    if (route.name === 'chat') {
+      tree.refresh(route.sessionId)
+    }
+    // `tree.refresh` and not `tree`: the object is rebuilt whenever the children it holds change,
+    // and an identity that moved on every answer would be an effect that never settles.
+  }, [route, tree.refresh])
+
   const deleteSession = useCallback(
     async (sessionId: string): Promise<DeleteSessionResult> => {
       const result = await remove(sessionId)
@@ -342,6 +357,7 @@ function AppFrame({
           panelRef={panelRef}
           nameOf={nameOf}
           onDelete={deleteSession}
+          childrenOf={tree.childrenOf}
         />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-2 border-b px-3 py-2 md:hidden">
@@ -412,6 +428,11 @@ function AppFrame({
               modes={modes}
               onDelete={deleteSession}
               onDeleted={forgetSession}
+              // A chat that has just started a helper (or finished one) tells the sidebar, so the
+              // group under its row appears while the reader is still in it (#346). The tree's own
+              // read is silent and one-per-chat, so this is a re-read of one row rather than a
+              // walk of the list.
+              onTasksChanged={refreshOpenChatChildren}
             />
           ) : route.name === 'settings' ? (
             <SettingsScreen catalog={catalog} modes={modes} />

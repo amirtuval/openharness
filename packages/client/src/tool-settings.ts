@@ -1,4 +1,10 @@
-import { WEB_SEARCH_TOOL_NAME } from '@openharness/protocol'
+import {
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  AGENT_TOOL_NAME,
+  MESSAGE_PARENT_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+} from '@openharness/protocol'
 import type { ToolPermission, ToolSettingEntry } from '@openharness/protocol'
 
 import { TOOL_POLICIES } from './mcp'
@@ -17,18 +23,60 @@ import { TOOL_POLICIES } from './mcp'
  */
 
 /**
+ * The tools whose calls **cannot pause for the reader** (epic #340, S9; issue #368).
+ *
+ * `ask` is the pause #309 answers: the call is stored, nothing runs it, and the turn ends
+ * `requires_action` until one `user.tool_confirmation` answers it. That needs a client that can
+ * *draw* the prompt, and these four are deliberately kept out of the transcript's `toolCalls`
+ * (S9) — a card stands in for the `agent` call, and the other three are task machinery rather
+ * than work worth a line — so `pendingCalls(toolCalls)` holds nothing for either frontend to
+ * hang a prompt under. A policy of `ask` on one of them paused the parent's turn with no way to
+ * answer it, reachable from Settings → Tools, which listed them like any other built-in.
+ *
+ * The decision (2026-10-13) is that these tools **do not support `ask`**, and the server refuses
+ * the write; this list is the frontends' half of it, so a settings screen never offers a switch
+ * the save would reject. `agent_wait` is **not** here: its own pause (waiting for the tasks it
+ * names) outranks the permission, and a `deny` on it is still refused by the loop.
+ */
+export const NO_ASK_TOOL_NAMES: readonly string[] = [
+  AGENT_TOOL_NAME,
+  AGENT_MESSAGE_TOOL_NAME,
+  AGENT_STOP_TOOL_NAME,
+  MESSAGE_PARENT_TOOL_NAME,
+]
+
+/**
+ * Whether `ask` is a permission this tool may take.
+ *
+ * False for the two kinds of tool that cannot pause: a **provider-executed** one (`web_search`
+ * runs inside the model request, so there is no moment at which this build could ask — the
+ * server refuses the write, #335) and the four **subagent** ones ({@link NO_ASK_TOOL_NAMES},
+ * whose calls are not in `toolCalls` and so have no prompt a client could draw).
+ *
+ * @param name the offered name — a built-in's own, or a remote tool's `<server>__<tool>`
+ */
+export function toolSupportsAsk(name: string): boolean {
+  return name !== WEB_SEARCH_TOOL_NAME && !NO_ASK_TOOL_NAMES.includes(name)
+}
+
+/**
+ * What a row says instead of offering `ask` for a tool that cannot take it (issue #368).
+ *
+ * Short, and it names the reason rather than the rule: a reader who wanted "pause and let me
+ * decide" needs to know there is nobody to pause for, not that this build dislikes the value.
+ */
+export const SUBAGENT_ASK_NOTE = 'Subagents run in the background — allow or deny it.'
+
+/**
  * The permissions a cycling key walks for a tool, in order.
  *
- * `ask` is missing for a **provider-executed** tool. `web_search` runs inside the model request
- * — the provider does it, before any call of ours exists — so there is no moment at which this
- * build could pause and ask, and the server refuses the write outright (#335). Leaving it in the
- * cycle would offer a reader a switch that the save then rejects; a search is offered or denied,
- * and `allow` → `deny` is the whole of what cycling it means.
+ * `ask` is missing for a tool that cannot pause — see {@link toolSupportsAsk}. Leaving it in the
+ * cycle would offer a reader a switch that the save then rejects (a search) or one that leaves the
+ * turn paused with nothing to answer it (a subagent call); `allow` → `deny` is the whole of what
+ * cycling one of those means.
  */
 export function toolPolicyChoices(name: string): readonly ToolPermission[] {
-  return name === WEB_SEARCH_TOOL_NAME
-    ? TOOL_POLICIES.filter((policy) => policy !== 'ask')
-    : TOOL_POLICIES
+  return toolSupportsAsk(name) ? TOOL_POLICIES : TOOL_POLICIES.filter((p) => p !== 'ask')
 }
 
 /**

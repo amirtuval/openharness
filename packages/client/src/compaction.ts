@@ -35,8 +35,7 @@ import type {
  * — and `DEFAULT_CONTEXT_TOKEN_BUDGET` (32,768, the brain's own) for a model whose window even
  * that cannot describe. It is restated rather than shared because the rule lives in a package
  * this one may not depend on, and both frontends need it (the web header and the `oh` status
- * line must agree). Keep the two in step: that path is one rule written twice, the way the
- * fake's session-naming rule is (`testing/titles.ts`).
+ * line must agree). Keep the two in step: it is one rule written twice.
  *
  * ## What the meter measures
  *

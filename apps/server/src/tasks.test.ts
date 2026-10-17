@@ -4,6 +4,7 @@ import {
   API_VERSION_PREFIX,
   EVENT_TYPES,
   TASK_WAIT_TOOL_NAME,
+  newEventId,
   newTaskId,
   type AgentToolResultEvent,
   type Session,
@@ -100,9 +101,11 @@ describe('the inbox anything that runs a task writes through', () => {
     const child = await store.createSession(agent.id, { ownerId: 'user_tasks_test' })
     const { tasks } = inbox(store)
     const taskId = newTaskId()
+    const toolUseId = newEventId()
 
     await tasks.startTask(session.id, {
       taskId,
+      toolUseId,
       childSessionId: child.id,
       taskType: 'researcher',
       description: '  Research   the event log  ',
@@ -112,6 +115,8 @@ describe('the inbox anything that runs a task writes through', () => {
     expect(of(events, EVENT_TYPES.sessionTaskStarted)[0]).toMatchObject({
       task_id: taskId,
       kind: 'subagent',
+      // The call that started it, when the starter has one (#345).
+      tool_use_id: toolUseId,
       child_session_id: child.id,
       task_type: 'researcher',
       // Collapsed and trimmed: a card's line, not a paragraph with the caller's whitespace in it.
@@ -187,6 +192,9 @@ describe('the wait for background tasks over HTTP', () => {
     const taskId = newTaskId()
     const test = createTestApp({
       tools: registry(),
+      // The five subagent tools are offered only to a deployment that wired a runtime (#365),
+      // and `agent_wait` is one of them: the real server always wires this one (`main.ts`).
+      subagents: true,
       replies: [
         {
           toolCalls: [
@@ -261,6 +269,9 @@ describe('the wait for background tasks over HTTP', () => {
     const taskId = newTaskId()
     const test = createTestApp({
       tools: registry(),
+      // The five subagent tools are offered only to a deployment that wired a runtime (#365),
+      // and `agent_wait` is one of them: the real server always wires this one (`main.ts`).
+      subagents: true,
       replies: [
         {
           toolCalls: [{ name: TASK_WAIT_TOOL_NAME, input: { task_ids: [taskId], timeout_s: 0.2 } }],
@@ -329,7 +340,7 @@ describe('the wait for background tasks over HTTP', () => {
   })
 
   it('offers the task tools through the registry, and lists agent_wait as available', async () => {
-    const test = createTestApp({ tools: registry() })
+    const test = createTestApp({ tools: registry(), subagents: true })
     const response = await test.request(`${API_VERSION_PREFIX}/me/tools`)
     expect(response.status).toBe(200)
     const body = (await response.json()) as { data: { name: string; available: boolean }[] }
@@ -357,14 +368,15 @@ describe('the test background task', () => {
     expect(ran.isError).toBe(true)
   })
 
-  it('is registered for the test model, and never for a provider-backed deployment', () => {
-    // #344 registers `agent_wait` (and whatever starts a subagent) for every deployment; until
-    // then the mechanism's tools ride on the mock model, so a real chat is untouched.
+  it('registers the wait for every deployment, and the test task for the mock model', () => {
+    // #344 registered `agent_wait` (and the rest of the subagent tools) for every deployment, so
+    // the wait is no longer a test hook: it is a tool a real chat is offered. What still rides on
+    // the mock model is the task the test model can **start** — a real deployment's is `agent`.
     const mocked = createTurnRegistry({ kind: 'mock' }).tools.map((tool) => tool.name)
     const provider = createTurnRegistry({ kind: 'provider' }).tools.map((tool) => tool.name)
     expect(mocked).toContain(TASK_WAIT_TOOL_NAME)
+    expect(provider).toContain(TASK_WAIT_TOOL_NAME)
     expect(mocked).toContain('task_start')
-    expect(provider).not.toContain(TASK_WAIT_TOOL_NAME)
     expect(provider).not.toContain('task_start')
   })
 })

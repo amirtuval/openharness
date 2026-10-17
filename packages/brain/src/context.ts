@@ -1013,8 +1013,10 @@ export function conversationItems(
     } else if (event.type === EVENT_TYPES.sessionTaskNotification) {
       // A task's news is an item of the conversation like a message (#343), framed the same way
       // the request carries it — unless a wait was resolved by it, in which case the call's
-      // result is what holds it and this item would be the same text twice.
-      if (consumed.has(event.id)) {
+      // result is what holds it and this item would be the same text twice — or unless the task
+      // it came from is not this chat's any more (a rewind took its start back, S7; #344), in
+      // which case the news is dropped rather than measured as part of a request.
+      if (consumed.has(event.id) || !starts.has(event.task_id)) {
         continue
       }
       role = 'user'
@@ -1402,8 +1404,9 @@ function conversationAfter(
         // A background task's news reaches the model as a **user** message, framed (epic #340,
         // S4; #343): it is addressed to the model, and the frame says which task it came from
         // and that its text is data rather than an instruction. One a wait was resolved by is
-        // left out — the call's own result carries it.
-        if (consumed.has(event.id)) {
+        // left out — the call's own result carries it — and so is news from a task this log no
+        // longer names (a rewind took its start back, S7; #344).
+        if (consumed.has(event.id) || !starts.has(event.task_id)) {
           break
         }
         closeAssistant()

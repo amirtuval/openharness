@@ -21,7 +21,8 @@ import { EventSeqSchema, ProcessedAtSchema, QueuedProcessedAtSchema } from './co
  * carry the whole of a task's life in the **parent's** log:
  *
  * ```
- *   session.task_started    { task_id, kind, child_session_id?, task_type?, description }
+ *   session.task_started    { task_id, kind, tool_use_id?, child_session_id?, task_type?,
+ *                             description }
  *   session.task_status     { task_id, status }        running | idle | failed | stopped
  *   session.task_notification { task_id, kind, text, source_key }   queued, claimed
  * ```
@@ -56,6 +57,13 @@ import { EventSeqSchema, ProcessedAtSchema, QueuedProcessedAtSchema } from './co
  * are the starter's to say; the brain writes neither — a task is started by the tool that
  * starts it (S4's "the tool's result is the handle"), through the deployment's own append.
  *
+ * `tool_use_id` is the **call** that started the task: the id of the `agent.tool_use` whose
+ * result was the handle (the event's id *is* the call's id, X1), so a reader places a task's
+ * card at the exact call it belongs to instead of guessing by `description` (#345). It is
+ * optional because not every task kind is started by a tool call of this log — a future
+ * background kind may be started by something else — and because a log stored before the field
+ * existed carries none; a reader that finds none falls back to matching by `description`.
+ *
  * The epic spells the sub-kind `type` (S4); it is `task_type` here because a stored event's
  * `type` is its own discriminant, and two fields of one object cannot share a name.
  */
@@ -68,6 +76,12 @@ export const SessionTaskStartedEventSchema = z.object({
   task_id: TaskIdSchema,
   /** What kind of background task it is. */
   kind: TaskKindSchema,
+  /**
+   * The tool call that started it — the id of the `agent.tool_use` whose result was the handle
+   * — when a tool call started it. Absent for a kind nothing of this log called, and for a log
+   * stored before the field existed.
+   */
+  tool_use_id: EventIdSchema.optional(),
   /**
    * The session the task runs in, when it has one. Written so a client can follow the task's
    * live activity: the child's own stream is where its progress is, and the parent's log only

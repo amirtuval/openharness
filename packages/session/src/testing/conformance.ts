@@ -1871,6 +1871,40 @@ export function runSessionStoreConformance(
         expect((await store.getPendingTaskNotifications(session.id)).length).toBe(1)
       })
 
+      it('writes the status beside the notification, once, in one append (#363)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const taskId = newTaskId()
+        const input = {
+          taskId,
+          kind: 'result' as const,
+          text: 'the child finished',
+          sourceKey: `${taskId}:7`,
+          status: 'idle' as const,
+        }
+        const first = await store.appendTaskNotification(session.id, input)
+        expect(first.appended).toBe(true)
+        const after = (await store.listEventsUnscoped(session.id)).data
+        const news = after.findIndex((event) => event.type === EVENT_TYPES.sessionTaskNotification)
+        const statuses = after.flatMap((event, index) =>
+          event.type === EVENT_TYPES.sessionTaskStatus ? [{ index, event }] : [],
+        )
+        // The status lands **with** the notification, after it: one sequel of events, so a
+        // reader of the parent's log sees the news and the card move together.
+        expect(news).toBeGreaterThanOrEqual(0)
+        expect(statuses).toHaveLength(1)
+        expect(statuses[0]?.index).toBe(news + 1)
+        expect(statuses[0]?.event.status).toBe('idle')
+        // A second call under the key stores **neither**: the status is exactly-once by the
+        // notification's own idempotency, which is the crash window #363 closed.
+        const second = await store.appendTaskNotification(session.id, input)
+        expect(second.appended).toBe(false)
+        const again = (await store.listEventsUnscoped(session.id)).data.filter(
+          (event) => event.type === EVENT_TYPES.sessionTaskStatus,
+        )
+        expect(again).toHaveLength(1)
+      })
+
       it('stores two notifications under different keys, in seq order', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
@@ -2729,7 +2763,7 @@ export function runSessionStoreConformance(
       })
 
       it('counts the descendants whose turn is not finished, and nothing else (S6)', async () => {
-        const { store } = await setup()
+        const { store, clock } = await setup()
         const { agent, session: root } = await seed(store)
         const childOf = (parent: Session) =>
           store.createSession(agent.id, { ownerId: OWNER_A, parentSessionId: parent.id })
@@ -2737,6 +2771,7 @@ export function runSessionStoreConformance(
         const waiting = await childOf(root)
         const running = await childOf(root)
         const paused = await childOf(root)
+        const onTasks = await childOf(root)
         const finished = await childOf(root)
         const idle = await childOf(root)
         const grandchild = await childOf(running)
@@ -2748,24 +2783,78 @@ export function runSessionStoreConformance(
         const call = newEventId()
         await append(store, paused.id, [statusRunning(), toolUse(call, 'ask_user')])
         await append(store, paused.id, [statusPausedFor([call])])
+        // A child parked in `agent_wait` is a **third** kind of work (epic #340, S4/S5; #344):
+        // its turn ended, but the task it is waiting for is still running, so the cap must
+        // count it or a chat could park ten helpers and start ten more.
+        await append(store, onTasks.id, [statusRunning()])
+        await append(store, onTasks.id, [statusWaitingFor([newTaskId()], clock.now() + 60_000)])
         await append(store, finished.id, [statusRunning(), statusIdle()])
         await append(store, grandchild.id, [userMessage('nested work')])
         // `idle` was created and never given anything: there is no work to count.
 
-        expect(await store.countLiveDescendants(root.id)).toBe(4)
+        expect(await store.countLiveDescendants(root.id)).toBe(5)
         // The tree's own root is not a descendant of itself, and a subtree count starts where
         // it is asked to.
         expect(await store.countLiveDescendants(running.id)).toBe(1)
         expect(await store.countLiveDescendants(idle.id)).toBe(0)
 
         // A turn that ends takes its session out of the count — while its own child's queued
-        // work keeps that one in it — and the paused one stays in until its turn ends: a child
-        // parked in `agent_wait` is still a running task.
+        // work keeps that one in it — and the two paused ones stay in until their turns end:
+        // a child parked in `agent_wait` is still a running task.
         await append(store, running.id, [statusIdle()])
-        expect(await store.countLiveDescendants(root.id)).toBe(3)
+        expect(await store.countLiveDescendants(root.id)).toBe(4)
         expect(await store.countLiveDescendants(grandchild.id)).toBe(0)
         const error = await thrownBy(() => store.countLiveDescendants(unknownSessionId()))
         expectErrorIdentity(error, 'SessionNotFoundError', SESSION_NOT_FOUND_ERROR_CODE)
+      })
+
+      it('finds a child whose finished turn its parent was never told about (S4; #344)', async () => {
+        const { store } = await setup()
+        const { agent, session: root } = await seed(store)
+        const taskId = newTaskId()
+        const child = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+          parentTaskId: taskId,
+          initial_events: [
+            { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'do the thing' }] },
+          ],
+        })
+        const promptId = (await store.listEventsUnscoped(child.id)).data[0]?.id
+        if (promptId === undefined) {
+          throw new Error('the child was created without its prompt')
+        }
+        // A child that has not run is work because its prompt is queued, as any session is.
+        expect(await store.findSessionsNeedingWork([partitionOf(child.id)])).toEqual([child.id])
+
+        // Its turn runs and ends: the prompt is claimed by the request that answers it, so
+        // nothing is queued and no turn is open — and the child is work all the same, because
+        // its parent has not been told how the turn went.
+        await append(store, child.id, [statusRunning(), statusIdleFor([promptId])])
+        expect(await store.findSessionsNeedingWork([partitionOf(child.id)])).toEqual([child.id])
+
+        // The announcement is keyed by the turn: once the parent has it, the child has no work
+        // left, and nothing about it is stranded.
+        const idle = (await store.listEventsUnscoped(child.id)).data.at(-1)
+        await store.appendTaskNotification(root.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${child.id}:${idle?.seq}`,
+        })
+        expect(await store.findSessionsNeedingWork([partitionOf(child.id)])).toEqual([])
+
+        // A turn that **paused** owes no announcement: a child parked in `agent_wait` is still
+        // working, and it is the deadline above — not this rule — that reaches it. Its own
+        // deadline is a long way off here, so it is reported by neither.
+        const waiting = await store.createSession(agent.id, {
+          ownerId: OWNER_A,
+          parentSessionId: root.id,
+          parentTaskId: newTaskId(),
+        })
+        await append(store, waiting.id, [statusRunning()])
+        await append(store, waiting.id, [statusWaitingFor([newTaskId()], Date.now() + 600_000)])
+        expect(await store.findSessionsNeedingWork([partitionOf(waiting.id)])).toEqual([])
       })
 
       it('deletes a session’s descendants with it (S7)', async () => {
@@ -3785,6 +3874,50 @@ export function runSessionStoreConformance(
         // status event is a later idle — the deadline is only read while it is the newest one.
         await append(store, session.id, [toolResult(call, false), statusIdle()])
         expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+      })
+
+      it('leaves a session paused on the user waiting when a task reports (#363)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const call = newEventId()
+        await append(store, session.id, [statusRunning(), toolUse(call, 'ask_user')])
+        await append(store, session.id, [statusPausedFor([call])])
+        // A helper finishing is news for the model, not an answer to the question: the pause
+        // stands. Waking the session for it would find the same call waiting, pause again with
+        // the news still pending, and find work again — a spin, not a recovery.
+        const taskId = newTaskId()
+        await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${taskId}:1`,
+        })
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+        // The user's own message is what makes the session work again — and the news rides the
+        // turn that message starts, exactly as any other queued event would.
+        await append(store, session.id, [userMessage('carry on')])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
+      })
+
+      it('finds a task wait when a task reports, paused on tasks rather than on the user (#363)', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const call = newEventId()
+        await append(store, session.id, [statusRunning(), toolUse(call, 'agent_wait')])
+        await append(store, session.id, [
+          statusWaitingFor([newTaskId()], clock.currentMs + 10 * SECOND),
+        ])
+        // A wait on tasks is not the user's pause: nothing about it waits for a person, and a
+        // notification is exactly what resolves it, so the news **is** work.
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+        const taskId = newTaskId()
+        await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${taskId}:1`,
+        })
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
       })
 
       it('leaves out sessions with nothing to do', async () => {

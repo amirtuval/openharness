@@ -82,6 +82,26 @@ export function taskStarts(
 }
 
 /**
+ * The news this log should still deliver: the pending notifications whose task the log names.
+ *
+ * One refinement over {@link pendingNotifications}, and it is the rewind's (S7; #344): a task
+ * whose `session.task_started` a `session.rewind` took back is no longer a task of this chat —
+ * the reader said that work did not happen — so a notification from it is **dropped** rather
+ * than framed and handed to the model. A notification whose start the log never held is the
+ * same case as far as a reader can tell, and is dropped with it: a task nothing started is not
+ * a task.
+ *
+ * The map is {@link taskStarts}'s rather than a second walk, because the callers that need this
+ * (a wait's notifications and the model's own frame) have it already.
+ */
+export function deliverableNotifications(
+  notifications: readonly SessionTaskNotificationEvent[],
+  starts: ReadonlyMap<TaskId, SessionTaskStartedEvent>,
+): readonly SessionTaskNotificationEvent[] {
+  return notifications.filter((notification) => starts.has(notification.task_id))
+}
+
+/**
  * What each task is doing, by its id: the newest `session.task_status` of it.
  *
  * A task the log holds no status for reads as `running`, which is what its `session.task_started`
@@ -325,6 +345,66 @@ export function settleTaskWait(options: TaskWaitDecisionOptions): TaskWaitOutcom
     return { kind: 'waiting', deadlineMs: Number.isFinite(deadlineMs) ? deadlineMs : nowMs }
   }
   return { kind: 'waiting', deadlineMs: nowMs + (request?.timeoutMs ?? taskWaitTimeoutMs(null)) }
+}
+
+/** What {@link settleTaskWaits} is handed about the waits it decides. */
+export interface TaskWaitDecisionsOptions {
+  /** The open waits, in the order the log holds them — the order their results are written in. */
+  readonly calls: readonly ToolCallEvent[]
+  /** The notifications nobody has claimed yet, in `seq` order. */
+  readonly notifications: readonly SessionTaskNotificationEvent[]
+  /** Whether a `user.message` (or an interrupt) arrived while they were open. */
+  readonly endedByMessage: boolean
+  /** The deadline the log recorded for one wait, or `null` when it recorded none. */
+  readonly recordedDeadline: (call: ToolCallEvent) => Timestamp | null
+  /** The instant the turn is running at, from the injected clock. */
+  readonly nowMs: number
+}
+
+/**
+ * What each open wait of a turn resolves to, with **one notification claimed by one result**
+ * (S5; #363).
+ *
+ * {@link settleTaskWait} decides one wait in isolation, and two waits reading the same news
+ * both claim it — and a claim names a queued event **once**: an append whose batch names one
+ * notification twice is refused whole with `ClaimConflictError`, so a model that made two
+ * `agent_wait` calls and a single task's report would wedge the turn (nothing is written, the
+ * notification stays unclaimed, and every later wake retries the same refused append).
+ *
+ * So the news is shared out **before** any wait is decided: a notification goes to the wait that
+ * named its task, and to the **first** wait when none did — the reading a wait with no tasks
+ * asked for ("tell me when anything I started finishes"). A wait left with nothing behaves as
+ * if the news had never arrived: it stays waiting on its deadline, or ends as the message that
+ * ended it. S5's rule that any news reaches the parent holds — the news is still delivered, by
+ * exactly one result, and the wait that keeps no notification keeps its own rules.
+ *
+ * @param options the open waits, the pending notifications, and the time
+ */
+export function settleTaskWaits(options: TaskWaitDecisionsOptions): readonly TaskWaitOutcome[] {
+  const { calls, notifications, endedByMessage, recordedDeadline, nowMs } = options
+  const assigned: SessionTaskNotificationEvent[][] = calls.map(() => [])
+  for (const notification of notifications) {
+    const named = calls.findIndex((call) => {
+      const request = taskWaitOf({ name: toolCallName(call), input: toolCallInput(call) })
+      return (request?.taskIds ?? []).includes(notification.task_id)
+    })
+    const owner = named === -1 ? assigned[0] : assigned[named]
+    if (owner === undefined) {
+      // No wait to answer: the caller only asks with at least one, and news nothing can answer
+      // stays pending for the turn that follows.
+      continue
+    }
+    owner.push(notification)
+  }
+  return calls.map((call, index) =>
+    settleTaskWait({
+      call,
+      notifications: assigned[index] ?? [],
+      endedByMessage,
+      recordedDeadline: recordedDeadline(call),
+      nowMs,
+    }),
+  )
 }
 
 /**

@@ -22,6 +22,11 @@ import { TaskIdSchema } from './ids'
  *   and for the deployment that registers the tool.
  * - {@link TaskWaitInputSchema} and {@link taskWaitTimeoutMs} — what a wait asks for and how
  *   long it may last, so the brain and the tool that offers it agree on the bounds.
+ * - the names and inputs of the subagent tools (S5; #344) — {@link AGENT_TOOL_NAME},
+ *   {@link AGENT_MESSAGE_TOOL_NAME}, {@link AGENT_STOP_TOOL_NAME}, {@link MESSAGE_PARENT_TOOL_NAME}
+ *   and their schemas — and the two nesting limits of S6 ({@link DEFAULT_MAX_AGENT_DEPTH},
+ *   {@link DEFAULT_MAX_LIVE_TASKS}), because the deployment that offers the tools, the harness
+ *   that answers them and the frontends that render a task's card all have to agree on them.
  */
 
 /** The kinds of background task this build knows (S4). */
@@ -194,3 +199,108 @@ export function taskWaitTimeoutMs(input: TaskWaitInput | null): number {
   }
   return Math.min(Math.round(asked * 1000), TASK_WAIT_MAX_TIMEOUT_MS)
 }
+
+/**
+ * The name of the tool that starts a helper (S5): `agent { type, description, prompt }`.
+ *
+ * It is the one tool that starts a task, and its result is the handle — so it is spelled once
+ * for the deployment that offers it, the brain that answers it, and the frontends that render
+ * the card it produces. A call to it is not run by `@openharness/hands`: the harness itself
+ * creates the child, which is why the name is here rather than in a tool's own module.
+ */
+export const AGENT_TOOL_NAME = 'agent'
+
+/** The name of the tool that sends a running or finished helper a message (S5): `agent_message`. */
+export const AGENT_MESSAGE_TOOL_NAME = 'agent_message'
+
+/** The name of the tool that stops a helper (S5): `agent_stop`. */
+export const AGENT_STOP_TOOL_NAME = 'agent_stop'
+
+/**
+ * The name of the tool a **child** sends its parent a note with (S5): `message_parent`.
+ *
+ * The one tool only a child is offered — the other four belong to the parent side — and it does
+ * not block: it writes a `message` notification and returns.
+ */
+export const MESSAGE_PARENT_TOOL_NAME = 'message_parent'
+
+/**
+ * What an `agent` call carries (S5): which type to start, what for, and the prompt.
+ *
+ * `type` is a name the server's type resolver knows (`general-purpose`, or one of the owner's
+ * modes with a description, S2) and is deliberately **not** checked against a closed list here:
+ * the list is the owner's own and moves with their modes, so "is this a type" is the resolver's
+ * answer (`{ ok: false, message }`), which the parent model reads and acts on.
+ *
+ * `description` is what the task is for — it is the `description` of the `session.task_started`
+ * the call writes and what a card shows — and is bounded like every other free text a caller
+ * sets (`TASK_DESCRIPTION_MAX_LENGTH`). `prompt` is not: it becomes the child's first
+ * `user.message`, as unbounded as any message.
+ */
+export const AgentToolInputSchema = z.object({
+  /** The type of helper to start: a mode's name, or `general-purpose`. */
+  type: z.string().min(1),
+  /** What the helper is for, in a sentence; the task's description. */
+  description: z.string().min(1).max(TASK_DESCRIPTION_MAX_LENGTH),
+  /** What the helper is asked to do — its first `user.message`, and its whole context. */
+  prompt: z.string().min(1),
+})
+
+/** What an `agent` call carries. */
+export type AgentToolInput = z.infer<typeof AgentToolInputSchema>
+
+/**
+ * What an `agent_message` call carries (S5): the task to steer, and what to say.
+ *
+ * The text is a `user.message` in the child — it steers a running child, and starts a new turn
+ * on one that has already reported, with its context intact — so it is unbounded like any other
+ * message.
+ */
+export const AgentMessageToolInputSchema = z.object({
+  /** The task to send the message to; its `task_` id, as the `agent` call answered it. */
+  task_id: TaskIdSchema,
+  /** What to tell the child. */
+  text: z.string().min(1),
+})
+
+/** What an `agent_message` call carries. */
+export type AgentMessageToolInput = z.infer<typeof AgentMessageToolInputSchema>
+
+/** What an `agent_stop` call carries (S5): the task to interrupt. */
+export const AgentStopToolInputSchema = z.object({
+  /** The task to stop; its `task_` id. */
+  task_id: TaskIdSchema,
+})
+
+/** What an `agent_stop` call carries. */
+export type AgentStopToolInput = z.infer<typeof AgentStopToolInputSchema>
+
+/**
+ * What a child's `message_parent` call carries (S5): a note to the parent.
+ *
+ * One field, because there is nothing else to say about it: the parent is the session's own
+ * (`Session.parent_session_id`) and the task is its own `parent_task_id`, so a child cannot
+ * address anybody else. The text is delivered as a `message` notification, framed the way a
+ * result is.
+ */
+export const MessageParentToolInputSchema = z.object({
+  /** What to tell the parent. */
+  text: z.string().min(1),
+})
+
+/** What a `message_parent` call carries. */
+export type MessageParentToolInput = z.infer<typeof MessageParentToolInputSchema>
+
+/**
+ * How deep a tree of helpers may get when the deployment says nothing (S6): a top-level chat
+ * (depth 0), its children (1) and their children (2) are offered the tools that start one; a
+ * session at depth 3 is not.
+ */
+export const DEFAULT_MAX_AGENT_DEPTH = 3
+
+/**
+ * How many descendants of one root chat may be live at once when the deployment says nothing
+ * (S6): ten. Past it an `agent` call is answered with an `is_error` the model can act on rather
+ * than starting anything.
+ */
+export const DEFAULT_MAX_LIVE_TASKS = 10

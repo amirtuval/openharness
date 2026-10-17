@@ -119,7 +119,8 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SessionStore`                                                                                                                                                                                                                                                                                      | the storage and signaling contract; every method is async, and documented below. Since #111 it also carries `getPreferences`/`putPreferences` (the per-user settings beside the log), `getToolSettings`/`putToolSettings` (the per-user tool choices, epic #303 X4; #307) and `deleteSession` (the owner-scoped hard delete); since #341 the session tree |
 | (`listDescendants`, `countLiveDescendants`, and the cascade the delete performs); since #122 the scheduler membership (`heartbeatInstance`, `listLiveInstances`, `removeInstance`); since #343 the background-task half — `getPendingTaskNotifications` and the idempotent `appendTaskNotification` |
-| `TaskNotificationInput`, `TaskNotificationAppend`                                                                                                                                                                                                                                                   | what `appendTaskNotification` writes (the task, the kind, the text, and the `sourceKey` the append is idempotent on) and what it answers (the stored notification, and whether this call is the one that wrote it) — epic #340 S4; #343                                                                                                                   |
+| `TaskNotificationInput`, `TaskNotificationAppend`, `TaskDeliveryStatus`                                                                                                                                                                                                                             | what `appendTaskNotification` writes (the task, the kind, the text, the `sourceKey` the append is idempotent on, and the optional `status` it writes **with** the notification, #363) and what it answers (the stored notification, and whether this call is the one that wrote it) — epic #340 S4; #343                                                  |
+| `MAX_DESCENDANT_DEPTH`                                                                                                                                                                                                                                                                              | `64` — how deep the tree walks go before they stop (#361): the deployment's `OPENHARNESS_MAX_AGENT_DEPTH` is bounded by it, because a tree past it is one a walk cannot see the bottom of                                                                                                                                                                 |
 | `UserToolSettings`                                                                                                                                                                                                                                                                                  | a user's stored tool choices, `{ builtin: Record<tool name, { enabled, policy }> }` (epic #303, X4; #307) — the vocabulary of `getToolSettings`/`putToolSettings`                                                                                                                                                                                         |
 | `UserPreferences`                                                                                                                                                                                                                                                                                   | a user's stored preferences, `{ default_model: string \| null, theme, compaction_threshold: number \| null, summary_model, summary_max_passes: number \| null }` (#111, epic #116 U1; theme: #203; compaction: epic #277 C3, #282) — the vocabulary of `getPreferences`/`putPreferences`                                                                  |
 | `AppendableEvent`, `AppendableStoredEvent`, `AppendableRewind`                                                                                                                                                                                                                                      | an event a caller appends: a `StoredEvent` minus `seq` and `processed_at` (plus an optional `id` the caller supplies), or a `session.rewind` input that names the message the session restarts from (#238)                                                                                                                                                |
@@ -523,6 +524,30 @@ The partition scheduler computes each instance's fair share from that list; the 
 promises nothing more than the rows, and a membership that is lost costs one heartbeat's
 announcement.
 
+**A child whose finished turn its parent was never told about is work** (epic #340, S4; #344).
+`findSessionsNeedingWork` reports it, in both stores: the child's newest status event is a
+`session.status_idle` whose stop reason is `end_turn` (a pause is not an end), and its parent's
+log holds no `session.task_notification` whose `source_key` is `<child_session_id>:<idle seq>` —
+the key S4's delivery is exactly-once on. A turn that **did nothing** is not one whose end owes
+an announcement (#371): an interrupt written into an idle child opens a turn of its own that the
+loop ends with nothing in flight, and its idle — empty window, claiming nothing but that
+interrupt — would otherwise keep this scan waking the child for news the delivery refuses to
+write.
+
+**A task's notification is work only where the session is not waiting on a person** (#363).
+`findSessionsNeedingWork` counts a pending `session.task_notification` as work — the parent
+reacts on its own — **except** while the session's last turn ended `requires_action`: a
+notification answers no question, so the turn it started would find the same `ask_user`/`ask`
+call waiting and pause again with the news still pending, and this scan would find work again —
+a spin. The pause stands until the user answers, and the turn their answer starts is the one
+that folds the news in. A wait on **tasks** (`waiting_on_tasks`) is the opposite case: nothing
+about it waits for a person, and the notification is what resolves it. Nothing else would reach such a session: the turn did
+finish, so it has no queued event and no open turn, and the parent is idle waiting for news that
+will never come. The delivery itself is the brain's (a turn on the child writes the notification
+and nothing to its own log); this is what finds the child, the way the passed-deadline case finds
+a wait nothing else would resume. The predicate is a child's only — a top-level chat owes no
+announcement — and the child's parent is read in the same query.
+
 **A task notification is appended from outside the session, once per key** (epic #340, S4;
 #343). `appendTaskNotification` is the one way anything reaches a session from outside it — a
 child session finishing its turn — and it is a store method rather than an `appendEvents` call
@@ -533,7 +558,12 @@ however many instances make it or however often a recovery path runs. The unique
 partial index over `(session_id, payload->>'source_key') where type =
 'session.task_notification'` (`0034`), which is what makes it true under concurrency rather
 than only in one writer's memory. The notification is stored **queued**, so nothing waits for
-a turn; appending needs **no fence**, for the same reason a user event needs none.
+a turn; appending needs **no fence**, for the same reason a user event needs none. Since #363
+the input may carry a `status`, and the store writes the `session.task_status` **with** the
+notification in the same append: a child's turn end owes its parent both facts, and as two
+appends a crash or a fence between them delivered the news and lost the status — a card stuck
+`running` for ever, with nothing for the work scan to repair. One key, one pair: a second call
+under the key writes neither.
 
 **Signals are hints.** `signalPartition` delivers a signal to the listeners attached to that
 partition at that moment, once each; a signal nobody is listening for is dropped, because
@@ -1156,7 +1186,7 @@ dependency table.
   the caller does not own (or an id nothing has) refused, a task id with no parent, the
   top-level default and the children filter of a list, the descendants walk — level by level,
   owner-scoped, subtree from wherever it is asked — the live count (a queued message, an open
-  turn and a pause each counting; a finished turn leaving), the cascade a delete performs over
+  turn, a pause on the user and a wait on tasks each counting; a finished turn leaving), the cascade a delete performs over
   three levels (and from the middle, leaving the parent), and one `session.deleted` delivered
   per session of the subtree. Both stores run it, and `postgres.test.ts` adds the `0032`
   backfill over a session row written the pre-tree way, beside the ordered list of every
@@ -1199,7 +1229,11 @@ dependency table.
   work scan's cases are beside them: a session a task just wrote to is work, a task wait is
   work **only once its deadline has passed**, and a wait something has since answered is not
   (resolving one writes its result and carries the turn on, so the log's newest status event is
-  a later idle).
+  a later idle). Since #344 a **child whose finished turn its parent was never told about** is
+  work as well — until the notification keyed by that turn is in the parent's log — and a turn
+  that **paused** is not. The live count's own cases are beside those: a child parked in
+  `agent_wait` counts as live exactly as one paused on the user does, which is what makes
+  S6's cap a cap on work rather than on open turns.
 - `postgres/postgres.test.ts` runs both suites against Postgres — the acceptance tests of the
   durable stores — and adds what only a shared store can be asked: concurrent appends from
   two stores, a supplied event id two of them try to take, fencing across stores, a burst that
