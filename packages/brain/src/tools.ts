@@ -1,5 +1,5 @@
 import type { ToolRegistry, ToolResult, ToolRunContext } from '@openharness/hands'
-import { createToolRegistry, errorResult } from '@openharness/hands'
+import { cannotAskForApproval, createToolRegistry, errorResult } from '@openharness/hands'
 import type {
   JsonValue,
   ModeToolOverride,
@@ -33,6 +33,7 @@ import {
   malformedQuestion,
   waitsForUser,
 } from './pausing'
+import { awaitingTasks, malformedTaskWait, waitsForTasks } from './tasks'
 
 /**
  * The loop's half of tools: what a request offers, what the settings in force say about a call,
@@ -364,7 +365,7 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
         : agentMcpToolUse(remote.serverName, remote.toolName, input, permission)
     }),
   )
-  const context: ToolRunContext = {
+  const baseContext: ToolRunContext = {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
   }
@@ -373,21 +374,35 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
       const decision = decisions[index] ?? { permission: 'deny' as const, waiting: false }
       const input = inputs[index] ?? {}
       if (decision.waiting) {
-        // A non-interactive session never pauses (epic #340, S1): there is nobody to ask, so an
-        // `ask` policy is a refusal the model is told about at once — the call keeps the
-        // permission it was evaluated under, and the turn carries on with the answer beside it.
-        if (interactive === false) {
+        // A non-interactive session never pauses **on the user** (epic #340, S1): there is
+        // nobody to ask, so an `ask` policy is a refusal the model is told about at once — the
+        // call keeps the permission it was evaluated under, and the turn carries on with the
+        // answer beside it. A **task wait** is not that kind of pause and is left alone (#343):
+        // what resolves it is a notification or a clock, neither of which needs a reader.
+        const waitForTasks = waitsForTasks(registry.get(call.name) !== undefined, call.name)
+        if (interactive === false && !waitForTasks) {
           return errorResult(NON_INTERACTIVE_REFUSAL)
         }
-        // Otherwise the call is the user's to answer (#309): nothing runs, and no result is
-        // written — the turn ends `requires_action` and the next turn answers it from the
-        // confirmation. The one exception is a question nothing could answer: the model is told
-        // what was wrong with it and asks again, rather than the turn pausing on a call no
-        // client can render.
-        const problem = malformedQuestion({ name: call.name, input })
+        // Otherwise the call is the user's to answer (#309) or a background task's to resolve
+        // (#340, S5): nothing runs, and no result is written — the turn ends `requires_action`
+        // or `waiting_on_tasks`, and the turn that follows answers it. The one exception is a
+        // call nothing could honour — an `ask_user` question or an `agent_wait` whose arguments
+        // the protocol refuses — where the model is told what was wrong with it and asks again,
+        // rather than the turn pausing on something no client or no clock could resolve.
+        const problem =
+          malformedQuestion({ name: call.name, input }) ??
+          malformedTaskWait({ name: call.name, input })
         return problem === null ? null : errorResult(problem)
       }
       if (runs(registry, call.name, decision.permission)) {
+        // The call's own id — the event just stored for it, which *is* its id (X1) — so a tool
+        // that writes an event naming the call that caused it (the `agent` tool's
+        // `session.task_started`, #345) has it without having to guess.
+        const storedCall = stored[index]
+        const context: ToolRunContext = {
+          ...baseContext,
+          ...(storedCall === undefined ? {} : { toolUseId: storedCall.id }),
+        }
         return await registry.execute(call.name, input, context)
       }
       return errorResult(refusal(call.name))
@@ -465,6 +480,12 @@ export function lostExecutions(events: readonly StoredEvent[]): ToolCallEvent[] 
       .filter((call) => !confirmations.has(call.id))
       .map((call) => call.id),
   )
+  // A wait for a background task is open rather than lost (S5; #343): nothing has run, and
+  // `runTurn` settles it — with the notifications that answered it, its deadline, or a message
+  // — before any request is built.
+  for (const call of awaitingTasks(events)) {
+    waiting.add(call.id)
+  }
   return pendingToolUse(events).filter((call) => !waiting.has(call.id))
 }
 
@@ -532,9 +553,22 @@ function decisionFor(
   approved: ReadonlySet<string>,
 ): CallDecision {
   const tool = registry.get(name)
-  const permission = settings?.[name]?.permission ?? tool?.permission ?? 'deny'
+  const stored = settings?.[name]?.permission ?? tool?.permission ?? 'deny'
+  // A stored `ask` on a subagent tool is read as `allow` (#363): no client renders a subagent
+  // tool call — the parent's transcript draws a task **card**, and a child's transcript is the
+  // child's own — so a pause on one could never be answered. The rule is #335's, one tool
+  // family over: the switch that could never ask is not honoured, `PUT /v1/me/tools` refuses a
+  // new one, and the call is recorded `allow` because that is the decision it really ran under.
+  const permission = stored === 'ask' && cannotAskForApproval(name) ? 'allow' : stored
   if (permission === 'deny') {
     return { permission, waiting: false }
+  }
+  if (waitsForTasks(tool !== undefined, name)) {
+    // A call to the wait tool always pauses the turn, whatever the policy says about the tool
+    // (a `deny` above is the user's own decision and outranks it): there is nothing to run, and
+    // the call is recorded `ask` exactly as a question is, so a reader of the log sees a pause
+    // in both cases and `./tasks` tells the two apart by the tool's name (#340, S5; #343).
+    return { permission: 'ask', waiting: true }
   }
   if (waitsForUser(permission, tool !== undefined, name)) {
     const remembered = name !== ASK_USER_TOOL_NAME && approved.has(name)

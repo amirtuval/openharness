@@ -1,3 +1,5 @@
+import type { EventId } from '@openharness/protocol'
+
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from './tool'
 import { DEFAULT_TOOL_TIMEOUT_MS, errorResult } from './tool'
 
@@ -30,6 +32,12 @@ export interface ToolRunContext {
    * but never lengthen what a tool declared.
    */
   readonly timeoutMs?: number
+  /**
+   * The call this is, when the caller knows it — the event id of the `agent.tool_use` it stored
+   * for the call ({@link ToolExecutionContext.toolUseId}). The registry hands it to the tool
+   * untouched, so a tool that writes an event naming its own call can.
+   */
+  readonly toolUseId?: EventId
 }
 
 /** A set of tools, and `execute`: how one call of one is run. */
@@ -48,7 +56,8 @@ export interface ToolRegistry {
    *
    * @param name the tool to run
    * @param input the arguments the model produced, as the call carried them
-   * @param context the turn's signal, ceilings and resolved per-user values
+   * @param context the turn's signal, ceilings and resolved per-user values, and the id of the
+   *   call this is where the caller has one
    */
   execute(name: string, input: unknown, context?: ToolRunContext): Promise<ToolResult>
 }
@@ -124,7 +133,12 @@ async function run(
     // Nothing new starts for a turn already interrupted. The deadline cannot have fired yet.
     return errorResult('Interrupted by the user.')
   }
-  const execution: ToolExecutionContext = { signal, timeoutMs, secrets }
+  const execution: ToolExecutionContext = {
+    signal,
+    timeoutMs,
+    secrets,
+    ...(context.toolUseId === undefined ? {} : { toolUseId: context.toolUseId }),
+  }
   // The listener is the call's, not the turn's: a signal lives as long as the turn does, and
   // one left behind per call would accumulate for as long as it ran.
   const listener: { remove: (() => void) | null } = { remove: null }

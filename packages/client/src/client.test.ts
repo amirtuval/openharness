@@ -1132,6 +1132,12 @@ describe('usage (#247)', () => {
     cost: 0.0045,
     unpriced_requests: 0,
   }
+  const zeroTotals = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  }
 
   it('reads one session’s usage from GET /v1/sessions/{id}/usage', async () => {
     const usage = {
@@ -1140,6 +1146,15 @@ describe('usage (#247)', () => {
       cost: 0.0045,
       unpriced_requests: 0,
       by_model: [entry],
+      // What the chat's helpers spent (epic #340, S8; #344) — zeroed here, because this response
+      // describes a chat that delegated nothing.
+      descendants: {
+        totals: zeroTotals,
+        cost: null,
+        unpriced_requests: 0,
+        by_model: [],
+        searches: 0,
+      },
       searches: 0,
     }
     const { client, mock } = clientWith(() => jsonResponse(usage))
@@ -1201,6 +1216,13 @@ describe('usage (#247)', () => {
       cost: 0.0045,
       unpriced_requests: 3,
       by_model: [entry, { ...entry, model: 'acme/mystery-1', cost: null, unpriced_requests: 3 }],
+      descendants: {
+        totals: zeroTotals,
+        cost: null,
+        unpriced_requests: 0,
+        by_model: [],
+        searches: 0,
+      },
       searches: 0,
     }
     const { client } = clientWith(() => jsonResponse(usage))
@@ -1219,6 +1241,13 @@ describe('usage (#247)', () => {
         cost: null,
         unpriced_requests: 2,
         by_model: [{ ...entry, cost: null, unpriced_requests: 2 }],
+        descendants: {
+          totals: zeroTotals,
+          cost: null,
+          unpriced_requests: 0,
+          by_model: [],
+          searches: 0,
+        },
         searches: 0,
       }),
     )

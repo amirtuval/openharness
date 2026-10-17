@@ -7,7 +7,12 @@ import {
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_MAX_TOOL_STEPS,
 } from '@openharness/brain'
-import { DEFAULT_PARTITION_COUNT } from '@openharness/protocol'
+import {
+  DEFAULT_MAX_AGENT_DEPTH,
+  DEFAULT_MAX_LIVE_TASKS,
+  DEFAULT_PARTITION_COUNT,
+} from '@openharness/protocol'
+import { MAX_DESCENDANT_DEPTH } from '@openharness/session'
 import { DEFAULT_KEY_CACHE_TTL_MS, envKeyProvider, gcpKmsKeyProvider } from '@openharness/vault'
 
 import type { TracingMode } from './observability/tracing'
@@ -119,6 +124,8 @@ export const ENV_VARS = {
   clearThreshold: 'OPENHARNESS_CLEAR_THRESHOLD',
   todoNudge: 'OPENHARNESS_TODO_NUDGE',
   maxToolSteps: 'OPENHARNESS_MAX_TOOL_STEPS',
+  maxAgentDepth: 'OPENHARNESS_MAX_AGENT_DEPTH',
+  maxLiveTasks: 'OPENHARNESS_MAX_LIVE_TASKS',
   logFormat: 'OPENHARNESS_LOG_FORMAT',
   tracing: 'OPENHARNESS_TRACING',
   traceSampleRate: 'OPENHARNESS_TRACE_SAMPLE_RATE',
@@ -240,6 +247,27 @@ export interface ServerConfig {
    * short of a runaway — and a value below 1 fails the boot.
    */
   readonly maxToolSteps: number
+  /**
+   * `OPENHARNESS_MAX_AGENT_DEPTH`: how deep a tree of helpers may get (epic #340, S6; #344).
+   *
+   * A top-level chat is depth 0, and a session at this depth is not offered the tools that
+   * start another one — so the default of 3 offers them at depths 0, 1 and 2, and a deployment
+   * that wants no nesting says `1`. It is the **brain's** runtime that enforces it, from the
+   * answer this config gives; a value below 1 fails the boot, because a depth of zero would
+   * take the tools away from the very chat a person started.
+   */
+  readonly maxAgentDepth: number
+  /**
+   * `OPENHARNESS_MAX_LIVE_TASKS`: how many of one root chat's descendants may be live at once
+   * (epic #340, S6; #344).
+   *
+   * Past it an `agent` call is answered with an `is_error` the model acts on instead of
+   * starting anything — a cap the model can see and work with, rather than a chat that quietly
+   * runs out of room. Live is the store's own reading (`countLiveDescendants`): a turn open, a
+   * prompt queued, or a child parked waiting for its own helpers. A value below 1 fails the
+   * boot, because it would make every `agent` call fail.
+   */
+  readonly maxLiveTasks: number
   /** `OPENHARNESS_LOG_FORMAT`: the readable one-line format, or Cloud Logging JSON (#158). */
   readonly logFormat: LogFormat
   /** `OPENHARNESS_TRACING`: where spans go — nowhere, or Cloud Trace (#158). */
@@ -462,6 +490,17 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     // The tool loop's budget (epic #303, X2): how many model requests one turn may make. At
     // least one — a turn that may make no request could not answer a message at all.
     maxToolSteps: readInteger(env, ENV_VARS.maxToolSteps, DEFAULT_MAX_TOOL_STEPS, { min: 1 }),
+    // The subagent limits (epic #340, S6; #344). A depth of at least one keeps the tools on the
+    // chat a person started, and a live cap of at least one lets a chat start a helper at all.
+    // The depth is capped at the tree walks' own ceiling (#361): a deployment allowed to build a
+    // tree deeper than `MAX_DESCENDANT_DEPTH` would get a delete that leaves descendants behind
+    // (and two stores that disagree about an orphaned child), so the configuration is where the
+    // two limits are kept consistent rather than left to a comment.
+    maxAgentDepth: readInteger(env, ENV_VARS.maxAgentDepth, DEFAULT_MAX_AGENT_DEPTH, {
+      min: 1,
+      max: MAX_DESCENDANT_DEPTH,
+    }),
+    maxLiveTasks: readInteger(env, ENV_VARS.maxLiveTasks, DEFAULT_MAX_LIVE_TASKS, { min: 1 }),
     // Observability (#158). The log format and the trace mode are a choice each, so an
     // unknown value is a boot failure naming the variable rather than a silent default; the
     // sample rate is a fraction, and 0 is meaningful (trace nothing while keeping the

@@ -31,6 +31,9 @@ import { PACKAGE_NAME as SESSION_PACKAGE_NAME } from '@openharness/session'
  *   made with the {@link ModelCredential} the request runs under.
  * - **{@link ResolveCredential}** (`./model`) — where that credential comes from: the session
  *   owner's own provider key, never the environment (epic #65, A5).
+ * - **{@link pendingNotifications}** (`./tasks`) — the background tasks a session started, what
+ *   they are doing, and the news each has for the parent model; and the durable wait a turn can
+ *   end in (epic #340, S4/S5; #343).
  * - **{@link redactSecret}** (`./redact`) — scrubbing a key out of provider error text.
  * - **{@link RetryPolicy}** (`./retry`) — how retryable failures are retried.
  * - **{@link classifyModelError}** (`./errors`) — retryable or terminal, and which
@@ -68,8 +71,10 @@ export * from './redact'
 export * from './retry'
 export * from './stuck'
 export * from './subagent'
+export * from './agents'
 export * from './manual'
 export * from './tools'
 export * from './summarize'
+export * from './tasks'
 export * from './turn'
 export * from './vertex'

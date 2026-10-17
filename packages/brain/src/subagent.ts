@@ -1,4 +1,4 @@
-import type { McpServerId, ModeToolOverride, ReasoningEffort, UserId } from '@openharness/protocol'
+import type { ModeId, ModeToolOverride, ReasoningEffort, UserId } from '@openharness/protocol'
 
 /**
  * Subagents, brain-side (epic #340): the **system prompt** a child runs with, and the
@@ -153,6 +153,15 @@ export interface SubagentParent {
   readonly reasoningEffort: ReasoningEffort | null
   /** The tool override the parent's own mode imposes, or `null` when it follows none. */
   readonly toolOverride: ModeToolOverride | null
+  /**
+   * The mode the parent follows, or `null` for a chat on a plain model (#344).
+   *
+   * The third answer a caller that creates the child **on a mode** needs: a `general-purpose`
+   * child of a chat that follows one follows the same mode (S2, "the parent, continued"), and
+   * the mode is what carries the tool and MCP-server override — the session record holds an id
+   * and nothing else, and `toolOverride` alone could not be stored on a child.
+   */
+  readonly modeId: ModeId | null
 }
 
 /**
@@ -163,19 +172,15 @@ export interface SubagentParent {
  * what a child runs is what a chat on that mode would run, and a parent that wants its helper
  * to change is a user who edits the mode they already have.
  *
- * Two spellings of the tool half, and neither is spare:
- *
- * - `toolOverride` is the **patch** the type imposes (`Mode.tools`, or the parent's own mode's
- *   for {@link GENERAL_PURPOSE_TYPE}) — what a caller that creates the child **on the mode**
- *   passes on, so the child follows it live exactly as a chat does; and
- * - `tools` and `mcpServers` are that patch **applied to the owner's settings**, which is the
- *   set a child really has: the loop's own answer (`apps/server`'s `effectiveTools` and
- *   `listMcpServersInForce`), for a caller that builds the child's turn options itself. A
- *   caller must not compute this a second way: "the tools this child has" and "the tools this
- *   request offers" are one answer, and the server is where it is computed.
- *
- * `tools` is a list of **names** and `mcpServers` a list of server ids: policies stay the
- * user's (E6), so a type says which tools a child has and never what a call to one may do.
+ * One spelling of the tool half, and the caller does not compute it: `toolOverride` is the
+ * **patch** the type imposes (`Mode.tools`, or the parent's own mode's for
+ * {@link GENERAL_PURPOSE_TYPE}) — what a caller that creates the child **on the mode**
+ * (`modeId`) passes on, so the child follows it live exactly as a chat does. The child's
+ * *effective* tool set is then the one the loop resolves for its every request, through the
+ * same `effectiveTools`/`listMcpServersInForce` a chat's request goes through (#365):
+ * "the tools this child has" and "the tools its request offers" are one answer, and computing
+ * it here would be a second one that nothing reads and nothing keeps honest. Policies stay the
+ * user's (E6) either way.
  */
 export interface ResolvedSubagentType {
   /** The type's name, as it was asked for. */
@@ -189,6 +194,18 @@ export interface ResolvedSubagentType {
   /** Appended to the child's system prompt, or `null` for no addition of its own. */
   readonly systemPromptAddition: string | null
   /**
+   * The mode the child is created **on**, so it follows it live, or `null` for a child on a
+   * plain model (#344).
+   *
+   * A type that came from a mode answers its own id; {@link GENERAL_PURPOSE_TYPE} answers the
+   * parent's ({@link SubagentParent.modeId}), because it is the parent continued. It is what
+   * makes {@link ResolvedSubagentType.toolOverride} real rather than advisory: the caller passes
+   * this id to `createSession` (with the resolved `model` as the header's fallback), and the
+   * loop then resolves the mode for the child's every request exactly as it does for a chat's —
+   * model, effort, prompt addition and the tool/MCP-server override included (#245, M6).
+   */
+  readonly modeId: ModeId | null
+  /**
    * The tool/MCP-server patch the type imposes, or `null`.
    *
    * For a mode type this is the mode's own `tools`; for {@link GENERAL_PURPOSE_TYPE} it is the
@@ -196,10 +213,6 @@ export interface ResolvedSubagentType {
    * this chat has" in the one vocabulary a tool override has.
    */
   readonly toolOverride: ModeToolOverride | null
-  /** The built-in tools the child has, by name — the patch applied to the owner's settings. */
-  readonly tools: readonly string[]
-  /** The ids of the remote MCP servers in force for the child. */
-  readonly mcpServers: readonly McpServerId[]
 }
 
 /**

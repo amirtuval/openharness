@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { isQueuedEventType } from '@openharness/protocol'
 import type {
   Agent,
   McpAuthType,
@@ -26,7 +27,7 @@ import type { ColumnType, Selectable } from 'kysely'
 
 import { timestampAt } from '../clock'
 import type { SealedProviderCredential, SealedSecret } from '../credentials'
-import { isUserEventType } from '../events'
+
 import { deepFreeze } from '../freeze'
 import type { AppendableEvent, ModelRequestUsage, PartitionSignal, ToolUseRecord } from '../store'
 
@@ -677,7 +678,9 @@ export function credentialFromRow(row: ProviderCredentialRow): SealedProviderCre
  */
 export function eventFromRow(row: EventWithClaimRow): StoredEvent {
   const payload = row.payload as AppendableEvent
-  const processed_at = isUserEventType(row.type)
+  // A queued event's `processed_at` is the claim's instant, never the column's: the column is
+  // left NULL for one, and a notification (#343) is queued exactly as a user event is.
+  const processed_at = isQueuedEventType(row.type)
     ? row.claimed_at === null
       ? null
       : timestampOf(row.claimed_at)

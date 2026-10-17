@@ -3,6 +3,7 @@ import {
   DEFAULT_PARTITION_COUNT,
   DEFAULT_USER_THEME,
   EVENT_TYPES,
+  isQueuedEventType,
   MAX_MCP_SERVERS_PER_USER,
   StoredEventSchema,
   encodeKeyCursor,
@@ -37,6 +38,7 @@ import {
   type ProviderCredential,
   type Session,
   type SessionId,
+  type SessionTaskNotificationEvent,
   type StoredEvent,
   type Supersedes,
   type SummaryModel,
@@ -77,6 +79,7 @@ import {
   isSuperseded,
   isUserEventType,
   supersessionsOf,
+  taskNotificationEvents,
   type AppendedEvent,
   type SupersessionRecord,
 } from './events'
@@ -126,6 +129,8 @@ import type {
   TurnState,
   TurnStateKind,
   Unsubscribe,
+  TaskNotificationAppend,
+  TaskNotificationInput,
   UpdateSessionRequest,
 } from './store'
 
@@ -682,6 +687,47 @@ export class InMemorySessionStore implements SessionStore {
     return { data: data.map((event) => this.#share(event)), next_page }
   }
 
+  getPendingTaskNotifications(sessionId: SessionId): Promise<SessionTaskNotificationEvent[]> {
+    const record = this.#requireSession(sessionId)
+    const ranges = this.#supersessions.get(sessionId)
+    const pending = record.events
+      .map((entry) => entry.event)
+      .filter(
+        (event): event is SessionTaskNotificationEvent =>
+          event.type === EVENT_TYPES.sessionTaskNotification &&
+          !this.#claims.has(event.id) &&
+          !isSuperseded(event, ranges),
+      )
+      .map((event) => this.#share(event))
+    return resolved(pending)
+  }
+
+  appendTaskNotification(
+    sessionId: SessionId,
+    input: TaskNotificationInput,
+  ): Promise<TaskNotificationAppend> {
+    const record = this.#requireSession(sessionId)
+    const existing = notificationWithSourceKey(record, input.sourceKey)
+    if (existing !== undefined) {
+      // Idempotent on the key (#343): the caller asked again for a notification this log
+      // already holds, so nothing is stored and the caller is told which one it is.
+      return resolved({ event: this.#share(existing), appended: false })
+    }
+    const now = this.#clock()
+    // The notification and the status it carries are **one append** (#363): a crash between two
+    // appends used to deliver the news and leave the card `running` for ever, and nothing was
+    // work for the scan to repair it. Idempotent on the key like the notification alone was.
+    const stored = this.#append(record, taskNotificationEvents(input), now)
+    const [notification] = stored
+    if (notification === undefined || notification.type !== EVENT_TYPES.sessionTaskNotification) {
+      throw new Error('the store did not return the notification it was asked to append')
+    }
+    for (const event of stored) {
+      this.#deliver(sessionId, event)
+    }
+    return resolved({ event: this.#share(notification), appended: true })
+  }
+
   getPendingUserEvents(sessionId: SessionId): Promise<UserEvent[]> {
     const record = this.#requireSession(sessionId)
     // Pending is "no claim", not "no `processed_at`": the claim is the fact, and the
@@ -1116,7 +1162,7 @@ export class InMemorySessionStore implements SessionStore {
         if (
           namedHere.has(consumed) ||
           target === undefined ||
-          !isUserEvent(target) ||
+          !isQueuedEvent(target) ||
           this.#claims.has(consumed) ||
           // A message a rewind replaced (#238) answers nothing: nothing outside a range may
           // claim into it.
@@ -1170,9 +1216,11 @@ export class InMemorySessionStore implements SessionStore {
     })
   }
 
-  /** Whether a session has work waiting: a pending user event, or an open turn. */
+  /** Whether a session has work waiting: a pending event, an open turn, or a pause to resume. */
   #needsWork(record: SessionRecord): boolean {
     const ranges = this.#supersessions.get(record.session.id)
+    // A **queued** event of the user's: a message or an interrupt (#343 widened the store's
+    // queued family by a task's news, which is deliberately not this — see the last line).
     if (this.#hasPendingUserEvent(record) || turnStateOf(record).state !== 'idle') {
       return true
     }
@@ -1181,7 +1229,75 @@ export class InMemorySessionStore implements SessionStore {
     // a confirmation processed — it is not a queued user event, and the session is idle — so
     // nothing else would find it; without this the chat stays stuck until the next message.
     const events = record.events.map((entry) => entry.event)
-    return answersPause(events, ranges)
+    if (answersPause(events, ranges)) {
+      return true
+    }
+    // A task wait past its deadline (epic #340, S5; #343): the last turn ended
+    // `waiting_on_tasks`, and the deadline it recorded has passed. Nothing else would reach
+    // such a session — the notification it waits for may never come — so recovery is what
+    // resumes it and answers the wait as timed out.
+    if (pastDeadlineWait(events, ranges, this.#clock()) || this.#undeliveredTurn(record)) {
+      return true
+    }
+    // A background task's news (epic #340, S4; #343) is work — the parent reacts on its own —
+    // **unless the session is paused on the user**. A notification answers no question: the
+    // turn it started would find the same `ask_user`/`ask` call waiting, pause again, and the
+    // news would still be pending, so this scan would find work again and the session would
+    // spin. The pause stands until the user answers, and the turn their answer starts is the
+    // one that folds the news in (the `requires_action` road in `docs/LEARNINGS.md`).
+    return this.#hasPendingNotification(record) && pauseOf(events) === null
+  }
+
+  /**
+   * Whether a queued `session.task_notification` is waiting for a turn (epic #340, S4; #343).
+   *
+   * The sibling of {@link #hasPendingUserEvent}, and asked separately on purpose: a
+   * notification is addressed to the parent **model**, and whether delivering it is *work* is
+   * a second question (see {@link #needsWork}).
+   */
+  #hasPendingNotification(record: SessionRecord): boolean {
+    const ranges = this.#supersessions.get(record.session.id)
+    return record.events.some(
+      (entry) =>
+        entry.event.type === EVENT_TYPES.sessionTaskNotification &&
+        !this.#claims.has(entry.event.id) &&
+        !isSuperseded(entry.event, ranges),
+    )
+  }
+
+  /**
+   * Whether this session is a **child** whose finished turn its parent was never told about
+   * (epic #340, S4; #344).
+   *
+   * A child's turn end owes its parent a notification keyed `<child_session_id>:<idle seq>`,
+   * and the write is the child's own — so a process that died between the turn's end and the
+   * write leaves an idle child holding news nobody has. Nothing else reaches it: the turn *did*
+   * end, so the log holds no queued event and no open turn, and the parent is idle waiting for
+   * news that will never come. The delivery is the brain's (a turn on the child writes the
+   * notification and nothing to its own log); this is what finds the child, the way
+   * {@link pastDeadlineWait} finds a pause nothing else would resume.
+   *
+   * Only a turn that **ended** counts. A child parked in `agent_wait` is still working, and a
+   * wait past its deadline is the case above.
+   */
+  #undeliveredTurn(record: SessionRecord): boolean {
+    const { session } = record
+    if (session.parent_session_id === null || session.parent_task_id === null) {
+      return false
+    }
+    const parent = this.#sessions.get(session.parent_session_id)
+    if (parent === undefined) {
+      return false
+    }
+    const idle = endedWorkingTurn(record.events.map((entry) => entry.event))
+    if (idle === null) {
+      return false
+    }
+    const key = `${session.id}:${idle.seq}`
+    return !parent.events.some(
+      (entry) =>
+        entry.event.type === EVENT_TYPES.sessionTaskNotification && entry.event.source_key === key,
+    )
   }
 
   /**
@@ -1214,7 +1330,13 @@ export class InMemorySessionStore implements SessionStore {
       return true
     }
     const events = record.events.map((entry) => entry.event)
-    return pauseOf(events) !== null || this.#hasPendingUserEvent(record)
+    return (
+      pauseOf(events) !== null ||
+      // A child parked in a **task** wait is working too (#343): S5's pause is the same kind,
+      // and a cap that could not see one would not be a cap.
+      taskWaitPause(events) !== null ||
+      this.#hasPendingUserEvent(record)
+    )
   }
 
   /**
@@ -1534,7 +1656,7 @@ function storedEventFrom(input: AppendableEvent, assigned: AssignedEventFields):
     ...storedPayload(input, assigned),
     id: assigned.id,
     seq: assigned.seq,
-    processed_at: isUserEventType(input.type) ? null : assigned.processedAt,
+    processed_at: isQueuedEventType(input.type) ? null : assigned.processedAt,
   })
 }
 
@@ -1573,11 +1695,36 @@ function isUserEvent(event: StoredEvent): event is UserEvent {
 }
 
 /**
- * The `processed_at` a reader sees: a user event's comes from the claim that took it — `null`
+ * Whether a stored event is one a turn claims: the user's own, or a task's notification
+ * (epic #340, S4; #343). See {@link isQueuedEventType}.
+ */
+function isQueuedEvent(event: StoredEvent): boolean {
+  return isQueuedEventType(event.type)
+}
+
+/** The notification this session's log already holds under `sourceKey`, if any (#343). */
+function notificationWithSourceKey(
+  record: SessionRecord,
+  sourceKey: string,
+): SessionTaskNotificationEvent | undefined {
+  for (const entry of record.events) {
+    const event = entry.event
+    if (event.type === EVENT_TYPES.sessionTaskNotification && event.source_key === sourceKey) {
+      return event
+    }
+  }
+  return undefined
+}
+
+/**
+ * The `processed_at` a reader sees: a queued event's comes from the claim that took it — `null`
  * while none has — and every other event keeps the one the store wrote when it appended it.
+ *
+ * Queued means the user's own events and, since #343, a background task's notification; see
+ * {@link isQueuedEventType}.
  */
 function derivedProcessedAt(event: StoredEvent, claim: ClaimRecord | undefined): Timestamp | null {
-  if (isUserEvent(event)) {
+  if (isQueuedEventType(event.type)) {
     return claim === undefined ? null : timestampAt(claim.claimedAtMs)
   }
   return event.processed_at
@@ -1660,22 +1807,142 @@ function pauseOf(
   return lastStatus.stop_reason
 }
 
+/**
+ * The **task wait** a log is sitting on (epic #340, S5; #343): its last status event is a
+ * `session.status_idle` whose stop reason is `waiting_on_tasks` — or `null` when the log's last
+ * turn ended any other way.
+ *
+ * A task wait is a pause like {@link pauseOf}'s and about something else: it holds no lease and
+ * no slot either, and it is not finished — a notification, a `user.message` or its own deadline
+ * continues it. Both readings are asked separately because they answer different questions:
+ * {@link answersPause} wants the calls a confirmation could answer, `#isLive` wants "is this
+ * session still working" (a child parked in `agent_wait` is), and
+ * {@link pastDeadlineWait} wants the deadline.
+ */
+function taskWaitPause(
+  events: readonly StoredEvent[],
+): { readonly event: IdleEvent; readonly deadline: string } | null {
+  const lastStatus = findLastStatusEvent(events)
+  if (
+    lastStatus === null ||
+    lastStatus.type !== EVENT_TYPES.sessionStatusIdle ||
+    lastStatus.stop_reason.type !== 'waiting_on_tasks'
+  ) {
+    return null
+  }
+  return { event: lastStatus, deadline: lastStatus.stop_reason.deadline }
+}
+
+/**
+ * The `session.status_idle` that **ended** a log's newest turn, or `null` when nothing ended.
+ *
+ * A pause is not an end (epic #340, S4/S5; #309, #343): a turn that stopped `requires_action` or
+ * `waiting_on_tasks` is still being worked on, and announcing it would tell the parent something
+ * it is not. That is why this asks for `end_turn` rather than for any idle.
+ */
+function endedTurn(events: readonly StoredEvent[]): IdleEvent | null {
+  const lastStatus = findLastStatusEvent(events)
+  if (
+    lastStatus === null ||
+    lastStatus.type !== EVENT_TYPES.sessionStatusIdle ||
+    lastStatus.stop_reason.type !== 'end_turn'
+  ) {
+    return null
+  }
+  return lastStatus
+}
+
+/** A stored `session.status_idle`, for the two readings above. */
+type IdleEvent = Extract<StoredEvent, { readonly type: 'session.status_idle' }>
+
+/**
+ * Whether the task wait this log is sitting on has passed its deadline.
+ *
+ * The fourth thing the work scan looks for, and the same kind of fact as {@link answersPause}:
+ * the last turn ended `waiting_on_tasks`, its deadline is at or before the store's clock, and
+ * nothing has since answered it. Nothing else would reach such a session — a wait holds no
+ * lease, no slot and no timer that outlives the process — so recovery is what resumes it and
+ * answers the wait as timed out.
+ *
+ * Only the **newest** status event is read, which is what tells a wait still open from one
+ * already answered: resolving a wait writes its result and carries the turn on, so the log's
+ * last status is a later idle (or a running) event and this reads nothing. A wait a rewind
+ * covered is not one of these either (#238).
+ */
+function pastDeadlineWait(
+  events: readonly StoredEvent[],
+  ranges: readonly SupersessionRecord[] | undefined,
+  now: number,
+): boolean {
+  const pause = taskWaitPause(events)
+  if (pause === null || isSuperseded(pause.event, ranges)) {
+    return false
+  }
+  const deadline = Date.parse(pause.deadline)
+  return Number.isFinite(deadline) && deadline <= now
+}
+
 /** The last status event in a log, or `null` when the log has none. */
 function findLastStatusEvent(events: readonly StoredEvent[]): StoredEvent | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
-    if (event === undefined) {
-      continue
-    }
-    if (
-      event.type === EVENT_TYPES.sessionStatusRunning ||
-      event.type === EVENT_TYPES.sessionStatusIdle ||
-      event.type === EVENT_TYPES.sessionStatusRescheduled
-    ) {
+    if (event !== undefined && isStatusEvent(event)) {
       return event
     }
   }
   return null
+}
+
+/** Whether an event is one of the three the loop writes around a turn. */
+function isStatusEvent(event: StoredEvent): boolean {
+  return (
+    event.type === EVENT_TYPES.sessionStatusRunning ||
+    event.type === EVENT_TYPES.sessionStatusIdle ||
+    event.type === EVENT_TYPES.sessionStatusRescheduled
+  )
+}
+
+/**
+ * The `session.status_idle` that ended a log's newest turn **that did something**, or `null`
+ * (#371).
+ *
+ * {@link endedTurn} answers "did a turn end?", and this narrows it by one case: a turn with an
+ * **empty window** — nothing between the status event it opened on and the idle that ended it —
+ * that also **answered nothing** is not a turn that ended. It is what an interrupt written into
+ * an idle session produces: the event is pending, the turn opens (`session.status_running`) and
+ * the loop's first check ends it with nothing in flight, so its idle claims the interrupt and
+ * nothing else.
+ *
+ * Nothing ran, so a child owes its parent no announcement — and the scan must not keep waking it
+ * for news that does not exist. A turn with an empty window can still have done something: a
+ * child's first turn is ended by the idle that claims the prompt it answered, and that is a turn
+ * the parent has to hear about.
+ */
+function endedWorkingTurn(events: readonly StoredEvent[]): IdleEvent | null {
+  const idle = endedTurn(events)
+  if (idle === null) {
+    return null
+  }
+  const index = events.findIndex((event) => event.seq === idle.seq)
+  let opened: number = -1
+  for (let at = index - 1; at >= 0; at -= 1) {
+    const event = events[at]
+    if (event !== undefined && isStatusEvent(event)) {
+      opened = at
+      break
+    }
+  }
+  if (index > opened + 1) {
+    return idle
+  }
+  const claims = new Set<string>(idle.consumes ?? [])
+  const answered = events.some(
+    (event) =>
+      claims.has(event.id) &&
+      (event.type === EVENT_TYPES.userMessage ||
+        event.type === EVENT_TYPES.sessionTaskNotification),
+  )
+  return answered ? idle : null
 }
 
 /**
