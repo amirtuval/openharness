@@ -1,6 +1,7 @@
 import {
   taskActivityLabel,
   taskCardStatus,
+  taskIsLive,
   type ModelPriceLookup,
   type TaskCard,
   type TaskCardStatus,
@@ -10,7 +11,7 @@ import { Check, ChevronRight, CircleAlert, CircleSlash, Loader2, Pause, Square }
 
 import { useTaskActivity } from '../../hooks/use-task-activity'
 import { formatCostTotal, formatCount } from '../../lib/format'
-import { taskIsLive, taskMessageLabel, taskTokens, taskTypeLabel } from '../../lib/tasks'
+import { taskMessageLabel, taskTokens, taskTypeLabel } from '../../lib/tasks'
 import { chatHash } from '../../lib/router'
 import { cn } from '../../lib/utils'
 import { Badge } from '../ui/badge'

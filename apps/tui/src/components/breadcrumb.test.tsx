@@ -68,6 +68,32 @@ describe('the breadcrumb of a task’s own chat (#347)', () => {
     ).trimEnd()
     expect(frame.length).toBeLessThanOrEqual(12)
   })
+
+  it('uses the terminal’s own width, not a fixed eighty (#368)', () => {
+    // The line is cut at its **tail** — the chat the reader is in, the one part it exists to
+    // place. `BreadcrumbLine` defaulted `width` to 80 and the chat screen passes none, so a
+    // 100-column terminal (which is what a render under `ink-testing-library` reports) still lost
+    // the end of the chain. Every other component here reads `stdout.columns`; this pins that
+    // this one does too, since the caller hands it no width.
+    const root = named('the root chat that started it')
+    const middle = { ...makeChildSession(root), title: 'a researcher helper chat' }
+    const child = { ...makeChildSession(middle), title: 'a helper still working now' }
+    const line = textOf([root, middle, child])
+    // Wider than the old default of 80, and still inside the 100 a test render reports — so the
+    // line has to survive whole, and would not have under the fixed width.
+    expect(line.length).toBeGreaterThan(80)
+    expect(line.length).toBeLessThanOrEqual(100)
+
+    const frame = (
+      render(
+        <ThemeProvider theme={DARK}>
+          <BreadcrumbLine chain={[root, middle, child]} />
+        </ThemeProvider>,
+      ).lastFrame() ?? ''
+    ).trimEnd()
+
+    expect(frame).toBe(line)
+  })
 })
 
 /** How the client shortens a handle: `sesn_…<last 6>`. */

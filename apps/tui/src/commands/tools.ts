@@ -1,5 +1,7 @@
 import {
   mcpToolPolicyBody,
+  NO_ASK_TOOL_NAMES,
+  SUBAGENT_ASK_NOTE,
   toolAvailabilityNote,
   toolPolicyNote,
   type Client,
@@ -50,6 +52,17 @@ export async function runTools(client: Client, io: CommandIo, patch: ToolsPatch)
     if (current === undefined) {
       io.stderr(`oh: no tool named ${patch.name} is registered on this server.`)
       return 1
+    }
+
+    // **A subagent call cannot be asked about** (epic #340, S9; issue #368). Four of the five
+    // subagent tools are kept out of the transcript's tool calls — a card stands in for the
+    // `agent` call, and the other three are task machinery — so there is no prompt any client
+    // could draw, and the server refuses the write. The settings screen offers the tool without
+    // the value; this command refuses it rather than sending a write that comes back refused.
+    // `agent_wait` is unaffected: its own pause (the tasks it named) outranks the permission.
+    if (patch.policy === 'ask' && NO_ASK_TOOL_NAMES.includes(patch.name)) {
+      io.stderr(`oh: ${patch.name} cannot take \`ask\`. ${SUBAGENT_ASK_NOTE}`)
+      return 2
     }
 
     // A remote MCP tool's on/off is its server's, so `--on`/`--off` name the wrong thing for

@@ -175,9 +175,13 @@ export const SessionSchema = z.object({
    * // extension: the top-level chat this session belongs to — its own id when it *is* the
    * top-level chat (epic #340, S3).
    *
-   * Every session in a tree shares one root, which is what makes "the live descendants of a
-   * root chat" one indexed query (S6's cap, #344) rather than a walk. Read-only, and not
-   * client-settable: the store derives it from the parent at creation.
+   * Every session in a tree shares one root, which is what says which tree a session belongs
+   * to: S6's live cap is asked **from** the root (`countLiveDescendants(root_session_id)`), and
+   * "every live descendant of this root" is one walk of the subtree. It is **not** a filter any
+   * query makes: a tree read is a recursion over `parent_session_id`, because a root column
+   * cannot answer "every descendant of *this* session" — the branch under a middle child — and
+   * the walks are what `listDescendants`, the live count and the delete cascade share.
+   * Read-only, and not client-settable: the store derives it from the parent at creation.
    */
   root_session_id: SessionIdSchema,
   /**

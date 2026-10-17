@@ -1,5 +1,5 @@
 import type { ToolRegistry, ToolResult, ToolRunContext } from '@openharness/hands'
-import { createToolRegistry, errorResult } from '@openharness/hands'
+import { cannotAskForApproval, createToolRegistry, errorResult } from '@openharness/hands'
 import type {
   JsonValue,
   ModeToolOverride,
@@ -553,7 +553,13 @@ function decisionFor(
   approved: ReadonlySet<string>,
 ): CallDecision {
   const tool = registry.get(name)
-  const permission = settings?.[name]?.permission ?? tool?.permission ?? 'deny'
+  const stored = settings?.[name]?.permission ?? tool?.permission ?? 'deny'
+  // A stored `ask` on a subagent tool is read as `allow` (#363): no client renders a subagent
+  // tool call — the parent's transcript draws a task **card**, and a child's transcript is the
+  // child's own — so a pause on one could never be answered. The rule is #335's, one tool
+  // family over: the switch that could never ask is not honoured, `PUT /v1/me/tools` refuses a
+  // new one, and the call is recorded `allow` because that is the decision it really ran under.
+  const permission = stored === 'ask' && cannotAskForApproval(name) ? 'allow' : stored
   if (permission === 'deny') {
     return { permission, waiting: false }
   }

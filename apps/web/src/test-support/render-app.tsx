@@ -7,7 +7,6 @@ import { render, screen, type RenderResult } from '@testing-library/react'
 import type userEvent from '@testing-library/user-event'
 
 import { App } from '../App'
-import { honourSessionTree } from './session-tree'
 
 /**
  * Render the app against a fake server.
@@ -27,10 +26,7 @@ export function renderApp(
 ): RenderResult {
   const hash = options.hash ?? `#/s/${fake.session.id}`
   window.history.replaceState(null, '', `${options.search ?? ''}${hash}`)
-  // The sidebar nests each chat's subagents, and it asks for them the way the server is asked
-  // (#346): the fake answers the whole list to any filter, so it is taught the one query it does
-  // not model — see `test-support/session-tree.ts`.
-  return render(<App client={honourSessionTree(fake)} fakeClient={options.fakeClient} />)
+  return render(<App client={fake} fakeClient={options.fakeClient} />)
 }
 
 /**
@@ -42,7 +38,7 @@ export function renderApp(
  * point.
  */
 export function makeFake(options: FakeClientOptions = {}): FakeClient {
-  return honourSessionTree(createFakeClient(options))
+  return createFakeClient(options)
 }
 
 /**

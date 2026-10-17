@@ -1871,6 +1871,40 @@ export function runSessionStoreConformance(
         expect((await store.getPendingTaskNotifications(session.id)).length).toBe(1)
       })
 
+      it('writes the status beside the notification, once, in one append (#363)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const taskId = newTaskId()
+        const input = {
+          taskId,
+          kind: 'result' as const,
+          text: 'the child finished',
+          sourceKey: `${taskId}:7`,
+          status: 'idle' as const,
+        }
+        const first = await store.appendTaskNotification(session.id, input)
+        expect(first.appended).toBe(true)
+        const after = (await store.listEventsUnscoped(session.id)).data
+        const news = after.findIndex((event) => event.type === EVENT_TYPES.sessionTaskNotification)
+        const statuses = after.flatMap((event, index) =>
+          event.type === EVENT_TYPES.sessionTaskStatus ? [{ index, event }] : [],
+        )
+        // The status lands **with** the notification, after it: one sequel of events, so a
+        // reader of the parent's log sees the news and the card move together.
+        expect(news).toBeGreaterThanOrEqual(0)
+        expect(statuses).toHaveLength(1)
+        expect(statuses[0]?.index).toBe(news + 1)
+        expect(statuses[0]?.event.status).toBe('idle')
+        // A second call under the key stores **neither**: the status is exactly-once by the
+        // notification's own idempotency, which is the crash window #363 closed.
+        const second = await store.appendTaskNotification(session.id, input)
+        expect(second.appended).toBe(false)
+        const again = (await store.listEventsUnscoped(session.id)).data.filter(
+          (event) => event.type === EVENT_TYPES.sessionTaskStatus,
+        )
+        expect(again).toHaveLength(1)
+      })
+
       it('stores two notifications under different keys, in seq order', async () => {
         const { store } = await setup()
         const { session } = await seed(store)
@@ -3840,6 +3874,50 @@ export function runSessionStoreConformance(
         // status event is a later idle — the deadline is only read while it is the newest one.
         await append(store, session.id, [toolResult(call, false), statusIdle()])
         expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+      })
+
+      it('leaves a session paused on the user waiting when a task reports (#363)', async () => {
+        const { store } = await setup()
+        const { session } = await seed(store)
+        const call = newEventId()
+        await append(store, session.id, [statusRunning(), toolUse(call, 'ask_user')])
+        await append(store, session.id, [statusPausedFor([call])])
+        // A helper finishing is news for the model, not an answer to the question: the pause
+        // stands. Waking the session for it would find the same call waiting, pause again with
+        // the news still pending, and find work again — a spin, not a recovery.
+        const taskId = newTaskId()
+        await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${taskId}:1`,
+        })
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+        // The user's own message is what makes the session work again — and the news rides the
+        // turn that message starts, exactly as any other queued event would.
+        await append(store, session.id, [userMessage('carry on')])
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
+      })
+
+      it('finds a task wait when a task reports, paused on tasks rather than on the user (#363)', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const call = newEventId()
+        await append(store, session.id, [statusRunning(), toolUse(call, 'agent_wait')])
+        await append(store, session.id, [
+          statusWaitingFor([newTaskId()], clock.currentMs + 10 * SECOND),
+        ])
+        // A wait on tasks is not the user's pause: nothing about it waits for a person, and a
+        // notification is exactly what resolves it, so the news **is** work.
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+        const taskId = newTaskId()
+        await store.appendTaskNotification(session.id, {
+          taskId,
+          kind: 'result',
+          text: 'done',
+          sourceKey: `${taskId}:1`,
+        })
+        expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([session.id])
       })
 
       it('leaves out sessions with nothing to do', async () => {

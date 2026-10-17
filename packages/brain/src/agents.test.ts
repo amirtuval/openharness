@@ -6,6 +6,7 @@ import {
   AGENT_TOOL_NAME,
   EVENT_TYPES,
   MESSAGE_PARENT_TOOL_NAME,
+  SESSION_TITLE_MAX_LENGTH,
   TASK_WAIT_TOOL_NAME,
   newTaskId,
   ulid,
@@ -24,6 +25,7 @@ import { z } from 'zod'
 
 import {
   EMPTY_TURN_RESULT,
+  RESTARTED_TURN_RESULT,
   STOPPED_TURN_RESULT,
   childTurnDelivery,
   childTaskParent,
@@ -251,10 +253,12 @@ describe('the tools a session is offered (S5/S6; #344)', () => {
     expect(JSON.stringify(agent)).toContain(GENERAL_PURPOSE_TYPE)
   })
 
-  it('leaves the registry the host built exactly as it was when no runtime is wired', async () => {
-    // A deployment with no subagents must not lose a tool of one of those names: the test hooks
-    // register `agent_wait` for the mock model without a runtime, and the loop still recognises
-    // it there (A3's own tests are the other half of this).
+  it('offers the five to nobody when no runtime is wired (#365)', async () => {
+    // A deployment with no `SubagentRuntime` has no subagents: the five are taken out of the
+    // offer even though the process registry carries them (a settings screen lists them, and a
+    // mode can override one). Offering them would hand a chat four calls whose handlers can only
+    // answer `HARNESS_ANSWERED` — and a live `agent_wait`, which parks the turn for its whole
+    // deadline with no task in existence to resolve it.
     const { store, sessionId } = await newSession([message('hi')])
     const wait: ToolDefinition = {
       name: TASK_WAIT_TOOL_NAME,
@@ -263,18 +267,53 @@ describe('the tools a session is offered (S5/S6; #344)', () => {
       permission: 'allow',
       run: () => textResult('answered by the log'),
     }
+    const keep: ToolDefinition = {
+      name: 'web_fetch',
+      description: 'Fetch.',
+      inputSchema: z.object({}),
+      permission: 'allow',
+      run: () => textResult('fetched'),
+    }
     const model = mockModel({ text: ['Done.'] })
     await runTurn(sessionId, {
       store,
       model: model.factory,
       resolveCredential: resolveTestCredential,
-      tools: createToolRegistry([wait]),
+      tools: createToolRegistry([wait, keep]),
     })
-    expect((model.calls[0]?.tools ?? []).map((tool) => tool.name)).toContain(TASK_WAIT_TOOL_NAME)
+    const offered = (model.calls[0]?.tools ?? []).map((tool) => tool.name)
+    // The host's own tools are untouched — only the five go.
+    expect(offered).toContain('web_fetch')
+    expect(offered).not.toContain(TASK_WAIT_TOOL_NAME)
   })
 })
 
 describe('starting a helper (S3/S4/S5; #344)', () => {
+  it('runs an `agent` call a stored `ask` policy would pause on (#363)', async () => {
+    // No client renders a subagent tool call — the parent's transcript draws a task **card**, and
+    // a child's transcript is the child's own — so an `ask` on one could never be answered. The
+    // loop reads a stored one as `allow`, exactly as #335 reads one on a provider-native search:
+    // the call runs, and the log records the permission it really ran under.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const model = mockModel({ toolCalls: [START] }, { text: ['Started it.'] })
+    const outcome = await runTurn(sessionId, {
+      store,
+      model: model.factory,
+      resolveCredential: resolveTestCredential,
+      subagents: deployment,
+      toolSettings: () => ({ [AGENT_TOOL_NAME]: { enabled: true, permission: 'ask' } }),
+    })
+
+    expect(outcome).toEqual({ outcome: 'idle' })
+    const log = await logOf(store, sessionId)
+    expect(of(log, EVENT_TYPES.agentToolUse)[0]).toMatchObject({
+      name: AGENT_TOOL_NAME,
+      evaluated_permission: 'allow',
+    })
+    expect(starts(log).size).toBe(1)
+  })
+
   it('creates a child session and answers its handle at once', async () => {
     const { store, sessionId } = await newSession([message('start a helper')])
     const { runtime: deployment, signal } = runtime()
@@ -376,6 +415,236 @@ describe('starting a helper (S3/S4/S5; #344)', () => {
     expect(await store.listDescendants(sessionId, { ownerId: 'user_brain_tests' })).toEqual([
       first.id,
     ])
+  })
+
+  it('titles the child with the description its parent gave it (epic #340)', async () => {
+    // The bug the sidebar showed: a child was created with no title at all, so a list of chats
+    // had nothing to label it with but its **model's** name. The description the parent model
+    // wrote in its `agent` call is the name of the work, which is what the row should say.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    await turn(store, sessionId, [{ toolCalls: [START] }, { text: ['Started it.'] }], deployment)
+
+    const log = await logOf(store, sessionId)
+    const child = await childOf(store, log, sessionId)
+    expect(child.title).toBe('Check the rewind path')
+  })
+
+  it('normalises the description the way a first message is (epic #340)', async () => {
+    // A description is free text a model wrote: it may open with blank lines, wrap, and be
+    // padded with tabs. One clean line is what a title is, so the derivation the server uses
+    // for a chat's first message is the one a child gets.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    await turn(
+      store,
+      sessionId,
+      [
+        {
+          toolCalls: [
+            {
+              name: AGENT_TOOL_NAME,
+              input: {
+                ...START.input,
+                description: '\n  \nCheck\t\tthe   rewind path\nand say what it did  ',
+              },
+            },
+          ],
+        },
+        { text: ['Started it.'] },
+      ],
+      deployment,
+    )
+
+    const log = await logOf(store, sessionId)
+    const child = await childOf(store, log, sessionId)
+    expect(child.title).toBe('Check the rewind path')
+  })
+
+  it('falls back to the type’s name when the description has no text in it (#380)', async () => {
+    // `AgentToolInputSchema`'s `min(1)` counts UTF-16 units, so a blank description — a space, a
+    // newline — passes the tool's schema and `session.task_started`'s alike, and
+    // `deriveSessionTitle` then finds no non-empty line and answers `null` (never `''`). A child
+    // stored untitled is a row a client can only label with its **model's** name, which is the
+    // bug #379 fixed; the type's name is the fallback, because it is always there and it names
+    // the helper better than the model does.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    await turn(
+      store,
+      sessionId,
+      [
+        {
+          toolCalls: [{ name: AGENT_TOOL_NAME, input: { ...START.input, description: ' \n\t ' } }],
+        },
+        { text: ['Started it.'] },
+      ],
+      deployment,
+    )
+
+    const child = await childOf(store, await logOf(store, sessionId), sessionId)
+    expect(child.title).toBe(RESEARCHER.name)
+  })
+
+  it('takes a description at the protocol’s own bound whole (epic #340)', async () => {
+    // A description can never be *longer* than a title may be: the tool's schema caps it at
+    // `TASK_DESCRIPTION_MAX_LENGTH` and `session.task_started` enforces the same 500, both of
+    // which are `SESSION_TITLE_MAX_LENGTH` — so the longest one a model can give is exactly a
+    // title's length and is kept whole (the cut itself is asserted where the rule lives,
+    // `@openharness/protocol`'s `titles.test.ts`).
+    const description = 'y'.repeat(SESSION_TITLE_MAX_LENGTH)
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    await turn(
+      store,
+      sessionId,
+      [
+        { toolCalls: [{ name: AGENT_TOOL_NAME, input: { ...START.input, description } }] },
+        { text: ['Started.'] },
+      ],
+      deployment,
+    )
+
+    const log = await logOf(store, sessionId)
+    const child = await childOf(store, log, sessionId)
+    expect(child.title).toBe(description)
+  })
+})
+
+describe('nesting (S6; #344)', () => {
+  /** A session below `parent`, as the tree stores it (the store derives root and depth). */
+  async function nestedChild(
+    store: InMemorySessionStore,
+    parent: Session,
+  ): Promise<{ child: Session; taskId: TaskId }> {
+    const taskId = newTaskId()
+    const child = await store.createSession(null, {
+      ownerId: 'user_brain_tests',
+      interactive: false,
+      parentSessionId: parent.id,
+      parentTaskId: taskId,
+      model: { id: 'anthropic/claude-haiku-4-5' },
+      initial_events: [
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'nested work' }] },
+      ],
+    })
+    await store.appendEvents(parent.id, [
+      {
+        type: EVENT_TYPES.sessionTaskStarted,
+        task_id: taskId,
+        kind: 'subagent',
+        child_session_id: child.id,
+        description: 'A nested helper',
+      },
+    ])
+    return { child, taskId }
+  }
+
+  it('offers a depth-1 child the parent-side tools through a turn, and lets it start a grandchild', async () => {
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const { child } = await childOfParent(store, sessionId)
+    expect(child.depth).toBe(1)
+
+    const { model } = await turn(
+      store,
+      child.id,
+      [{ toolCalls: [START] }, { text: ['Nested.'] }],
+      deployment,
+    )
+    // A child below the cap is offered what starts another helper **and** the tool that reaches
+    // up (S6): nesting is allowed, and bounded by `maxDepth` alone.
+    expect((model.calls[0]?.tools ?? []).map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([
+        AGENT_TOOL_NAME,
+        AGENT_MESSAGE_TOOL_NAME,
+        TASK_WAIT_TOOL_NAME,
+        AGENT_STOP_TOOL_NAME,
+        MESSAGE_PARENT_TOOL_NAME,
+      ]),
+    )
+
+    // And it really starts one: the grandchild is a session below the child, one level deeper,
+    // hanging off the **root** the whole tree shares.
+    const grandchild = await childOf(store, await logOf(store, child.id), child.id)
+    expect(grandchild).toMatchObject({
+      parent_session_id: child.id,
+      root_session_id: sessionId,
+      depth: 2,
+      interactive: false,
+    })
+  })
+
+  it('counts the live cap from the ROOT, so a nesting level cannot overrun it (S6)', async () => {
+    // The cap is on a tree, not on a level. This deployment allows one live helper per root
+    // chat, and the depth-1 child **is** that live helper (its own turn is open) — so a count
+    // taken from the child's own id would see an empty subtree and let it start a grandchild
+    // over the limit the root has already reached.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime({ maxLiveTasks: 1 })
+    const { child } = await childOfParent(store, sessionId)
+
+    const { model } = await turn(
+      store,
+      child.id,
+      [{ toolCalls: [START] }, { text: ['Nested.'] }],
+      deployment,
+    )
+
+    const result = of(await logOf(store, child.id), EVENT_TYPES.agentToolResult)[0]
+    expect(resultText(result)).toContain('is the limit')
+    expect(model.calls).toHaveLength(2)
+    // Nothing was started: no `session.task_started` in the child's log, no session below it.
+    expect(starts(await logOf(store, child.id)).size).toBe(0)
+    expect(await store.listDescendants(child.id, { ownerId: 'user_brain_tests' })).toEqual([])
+  })
+
+  it('sends a depth-2 note to its immediate parent, not to the root', async () => {
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment, signal } = runtime()
+    const { child } = await childOfParent(store, sessionId)
+    const { child: grandchild, taskId } = await nestedChild(store, child)
+
+    await turn(
+      store,
+      grandchild.id,
+      [
+        { toolCalls: [{ name: MESSAGE_PARENT_TOOL_NAME, input: { text: 'Halfway.' } }] },
+        { text: ['Noted.'] },
+      ],
+      deployment,
+    )
+
+    const note = of(await logOf(store, child.id), EVENT_TYPES.sessionTaskNotification)[0]
+    expect(note).toMatchObject({ task_id: taskId, kind: 'message', text: 'Halfway.' })
+    // The root was not told: a note goes up **one** level, to the chat that started this one.
+    expect(await store.getPendingTaskNotifications(sessionId)).toEqual([])
+    expect(signal).toHaveBeenCalledWith(child.id, 'work')
+  })
+
+  it('offers a session at the cap nothing that starts work', async () => {
+    const { store, sessionId } = await newSession([message('start a helper')])
+    // Two levels below the top is the cap by default, so a depth-3 session is the deepest a tree
+    // may get — and it is offered only the tool that reaches up (S6).
+    const { runtime: deployment } = runtime({ maxDepth: 3 })
+    const { child } = await childOfParent(store, sessionId)
+    const { child: grandchild } = await nestedChild(store, child)
+    const { child: greatGrandchild } = await nestedChild(store, grandchild)
+    expect(greatGrandchild.depth).toBe(3)
+
+    const { model } = await turn(store, greatGrandchild.id, [{ text: ['Done.'] }], deployment)
+    const offered = (model.calls[0]?.tools ?? []).map((tool) => tool.name)
+    expect(offered).toContain(MESSAGE_PARENT_TOOL_NAME)
+    // Nothing that starts, steers or stops work — and nothing that waits on it. (A model whose
+    // provider has a native search is offered that one; it is not a subagent tool.)
+    for (const name of [
+      AGENT_TOOL_NAME,
+      AGENT_MESSAGE_TOOL_NAME,
+      TASK_WAIT_TOOL_NAME,
+      AGENT_STOP_TOOL_NAME,
+    ]) {
+      expect(offered).not.toContain(name)
+    }
   })
 })
 
@@ -806,8 +1075,10 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
       status: 'stopped',
     })
 
-    // A turn aborted by a signal with no user event written for it — what `agent_stop` sends the
-    // child — records the same stop as an `interrupted` span end.
+    // A turn aborted by a signal with **no event** for it is not a user stop (#378): a rolling
+    // deploy's drain and a shutdown abort exactly this way, and the log records no human intent
+    // for them. The parent is told what really happened — the server interrupted the turn, and
+    // the helper can be continued — and the card does not move to `stopped`.
     const aborted = {
       id: 'sevt_s',
       type: EVENT_TYPES.modelRequestEnd,
@@ -818,9 +1089,18 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
 
     expect(childTurnDelivery([running, aborted, idle], child)).toEqual({
       kind: 'result',
-      text: STOPPED_TURN_RESULT,
+      text: RESTARTED_TURN_RESULT,
       sourceKey: 'sesn_child:4',
-      status: 'stopped',
+      status: 'idle',
+    })
+
+    // ...and the partial output the aborted turn had produced is kept in the sentence, exactly
+    // as a user stop's is: what the helper said is not thrown away because the server went away.
+    expect(childTurnDelivery([running, reply, aborted, idle], child)).toEqual({
+      kind: 'result',
+      text: `${RESTARTED_TURN_RESULT} Its partial output: Half a report.`,
+      sourceKey: 'sesn_child:4',
+      status: 'idle',
     })
   })
 
@@ -1022,6 +1302,118 @@ describe('what a child’s turn owes its parent (S4; #344)', () => {
     )
   })
 
+  it('announces a turn the **server** aborted as the server’s doing, not as a user stop (#378)', async () => {
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const { child, taskId } = await childOfParent(store, sessionId)
+
+    // A rolling deploy drains by aborting the turns in flight — the same abort a shutdown and a
+    // delete use — and **no `user.interrupt` is written** for it, because no person spoke. The
+    // turn really ended, so the parent has to hear about it; what it must not hear is that the
+    // *user* stopped a helper the operator restarted.
+    const controller = new AbortController()
+    const drained = mockModel({
+      text: ['Half a ', 'report.'],
+      onChunk: (_chunk, index) => {
+        // After the first chunk has streamed, so there is partial output to keep.
+        if (index === 1) {
+          controller.abort()
+        }
+      },
+    })
+    const outcome = await runTurn(child.id, {
+      store,
+      model: drained.factory,
+      resolveCredential: resolveTestCredential,
+      subagents: deployment,
+      signal: controller.signal,
+    })
+    expect(outcome.outcome).toBe('interrupted')
+
+    const notifications = of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification)
+    expect(notifications).toHaveLength(1)
+    expect(notifications[0]).toMatchObject({ task_id: taskId, kind: 'result' })
+    expect(notifications[0]?.text).toContain(RESTARTED_TURN_RESULT)
+    expect(notifications[0]?.text).not.toContain(STOPPED_TURN_RESULT)
+    // The card reads `idle` — done — and not `stopped`: nothing the user did, and the helper can
+    // be continued with `agent_message`.
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
+      'idle',
+    )
+  })
+
+  it('leaves a finished child’s card and news alone when an interrupt lands in it (#371)', async () => {
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const { child } = await childOfParent(store, sessionId)
+    // The helper finishes and reports: the parent's log holds its result and an `idle`, so the
+    // card says **done**.
+    await turn(store, child.id, [{ text: ['All done.'] }], deployment)
+    const before = await logOf(store, sessionId)
+    expect(of(before, EVENT_TYPES.sessionTaskNotification)).toHaveLength(1)
+
+    // A person's Stop on a helper that has already finished — `oh`'s `/agents` Stop calls
+    // `interrupt` unconditionally, and a frontend's Stop is gated on a status that can lag a
+    // round trip behind the child's real turn end. The interrupt opens and immediately ends a
+    // turn of its own, and announcing that would tell the parent model its helper was stopped
+    // *before it finished* — after it had — and flip the card from done to stopped.
+    await store.appendEvents(child.id, [{ type: EVENT_TYPES.userInterrupt }])
+    const { outcome, model } = await turn(store, child.id, [{ text: ['unused'] }], deployment)
+    expect(outcome.outcome).toBe('interrupted')
+    expect(model.calls).toHaveLength(0)
+
+    const after = await logOf(store, sessionId)
+    expect(of(after, EVENT_TYPES.sessionTaskNotification)).toEqual(
+      of(before, EVENT_TYPES.sessionTaskNotification),
+    )
+    expect(of(after, EVENT_TYPES.sessionTaskStatus)).toEqual(
+      of(before, EVENT_TYPES.sessionTaskStatus),
+    )
+    // The interrupt is not left queued either: the turn claimed it (P4), so nothing will wake
+    // this child again for it.
+    expect(await store.getPendingUserEvents(child.id)).toEqual([])
+    expect(
+      of(await logOf(store, child.id), EVENT_TYPES.userInterrupt)[0]?.processed_at,
+    ).not.toBeNull()
+  })
+
+  it('delivers an undelivered turn before starting a new one, with a message queued (#365)', async () => {
+    // The crash window: the child's turn ended and its news never landed. Before the recovery
+    // scan reaches it, the parent sends `agent_message` — and the child's next turn must still
+    // hand over the older announcement: `childTurnDelivery` reads the **newest** ended turn
+    // only, so the answer to the prompt the parent actually wrote would be lost for good.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment } = runtime()
+    const { child } = await childOfParent(store, sessionId)
+    const promptId = of(await logOf(store, child.id), EVENT_TYPES.userMessage)[0]?.id
+    await store.appendEvents(child.id, [
+      { type: EVENT_TYPES.sessionStatusRunning },
+      { type: EVENT_TYPES.agentMessage, content: [{ type: 'text', text: 'First answer.' }] },
+      {
+        type: EVENT_TYPES.sessionStatusIdle,
+        stop_reason: { type: 'end_turn' },
+        consumes: [promptId as EventId],
+      },
+    ])
+    // The message is already queued for the child — the parent's `agent_message`, or the user
+    // steering it — which is what used to skip the no-op guard and so the delivery.
+    await store.appendEvents(child.id, [
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'now also do Y' }] },
+    ])
+
+    const { outcome } = await turn(store, child.id, [{ text: ['Second answer.'] }], deployment)
+    expect(outcome).toEqual({ outcome: 'idle' })
+
+    // Both turns were announced, each under its own key: the older one first, then the turn the
+    // message started.
+    const texts = of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskNotification).map(
+      (notification) => notification.text,
+    )
+    expect(texts).toContain('First answer.')
+    expect(texts).toContain('Second answer.')
+    expect(texts.indexOf('First answer.')).toBeLessThan(texts.indexOf('Second answer.'))
+  })
+
   it('is what an idle child with an undelivered turn wakes up for (S4; #344)', async () => {
     // The crash recovery: a child whose turn ended and whose announcement never landed is work
     // (the store's scan says so), and the turn that runs for it writes the news and nothing to
@@ -1192,6 +1584,31 @@ describe('a rewind that took an `agent` call back (S7; #344)', () => {
     ).toEqual([])
   })
 
+  it('delivers nothing when a rewind took the task back while the child was finishing (#382)', async () => {
+    // The delivery reads the **parent's** log, not only the child's: the reader may have taken
+    // the `agent` call back while the child's turn was ending, and a task the parent's log no
+    // longer names has no news to bring. Written anyway, the notification would be a queued
+    // event nothing may claim — the store's work scan and `SessionRunner`'s `#hasMoreWork`
+    // would both find it on every pass — and the parent would wake for ever over news the
+    // rewind said did not happen.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment, signal } = runtime()
+    const { child, taskId } = await childOfParent(store, sessionId)
+    // The reader edits the message that started it, covering the `session.task_started`.
+    await store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.sessionRewind, from_seq: 1 },
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'never mind' }] },
+    ])
+    expect(starts(await logOf(store, sessionId)).has(taskId)).toBe(false)
+    signal.mockClear()
+
+    await turn(store, child.id, [{ text: ['I finished before you took it back.'] }], deployment)
+
+    const parentLog = await logOf(store, sessionId)
+    expect(of(parentLog, EVENT_TYPES.sessionTaskNotification)).toEqual([])
+    expect(signal).not.toHaveBeenCalledWith(sessionId, 'work')
+  })
+
   it('interrupts a paused orphan with an event, so the card cannot flip back (S7; #348)', async () => {
     // The same hole as `agent_stop`'s, on the rewind path: a child parked in a task wait is not
     // stopped by a signal alone, so the turn it eventually ends would announce `idle` after the
@@ -1234,6 +1651,51 @@ describe('a rewind that took an `agent` call back (S7; #344)', () => {
     await turn(store, sessionId, [{ text: ['Fine.'] }], deployment)
 
     expect(of(await logOf(store, child.id), EVENT_TYPES.userInterrupt)).toHaveLength(1)
+    expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
+      'stopped',
+    )
+  })
+
+  it('interrupts a **running** orphan with an event too, so a lost signal cannot leave it working (#371)', async () => {
+    // The paused case above is one step of the same fact: a signal is a hint, and this path's
+    // own invariant (a signal on an idle session starts a turn that finds the same wait) has a
+    // running twin — a dropped notification (`LISTEN` lost, an instance restarting) leaves a
+    // helper working on work the reader took back, and it later delivers news for a task the
+    // log no longer names. The event is what makes the stop durable, exactly as `agent_stop`
+    // writes it (`./agents`' stop), so the child's own log records what stopped it.
+    const { store, sessionId } = await newSession([message('start a helper')])
+    const { runtime: deployment, signal } = runtime()
+    const taskId = newTaskId()
+    const child = await store.createSession(null, {
+      ownerId: 'user_brain_tests',
+      interactive: false,
+      parentSessionId: sessionId,
+      parentTaskId: taskId,
+      model: { id: 'anthropic/claude-haiku-4-5' },
+      initial_events: [
+        { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'work' }] },
+      ],
+    })
+    // A turn in flight: the stop the rewind writes is one the child can read, not a hint.
+    await store.appendEvents(child.id, [{ type: EVENT_TYPES.sessionStatusRunning }])
+    await store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.sessionTaskStarted,
+        task_id: taskId,
+        kind: 'subagent',
+        child_session_id: child.id,
+        description: 'A helper',
+      },
+    ])
+    await store.appendEvents(sessionId, [
+      { type: EVENT_TYPES.sessionRewind, from_seq: 1 },
+      { type: EVENT_TYPES.userMessage, content: [{ type: 'text', text: 'never mind' }] },
+    ])
+
+    await turn(store, sessionId, [{ text: ['Fine.'] }], deployment)
+
+    expect(of(await logOf(store, child.id), EVENT_TYPES.userInterrupt)).toHaveLength(1)
+    expect(signal).toHaveBeenCalledWith(child.id, 'interrupt')
     expect(of(await logOf(store, sessionId), EVENT_TYPES.sessionTaskStatus).at(-1)?.status).toBe(
       'stopped',
     )

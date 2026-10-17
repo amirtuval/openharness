@@ -71,6 +71,9 @@ src/
   tasks.ts              background tasks: the kinds, statuses and notification kinds, and the
                         `agent_wait` vocabulary (the tool's name, its input, the timeout bounds)
                         three packages agree on (#343)
+  titles.ts             naming a session after something said in it: `deriveSessionTitle`, the
+                        one normalisation a first `user.message` and a subagent task's
+                        description are both titled with (epic #340)
   resources/
     agent.ts            the agent resource + its endpoints
     mcp-server.ts       the per-user remote MCP server resource + its endpoints (#303, X10)
@@ -244,6 +247,7 @@ provider, or "my default model" with no default set. It ends in `_error`, unlike
 | `AGENT_TOOL_NAME`, `AGENT_MESSAGE_TOOL_NAME`, `AGENT_STOP_TOOL_NAME`, `MESSAGE_PARENT_TOOL_NAME`, `AgentToolInputSchema` / `AgentToolInput`, `AgentMessageToolInputSchema` / `AgentMessageToolInput`, `AgentStopToolInputSchema` / `AgentStopToolInput`, `MessageParentToolInputSchema` / `MessageParentToolInput`, `DEFAULT_MAX_AGENT_DEPTH`, `DEFAULT_MAX_LIVE_TASKS` | the subagent tools (epic #340, S5/S6; #344): the four names a class name is a parent side — `agent { type, description, prompt }`, `agent_message { task_id, text }`, `agent_stop { task_id }` — and the one a **child** reaches up with (`message_parent { text }`, whose parent and task are the session's own), plus the two nesting limits of S6 and their defaults (a depth of 3, ten live descendants per root chat) |
 | `JsonValueSchema` / `JsonValue`, `ToolInputSchema` / `ToolInput` | what a tool call's input may hold: JSON, and nothing else — the narrowness is what keeps `agent.tool_use.input` readable by every reader of the log |
 | `TODO_WRITE_TOOL_NAME`, `TodoStatusSchema` / `TodoStatus`, `TodoItemSchema` / `TodoItem`, `TodoListSchema` / `TodoList`, `TodoWriteInputSchema` / `TodoWriteInput` | the `todo_write` tool's vocabulary (#305): the three states, one item, the whole list, and the object a call carries it in |
+| `deriveSessionTitle(text)` | a session's title: the first non-empty line, whitespace collapsed, trimmed and cut to `SESSION_TITLE_MAX_LENGTH` with an ellipsis — or `null` when there is nothing to name it after. The one naming rule both sites read: a chat named from its first `user.message` (the server, `apps/server/src/titles.ts`, #29) and a subagent child named from the description its parent model gave (the brain, epic #340) |
 | `readTodoList(events)` | the list a log holds — the newest successful `todo_write` call's own input — or `null` when none has taken effect. The one reading the brain and the frontends share (#308) |
 | `WEB_SEARCH_TOOL_NAME` | `web_search`, the one built-in this build does not run (#303, X14; #335): it names the native tool a provider is offered, is the key a user's stored settings and a mode's override carry (`builtin.web_search`), is what the span's offer and a search's call record, and is the name a client renders. Spelled once because three packages have to agree on it and none owns it |
 | `UsageSearchesSchema` / `UsageSearches` | how many searches a usage answer covers (#305; #335): a count, never a price — the `web_search` calls an older log holds, plus what each request's `searches` counted for the provider-executed kind |
@@ -990,7 +994,10 @@ The semantics — local days, ownership, what a rewind does to a bill — are in
 `src/**/*.test.ts` with Vitest (node environment). One file per module — `todo.test.ts` is the
 list's vocabulary and `readTodoList` (the newest successful call winning, a cleared list read as
 empty and not as none, a failed call and one nothing answered ignored, an input the schema
-refuses ignored) — plus `events/events.test.ts` for the unions — it drives a table of one valid wire sample per stored
+refuses ignored), and `titles.test.ts` is the naming rule the server and the brain both read (the
+first non-empty line, whitespace collapsed, a line of exactly the maximum kept whole, an
+over-long one cut with an ellipsis and never mid-surrogate-pair, and `null` for text with nothing
+in it) — plus `events/events.test.ts` for the unions — it drives a table of one valid wire sample per stored
 event type, so a schema change that breaks the wire format fails a named test rather than a
 type.
 

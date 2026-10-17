@@ -96,6 +96,19 @@ export interface PromptInputProps {
    * still holds what was typed; it simply hears nothing until the flow hands the keys back.
    */
   readonly captureKeys?: boolean | undefined
+  /**
+   * Where the prompt reports whether its command menu is up (issue #368).
+   *
+   * **A terminal delivers one keypress to every mounted handler**, so a screen that binds a key
+   * the menu also uses cannot tell who the reader meant without asking. The chat screen's Esc
+   * stops a child's turn (epic #340, S9); a reader sitting in a helper's chat who typed `/` to
+   * look at the commands and pressed Esc to dismiss the list did not ask to stop the helper, and
+   * this is how the screen knows.
+   *
+   * A ref rather than a callback: the screen's own key handler reads what is *committed*, and a
+   * menu opening would otherwise be a render of the whole chat per keystroke.
+   */
+  readonly menuOpenRef?: { current: boolean } | undefined
 }
 
 /**
@@ -140,6 +153,7 @@ export function PromptInput({
   history,
   commands,
   captureKeys = true,
+  menuOpenRef,
 }: PromptInputProps) {
   const [buffer, setBuffer] = useState<Buffer>(EMPTY)
   const [menu, setMenu] = useState<MenuState>(FRESH_MENU)
@@ -454,6 +468,14 @@ export function PromptInput({
   })
 
   const rows = menuRows(buffer.value, menu.dismissed)
+
+  // Published on every render, so a caller binding a key the menu also uses reads what the last
+  // committed frame drew (issue #368). Assigning during render is what the refs above do, for the
+  // same reason: the value has to be right for the render that is about to be committed, not one
+  // effect later.
+  if (menuOpenRef !== undefined) {
+    menuOpenRef.current = rows !== null
+  }
 
   return (
     <Box flexDirection="column">

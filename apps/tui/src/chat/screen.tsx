@@ -200,6 +200,11 @@ export function ChatScreen({
   // to go — Ink refuses to suspend a suspended terminal — so it is dropped instead.
   const clearing = useRef(false)
 
+  // Whether the prompt's command menu is up, published by the prompt on every render (issue
+  // #368). The key handler below binds Esc and so does the menu, and a keypress reaches both —
+  // see the Esc branch for what the reader meant.
+  const menuOpen = useRef(false)
+
   /**
    * Read the catalog once, in the background, for the two things beyond the picker it is good
    * for (#247): the **prices** a cost is computed with, and the display names the status line
@@ -761,7 +766,17 @@ export function ChatScreen({
     // second idle press, but the whole reason a reader is in here is to steer or stop a helper.
     // Outside a child chat Esc is the prompt's alone (it closes the command menu), so nothing
     // here changes for a top-level chat.
+    //
+    // **But the menu's Esc is the menu's** (issue #368). Ink delivers one keypress to every
+    // mounted handler, so an Esc that closed the command menu also stopped the helper: a reader
+    // who typed `/` to look at the commands and pressed Esc to dismiss the list interrupted the
+    // turn they were watching. The prompt publishes whether its menu is up (`menuOpenRef`), and
+    // an Esc that dismissed it is spent — the next one stops the turn, which is what the reader
+    // who meant it presses.
     if (key.escape) {
+      if (menuOpen.current) {
+        return
+      }
       if (session.session.parent_session_id !== null && view.transcript.status === 'running') {
         void session.interrupt()
       }
@@ -936,6 +951,7 @@ export function ChatScreen({
           // row. With nothing waiting — or once that row is picked — the prompt reads keys as
           // it always did.
           captureKeys={waiting.length === 0 || composing}
+          menuOpenRef={menuOpen}
           onSubmit={onSubmit}
           onActivity={() => {
             session.dismissHint()

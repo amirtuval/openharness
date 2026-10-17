@@ -10,7 +10,7 @@ import {
 } from '@openharness/protocol/fixtures'
 import type { EventId, SessionId, StoredEvent, TaskId } from '@openharness/protocol'
 
-import { isTaskToolName, taskCardStatus, tasksFromEvents } from './tasks'
+import { isTaskToolName, taskCardStatus, taskIsLive, tasksFromEvents } from './tasks'
 
 /**
  * The `agent` call that starts a task, as the parent's log records it (epic #340, S5).
@@ -299,6 +299,19 @@ describe('taskCardStatus (#340, S9; #345)', () => {
 
   it('is the parent’s own status when the child is not waiting', () => {
     expect(taskCardStatus('running', false)).toBe('running')
+  })
+})
+
+describe('taskIsLive (#340, S9; #368)', () => {
+  it('is running and waiting — the two a card follows its child for', () => {
+    expect(taskIsLive('running')).toBe(true)
+    expect(taskIsLive('waiting')).toBe(true)
+  })
+
+  it('is nothing else: a task that has an answer is not followed', () => {
+    expect(taskIsLive('done')).toBe(false)
+    expect(taskIsLive('failed')).toBe(false)
+    expect(taskIsLive('stopped')).toBe(false)
   })
 })
 

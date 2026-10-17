@@ -107,7 +107,7 @@ import {
   deliverableNotifications,
   pendingNotifications,
   recordedWaitDeadline,
-  settleTaskWait,
+  settleTaskWaits,
   stillRunning,
   taskStatuses,
   taskStarts,
@@ -733,6 +733,36 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
    * state at the moment this call began does.
    */
   const recovered = turnState.state !== 'idle'
+  /**
+   * Whether this turn is only here to claim an interrupt (#371).
+   *
+   * An idle session whose whole queue is `user.interrupt` events is not being asked to do
+   * anything: the loop's first check ends the turn on the interrupt, and the only other thing
+   * it does is write the results of the calls that were waiting when it arrived. So it must not
+   * announce a start — a child would tell its parent it is working when nothing will run — and
+   * its end is not a turn that ended when the window it leaves is empty.
+   */
+  const claimsOnlyInterrupt =
+    turnState.state === 'idle' && queued.length > 0 && queued.every(isUserInterrupt)
+  // A **child** that owes its parent the news of a finished turn hands it over before anything
+  // else this turn does (epic #340, S4; #344), and **whether or not something else is queued
+  // for it** (#365). The delivery is idempotent — the notification is keyed by the child's
+  // turn — so a process that died between a turn's end and its announcement is repaired by the
+  // next turn on that child, which is the turn the store's work scan starts. It must not be
+  // skipped when a `user.message` is already queued (an `agent_message`, the user steering it):
+  // the turn about to run is a *new* one that will announce its own end, and the older turn's
+  // key is never written again — its result, the answer to the prompt the parent wrote, would
+  // be lost for good. Nothing is written to this log: the turn exists to hand the news over.
+  if (
+    turnState.state === 'idle' &&
+    options.subagents !== undefined &&
+    session.parent_session_id !== null
+  ) {
+    const child = await store.getSessionUnscoped(sessionId)
+    if (child !== null) {
+      await deliverChildTurn(store, child, options.subagents)
+    }
+  }
   if (turnState.state === 'idle' && queued.length === 0) {
     // An idle session with nothing queued is a no-op — unless something waiting in the log owes
     // this turn. Three things do, and none is a user event, so none shows up in `queued`: a
@@ -745,18 +775,6 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
     // The notification read is the store's, not the log's: this guard is consulted on every
     // idle sweep, and the store's answer is one indexed query rather than a whole replay.
     const notified = (await store.getPendingTaskNotifications(sessionId)).length > 0
-    // A **child** whose last turn's news never reached its parent is the fourth thing an idle
-    // session can owe (epic #340, S4; #344). The delivery is idempotent — the notification is
-    // keyed by the child's turn — so a process that died between a turn's end and its
-    // announcement is repaired by the next turn on that child, and the store's work scan is
-    // what starts one (a child with an undelivered turn is work). Nothing is written to this
-    // log: the turn exists to hand the news over, and then it is a no-op like any other.
-    if (options.subagents !== undefined && session.parent_session_id !== null) {
-      const child = await store.getSessionUnscoped(sessionId)
-      if (child !== null && (await deliverChildTurn(store, child, options.subagents))) {
-        return { outcome: 'noop' }
-      }
-    }
     if (
       !compactionPending &&
       !notified &&
@@ -775,7 +793,12 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
   // `session.rewind` took back stops the helper that call started (S7; #344), because this is
   // the first turn that can tell what the rewind covered.
   if (options.subagents !== undefined) {
-    if (session.parent_session_id !== null) {
+    // A turn that is only here to claim an interrupt does no work, so a **child** must not tell
+    // its parent it started working (S4; #371): `session.task_status { running }` is a claim
+    // about work, and the loop's first check ends this turn before anything runs. Announcing it
+    // would flip a card that had already finished — the very flip the empty turn's delivery is
+    // no longer allowed to make (see `./agents`' `childTurnDelivery`).
+    if (session.parent_session_id !== null && !claimsOnlyInterrupt) {
       await childTurnStart(store, session)
     }
     await stopOrphanedTasks(store, session, options.subagents)
@@ -977,7 +1000,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
     // not in its `consumes`, so it stays queued for the next request (and `contextView` leaves
     // it out of what this one answers). The notification read is the store's, deliberately: it
     // is the same indexed query the no-op guard and the work scan make, and taking it from the
-    // log would mean reading the whole log again at every step.
+    // log would mean reading the whole log again at every step. A notification is in `claims`
+    // only because the request folds it in: it is **not** what the user's pause below waits for
+    // — nothing a task says answers a question a person was asked (#363).
     let claims = [
       ...pending.filter(isUserMessage).map((event) => event.id),
       ...(await store.getPendingTaskNotifications(sessionId)).map((event) => event.id),
@@ -1134,7 +1159,14 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
     //    and this turn carries on with the message.
     const waiting = awaitingUser(read)
     if (waiting.length > 0) {
-      if (claims.length === 0) {
+      // What resolves the user's pause is a **message**, not "something queued". `claims` holds
+      // a background task's news too, because the request below folds it in as steering — and a
+      // notification is news for the model, not the reader moving on (#363): a call waiting on
+      // the user must not be answered "The user sent a message instead." because a helper
+      // finished. The pause stands, the notification stays pending, and the turn the user's own
+      // answer starts is the one that carries it — which is why the store's work scan does not
+      // call a pending notification work while a session sits on an `ask` either (`./session`).
+      if (!pending.some(isUserMessage)) {
         await append([
           statusIdle({
             stopReason: {
@@ -1165,15 +1197,16 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
       // — a notification for some other task is news, not the reader moving on.
       const endedByMessage = pending.some(isUserMessage)
       const nowMs = clock()
-      const outcomes = openWaits.map((call) =>
-        settleTaskWait({
-          call,
-          notifications,
-          endedByMessage,
-          recordedDeadline: recordedWaitDeadline(read, call),
-          nowMs,
-        }),
-      )
+      // One notification is claimed by **one** result (#363): two open waits resolved by the
+      // same news would each name it in `consumes`, and the store refuses that append whole —
+      // the turn would wedge with the news undelivered. So the share-out happens first, here.
+      const outcomes = settleTaskWaits({
+        calls: openWaits,
+        notifications,
+        endedByMessage,
+        recordedDeadline: (call) => recordedWaitDeadline(read, call),
+        nowMs,
+      })
       const stillWaiting = outcomes.filter(
         (outcome): outcome is Extract<TaskWaitOutcome, { kind: 'waiting' }> =>
           outcome.kind === 'waiting',
