@@ -359,10 +359,13 @@ and deleting.
 
 Two specs cover skills (epic #349), and they cover the same ground in the two clients:
 
-- **`w30-skills.spec.ts`** (Playwright) — S1, S2, S3, S6, S8, S9, S10, S11 and S14: the screens,
-  the `/` menu, the import preview's problems, the refresh diff, the mode override, and the four
-  screenshots (`Settings → Skills`, the import preview, the refresh diff, the `/` menu), captured
-  in the three themes at 1280 and ~400 wide into `QA_SHOT_DIR`.
+- **`w30-skills.spec.ts`** (Playwright) — S1, S2, S3, S6, S8, S9, S10, S11, **S11b** and S14: the
+  screens, the `/` menu, the import preview's problems, the refresh diff, the mode override, the
+  **subagent type** whose skills reach its child (#355's deferred half, now that epic #340 is on
+  main), and the four screenshots (`Settings → Skills`, the import preview, the refresh diff, the
+  `/` menu), captured in the three themes at 1280 and ~400 wide into `QA_SHOT_DIR`. S11 and S11b
+  need a stack with a stored provider credential — a mode whose model has no credential cannot be
+  used as a chat's mode or as a subagent type — and skip when it has none.
 - **`cli-skills.spec.ts`** (tmux, `QA_WITH_CLI=1`) — the same cases through the built `oh`
   binary: `oh skills`, `oh skills add <url>` (the printed preview, then the interactive pick, then
   `--name` and `--all`), `oh skills refresh|enable|disable|remove`, and the `/` menu and the

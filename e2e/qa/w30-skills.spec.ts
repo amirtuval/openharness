@@ -38,9 +38,10 @@ import {
  *   `NODE_EXTRA_CA_CERTS=$PWD/e2e/fixtures/skills-https/ca.pem`, because the fixture is a
  *   loopback `https://` address.
  *
- * Nothing here needs a **stored provider credential**: the root route is what the first-run
- * screen stands in for, and every chat this spec opens is a session created through the API
- * and opened at `#/s/<id>`, which is not gated.
+ * Nothing here needs a **stored provider credential** except S11 and S11b: a mode whose model
+ * has no credential is refused (and cannot start a helper), so those two skip on a stack that
+ * has none. Every other chat this spec opens is a session created through the API and opened at
+ * `#/s/<id>`, which is not gated.
  *
  * S4 (a real model loading a skill on its own) is the last scenario and skips unless a real
  * model is named (`QA_MODEL`/`OPENHARNESS_QA_MODEL`), the way the rest of the QA pass does.
@@ -214,6 +215,48 @@ async function ensureSkills(
 async function ensureRepo(): Promise<SkillsRepo> {
   repo ??= await startSkillsRepo()
   return repo
+}
+
+/** Wait until the log holds a matching event, and answer the newest one. */
+async function waitForEvent(
+  request: APIRequestContext,
+  sessionId: string,
+  matches: (event: Record<string, unknown>) => boolean,
+  timeoutMs = 60_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const found = (await readEvents(request, sessionId)).filter(matches)
+    if (found.length > 0) {
+      return found.at(-1) ?? {}
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`session ${sessionId} never held the event the scenario waited for`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
+/** Wait until the log holds at least `count` tool results, and answer them in order. */
+async function waitForResults(
+  request: APIRequestContext,
+  sessionId: string,
+  count: number,
+  timeoutMs = 60_000,
+): Promise<Record<string, unknown>[]> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const results = (await readEvents(request, sessionId)).filter(
+      (event) => event.type === 'agent.tool_result',
+    )
+    if (results.length >= count) {
+      return results
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`session ${sessionId} never held ${String(count)} tool results`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
 }
 
 /** The themes every view is captured in, the same three the app ships (epic #201, X3). */
@@ -796,6 +839,128 @@ test.describe('W30 the skills screens', () => {
       const read = await request.get(`/v1/me/modes/${mode.id}`)
       expect(read.status(), await read.text()).toBe(200)
     })
+  })
+
+  test('S11b a subagent type carries its own skills into the child', async ({ request }) => {
+    test.skip(!(await skillsFixtureAvailable()), 'needs a `git` executable for the fixture')
+    await ensureSkills(request, ['release-notes', 'house-style'])
+
+    // A type is a mode, and a mode whose model has no credential cannot start a helper
+    // (`usableModeModel`'s rule) — S11's own skip, for the same reason.
+    const credentials = await request.get('/v1/provider-credentials')
+    const providers = ((await credentials.json()) as { data: { name: string }[] }).data
+    test.skip(
+      providers.length === 0,
+      'a mode whose model has no credential cannot start a subagent — this stack has none',
+    )
+    const provider = providers[0]?.name ?? 'custom'
+
+    const listing = await request.get('/v1/me/skills')
+    const skills = ((await listing.json()) as { data: { id: string; name: string }[] }).data
+    const byName = new Map(skills.map((skill) => [skill.name, skill.id]))
+    const release = byName.get('release-notes')
+    const house = byName.get('house-style')
+    expect(release, 'the fixture import left release-notes stored').toBeDefined()
+    expect(house, 'the fixture import left house-style stored').toBeDefined()
+
+    // One type, one skill off and one on — the same patch a chat on the mode follows.
+    const created = await request.post('/v1/me/modes', {
+      data: {
+        name: 'subagent-style',
+        model: `${provider}/a-mode-model`,
+        subagent_description: 'Reads the house style',
+        tools: { builtin: {}, skills: { [release ?? '']: false, [house ?? '']: true } },
+      },
+    })
+    expect(created.status(), await created.text()).toBe(201)
+    const mode = (await created.json()) as { id: string }
+
+    const parent = await createChat(request, QA_MODEL)
+    const sent = await request.post(`/v1/sessions/${parent.id}/events`, {
+      data: {
+        events: [
+          {
+            type: 'user.message',
+            content: [{ type: 'text', text: '__agent__ subagent-style | Read the house style' }],
+          },
+        ],
+      },
+    })
+    expect(sent.status(), await sent.text()).toBe(200)
+
+    // The type started a child, and the child was created **on the mode** (#344) — which is
+    // what makes the mode's skill patch reach its listing.
+    const started = await waitForEvent(
+      request,
+      parent.id,
+      (event) => event.type === 'session.task_started',
+    )
+    expect(started.task_type).toBe('subagent-style')
+    const childId = started.child_session_id as string
+    expect(childId).toBeTruthy()
+
+    const child = await request.get(`/v1/sessions/${childId}`)
+    expect(child.status(), await child.text()).toBe(200)
+    const childSession = (await child.json()) as {
+      mode: string | null
+      parent_session_id: string | null
+    }
+    expect(childSession.mode).toBe(mode.id)
+    expect(childSession.parent_session_id).toBe(parent.id)
+
+    // The skill the type turns on is offered to the child at all: the request's own offer
+    // names it (#349 K8; #352 K6), before any message this scenario sends.
+    const offered = await waitForEvent(
+      request,
+      childId,
+      (event) =>
+        event.type === 'span.model_request_start' &&
+        Array.isArray(event.tools) &&
+        (event.tools as { name: string }[]).some((tool) => tool.name === 'skill'),
+    )
+    expect(offered).toBeTruthy()
+
+    // Let the child's prompt turn end, so the next message is a turn of its own.
+    await waitForEvent(request, childId, (event) => event.type === 'session.status_idle')
+
+    await test.step('the skill the type turns on reads', async () => {
+      const before = (await readEvents(request, childId)).filter(
+        (event) => event.type === 'agent.tool_result',
+      ).length
+      const response = await request.post(`/v1/sessions/${childId}/events`, {
+        data: {
+          events: [
+            { type: 'user.message', content: [{ type: 'text', text: '__skill__ house-style' }] },
+          ],
+        },
+      })
+      expect(response.status(), await response.text()).toBe(200)
+      const results = await waitForResults(request, childId, before + 1)
+      const result = results[before] ?? {}
+      expect(result.is_error).toBe(false)
+      expect(JSON.stringify(result)).toContain('House style')
+    })
+
+    await test.step('the skill the type turns off is not in the child at all', async () => {
+      const before = (await readEvents(request, childId)).filter(
+        (event) => event.type === 'agent.tool_result',
+      ).length
+      const response = await request.post(`/v1/sessions/${childId}/events`, {
+        data: {
+          events: [
+            { type: 'user.message', content: [{ type: 'text', text: '__skill__ release-notes' }] },
+          ],
+        },
+      })
+      expect(response.status(), await response.text()).toBe(200)
+      const results = await waitForResults(request, childId, before + 1)
+      const result = results[before] ?? {}
+      expect(result.is_error).toBe(true)
+      expect(JSON.stringify(result)).toContain('No skill named')
+      expect(JSON.stringify(result)).toContain('house-style')
+    })
+
+    await request.delete(`/v1/sessions/${parent.id}`)
   })
 
   test('S14 the four views in three themes at a desktop and a narrow width', async ({
