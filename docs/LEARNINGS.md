@@ -550,6 +550,14 @@ against 350m / 640Mi requested, two of them; one pod at 150m / 448Mi costs a qua
 single replica also needs the PodDisruptionBudget off — `minAvailable: 1` over one pod forbids every
 voluntary eviction, so a node drain waits out GKE's one-hour PDB grace instead of moving the pod.
 
+**A resource another resource refers to by a generated id has to be replaced create-before-destroy,
+or the replacement is refused.** Moving the host to `app.oharness.dev` replaced the uptime check
+(its host is immutable), and Terraform's default order deletes first — which Cloud Monitoring
+rejects with a bare 400, "please ensure all associated Alert Policies are deleted", because the
+uptime alert policy's filter names the check's id. Everything else in that apply had already
+landed, so the deploy failed on the last resource. The check is now `create_before_destroy`, so the
+policy moves to the new check before the old one is deleted ([#397](https://github.com/amirtuval/openharness/issues/397)).
+
 **An alert that is too broad is an alert nobody reads, and an empty alert email is a supported
 state.** Autopilot's `OPTIMIZE_UTILIZATION` profile replaces nodes often and GKE's own DaemonSet
 containers restart once per new node, so a cluster-wide restart alert pages on every routine node
