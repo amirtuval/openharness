@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { TimestampSchema } from '../common'
-import { McpServerIdSchema, ModeIdSchema, SkillIdSchema } from '../ids'
+import { McpServerIdSchema, ModeIdSchema, SkillIdSchema, type McpServerId } from '../ids'
 import { ReasoningEffortSchema } from '../reasoning'
 import { ToolNameSchema } from './tool-settings'
 import { DEFAULT_MODEL_PATTERN, UserIdSchema } from './user'
@@ -100,9 +100,38 @@ export type ModeReference = z.infer<typeof ModeReferenceSchema>
  *   Separate keys rather than one, so none can be mistaken for another: a tool name is free
  *   text and an id is not.
  */
+/**
+ * What an item a mode's map does not name does (epic #349, B8).
+ *
+ * - `follow` — the user's own setting. The default when the field is absent, and the value
+ *   every existing mode (and every mode created from a form that does not ask) reads as.
+ * - `off` — an **allowlist**: only the items the map turns on are on; anything added later
+ *   stays off in this mode.
+ * - `on` — every item is on except those the map turns off, even items the user turned off
+ *   globally.
+ *
+ * An explicit map entry always wins, and a hard rule that removes an item from a context
+ * (`ask_user` in a non-interactive child, the subagent tools a depth does not offer,
+ * `disable-model-invocation` skills out of the model's listing) cannot be undone by any of
+ * these.
+ */
+export const ModeItemDefaultSchema = z.enum(['follow', 'off', 'on'])
+
+export type ModeItemDefault = z.infer<typeof ModeItemDefaultSchema>
+
+/** The value an absent {@link ModeItemDefault} field means. */
+export const MODE_ITEM_DEFAULT: ModeItemDefault = 'follow'
+
 export const ModeToolOverrideSchema = z.object({
-  /** Per-tool on/off; a tool not named follows the user's own setting. */
-  builtin: z.record(ToolNameSchema, z.boolean()),
+  /**
+   * Per-tool on/off. An entry always wins over {@link builtin_default}; a tool with no entry
+   * follows the section default, which is the user's own setting when that is `'follow'`.
+   *
+   * Optional, and absent from a mode that says nothing about built-in tools — as it is from
+   * one that says something about servers or skills only (a shape written before #307, and
+   * the shape a patch that does not touch this half produces now).
+   */
+  builtin: z.record(ToolNameSchema, z.boolean()).optional(),
   /**
    * // extension: per-**server** on/off for the user's remote MCP servers (epic #303, X10;
    * #311). A server the map does not name follows the user's own `enabled` on the resource —
@@ -138,9 +167,102 @@ export const ModeToolOverrideSchema = z.object({
    * skills" and "an empty map" are the same thing.
    */
   skills: z.record(SkillIdSchema, z.boolean()).optional(),
+  /**
+   * // extension: what a built-in tool with **no `builtin` entry** does (epic #349, B8).
+   *
+   * `'follow'` — the absence of the field, and the value every mode stored before this field
+   * existed reads as — is today's behaviour: the tool follows the user's own setting in
+   * `/v1/me/tools`. `'off'` makes the map an **allowlist**: every tool the map does not turn on
+   * is off, so a tool the build adds later stays off in this mode. `'on'` makes every tool on
+   * except the ones the map turns off, **even tools the user turned off globally**.
+   *
+   * An explicit entry always wins. It is still **never a permission**: the default decides
+   * which tools a chat has, not what a call may do, and a hard rule that removes a tool from a
+   * context (`ask_user` in a non-interactive child, the subagent tools a session's depth does
+   * not offer) cannot be undone by `'on'`.
+   */
+  builtin_default: ModeItemDefaultSchema.optional(),
+  /**
+   * // extension: what a remote MCP server with **no `mcp_servers` entry** does (epic #349,
+   * B8) — `'follow'` (the user's `enabled`), `'off'` (only the servers the map turns on are in
+   * force) or `'on'` (every server except the ones the map turns off). An explicit entry
+   * always wins, and a deleted server named by the map is still ignored.
+   */
+  mcp_servers_default: ModeItemDefaultSchema.optional(),
+  /**
+   * // extension: what an imported skill with **no `skills` entry** does (epic #349, B8) —
+   * `'follow'` (the skill's own `enabled`), `'off'` (only the skills the map turns on are in
+   * force, so one imported later stays off in this mode) or `'on'` (every skill except the
+   * ones the map turns off). An explicit entry always wins; `disable-model-invocation` still
+   * keeps a skill out of the model's listing whatever this says.
+   */
+  skills_default: ModeItemDefaultSchema.optional(),
 })
 
 export type ModeToolOverride = z.infer<typeof ModeToolOverrideSchema>
+
+/**
+ * The one resolution rule a mode's default and map entry follow, for one item.
+ *
+ * **An explicit entry wins; otherwise the section default decides; `follow` falls through to
+ * the user's own setting.** This is the function every consumer of a mode's override uses —
+ * the built-in tool listing and the brain's offer, the in-force MCP servers, the in-force
+ * skills and both frontends' `/` menus — so server, brain, child sessions, web and `oh`
+ * cannot drift about what a mode turns on.
+ *
+ * @param entry the mode's map entry for the item, or `undefined` when it does not name it
+ * @param follows what the item does when the mode says nothing (the user's own setting)
+ * @param fallback the section default, or `undefined` for `follow`
+ */
+export function modeItemInForce(
+  entry: boolean | undefined,
+  follows: boolean,
+  fallback: ModeItemDefault | undefined,
+): boolean {
+  if (entry !== undefined) {
+    return entry
+  }
+  switch (fallback ?? MODE_ITEM_DEFAULT) {
+    case 'on':
+      return true
+    case 'off':
+      return false
+    default:
+      return follows
+  }
+}
+
+/**
+ * Whether one built-in tool is in force for a chat on `override` (epic #303, X4; #307; the
+ * default: epic #349, B8).
+ *
+ * @param name the tool's name as the settings speak of it
+ * @param follows whether the user's own setting has it on
+ * @param override the resolved mode's `tools`, or `null` for no mode
+ */
+export function builtinToolInForce(
+  name: string,
+  follows: boolean,
+  override: ModeToolOverride | null,
+): boolean {
+  return modeItemInForce(override?.builtin?.[name], follows, override?.builtin_default)
+}
+
+/**
+ * Whether one remote MCP server is in force for a chat on `override` (epic #303, X10; #311;
+ * the default: epic #349, B8).
+ *
+ * @param serverId the server's `mcps_` id
+ * @param follows the server resource's own `enabled`
+ * @param override the resolved mode's `tools`, or `null` for no mode
+ */
+export function mcpServerInForce(
+  serverId: McpServerId,
+  follows: boolean,
+  override: ModeToolOverride | null,
+): boolean {
+  return modeItemInForce(override?.mcp_servers?.[serverId], follows, override?.mcp_servers_default)
+}
 
 /**
  * // extension: the description that makes a mode a **subagent type** (epic #340, S2; #342).

@@ -1322,7 +1322,10 @@ not picked up by the fake's next turn.
 
 A mode carries the **tool override** of #307 (`tools`) like any other mode field: the fake
 stores what a create or update carries, defaults it to `null`, and keeps it when an update
-omits it — the resource is the protocol's, so there is nothing else for the fake to do with it.
+omits it. Its three section defaults (epic #349, B8) are applied by the protocol's own
+`builtinToolInForce` and `mcpServerInForce` in the fake's `GET /v1/me/tools` and in-force
+server read, so the fake cannot disagree with the server about an `off` allowlist or an `on`
+default.
 
 `client.tools` is an in-memory store behind `/v1/me/tools` (#308): the fake registers three
 built-ins (`web_fetch`, `web_search`, `todo_write`, each declared `allow`), seeded with

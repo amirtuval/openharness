@@ -1250,29 +1250,39 @@ stored. A mode is stored even when its model is not usable yet: the key may come
 
 **A mode may also carry a tool override.** `Mode.tools` is
 `{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false }, "skills": { "<skl_…>":
-true } }` or `null`: an on/off patch applied over the user's own choices, so a `deep` mode can
-insist on `web_search`, do without `todo_write`, leave `notes` (a remote MCP server) out of
-every chat that follows it, and bring its own `release-notes` skill with it. It decides **which**
-tools, **which MCP servers** and **which skills** a chat has, never what a call to one may do —
-permissions are the user's (see
+true } }` (each map optional) or `null`: an on/off patch applied over the user's own choices, so
+a `deep` mode can insist on `web_search`, do without `todo_write`, leave `notes` (a remote MCP
+server) out of every chat that follows it, and bring its own `release-notes` skill with it. It
+decides **which** tools, **which MCP servers** and **which skills** a chat has, never what a
+call to one may do — permissions are the user's (see
 [Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)) — and never what a
 skill is.
 
 - **`builtin`** is keyed by tool name and patches the user's `/v1/me/tools` choices.
 - **`mcp_servers`** (epic #303, X10; #311) is a sibling key, keyed by a remote MCP server's
-  `mcps_` id, and patches the server's own `enabled` field — the user's default. A server the map
-  does not name follows the user; a mode that names one turns it on or off for the chats that
-  follow it, live, from the next request on. It is **server granularity, never per MCP tool**:
-  which of a server's tools a request offers, and under which permission, is the server's own
-  listing and the user's settings, not a mode's.
+  `mcps_` id, and patches the server's own `enabled` field — the user's default. It is **server
+  granularity, never per MCP tool**: which of a server's tools a request offers, and under which
+  permission, is the server's own listing and the user's settings, not a mode's.
 - **`skills`** (epic #349, K8) is the third sibling key, keyed by a skill's `skl_` id, and
   patches the skill's own `enabled` field. A subagent type (epic #340) is a mode, so this is
   what gives one its own skills.
+- **`builtin_default`, `mcp_servers_default` and `skills_default`** (epic #349, B8) say what an
+  item the corresponding map does **not** name does. Each is `"follow"`, `"off"` or `"on"`,
+  optional, and **absent means `"follow"`** — the behaviour every existing mode and every newly
+  created one has. `"follow"` uses the user's own setting (a built-in tool's `/v1/me/tools`
+  choice, a server's `enabled`, a skill's `enabled`); `"off"` makes the map an **allowlist**
+  (only the items it turns on are on, so an item added later stays off in that mode); `"on"`
+  turns every item on except the ones the map turns off, **even items the user turned off
+  globally**. An explicit map entry always wins. A default is never a permission, and it cannot
+  undo a hard rule: `ask_user` is still absent from a non-interactive child, the subagent tools a
+  depth does not offer are still absent, and a `disable-model-invocation` skill still stays out
+  of the model's listing.
 - **A mode naming a server or a skill the caller no longer has is simply ignored.** The mode
   routes store the maps as written and do not check the ids against what is present, so deleting
   an MCP server or a skill neither fails nor rewrites the modes that named it — the entry just
   matches nothing. The servers and skills in force for a request are resolved as _the user's
-  `enabled`, overridden by the mode_, per request.
+  `enabled`, overridden by the mode_, per request; the one shared rule per kind is
+  `builtinToolInForce`, `mcpServerInForce` and the protocol's `skillInForce`.
 
 **A mode with a description is a subagent type.** `Mode.subagent_description` (epic #340, S2;
 #342) is one short sentence — at most 500 characters — saying what the mode is **good for**, or

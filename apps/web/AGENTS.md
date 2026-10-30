@@ -692,15 +692,27 @@ toolCalls)`, the client's one merge, so a call draws where its event sits. **It 
   together.
 
 **A mode may turn a tool on or off** (#307). `mode-form-dialog.tsx` grew a Tools section whose
-choice per tool is tri-state — _Follow my settings_ (the absence of a name in the patch), _Always
-on_, _Always off_ — which `lib/tools.ts`'s `modeToolChoice` / `withModeToolChoice` translate to
-and from the wire's `{ builtin: { name: boolean } }`. A patch that ends up empty is sent as
-`null`, the one value that reads as "follow my settings" on both sides; a mode never changes a
-permission, and the Modes list shows what a mode overrides under its name. Only this build's own
-tools get a switch (#312): a remote MCP tool's presence is its server's, which a mode patches by
-id — a half of the editor that is #313 — while `withModeToolChoice` carries a mode's existing
-`mcp_servers` patch through a save untouched, and the row counts the servers a mode names rather
-than reading them as "follow your settings".
+choice per tool is tri-state — _Default_ (the absence of a name in the patch; it follows the
+section's setting), _Always on_, _Always off_ — which `lib/tools.ts`'s `modeToolChoice` /
+`withModeToolChoice` translate to and from the wire's `{ builtin: { name: boolean } }`. A patch
+that ends up empty is sent as `null`, the one value that reads as "follow my settings" on both
+sides; a mode never changes a permission, and the Modes list shows what a mode overrides under
+its name. Only this build's own tools get a switch (#312): a remote MCP tool's presence is its
+server's, which a mode patches by id — a half of the editor that is #313 — while
+`withModeToolChoice` carries a mode's existing `mcp_servers` patch through a save untouched, and
+the row counts the servers a mode names rather than reading them as "follow your settings".
+
+**Each section has a "not listed below" default** (epic #349, B8). Above the per-item rows in
+Tools, MCP servers and Skills, a select says what an item the mode does not name does — _Follow
+my settings_, _Off_ (an allowlist: only what is turned on here, so anything added later stays
+off in this mode) or _On_ (everything except what is turned off here, even items the reader
+turned off in their own settings) — with a one-line explanation under it. Every section is
+rendered even when its list is empty, because a default is a choice a mode can make before it
+has any item to name. `lib/tools.ts`'s `modeSectionDefault` / `withModeSectionDefault` read and
+write `builtin_default` / `mcp_servers_default` / `skills_default`; `follow` is stored as the
+absence of the key, an override with only a default is not `null`, and the Modes list summary
+names each non-`follow` default (`tools: skills not listed off`). The editor's create and edit
+paths both round-trip them.
 
 ### The pause, on screen (epic #303, X6; issues #309, #310)
 

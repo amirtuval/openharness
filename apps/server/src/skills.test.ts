@@ -237,6 +237,45 @@ describe('the skills in force for a request (epic #349, K8)', () => {
     ])
   })
 
+  it('applies the skills default: off is an allowlist, on turns every skill on (B8)', async () => {
+    const test = createTestApp()
+    const on = await seedSkill(test)
+    const off = await seedSkill(test, { name: 'pdf-tools', enabled: false })
+    const me = await test.currentUser()
+    const resolve = createSkillSettingsResolver({ skills: test.skills })
+
+    // `off` is an allowlist: only the skill the map turns on is in force, and a skill imported
+    // afterwards is not — which is the whole point of the setting.
+    expect(
+      (await resolve(me.id, { skills_default: 'off', skills: { [on.id]: true } })).map(
+        (skill) => skill.id,
+      ),
+    ).toEqual([on.id])
+    const later = await seedSkill(test, { name: 'later' })
+    expect(
+      (await resolve(me.id, { skills_default: 'off', skills: { [on.id]: true } })).map(
+        (skill) => skill.id,
+      ),
+    ).toEqual([on.id])
+
+    // `on` turns every skill on except the ones the map turns off, even one the user disabled.
+    expect((await resolve(me.id, { skills_default: 'on' })).map((skill) => skill.id)).toEqual([
+      on.id,
+      off.id,
+      later.id,
+    ])
+    expect(
+      (await resolve(me.id, { skills_default: 'on', skills: { [on.id]: false } })).map(
+        (skill) => skill.id,
+      ),
+    ).toEqual([off.id, later.id])
+    // An absent default is `follow`, so the user's own switches stand.
+    expect((await resolve(me.id, { skills: {} })).map((skill) => skill.id)).toEqual([
+      on.id,
+      later.id,
+    ])
+  })
+
   it('answers the skill’s own metadata, never a file’s content', async () => {
     const test = createTestApp()
     await seedSkill(test)

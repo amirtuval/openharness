@@ -1,16 +1,24 @@
 import type {
+  ModeToolOverride,
   SessionSkillLoadedEvent,
   Skill,
   StoredEvent,
   UserEventInput,
 } from '@openharness/protocol'
-import { EVENT_TYPES, newSkillId } from '@openharness/protocol'
+import { EVENT_TYPES, newModeId, newSkillId, skillsInForce } from '@openharness/protocol'
 import type { OfferedSkill } from '@openharness/hands'
 import { SKILL_READ_TOOL_NAME, SKILL_TOOL_NAME } from '@openharness/hands'
 import { describe, expect, it } from 'vitest'
 
 import type { SkillProvider } from './skills'
-import { NATIVE_SEARCH_TOOL, eventTypes, logOf, newSession } from './testing/harness'
+import {
+  NATIVE_SEARCH_TOOL,
+  TEST_MODEL_ID,
+  eventTypes,
+  logOf,
+  message,
+  newSession,
+} from './testing/harness'
 import { mockModel, readPrompt, TEST_CREDENTIAL } from './testing/mock-model'
 import { runTurn } from './turn'
 
@@ -392,5 +400,66 @@ describe('a slash invocation in the turn loop (K7)', () => {
     const events = await logOf(session.store, session.sessionId)
     const span = events.find((event) => event.type === EVENT_TYPES.modelRequestStart)
     expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toBeUndefined()
+  })
+
+  it('asks the provider with the mode override, so a child gets only its allowlist (B8)', async () => {
+    // A child session on a subagent type is a real session on a mode (epic #340), so the loop
+    // asks its skill provider with that mode's override exactly as it does for a chat. The
+    // provider applies the protocol's one rule — off is an allowlist — and the request is built
+    // from its answer; a skill the mode does not name is not offered.
+    const keep = skill('keep', { id: newSkillId(1_700_000_000_100) })
+    const later = skill('later', { id: newSkillId(1_700_000_000_200) })
+    const override: ModeToolOverride = {
+      skills_default: 'off',
+      skills: { [keep.id]: true },
+    }
+    const seen: (ModeToolOverride | null)[] = []
+    const provide: SkillProvider = (_owner, modeOverride) => {
+      seen.push(modeOverride)
+      return Promise.resolve(
+        skillsInForce([keep, later], modeOverride).map((entry) => ({
+          skill: entry,
+          readFile: () => Promise.resolve(null),
+        })),
+      )
+    }
+    const modeId = newModeId()
+    const session = await newSession([message('hello')], {
+      mode: modeId,
+      interactive: false,
+    })
+    const chat = mockModel({ text: ['ok'] })
+
+    await runTurn(session.sessionId, {
+      store: session.store,
+      model: chat.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      resolveMode: () =>
+        Promise.resolve({
+          id: modeId,
+          name: 'allowlist',
+          model: TEST_MODEL_ID,
+          reasoningEffort: null,
+          systemPromptAddition: null,
+          toolOverride: override,
+        }),
+      skills: provide,
+    })
+
+    expect(seen).toEqual([override])
+    const events = await logOf(session.store, session.sessionId)
+    const span = events.find((event) => event.type === EVENT_TYPES.modelRequestStart)
+    // The one allowlisted skill is what makes both tools exist; the later skill contributes
+    // nothing, and the native search tool rides beside them as it does for any offer.
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toEqual([
+      { name: SKILL_TOOL_NAME, source: 'builtin' },
+      { name: SKILL_READ_TOOL_NAME, source: 'builtin' },
+      NATIVE_SEARCH_TOOL,
+    ])
+    // A non-interactive child is offered no `ask_user`, and the mode default cannot bring it
+    // back: the hard rule is applied outside the override.
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : []).not.toContainEqual(
+      expect.objectContaining({ name: 'ask_user' }),
+    )
   })
 })

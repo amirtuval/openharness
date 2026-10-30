@@ -79,8 +79,10 @@ export function formatModes(
     ]
       .join('  ')
       .trimEnd()
-    const overrides = skillOverridesLabel(mode, names)
-    const head = overrides === null ? line : `${line}  ·  ${overrides}`
+    const clauses = [modeDefaultsLabel(mode), skillOverridesLabel(mode, names)].filter(
+      (clause): clause is string => clause !== null,
+    )
+    const head = clauses.length === 0 ? line : `${line}  ·  ${clauses.join('  ·  ')}`
     const description = mode.subagent_description
     return description === null ? [head] : [head, `${indent}${description}`]
   })
@@ -88,6 +90,23 @@ export function formatModes(
   return lines.some((line) => line.includes(SUBAGENT_TYPE_MARK))
     ? [...lines, SUBAGENT_TYPE_HINT]
     : lines
+}
+
+/**
+ * The three "not listed below" defaults a mode carries (epic #349, B8), as one clause: what an
+ * item each map does not name does. `follow` is shown too, because it is a value the mode
+ * really has — and because a reader comparing two modes should see all three settings rather
+ * than having to remember which absence means what.
+ */
+function modeDefaultsLabel(mode: Mode): string | null {
+  const override = mode.tools
+  if (override === null) {
+    return null
+  }
+  const builtin = override.builtin_default ?? 'follow'
+  const mcp = override.mcp_servers_default ?? 'follow'
+  const skills = override.skills_default ?? 'follow'
+  return `not listed: tools ${builtin} · mcp ${mcp} · skills ${skills}`
 }
 
 /**

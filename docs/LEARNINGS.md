@@ -865,6 +865,24 @@ database and, unless they ask otherwise, **one** dev account: a skill seeded for
 force for every later test in the file, so per-test accounts are not politeness but the fixture
 ([#352](https://github.com/amirtuval/openharness/issues/352)).
 
+**A boolean patch over "the user's setting" cannot say "only these", and the missing statement is
+the whole difference between a preset and a policy.** `Mode.tools` was a map of exceptions: a name
+absent from it followed the user's own switch, so a server or skill added after the mode was
+written was silently on in it, and no mode could be the allowlist a reviewed helper needs. The
+fix is one tri-state per kind — `builtin_default`, `mcp_servers_default`, `skills_default`, each
+`follow | off | on` with absent meaning `follow` — and the trap is that the three kinds were
+already resolved in three places (`tool-settings.ts`'s `effectiveTools`, `mcp/in-force.ts`,
+`skill.ts`'s `skillInForce`). Adding the default at each site would have been three chances to
+disagree with the brain, the frontends' `/` menus and a child session; instead one
+`modeItemInForce(entry, follows, fallback)` in the protocol is applied by one helper per kind,
+and every consumer calls it. `off` is an allowlist (an item added later stays off), `on` turns
+every unlisted item on even where the user turned it off globally, and **an explicit entry still
+wins**; a default is never a permission, and it cannot undo a hard rule — `withoutAskUser`, the
+subagent tools a depth withholds and `disable-model-invocation` are applied outside it. Storage
+needed no migration because all of it rides inside the existing `tools jsonb`
+([#349](https://github.com/amirtuval/openharness/issues/349) B8,
+`packages/protocol/src/resources/mode.ts`).
+
 ## Pausing for the user
 
 **A pause is written down, not held in memory.** A call evaluated as `ask` (or any `ask_user` call)
@@ -1876,6 +1894,20 @@ read said `idle` and the card said `done` (found by the #348 pass). The fix is o
 `tasks.length`; [#374](https://github.com/amirtuval/openharness/issues/374)) and the lesson is
 about what an effect is keyed on: the thing the reader sees is the status, and a count is only
 ever a proxy for it that happens to be wrong exactly when work stops.
+
+**"Pending switch" and "the mode in effect" are two states, and collapsing them made one
+direction of a mode switch invisible.** In the web chat, picking a **mode** while on a model was
+visible at once because the picked mode was rendered as the current one; picking a **model**
+while on a mode was not, because the current mode id still came from the session and the picker's
+trigger prefers a selected mode over a model name — so the reader saw the mode until the next
+message detached it. Clearing the mode id on the pick would have fixed the display and broken the
+send: choosing the very model the mode resolves to must still send `{ model }`, and the switch
+test needs to know the session was on a mode at that moment. The fix was a separate
+`detachingMode` flag (display: detached now) beside a committed mode id (send: still on a mode),
+with `oh`'s status line dropping its mode clause on the same rule and its `/` menu reading the
+override of the mode the next message will _not_ follow
+(`apps/web/src/components/chat/chat-view.tsx`,
+`apps/tui/src/chat/screen.tsx`'s `statusModeLabel`).
 
 ## Testing, CI and releasing
 

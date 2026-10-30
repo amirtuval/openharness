@@ -1,4 +1,4 @@
-import type { ModeToolOverride, ToolPermission } from '@openharness/protocol'
+import type { ModeItemDefault, ModeToolOverride, ToolPermission } from '@openharness/protocol'
 
 /**
  * The tool settings a form offers, in one place (epic #303, X4; #307; the screen is #308).
@@ -57,7 +57,7 @@ export type ModeToolChoice = 'follow' | 'on' | 'off'
  * @param name the tool's name
  */
 export function modeToolChoice(override: ModeToolOverride | null, name: string): ModeToolChoice {
-  const chosen = override?.builtin[name]
+  const chosen = override?.builtin?.[name]
   if (chosen === undefined) {
     return 'follow'
   }
@@ -189,30 +189,99 @@ export function withModeSkillChoice(
   )
 }
 
+/** The three sections a mode's editor has a "not listed below" default for (epic #349, B8). */
+export type ModeSection = 'builtin' | 'mcp_servers' | 'skills'
+
+/** The mode's default for one section — `follow` when it has none (epic #349, B8). */
+export function modeSectionDefault(
+  override: ModeToolOverride | null,
+  section: ModeSection,
+): ModeItemDefault {
+  return (
+    override?.[
+      section === 'builtin'
+        ? 'builtin_default'
+        : section === 'mcp_servers'
+          ? 'mcp_servers_default'
+          : 'skills_default'
+    ] ?? 'follow'
+  )
+}
+
+/**
+ * The override a section default makes, keeping every map and every other default exactly as
+ * it was (epic #349, B8).
+ *
+ * `follow` is the absence of the field — the value every mode created before this setting
+ * reads as — so choosing it removes the key rather than storing `'follow'`. An override that
+ * says nothing at all afterwards folds back to `null`.
+ */
+export function withModeSectionDefault(
+  override: ModeToolOverride | null,
+  section: ModeSection,
+  value: ModeItemDefault,
+): ModeToolOverride | null {
+  const defaults: Partial<
+    Pick<ModeToolOverride, 'builtin_default' | 'mcp_servers_default' | 'skills_default'>
+  > = {
+    builtin_default: override?.builtin_default,
+    mcp_servers_default: override?.mcp_servers_default,
+    skills_default: override?.skills_default,
+  }
+  // `undefined` is written rather than the key deleted: `rebuild` uses the key's **presence**
+  // to tell "the caller decided this" from "the caller said nothing", and deleting would let
+  // the stored value fall back in — which is exactly what choosing Follow must undo.
+  defaults[`${section}_default`] = value === 'follow' ? undefined : value
+  return rebuild(
+    override,
+    { ...(override?.builtin ?? {}) },
+    { ...(override?.mcp_servers ?? {}) },
+    { ...(override?.skills ?? {}) },
+    defaults,
+  )
+}
+
 /**
  * Fold the halves back into one override, or `null` when none of them says anything.
  *
  * A patch that ends up empty is `null` — the reading a reader sees ("follow my settings") and
- * the value the server treats as no override. Otherwise the `builtin` map is always written,
- * empty included, because it is the one required field of the wire's override: a mode that says
- * something about servers and nothing about tools is `{ builtin: {}, mcp_servers: { … } }`. An
- * empty `mcp_servers` or `skills` is left out altogether — it means the same thing as none, and
- * the patch a reader's choice produces should be the smallest one that says it.
+ * the value the server treats as no override (epic #349, B8 made `builtin` optional, so a mode
+ * that says something only about servers is `{ mcp_servers: { … } }`). An empty map is left out
+ * altogether — it means the same thing as none, and the patch a reader's choice produces
+ * should be the smallest one that says it. A section default that is not `follow` is part of
+ * what the patch says, so a mode with one and no entries is still not `null`.
  */
 function rebuild(
   override: ModeToolOverride | null,
   builtin: Record<string, boolean>,
   mcpServers: Record<string, boolean> = override?.mcp_servers ?? {},
   skills: Record<string, boolean> = override?.skills ?? {},
+  defaults: Partial<
+    Pick<ModeToolOverride, 'builtin_default' | 'mcp_servers_default' | 'skills_default'>
+  > = {},
 ): ModeToolOverride | null {
-  if (Object.keys(builtin).length === 0 && isEmpty(mcpServers) && isEmpty(skills)) {
-    return null
-  }
-  return {
-    builtin,
+  // Presence, not truthiness: a key the caller wrote as `undefined` means "clear this default",
+  // while a key the caller did not write at all means "keep the stored one".
+  const taken = (key: keyof typeof defaults, stored: ModeItemDefault | undefined) =>
+    Object.prototype.hasOwnProperty.call(defaults, key) ? defaults[key] : stored
+  const builtinDefault = taken('builtin_default', override?.builtin_default)
+  const mcpDefault = taken('mcp_servers_default', override?.mcp_servers_default)
+  const skillsDefault = taken('skills_default', override?.skills_default)
+  const next: ModeToolOverride = {
+    ...(isEmpty(builtin) ? {} : { builtin }),
     ...(isEmpty(mcpServers) ? {} : { mcp_servers: mcpServers }),
     ...(isEmpty(skills) ? {} : { skills }),
+    ...(builtinDefault === undefined || builtinDefault === 'follow'
+      ? {}
+      : { builtin_default: builtinDefault }),
+    ...(mcpDefault === undefined || mcpDefault === 'follow'
+      ? {}
+      : { mcp_servers_default: mcpDefault }),
+    ...(skillsDefault === undefined || skillsDefault === 'follow'
+      ? {}
+      : { skills_default: skillsDefault }),
   }
+  return Object.keys(next).length === 0 ? null : next
 }
 
 /** Whether a record holds no entries at all. */

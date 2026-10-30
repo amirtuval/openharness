@@ -229,7 +229,19 @@ function describeModeTools(
   skills: readonly Skill[],
 ): string {
   const builtin = mode.tools?.builtin ?? {}
-  const parts = Object.entries(builtin).map(([name, on]) => `${name} ${on ? 'on' : 'off'}`)
+  // The section defaults (epic #349, B8) come first, because they say what every item the
+  // patch does not name does — which is the fact a map of exceptions cannot show.
+  const parts: string[] = []
+  for (const [label, value] of [
+    ['tools not listed', mode.tools?.builtin_default],
+    ['MCP servers not listed', mode.tools?.mcp_servers_default],
+    ['skills not listed', mode.tools?.skills_default],
+  ] as const) {
+    if (value !== undefined && value !== 'follow') {
+      parts.push(`${label} ${value}`)
+    }
+  }
+  parts.push(...Object.entries(builtin).map(([name, on]) => `${name} ${on ? 'on' : 'off'}`))
   const ids: Record<string, boolean> = {
     ...(mode.tools?.mcp_servers ?? {}),
     ...(mode.tools?.skills ?? {}),

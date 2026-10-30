@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { TimestampSchema } from '../common'
 import { SkillIdSchema } from '../ids'
-import type { ModeToolOverride } from './mode'
+import { modeItemInForce, type ModeToolOverride } from './mode'
 import { UserIdSchema } from './user'
 
 /**
@@ -169,18 +169,24 @@ export function skillSettingsOf(skill: Skill): SkillSettings {
  * Whether one skill is **on** for a request, given the mode's override (epic #349, K8).
  *
  * The rule is the one every reader must apply: **a mode that names the skill wins; a skill it
- * does not name follows the user's `enabled`**. A map entry naming a skill the user no longer
- * has never matches anything, so a mode that named a deleted skill is simply ignored. It is
- * exported from the protocol — rather than written once in the server and once in each
+ * does not name follows {@link ModeToolOverride.skills_default} — `follow` (the user's
+ * `enabled`), `off` (an allowlist, so a skill imported later stays off in this mode) or `on`
+ * (every skill except the ones the mode turns off)**. A map entry naming a skill the user no
+ * longer has never matches anything, so a mode that named a deleted skill is simply ignored.
+ * It is exported from the protocol — rather than written once in the server and once in each
  * frontend — because the server's `assertInvocableSkills` and the `/` menu have to answer with
  * the same effective set: a menu row the server refuses, or a missing row the server would
  * accept, is a bug that only one shared rule can prevent.
+ *
+ * A mode default cannot bring back a skill a **hard rule** removes: `disable-model-invocation`
+ * still keeps the skill out of the model's listing, and `resolveSkills` applies that beside this
+ * function.
  *
  * @param skill the skill as the store lists it (its stored `enabled`, never an effective one)
  * @param override the resolved mode's `tools` patch, or `null` for no override
  */
 export function skillInForce(skill: Skill, override: ModeToolOverride | null): boolean {
-  return override?.skills?.[skill.id] ?? skill.enabled
+  return modeItemInForce(override?.skills?.[skill.id], skill.enabled, override?.skills_default)
 }
 
 /**
