@@ -119,8 +119,14 @@ describe('the provider the brain is handed (#352)', () => {
 
     const offered = await createSkillProvider({ skills: test.skills })(me.id, null)
     expect(offered.map((entry) => entry.skill.id)).toEqual([skill.id])
-    expect(await offered[0]?.readFile(SKILL_MD_FILENAME)).toBe(SKILL_MD)
-    expect(await offered[0]?.readFile('reference/tone.md')).toBe('Be terse.')
+    expect(await offered[0]?.readFile(SKILL_MD_FILENAME)).toMatchObject({
+      encoding: 'utf8',
+      content: SKILL_MD,
+    })
+    expect(await offered[0]?.readFile('reference/tone.md')).toMatchObject({
+      encoding: 'utf8',
+      content: 'Be terse.',
+    })
     // A path the snapshot does not hold, and another owner's skill, are both `null`.
     expect(await offered[0]?.readFile('nope.md')).toBeNull()
     const theirs = await createSkillProvider({ skills: test.skills })('user_somebody_else', null)

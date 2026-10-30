@@ -171,11 +171,6 @@ export function ChatView({
   // drawn. A server that predates the field — or a read that failed — leaves the default.
   const { preferences } = usePreferences(client)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  // The `/` menu (epic #349, K7; #353): the built-in commands and the reader's own usable
-  // skills, from the client's one reading of both. Built here rather than in the composer
-  // because the send path parses the same line against the same list — a box that offered a row
-  // the send would not recognize would be a lie.
-  const commands = useMemo(() => slashCommands(skills), [skills])
   // The draft, owned here rather than by the composer (#212): "Edit and resend" puts the
   // reader's own words back in the box, and a screen that wants to put words in the box owns
   // its text (U10) — the composer is the box, not the thing that decides what is in it.
@@ -265,9 +260,28 @@ export function ChatView({
   // The mode this tab believes the chat follows, once a switch has been sent. `undefined` is
   // "nothing sent yet, read the session"; `null` is "detached by a plain model switch".
   const [modeInEffect, setModeInEffect] = useState<string | null | undefined>(undefined)
-  const currentModeId =
+  // A plain model has been picked while the chat still follows a mode, and the switch has not
+  // been sent yet. The **display** detaches at once — the picker and header must show the model,
+  // not the mode they are about to leave — while `committedModeId` below stays non-null so the
+  // send still knows a detach is needed (picking the very model the mode resolves to must still
+  // send `{ model }`, not nothing).
+  const [detachingMode, setDetachingMode] = useState(false)
+  const committedModeId =
     pendingMode?.id ?? (modeInEffect === undefined ? sessionModeId : modeInEffect)
+  const currentModeId = detachingMode ? null : committedModeId
   const currentModeName = modeNameOf(modes.modes, currentModeId)
+  // The mode's skill (and tool) override, which is what makes the `/` menu the **effective**
+  // set (epic #349, K8): the menu follows a mode switch, the same way the server's answer does.
+  const modeOverride = useMemo(
+    () => modes.modes.find((mode) => mode.id === currentModeId)?.tools ?? null,
+    [modes.modes, currentModeId],
+  )
+  // The `/` menu (epic #349, K7; #353): the built-in commands and the reader's own usable
+  // skills, from the client's one reading of both. Built here rather than in the composer
+  // because the send path parses the same line against the same list — a box that offered a row
+  // the send would not recognize would be a lie. The mode's override is applied first, so a
+  // skill the mode turns off is not offered and one it turns on is.
+  const commands = useMemo(() => slashCommands(skills, modeOverride), [skills, modeOverride])
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -373,7 +387,10 @@ export function ChatView({
       // A picked model is a switch when it differs from what the session runs — or when the
       // session is on a **mode**: picking the very model the mode resolves to is still a switch
       // away from the mode, and it is what detaches the chat (#245, M6).
-      const switching = chosen !== null && (chosen !== sessionModel || currentModeId !== null)
+      // `committedModeId`, not `currentModeId`: a pick may already have detached the display,
+      // but the session still follows the mode until this message is sent, so choosing the very
+      // model the mode resolves to is still a switch away from it (#245, M6; #349, B8).
+      const switching = chosen !== null && (chosen !== sessionModel || committedModeId !== null)
       const switchingMode = pendingMode !== null && pendingMode.id !== sessionModeId
       // A skill invocation rides the message (K7): the text is what the reader typed, and the
       // `skill` beside it is what the brain loads the instructions from. A built-in answered
@@ -394,12 +411,14 @@ export function ChatView({
           // tracks models, not modes, and the header reads this rather than a stale session.
           setModeInEffect(pendingMode?.id ?? null)
           setPendingMode(null)
+          setDetachingMode(false)
         } else if (switching) {
           // The stored event moves the transcript's model to the pick; from here the selector
           // reads the log, and the message carries the "Switched to …" marker. A plain model
           // switch also detaches the chat from any mode (#245, M6).
           setChosen(null)
           setModeInEffect(null)
+          setDetachingMode(false)
         }
       }
       return stored
@@ -407,6 +426,7 @@ export function ChatView({
     [
       chosen,
       commands,
+      committedModeId,
       compact,
       editBlocked,
       editing,
@@ -778,13 +798,16 @@ export function ChatView({
                       // other, never both (#245, M6).
                       setPendingMode(mode)
                       setChosen(null)
+                      setDetachingMode(false)
                     }}
                     value={chosen ?? sessionModel}
                     onChange={(modelId) => {
                       // A plain model detaches the chat from any mode, so a pending mode goes with
-                      // the pick.
+                      // the pick — and the display detaches **now** (#349, B8): a picker that kept
+                      // naming the mode until the next message was the bug the reader reported.
                       setChosen(modelId)
                       setPendingMode(null)
+                      setDetachingMode(true)
                     }}
                     refreshing={catalog.refreshing}
                     onRefresh={catalog.refresh}

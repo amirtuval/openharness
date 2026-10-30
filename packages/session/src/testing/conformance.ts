@@ -23,6 +23,7 @@ import {
   type CreateModeRequest,
   type EventId,
   type ModeId,
+  type ModeToolOverride,
   type KeyCursorPosition,
   type ModelRequestStartEvent,
   type NextPage,
@@ -373,10 +374,16 @@ export function runSessionStoreConformance(
         // deleting one leave such a mode alone.
         const gone = newMcpServerId()
         const goneSkill = newSkillId()
-        const override = {
+        const override: ModeToolOverride = {
           builtin: { web_search: true, todo_write: false },
           mcp_servers: { [newMcpServerId()]: true, [gone]: false },
           skills: { [newSkillId()]: false, [goneSkill]: true },
+          // The three section defaults (epic #349, B8) ride inside the same `tools` JSON, so
+          // both stores carry them with no schema of their own — and a store written before
+          // them (no key) reads as `follow`.
+          builtin_default: 'off',
+          mcp_servers_default: 'on',
+          skills_default: 'off' as const,
         }
         const withTools = await store.createMode(modeInput('deep', { tools: override }), OWNER_A)
         expect(withTools.tools).toEqual(override)

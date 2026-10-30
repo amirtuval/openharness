@@ -34,8 +34,15 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-/** The files of a repository, by path from its root. */
-export type GitFileMap = Readonly<Record<string, string>>
+/**
+ * The files of a repository, by path from its root.
+ *
+ * A string is written as UTF-8 text. A `Uint8Array` is written as its bytes — which is how a
+ * fixture holds a file that is not text at all (a PNG, a font): a JavaScript string cannot
+ * carry invalid UTF-8, so a binary fixture has to be bytes rather than a string that happens
+ * to contain a NUL.
+ */
+export type GitFileMap = Readonly<Record<string, string | Uint8Array>>
 
 /** What {@link createGitFixture} is asked for. */
 export interface GitFixtureOptions {

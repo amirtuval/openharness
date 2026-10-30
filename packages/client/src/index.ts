@@ -241,8 +241,16 @@ export {
   skillSourceLabel,
   slashCommandQuery,
   slashCommands,
+  slashEnterAction,
 } from './skills'
-export type { BuiltinCommand, RefreshFileChange, SlashCommand, SlashInvocation } from './skills'
+export type {
+  BuiltinCommand,
+  RefreshFileChange,
+  SlashCommand,
+  SlashEnterAction,
+  SlashInvocation,
+  SlashMenuRow,
+} from './skills'
 
 export {
   APPROVAL_CHOICES,

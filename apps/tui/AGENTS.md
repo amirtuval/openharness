@@ -248,7 +248,10 @@ A mode whose model cannot be used is refused with the server's own sentence in t
 never silently swapped. A plain model pick and a mode pick are one choice: each clears the
 other, because a chat follows a mode or a model, never both. The status line names the mode
 first — `smart · claude-sonnet-5` — so what the chat follows and what it resolved to are on one
-line (`(next message)` while the pick is pending).
+line (`(next message)` while the pick is pending). **A plain model pick drops the mode clause
+immediately** (`statusModeLabel`): the session still follows its mode until that message is
+sent, but the reader must see the switch the moment it is made — keeping the mode named until
+send was the reported web bug's terminal twin.
 
 ### Switching the model in a chat
 
@@ -370,9 +373,11 @@ with the Ctrl+L mechanism and keeps the session, `/help` prints the commands and
 the prompt, and `/exit` (alias `/quit`) leaves — the same leave as the second idle Ctrl+C.
 
 **The reader's skills are rows in that menu** (`menuCommands`, #349, K7). The rows come from the
-client's own `slashCommands(skills)` — which already knows that a skill is offered when it is
-**on** (K8) and **user-invocable**, spells its usage `/name <argument-hint>`, and keeps the
-API's order — re-wrapped as registry entries so a skill is filtered, completed and corrected
+client's own `slashCommands(skills, override)` — the **effective** on/off set of K8 (the
+protocol's `skillsInForce` applied to the chat's current or pending mode, so a row the server
+would refuse is not offered and one it would accept is), **user-invocable** only, with the usage
+`/name <argument-hint>` and the API's order — re-wrapped as registry entries so a skill is
+filtered, completed and corrected
 exactly as `/compact` is, and a typo near a skill name is suggested by name rather than sent to
 the model. The screen reads `client.skills.list()` once in the background (a failed read leaves
 the menu with the chat's own commands) and re-reads it when `/skills` closes, because a skill
@@ -389,10 +394,14 @@ start the line — a line with a leading space is a message — which is the men
 
 Typing `/` on an empty buffer opens the filtered list under the prompt. ↑/↓ highlight (they do
 not walk the history while it is up), Tab completes the highlighted command into the buffer,
-Enter runs it, Esc closes the menu and keeps the text. The menu closes once the command word
-is over: at the first space, or as soon as the word is a command. Its rows are ANSI colours
-(`cyan` for the highlighted one), and the usage column is padded to the whole registry's
-widest label so the descriptions do not move as the filter narrows.
+and Esc closes the menu and keeps the text. What **Enter** does is the client's own rule
+(`slashEnterAction`, epic #349 K7; #354), so `oh` and the web app agree: a **built-in** the line
+names in full runs at once (`/compact`), while a name still being typed — and any **skill** row,
+arguments or not — completes to `/name ` for them, and a line that already has arguments sends
+as it always did. The menu closes once the command word is over: at the first space, or as soon
+as the word is a command (a one-row list is noise) — the Enter rule reads the line either way.
+Its rows are ANSI colours (`cyan` for the highlighted one), and the usage column is padded to
+the whole registry's widest label so the descriptions do not move as the filter narrows.
 
 **The inline prompt slot** (`src/components/prompt-slot.tsx`) is the one mechanism through
 which a flow takes the input area over and gives it back with a result:
@@ -995,6 +1004,10 @@ the web app does, in the transcript, where the `agent` call that started it was.
   second column, plus one line saying a type is a helper's mode and that this CLI only shows it.
   `oh` does not create or edit modes, and a description is what the parent model chooses a type
   by — so it is read here and written in the web app's Settings → Modes.
+- **`oh modes` shows each section default a mode carries** (epic #349, B8): a mode with a
+  `tools` override adds `not listed: tools follow · mcp on · skills off`, naming all three
+  values (`follow` included) so two modes can be compared without remembering which absence
+  means what. The override is read-only here, like the skill map beside it.
 
 ### Remote MCP servers in the terminal (#303, X10; #313)
 
@@ -1450,8 +1463,10 @@ and a whole chat that follows a mode from `src/chat/session.test.ts`.
 The skills half (#349, K3/K5/K7/K8; #354) is four files. `src/chat/commands.test.ts` and
 `src/components/prompt-input.test.tsx` hold the menu: `menuCommands` puts the reader's enabled,
 user-invocable skills beside the chat's own commands with their `argument-hint`, `parseChatInput`
-reads a skill line as an invocation (`invocationSkill`'s `{ name, arguments }`), and the menu
-offers, filters, completes and suggests them. `src/commands/skills.test.ts` holds `oh skills`'
+reads a skill line as an invocation (`invocationSkill`'s `{ name, arguments }`), the menu offers,
+filters, completes and suggests them, and Enter follows the client's own rule (#354): a built-in
+named in full runs, a skill completes to `/name ` and is sent with its arguments by the Enter after
+it. `src/commands/skills.test.ts` holds `oh skills`'
 words and its flows against the fake client — the listing and its badges, the printed preview's
 candidates and reasons, the refresh's diff, and every branch of `runSkills`: `--all`/`--name`,
 the refusals (a name the preview did not offer, a broken candidate, nothing importable), the

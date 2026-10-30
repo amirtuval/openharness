@@ -172,7 +172,12 @@ describe('the skill endpoints’ shapes', () => {
   })
 
   it('reads one file with its path, its size and its content', () => {
-    const file = { path: 'reference/tone.md', size: 6, content: 'terse\n' }
+    const file = {
+      path: 'reference/tone.md',
+      size: 6,
+      encoding: 'utf8' as const,
+      content: 'terse\n',
+    }
     expect(SkillFileContentSchema.parse(file)).toEqual(file)
   })
 
@@ -400,6 +405,18 @@ describe('skillSettingsOf', () => {
       '[version]',
     )
     expect(skillSettingsOf(parsed({ 'argument-hint': '   ' })).argumentHint).toBe(null)
+  })
+
+  it('renders the format’s bracket spelling back when YAML parsed it as a sequence', () => {
+    // `argument-hint: [version]` is a YAML flow sequence, so a snapshot stored before the import
+    // kept the raw line carries an array here — and the hint the file meant is what it renders.
+    expect(skillSettingsOf(parsed({ 'argument-hint': ['version'] })).argumentHint).toBe('[version]')
+    expect(skillSettingsOf(parsed({ 'argument-hint': ['a', 'b'] })).argumentHint).toBe('[a, b]')
+    // A hint the format can only mean as text, and nothing else: bad items, and none at all.
+    expect(skillSettingsOf(parsed({ 'argument-hint': [] })).argumentHint).toBe(null)
+    expect(skillSettingsOf(parsed({ 'argument-hint': ['', ' '] })).argumentHint).toBe(null)
+    expect(skillSettingsOf(parsed({ 'argument-hint': ['ok', 1] })).argumentHint).toBe(null)
+    expect(skillSettingsOf(parsed({ 'argument-hint': { a: 1 } })).argumentHint).toBe(null)
   })
 
   it('reads the fields by the names the format uses, and nothing else', () => {

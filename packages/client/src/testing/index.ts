@@ -49,8 +49,10 @@ import {
   UserPreferencesSchema,
   UserToolSettingsSchema,
   UserUsageSchema,
+  builtinToolInForce,
   credentialDetails,
   encodeKeyCursor,
+  mcpServerInForce,
   mcpToolOfferedName,
   newAgentId,
   mcpServerNameFromUrl,
@@ -1686,6 +1688,8 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
           path: filePath,
           // Bytes, the way the real route measures a file's size (the protocol's own rule).
           size: new TextEncoder().encode(content).length,
+          // The fake holds text files only; a binary snapshot is the real store's business.
+          encoding: 'utf8',
           content,
         }),
       )
@@ -1941,8 +1945,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
    * is the rule `apps/server/src/mcp/in-force.ts` applies.
    */
   function serverInForce(server: McpServer, override: ModeToolOverride | null): boolean {
-    const patch: Record<string, boolean> | undefined = override?.mcp_servers
-    return patch?.[server.id] ?? server.enabled
+    // The protocol's one rule (epic #349, B8): an entry wins, then the section default, then
+    // the server's own `enabled`.
+    return mcpServerInForce(server.id, server.enabled, override)
   }
 
   function hasLiveTokens(server: McpServer): boolean {
@@ -2275,7 +2280,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         name: tool.name,
         source: 'builtin' as const,
         // A mode's override is on/off only (#307); the user's choice, else on.
-        enabled: override?.builtin[tool.name] ?? choice?.enabled ?? true,
+        enabled: builtinToolInForce(tool.name, choice?.enabled ?? true, override),
         policy: choice?.policy ?? tool.policy,
         // A tool this deployment does not register has no declaration to report; one it does
         // declare and cannot offer — a `reason` is what says so (#335) — still has one.

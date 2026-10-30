@@ -114,12 +114,18 @@ export const NO_SKILLS: ResolvedSkills = { registry: undefined, byName: new Map(
  * `disable-model-invocation` skills has no listing to carry and no file a model may read: the
  * tools would be a description saying "this chat has no skills available to you". `base` is the
  * deployment's own registry, and a name it already carries is left to it.
+ *
+ * `userLoadedSkills` is what the session's **log** says the user has run in this chat (K7): a
+ * `disable-model-invocation` skill in that set may be read by the model, though it is still not
+ * listed. It comes from the caller because the log is the loop's to read, not this function's,
+ * and a child session passes its own log's answer exactly as a chat does.
  */
 export async function resolveSkills(
   provider: SkillProvider | undefined,
   ownerId: UserId,
   modeOverride: ModeToolOverride | null,
   base?: ToolRegistry,
+  userLoadedSkills: ReadonlySet<string> = new Set(),
 ): Promise<ResolvedSkills> {
   if (provider === undefined) {
     return NO_SKILLS
@@ -129,8 +135,10 @@ export async function resolveSkills(
   // keeps one under `web_search` (#335): `createToolRegistry` refuses two tools of one name, and
   // shadowing the host's would silently replace the tool it meant. What is left is the request's
   // own pair; nothing offered at all is `undefined`, the shape a chat with no skills has.
-  const tools = skillToolsOffered(skills)
-    ? createSkillTools({ skills }).filter((tool) => base?.get(tool.name) === undefined)
+  const tools = skillToolsOffered(skills, userLoadedSkills)
+    ? createSkillTools({ skills, userLoadedSkills }).filter(
+        (tool) => base?.get(tool.name) === undefined,
+      )
     : []
   return {
     registry: tools.length === 0 ? undefined : createToolRegistry(tools),
@@ -229,6 +237,25 @@ export function skillsInUse(events: readonly StoredEvent[], coversTo: number): s
     }
     if (!names.includes(event.name)) {
       names.push(event.name)
+    }
+  }
+  return names
+}
+
+/**
+ * The skills the **user** has run in this chat, by name (K7) — every `session.skill_loaded`
+ * the log holds.
+ *
+ * What the model may read of a `disable-model-invocation` skill depends on this: the flag says
+ * the model may not pick the skill on its own, and once the user has run `/name` its body is
+ * in the request and the files it names are the user's own instructions to follow (K1). A
+ * child session answers from its own log exactly as a top-level chat does.
+ */
+export function userLoadedSkillNames(events: readonly StoredEvent[]): Set<string> {
+  const names = new Set<string>()
+  for (const event of events) {
+    if (event.type === EVENT_TYPES.sessionSkillLoaded) {
+      names.add(event.name)
     }
   }
   return names
