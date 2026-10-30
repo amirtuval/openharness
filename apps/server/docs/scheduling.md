@@ -240,19 +240,50 @@ expired and take them. What they find in the log is the turn the dead instance h
 `brain_lost` and runs the turn again. Nothing is lost, because nothing was ever held in
 memory.
 
+### What a crash looks like to the user
+
+A crash is rare and may be visible, but it must not freeze for ever. With the deployment
+defaults — `OPENHARNESS_LEASE_TTL_MS` 30 s and `OPENHARNESS_HEARTBEAT_MS` 10 s — the partial
+reply stops, the client's stall indicator appears after 15 s (`Waiting for the server…`) or as
+soon as its own connection drops (`Reconnecting…`), and roughly 30–40 s after the kill a peer
+takes the partition over. The peer closes the orphaned span `brain_lost`, which **supersedes
+the partial reply** — the client drops what it had streamed, because nothing will ever store the
+message those chunks previewed — and re-runs the request. The user sees the reply restart and
+finish with one complete answer, without sending anything. A tool call that was in flight is
+answered `execution lost` with a sentence telling the model the server stopped, the outcome is
+unknown, and it may retry if that is safe; it is never re-run automatically.
+
+**Recovery is capped** (`OPENHARNESS_MAX_RECOVERY_ATTEMPTS`, 3 by default). A turn that takes
+every owner down with it — a poison input that crashes the process whenever the request runs —
+would otherwise be recovered for ever, one process death per lease TTL. Before taking an
+inherited turn over, the brain counts the consecutive `brain_lost` closures for that turn with
+no completed model request between them; the rule is cause-agnostic, because a graceful handoff
+leaves the same closure as a crash, and a turn that keeps moving without finishing a step is
+just as stuck. At the cap it closes the open span, writes a terminal
+`session.error { type: recovery_exhausted_error }` and `session.status_idle`, and the user can
+send a new message — which starts a fresh turn and a fresh count. The message says how many
+takeovers happened.
+
+The two lease timings are the knob that bounds the stall: shrinking them (say 20 s / 5 s)
+shortens crash recovery but raises the chance that a loaded instance's renewal LAPSES while a
+peer is scanning. A lapse nobody takes over is still renewable (see "Leases and epochs"), so the
+risk is a false takeover only when the peer really scans during the lapse; the deployment
+defaults favour stability.
+
 ## Configuration
 
-| variable                           | default                        | what it does                                                                                                        |
-| ---------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `SCHEDULER`                        | `local`                        | `local`, or `postgres` for partition leases                                                                         |
-| `DATABASE_URL`                     | —                              | required by `SCHEDULER=postgres`                                                                                    |
-| `OPENHARNESS_INSTANCE_ID`          | hostname + pid + random suffix | this instance's id in the lease table                                                                               |
-| `OPENHARNESS_PARTITIONS`           | `64` (the protocol's)          | how many partitions the session space has                                                                           |
-| `OPENHARNESS_LEASE_TTL_MS`         | `30000`                        | how long a lease lasts before it must be renewed                                                                    |
-| `OPENHARNESS_HEARTBEAT_MS`         | `10000`                        | how often leases are renewed and free ones taken                                                                    |
-| `OPENHARNESS_SWEEP_MS`             | `60000`                        | how often owned partitions are re-scanned                                                                           |
-| `OPENHARNESS_BALANCE_STABILITY_MS` | `30000`                        | how long the membership must be unchanged before surplus is released (#378, P3); `0` releases at the next heartbeat |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`     | `40000`                        | how long a shutdown/release lets the step in flight finish before the hard handoff                                  |
+| variable                            | default                        | what it does                                                                                                        |
+| ----------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `SCHEDULER`                         | `local`                        | `local`, or `postgres` for partition leases                                                                         |
+| `DATABASE_URL`                      | —                              | required by `SCHEDULER=postgres`                                                                                    |
+| `OPENHARNESS_INSTANCE_ID`           | hostname + pid + random suffix | this instance's id in the lease table                                                                               |
+| `OPENHARNESS_PARTITIONS`            | `64` (the protocol's)          | how many partitions the session space has                                                                           |
+| `OPENHARNESS_LEASE_TTL_MS`          | `30000`                        | how long a lease lasts before it must be renewed                                                                    |
+| `OPENHARNESS_HEARTBEAT_MS`          | `10000`                        | how often leases are renewed and free ones taken                                                                    |
+| `OPENHARNESS_SWEEP_MS`              | `60000`                        | how often owned partitions are re-scanned                                                                           |
+| `OPENHARNESS_BALANCE_STABILITY_MS`  | `30000`                        | how long the membership must be unchanged before surplus is released (#378, P3); `0` releases at the next heartbeat |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`      | `40000`                        | how long a shutdown/release lets the step in flight finish before the hard handoff                                  |
+| `OPENHARNESS_MAX_RECOVERY_ATTEMPTS` | `3`                            | how many takeovers one turn may survive before it ends with `recovery_exhausted_error` (#378, P4)                   |
 
 The instance id has to be unique among the instances sharing a database: two live instances
 leasing under one id would fence each other's writes.

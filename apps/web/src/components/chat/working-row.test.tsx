@@ -109,6 +109,32 @@ describe('workingState', () => {
     })
     expect(workingState(input({ status: 'idle', compacting: true }))).toBeNull()
   })
+
+  it('says the turn is waiting for the server once it goes quiet (#378, P4)', () => {
+    expect(workingState(input({ stalled: true }))).toEqual({ kind: 'waiting' })
+    // It is shown even when a reply had started: a stream that stops mid-answer is exactly the
+    // silence the row exists for.
+    expect(workingState(input({ stalled: true, hasReplyText: true }))).toEqual({
+      kind: 'waiting',
+    })
+    expect(workingState(input({ status: 'idle', stalled: true }))).toBeNull()
+  })
+
+  it('lets a specific wait outrank the stall clock, but a reconnect outrank everything', () => {
+    expect(workingState(input({ stalled: true, summarizing: { pass: 2, passes: 4 } }))).toEqual({
+      kind: 'summarizing',
+      pass: 2,
+      passes: 4,
+    })
+    expect(workingState(input({ stalled: true, reconnecting: true }))).toEqual({
+      kind: 'reconnecting',
+    })
+    expect(
+      workingState(input({ reconnecting: true, summarizing: { pass: 2, passes: 4 } })),
+    ).toEqual({ kind: 'reconnecting' })
+    // The indicator is about a turn that is in flight; once the turn ends it goes away.
+    expect(workingState(input({ status: 'idle', reconnecting: true }))).toBeNull()
+  })
 })
 
 describe('WorkingRow', () => {
@@ -153,6 +179,16 @@ describe('WorkingRow', () => {
     expect(row).toHaveAttribute('data-state', 'summarizing')
     // A compaction is a wait like any other, so the clock runs for it too.
     expect(row).toHaveTextContent('0s')
+  })
+
+  it('says it is reconnecting, and waiting for the server (#378, P4)', () => {
+    const { rerender } = render(<WorkingRow state={{ kind: 'reconnecting' }} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Reconnecting…')
+    expect(screen.getByRole('status')).toHaveAttribute('data-state', 'reconnecting')
+
+    rerender(<WorkingRow state={{ kind: 'waiting' }} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Waiting for the server…')
+    expect(screen.getByRole('status')).toHaveAttribute('data-state', 'waiting')
   })
 
   it('draws the wait a manual compaction asked for (#283)', () => {

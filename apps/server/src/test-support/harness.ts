@@ -4,6 +4,7 @@ import {
   createContextStrategy,
   DEFAULT_CLEAR_THRESHOLD,
   DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_RECOVERY_ATTEMPTS,
   DEFAULT_MAX_TOOL_STEPS,
   type ModelFactory,
 } from '@openharness/brain'
@@ -280,6 +281,8 @@ export interface TestOptions {
    * The production default unless a test wants a turn cut short early.
    */
   readonly maxToolSteps?: number
+  /** How many takeovers one turn may survive before recovery gives up (#378, P4). */
+  readonly maxRecoveryAttempts?: number
   /** The subagent limits a test runs with (epic #340, S6; #344); the deployment's defaults. */
   readonly maxAgentDepth?: number
   readonly maxLiveTasks?: number
@@ -803,6 +806,7 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
             tenantId: options.providers.microsoft.tenantId ?? 'common',
           },
     testModel: undefined,
+    testToolExecutionLog: undefined,
     webDir: options.webDir,
     allowPrivateProviderUrls: options.allowPrivateProviderUrls ?? false,
     trustedProxyHops: options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS,
@@ -825,6 +829,7 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     clearThreshold: options.clearThreshold ?? DEFAULT_CLEAR_THRESHOLD,
     todoNudge: options.todoNudge ?? false,
     maxToolSteps: options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS,
+    maxRecoveryAttempts: options.maxRecoveryAttempts ?? DEFAULT_MAX_RECOVERY_ATTEMPTS,
     maxAgentDepth: options.maxAgentDepth ?? DEFAULT_MAX_AGENT_DEPTH,
     maxLiveTasks: options.maxLiveTasks ?? DEFAULT_MAX_LIVE_TASKS,
     // Observability (#158) is off in a test by default: the readable log format, and no

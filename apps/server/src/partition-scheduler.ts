@@ -185,6 +185,8 @@ export interface PostgresPartitionSchedulerOptions {
   /** The clearing threshold and the todo nudge (#331), passed to every turn. */
   readonly clearThreshold?: number
   readonly todoNudge?: boolean
+  /** How many takeovers one turn may survive before recovery gives up (#378, P4). */
+  readonly maxRecoveryAttempts?: number
   /**
    * Called when a pass rejects, and when a background tick fails. Never throws.
    *
@@ -358,6 +360,9 @@ export class PostgresPartitionScheduler implements SessionScheduler {
             ? {}
             : { clearThreshold: options.clearThreshold }),
           ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+          ...(options.maxRecoveryAttempts === undefined
+            ? {}
+            : { maxRecoveryAttempts: options.maxRecoveryAttempts }),
         }),
       ...(options.maxConcurrentSessions === undefined
         ? {}

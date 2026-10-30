@@ -57,6 +57,7 @@ import { isHandoffAbort } from './handoff'
 import { assertValidEvents, EventValidationError } from './validate'
 import {
   chunkRangeAfter,
+  consecutiveRecoveryClosures,
   contextView,
   isUserInterrupt,
   isUserMessage,
@@ -382,6 +383,19 @@ export interface TurnOutcome {
   readonly waiting?: TaskWaitState
 }
 
+/**
+ * How many recoveries one turn may have before it is stopped (#378, P4).
+ *
+ * A crashed turn is normally re-run by the next owner, and a graceful hand-off of a deployment
+ * reaches the same path. A turn that takes its owner down every time it runs — a poison input —
+ * would otherwise be recovered for ever, one process death at a time. Three is enough to ride
+ * out a crash or two of unrelated bad luck (a node lost mid-turn while another is being
+ * replaced), and short enough that a poison turn is over in a few lease TTLs rather than
+ * leaving the user watching a reply that never comes. A deployment configures it with
+ * `OPENHARNESS_MAX_RECOVERY_ATTEMPTS`.
+ */
+export const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3
+
 /** What a turn waiting on tasks waits for, and until when. */
 export interface TaskWaitState {
   /** The tasks it waits for; empty means any task of this session. */
@@ -542,6 +556,19 @@ export interface RunTurnOptions {
    * goes idle rather than retrying.
    */
   readonly maxToolSteps?: number
+  /**
+   * How many times one turn may be taken over and re-run before recovery gives up (#378, P4);
+   * {@link DEFAULT_MAX_RECOVERY_ATTEMPTS} (3) when absent.
+   *
+   * The count is the run of `brain_lost` span closures for the open turn with no completed
+   * request between them — the log's record of "this turn was recovered, died again, and was
+   * recovered". Past the limit the brain closes the orphaned span, writes
+   * `session.error { type: 'recovery_exhausted_error', retry_status: 'terminal' }` and goes
+   * idle, so a poison input fails visibly instead of looping through processes for ever. A
+   * value below `1` refuses recovery outright: the next owner ends the inherited turn instead
+   * of taking it over.
+   */
+  readonly maxRecoveryAttempts?: number
   /**
    * // extension: the share of the chat model's budget at which old tool results are cleared
    * (#331); {@link DEFAULT_CLEAR_THRESHOLD} when absent.
@@ -706,6 +733,7 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
   const strategy = options.contextStrategy ?? DEFAULT_CONTEXT_STRATEGY
   const retry = resolveRetryPolicy(options.retry)
   const maxSteps = options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS
+  const maxRecoveries = options.maxRecoveryAttempts ?? DEFAULT_MAX_RECOVERY_ATTEMPTS
   const writeOptions = fence === undefined ? undefined : { fence }
 
   // Read through a function: `signal.aborted` is a property TypeScript would otherwise treat
@@ -880,10 +908,16 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
     await append([statusRunning()])
   } else {
     const inherited = await readLog(store, sessionId)
+    // How many times this turn has already been taken over without completing a step (#378,
+    // P4). Both a crash and a graceful hand-off leave the same `brain_lost` closure, so this
+    // counts recoveries rather than "crashes": a turn that keeps moving between pods without
+    // ever getting a step done is just as stuck as one that crashes on every owner.
+    const recoveries = consecutiveRecoveryClosures(inherited)
     if (turnState.openSpan !== null) {
       // The span the dead brain left open. Its request will not report usage — nobody saw it
       // end — and the chunks it streamed are orphaned: nothing will ever store the message
-      // they previewed, so this span end supersedes them and replay skips them.
+      // they previewed, so this span end supersedes them and replay skips them. It closes on
+      // the exhausted path too: every span a turn finishes is closed.
       const range = chunkRangeAfter(inherited, turnState.openSpan.seq)
       await append([
         spanEnd(turnState.openSpan.id, ZERO_MODEL_USAGE, {
@@ -894,6 +928,24 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
           supersedes: range ?? undefined,
         }),
       ])
+    }
+    if (recoveries >= maxRecoveries) {
+      // Recovery has been tried often enough. Taking the turn over again would only feed the
+      // same poison to another process, so end it visibly instead: the user sees a failure and
+      // can send a new message, which starts a fresh turn with a fresh count. The idle event
+      // claims whatever user input is still queued, or the scheduler would find that input and
+      // run this same turn again.
+      await append([
+        sessionError({
+          type: 'recovery_exhausted_error',
+          message:
+            `This turn was recovered ${String(recoveries)} times without completing a step, ` +
+            'so it was stopped. Send a new message to try again.',
+          retry_status: { type: 'terminal' },
+        }),
+        statusIdle({ consumes: queued.map((event) => event.id) }),
+      ])
+      return { outcome: 'error' }
     }
     if (lastStatusEventType(inherited) === EVENT_TYPES.sessionStatusRescheduled) {
       // The inherited turn was waiting to be resumed; resuming it is what a status_running says.

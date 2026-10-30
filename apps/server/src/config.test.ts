@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_CLEAR_THRESHOLD,
   DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_RECOVERY_ATTEMPTS,
   DEFAULT_MAX_TOOL_STEPS,
 } from '@openharness/brain'
 import {
@@ -88,12 +89,14 @@ describe('readServerConfig', () => {
       github: undefined,
       microsoft: undefined,
       testModel: undefined,
+      testToolExecutionLog: undefined,
       webDir: undefined,
       allowPrivateProviderUrls: false,
       trustedProxyHops: DEFAULT_TRUSTED_PROXY_HOPS,
       corsOrigins: [],
       maxConcurrentSessions: DEFAULT_MAX_CONCURRENT_SESSIONS,
       maxToolSteps: DEFAULT_MAX_TOOL_STEPS,
+      maxRecoveryAttempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
       maxAgentDepth: DEFAULT_MAX_AGENT_DEPTH,
       maxLiveTasks: DEFAULT_MAX_LIVE_TASKS,
       drainTimeoutMs: DEFAULT_DRAIN_TIMEOUT_MS,
@@ -142,6 +145,7 @@ describe('readServerConfig', () => {
         OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
         OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
         OPENHARNESS_MAX_TOOL_STEPS: '7',
+        OPENHARNESS_MAX_RECOVERY_ATTEMPTS: '4',
         OPENHARNESS_MAX_AGENT_DEPTH: '2',
         OPENHARNESS_MAX_LIVE_TASKS: '4',
         OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
@@ -178,12 +182,14 @@ describe('readServerConfig', () => {
       github: { clientId: 'gh-id', clientSecret: 'gh-secret' },
       microsoft: { clientId: 'ms-id', clientSecret: 'ms-secret', tenantId: 'contoso' },
       testModel: 'mock',
+      testToolExecutionLog: undefined,
       webDir: '/srv/web',
       allowPrivateProviderUrls: true,
       trustedProxyHops: 2,
       corsOrigins: ['http://a.test', 'http://b.test'],
       maxConcurrentSessions: 12,
       maxToolSteps: 7,
+      maxRecoveryAttempts: 4,
       maxAgentDepth: 2,
       maxLiveTasks: 4,
       drainTimeoutMs: 250,
@@ -391,6 +397,17 @@ describe('readServerConfig', () => {
     expect(() => readServerConfig(env({ OPENHARNESS_MAX_TOOL_STEPS: 'many' }))).toThrow(
       /OPENHARNESS_MAX_TOOL_STEPS/,
     )
+  })
+
+  it('refuses a recovery cap below one (#378, P4)', () => {
+    // Zero would end every inherited turn before it could make a single step of progress.
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_RECOVERY_ATTEMPTS: '0' }))).toThrow(
+      /OPENHARNESS_MAX_RECOVERY_ATTEMPTS/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_RECOVERY_ATTEMPTS: 'often' }))).toThrow(
+      /OPENHARNESS_MAX_RECOVERY_ATTEMPTS/,
+    )
+    expect(readServerConfig(env({})).maxRecoveryAttempts).toBe(3)
   })
 
   it('bounds the nesting depth at the tree walk’s own ceiling (#361)', () => {

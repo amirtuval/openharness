@@ -228,6 +228,25 @@ export const SessionErrorTypeSchema = z.enum([
    * **Non-retryable**: `session.status_idle` follows, and `retry_status.type` is `terminal`.
    */
   'tool_loop_stuck_error',
+  /**
+   * // extension: recovery of an inherited turn gave up after repeated takeovers (#378, P4).
+   *
+   * A crashed or handed-off turn is normally re-run by whichever instance takes its partition
+   * over. A turn that takes every owner down with it — a poison input that crashes the process
+   * every time the request runs — would otherwise loop forever, each owner closing the previous
+   * one's span as `brain_lost` and dying on the same step. The brain counts those consecutive
+   * `brain_lost` closures for the open turn, with no completed request in between, and past
+   * its configured limit it stops: the orphaned span closes, this error is written, and the
+   * session goes idle so the user sees a failure and can send a new message.
+   *
+   * The rule is **cause-agnostic**: a graceful handoff of a deployment ends up as the same
+   * `brain_lost` closure, and a turn that is moved from pod to pod without ever completing a
+   * step is just as stuck as one that crashes. The `message` says how many takeovers happened.
+   *
+   * **Non-retryable**: `session.status_idle` follows, and `retry_status.type` is `terminal` —
+   * recovery has already been tried, and the same work would loop again.
+   */
+  'recovery_exhausted_error',
 ])
 
 export type SessionErrorType = z.infer<typeof SessionErrorTypeSchema>
@@ -245,6 +264,13 @@ export const SessionErrorSchema = z
     {
       error:
         'missing_provider_credential is never retried: retry_status must be `exhausted` (epic #65, A5)',
+    },
+  )
+  .refine(
+    (error) => error.type !== 'recovery_exhausted_error' || error.retry_status.type === 'terminal',
+    {
+      error:
+        'recovery_exhausted_error is terminal: recovery was already attempted, so retry_status must be `terminal` (#378, P4)',
     },
   )
 

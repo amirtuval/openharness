@@ -242,6 +242,32 @@ rollout keeps the old replicas serving. Files are applied in name order and foll
 expand/contract rules in `packages/session/src/postgres/migrate.ts`; a file that has been
 applied anywhere is never edited — add a new one.
 
+### Recommended operational follow-ups (not built here)
+
+Two things the #378 stack found, written down as recommendations rather than code. Neither is
+required for the current rollout to work; both make a deployment's worst moments more
+predictable.
+
+- **Run the migration CLI as a pre-rollout Job.** The ledger makes every boot after the first a
+  fast read, but the one-time bootstrap of an old-runner database (an empty ledger over existing
+  tables) still re-runs the idempotent files under the advisory lock, and a migration that
+  genuinely needs a table lock still takes it on a serving pod. A Job that runs
+  `yarn workspace @openharness/session migrate` against the release's `DATABASE_URL` **before**
+  the Deployment rolls keeps that work off a serving pod entirely; the image already contains
+  the built CLI (`packages/session`'s `migrate` bin). The server still migrates on boot as a
+  safety net — a pod that starts against an un-migrated database must not serve — but with the
+  Job in front of it, the normal boot is the ledger's happy path (#392; see
+  [`packages/session/docs/postgres.md`](../packages/session/docs/postgres.md)).
+- **Tune the lease timings if crash-recovery latency matters more than rebalance stability.**
+  `OPENHARNESS_LEASE_TTL_MS` (30 s) and `OPENHARNESS_HEARTBEAT_MS` (10 s) bound how long a
+  crashed owner's turn stalls: the partition becomes stealable after the TTL, and a peer's next
+  heartbeat takes it, so the user waits roughly the TTL plus a heartbeat before the reply
+  restarts. Shorter values (e.g. 20 s / 5 s) recover sooner but make a loaded instance's renewal
+  more likely to lapse while a peer scans; a lapse nobody takes over is still renewable, so the
+  cost is a false takeover only when a scan lands in the window. The defaults favour stability.
+  The recovery cap itself is `OPENHARNESS_MAX_RECOVERY_ATTEMPTS` (3): a poison turn ends after
+  that many takeovers rather than looping through pods (#378, P4).
+
 ### Rolling back
 
 Re-point the tag at the commit that was good:

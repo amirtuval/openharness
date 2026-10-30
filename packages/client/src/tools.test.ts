@@ -46,7 +46,7 @@ describe('toolCallStatus', () => {
     const cases: readonly [string, string][] = [
       ['Interrupted by the user.', 'interrupted'],
       [
-        'Tool web_fetch: execution lost. The turn that started this call did not finish, so it was not run again.',
+        'Tool web_fetch: execution lost — The server running this tool stopped before it returned; it may or may not have taken effect. You may retry it if that is safe.',
         'lost',
       ],
       ['Permission to use web_fetch has been denied.', 'denied'],

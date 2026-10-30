@@ -397,6 +397,33 @@ describe('reduceTranscript', () => {
     expect(selectIsRunning(state)).toBe(false)
   })
 
+  it('keeps a terminal recovery-exhausted error (#378, P4)', () => {
+    // The brain stopped taking an inherited turn over. This is the sentence the reader is owed,
+    // and it survives the idle event that ends the turn: a later message is the way forward.
+    const error = makeSessionError({
+      seq: 1,
+      id: idA,
+      error: {
+        type: 'recovery_exhausted_error',
+        message:
+          'This turn was recovered 3 times without completing a step, so it was stopped. ' +
+          'Send a new message to try again.',
+        retry_status: { type: 'terminal' },
+      },
+    })
+
+    const state = reduceEvents([error, makeStatusIdle({ seq: 2, id: idB })])
+
+    expect(state.lastError).toEqual({
+      type: 'recovery_exhausted_error',
+      message:
+        'This turn was recovered 3 times without completing a step, so it was stopped. ' +
+        'Send a new message to try again.',
+      retryStatus: 'terminal',
+    })
+    expect(selectIsRunning(state)).toBe(false)
+  })
+
   it('does not mutate the state it is given', () => {
     const before = reduceEvents(sampleSessionHistory.slice(0, 6))
     const snapshot = JSON.parse(JSON.stringify(before)) as TranscriptState
