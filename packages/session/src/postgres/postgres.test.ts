@@ -1056,6 +1056,17 @@ if (target === null) {
           notifications: 'events_task_notification_source_key_idx',
         })
 
+        // The ledger discovers the migrations directory rather than naming files: the skills
+        // migration (#349) is a file like any other, so it is applied and recorded here, and
+        // its tables are really there. A hard-coded list that missed it would show up as a
+        // ledger without `0036_skills.sql` and a database without `skills`.
+        expect(expected).toContain('0036_skills.sql')
+        const skills = await sql<{ skills: string | null; files: string | null }>`
+          select to_regclass('skills')::text as skills,
+                 to_regclass('skill_files')::text as files
+        `.execute(target.db)
+        expect(skills.rows[0]).toEqual({ skills: 'skills', files: 'skill_files' })
+
         // Every file is recorded, so a boot has nothing to do — and, below, takes no lock.
         expect(await migrate(target.db)).toEqual([])
       } finally {
@@ -1112,6 +1123,15 @@ if (target === null) {
         const expected = await migrationFiles()
         await migrate(target.db)
 
+        // This is also the live upgrade path (main -> this branch): main's old, ledger-less
+        // runner applied every file — the skills migration #349 included — before the ledger
+        // runner ever booted, so the database has `skills` and no record of what built it.
+        expect(expected).toContain('0036_skills.sql')
+        const skillsBefore = await sql<{ skills: string | null }>`
+          select to_regclass('skills')::text as skills
+        `.execute(target.db)
+        expect(skillsBefore.rows[0]?.skills).toBe('skills')
+
         // The old runner left no record at all. An empty ledger is exactly that database:
         // every table is in place and nothing says which files built them.
         await sql`delete from schema_migrations`.execute(target.db)
@@ -1132,7 +1152,26 @@ if (target === null) {
           select instance_id from scheduler_instances
         `.execute(target.db)
         expect(instances.rows).toEqual([{ instance_id: 'bootstrap-check' }])
-        expect(await migrate(target.db)).toEqual([])
+
+        // The backfilled ledger makes the next boot the fast path — and that has to mean no
+        // lock on the application tables, the skills ones included. Hold the strongest lock on
+        // both while the boot runs; a runner that re-ran any file would wait here.
+        const holder = await target.pool.connect()
+        try {
+          await holder.query('begin')
+          await holder.query('lock table events, skills in access exclusive mode')
+
+          const startedAt = Date.now()
+          const applied = await Promise.race([
+            migrate(target.db, { lockTimeoutMs: 2_000 }),
+            pause(8_000).then(() => 'timed out on an application-table lock' as const),
+          ])
+          expect(applied).toEqual([])
+          expect(Date.now() - startedAt).toBeLessThan(2_000)
+        } finally {
+          await holder.query('rollback')
+          holder.release()
+        }
       } finally {
         await target.dispose()
       }
