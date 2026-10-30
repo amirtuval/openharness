@@ -24,7 +24,6 @@
     "test": "turbo run test",
     "dev": "turbo run dev",
     "oh": "node scripts/oh.mjs dev",
-    "oh:staging": "node scripts/oh.mjs staging",
     "oh:prod": "node scripts/oh.mjs prod",
     "check:deps": "node scripts/check-deps.mjs"
   },

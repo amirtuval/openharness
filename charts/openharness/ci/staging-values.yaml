@@ -1,37 +1,41 @@
-# Realistic staging values, the shape Terraform passes for the `openharness-dev` project (#154).
+# Realistic values, the shape Terraform passes for the one environment — `infra/envs/staging`,
+# in the `openharness-dev` project, serving app.oharness.dev (#154).
 #
 # `helm lint` renders an extra pass for every `ci/*-values.yaml`, and the CI job renders this
 # one before `kubeconform` validates it — so this file is what proves the chart renders the way
-# staging is deployed, not just its empty defaults. Production differs only in the project, the
-# host, the static IP, the Cloud SQL instance's connection name and the secret names; the image
-# tag is a git sha in both.
+# the environment is deployed, not just its empty defaults.
 
 image:
   repository: us-central1-docker.pkg.dev/openharness-dev/openharness/server
   tag: 4b0c557 # a git sha, one image per commit
   pullPolicy: IfNotPresent
 
-replicaCount: 2
+# One pod, sized to what it uses (a few millicores, ~130Mi idle), and no PDB — the cost-first
+# shape `infra/envs/staging` passes. See the chart's values.yaml for the trade-off.
+replicaCount: 1
 
 autoscaling:
   enabled: true
-  minReplicas: 2
-  maxReplicas: 4
+  minReplicas: 1
+  maxReplicas: 2
   targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: false
 
 resources:
   requests:
-    cpu: 250m
-    memory: 512Mi
+    cpu: 100m
+    memory: 384Mi
   limits:
-    memory: 512Mi
+    memory: 384Mi
 
 serviceAccount:
   name: openharness
   # The app GSA Terraform creates in openharness-dev.
   gcpServiceAccount: openharness-app@openharness-dev.iam.gserviceaccount.com
 
-# The Cloud SQL Auth Proxy sidecar (#159), on in both environments: the app has no way to reach
+# The Cloud SQL Auth Proxy sidecar (#159), always on in a deployed environment: the app has no way to reach
 # the instance's private IP over TLS the way `node-postgres` wants it (Cloud SQL's server
 # certificate is signed by a per-instance CA Node does not trust), so it connects to this proxy
 # on 127.0.0.1 instead. The connection name is the staging instance's — Cloud SQL's
@@ -40,9 +44,15 @@ serviceAccount:
 cloudSqlProxy:
   enabled: true
   instanceConnectionName: openharness-dev:us-central1:openharness
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
 
 gateway:
-  host: staging.oharness.dev
+  host: app.oharness.dev
   staticIpName: openharness-staging-ip
   # The Certificate Manager certificate map Terraform creates for the host
   # (`infra/modules/certs`) and puts in the Gateway's `networking.gke.io/certmap` annotation.
@@ -70,7 +80,7 @@ gcpProject: openharness-dev
 # provider's client secret as a third `secrets` entry (e.g. GOOGLE_CLIENT_ID +
 # {env: GOOGLE_CLIENT_SECRET, secret: google-client-secret}).
 env:
-  BETTER_AUTH_URL: https://staging.oharness.dev
+  BETTER_AUTH_URL: https://app.oharness.dev
   OPENHARNESS_TRUSTED_PROXY_HOPS: '1'
   OPENHARNESS_KEY_PROVIDER: gcp-kms
   OPENHARNESS_KMS_KEY: projects/openharness-dev/locations/global/keyRings/openharness/cryptoKeys/credentials

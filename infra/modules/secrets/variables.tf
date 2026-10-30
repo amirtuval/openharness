@@ -4,7 +4,7 @@ variable "project_id" {
 }
 
 variable "environment" {
-  description = "Environment label, staging or production, put on every secret."
+  description = "Environment label put on every secret."
   type        = string
 }
 
@@ -36,7 +36,7 @@ variable "db_password" {
 }
 
 variable "deletion_protection" {
-  description = "Block Terraform from deleting the secrets. false in staging, true in production."
+  description = "Block Terraform from deleting the secrets."
   type        = bool
   default     = true
 }

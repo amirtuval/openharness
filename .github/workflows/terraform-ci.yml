@@ -2,7 +2,7 @@ name: terraform-ci
 
 # The Terraform under infra/ is not part of the workspace, so turbo never sees it. This
 # workflow checks it without any GCP credentials: formatting, provider-specific linting,
-# and a provider-and-module validation of both environment roots. init runs with
+# and a provider-and-module validation of the environment root. init runs with
 # -backend=false, so nothing here reads or writes the state buckets.
 #
 # It is also the **reusable** half of the pull-request check (#155): terraform-pr.yml calls
@@ -31,8 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        # tflint walks up the tree for .tflint.hcl, so every module and both
-        # environments pick up infra/.tflint.hcl and its google ruleset.
+        # tflint walks up the tree for .tflint.hcl, so every module and the
+        # environment root pick up infra/.tflint.hcl and its google ruleset.
         working-directory: infra
     steps:
       - uses: actions/checkout@v4
@@ -59,10 +59,9 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     strategy:
-      # Report both environments even if one fails.
-      fail-fast: false
       matrix:
-        environment: [staging, production]
+        # The one environment root (openharness runs a single environment).
+        environment: [staging]
     defaults:
       run:
         working-directory: infra

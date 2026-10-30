@@ -7,8 +7,8 @@ name: terraform-pr
 #   helm    helm lint and helm template, when charts/openharness exists. It does not yet:
 #           the chart lands in #154, and the step is conditional so this workflow is
 #           correct either side of it.
-#   plan    `terraform plan` for staging and production, impersonating tf-plan@ through
-#           Workload Identity, then one collapsed PR comment with both plans.
+#   plan    `terraform plan` for the environment (the one root, `staging`), impersonating
+#           tf-plan@ through Workload Identity, then one collapsed PR comment with the plan.
 #
 # **The trigger is `pull_request`, never `pull_request_target`.** The plan runs the PR's own
 # tree, so a fork's code is never executed with this repository's credentials — and even so,
@@ -18,8 +18,7 @@ name: terraform-pr
 # repository's name. The account is read-only outside the state bucket, and this is the belt
 # to that suspenders. See .github/setup/README.md, "The plan account, and its risk".
 #
-# The plan job reads the repository-level `*_STAGING` / `*_PRODUCTION` copies of the setup
-# script's variables: it runs outside any GitHub environment, so it cannot read the
+# The plan job reads the repository-level `*_STAGING` copies of the setup script's variables: it runs outside any GitHub environment, so it cannot read the
 # environment-scoped ones (that is exactly why the script sets both).
 on:
   pull_request:
@@ -101,8 +100,6 @@ jobs:
       contents: read
       id-token: write
     strategy:
-      # Report both environments even when one of them fails.
-      fail-fast: false
       matrix:
         include:
           # Every value below is a GitHub variable — never a project ID or a hostname
@@ -112,14 +109,6 @@ jobs:
             project_id: ${{ vars.GCP_PROJECT_ID_STAGING }}
             wif_provider: ${{ vars.GCP_WIF_PROVIDER_STAGING }}
             plan_sa: ${{ vars.GCP_PLAN_SA_STAGING }}
-            # staging declares neither of production's variables, so an empty value keeps
-            # them off the command line, where Terraform would reject them as undeclared.
-            existing_zone_name: ''
-            staging_name_servers: ''
-            # staging *does* declare this one — it is the registry's production-node
-            # reader grant. Empty (its default) grants nothing, which is what a first
-            # staging plan sees; set it after production's first deploy.
-            production_node_service_account: ${{ vars.TF_PRODUCTION_NODE_SA }}
             # `OAUTH_`, not the Terraform variable's own name: GitHub rejects a
             # configuration variable whose name starts with `GITHUB_`, so
             # `github_client_id` cannot be spelled that way here.
@@ -128,27 +117,12 @@ jobs:
             microsoft_client_id: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_STAGING }}
             microsoft_tenant_id: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
             # The alert address and the billing account, so the plan shows exactly what the
-            # deploy will apply (#159). One billing account for both projects.
+            # deploy will apply (#159).
             alert_email: ${{ vars.TF_ALERT_EMAIL_STAGING }}
             billing_account_id: ${{ vars.TF_BILLING_ACCOUNT_ID }}
             # The monthly budget amount, in the billing account's currency. Unset leaves the
             # Terraform default; the run below passes the -var only when it is set (#159).
             budget_amount: ${{ vars.TF_BUDGET_AMOUNT_STAGING }}
-          - environment: production
-            project_id: ${{ vars.GCP_PROJECT_ID_PRODUCTION }}
-            wif_provider: ${{ vars.GCP_WIF_PROVIDER_PRODUCTION }}
-            plan_sa: ${{ vars.GCP_PLAN_SA_PRODUCTION }}
-            existing_zone_name: ${{ vars.TF_EXISTING_ZONE_NAME_PRODUCTION }}
-            staging_name_servers: ${{ vars.TF_STAGING_NAME_SERVERS }}
-            # production does not declare it — the grant lives in staging's root.
-            production_node_service_account: ''
-            google_client_id: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_PRODUCTION }}
-            github_client_id: ${{ vars.OAUTH_GITHUB_CLIENT_ID_PRODUCTION }}
-            microsoft_client_id: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_PRODUCTION }}
-            microsoft_tenant_id: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_PRODUCTION }}
-            alert_email: ${{ vars.TF_ALERT_EMAIL_PRODUCTION }}
-            billing_account_id: ${{ vars.TF_BILLING_ACCOUNT_ID }}
-            budget_amount: ${{ vars.TF_BUDGET_AMOUNT_PRODUCTION }}
     steps:
       - uses: actions/checkout@v4
 
@@ -187,7 +161,7 @@ jobs:
         run: terraform init -input=false -no-color
 
       # `image_tag` has no default and cannot be invented: a plan must show the change
-      # against what is actually deployed. It is an output of both roots (the input that
+      # against what is actually deployed. It is an output of the root (the input that
       # was applied), so a state that has ever been applied carries it. An environment with
       # no state is skipped — a plan of an empty project cannot render the helm_release
       # anyway, because the cluster endpoint it needs does not exist yet.
@@ -236,9 +210,6 @@ jobs:
           # RUNNER_TEMP the steps below use.
           RUNNER_TEMP: ${{ runner.temp }}
           IMAGE_TAG: ${{ steps.state.outputs.tag }}
-          EXISTING_ZONE_NAME: ${{ matrix.existing_zone_name }}
-          STAGING_NAME_SERVERS: ${{ matrix.staging_name_servers }}
-          PRODUCTION_NODE_SERVICE_ACCOUNT: ${{ matrix.production_node_service_account }}
           GOOGLE_CLIENT_ID: ${{ matrix.google_client_id }}
           GITHUB_CLIENT_ID: ${{ matrix.github_client_id }}
           MICROSOFT_CLIENT_ID: ${{ matrix.microsoft_client_id }}
@@ -249,14 +220,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Production's zone has no default — it is created by hand and adopted with an
-          # import block. Fail with a sentence rather than Terraform's "No value for
-          # required variable".
-          if [[ "$ENVIRONMENT" == production && -z "$EXISTING_ZONE_NAME" ]]; then
-            echo "::error title=Missing repository variable::TF_EXISTING_ZONE_NAME_PRODUCTION is not set. Production's plan needs it (the zone is created by hand and has no default); see docs/DEPLOYMENT.md, 'Variables the workflows read'."
-            exit 1
-          fi
-
           args=(-input=false -no-color -lock-timeout=2m -var "image_tag=$IMAGE_TAG")
           # The OAuth client IDs all default to "": passing the empty value back is the
           # same as not passing it, and it keeps the plan honest when one of them is set.
@@ -264,7 +227,7 @@ jobs:
           args+=(-var "github_client_id=${GITHUB_CLIENT_ID:-}")
           args+=(-var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}")
           args+=(-var "microsoft_tenant_id=${MICROSOFT_TENANT_ID:-}")
-          # Both roots declare alert_email, and its default is "": passing the empty value
+          # alert_email's default is "": passing the empty value
           # back is the same as not passing it (#159).
           args+=(-var "alert_email=${ALERT_EMAIL:-}")
           # The budget carries two variables, and the deploy passes enable_budget either way —
@@ -281,20 +244,6 @@ jobs:
           # deploys do (#159).
           if [[ -n "${BUDGET_AMOUNT:-}" ]]; then
             args+=(-var "budget_amount=$BUDGET_AMOUNT")
-          fi
-          # Only production declares these two, and an empty value means "leave it at the
-          # default" — so an unset variable is simply left off the command line.
-          if [[ -n "$EXISTING_ZONE_NAME" ]]; then
-            args+=(-var "existing_zone_name=$EXISTING_ZONE_NAME")
-          fi
-          if [[ -n "$STAGING_NAME_SERVERS" ]]; then
-            args+=(-var "staging_name_servers=$STAGING_NAME_SERVERS")
-          fi
-          # Only staging declares this one, and empty means "grant nothing" — the account
-          # does not exist until production's first deploy, so an empty variable is simply
-          # left off the command line (see docs/DEPLOYMENT.md, "The first deploy").
-          if [[ -n "$PRODUCTION_NODE_SERVICE_ACCOUNT" ]]; then
-            args+=(-var "production_node_service_account=$PRODUCTION_NODE_SERVICE_ACCOUNT")
           fi
 
           status=ok
@@ -337,7 +286,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 5
 
-  # One comment, updated in place, for both plans. `always()` so a plan that failed still
+  # One comment, updated in place. `always()` so a plan that failed still
   # says so on the PR — a plan job that goes red with no comment is a dead end for whoever
   # opened the pull request.
   report:
@@ -368,13 +317,13 @@ jobs:
             const MAX = 60000
             const plansDir = path.join(process.env.RUNNER_TEMP, 'plans')
 
-            const environments = ['staging', 'production']
+            const environments = ['staging']
             const header = [
               marker,
               '## Terraform plan',
               '',
-              'Both environments, planned against the state the last deploy left behind.',
-              'Read-only (`tf-plan@`); applying is the deploy workflows.',
+              'Planned against the state the last deploy left behind.',
+              'Read-only (`tf-plan@`); applying is `deploy-staging.yml`.',
               '',
             ].join('\n')
 

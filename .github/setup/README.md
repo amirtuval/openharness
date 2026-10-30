@@ -10,6 +10,12 @@ GKE, Cloud SQL, secrets and everything else come later, as Terraform.
 The script is idempotent: everything it owns is declared in lists at the top of the script,
 and a re-run converges the project to them — see [Re-running](#re-running-convergent-additive-or-pruning).
 
+> **Only `staging` is in use.** openharness runs one environment since October 2026 — the
+> `staging` one, in `openharness-dev`, serving `app.oharness.dev`
+> ([`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md#one-environment-and-why)). The script's
+> `production` mode, and everything below about production, describe the retired environment;
+> do not run it. Its leftovers were removed with the steps in [Undo](#undo).
+
 ## Prerequisites
 
 - `gcloud` installed and logged in (`gcloud auth login`), with **Owner** on the project.

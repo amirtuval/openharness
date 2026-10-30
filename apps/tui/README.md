@@ -44,9 +44,9 @@ Resolution order, highest first: `--server`, `OPENHARNESS_URL`,
 `~/.config/openharness/config.json`, then `https://app.oharness.dev` as the default.
 
 Working from a checkout of the [repo](https://github.com/amirtuval/openharness), `yarn oh`
-builds the CLI and runs it against `http://localhost:3000` (`yarn oh:staging` and
-`yarn oh:prod` run it against staging and production); arguments pass straight through, so
-`yarn oh:staging login` works.
+builds the CLI and runs it against `http://localhost:3000` (`yarn oh:prod` runs it
+against `https://app.oharness.dev`); arguments pass straight through, so `yarn oh:prod login`
+works.
 
 ## Commands
 

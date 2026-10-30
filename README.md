@@ -150,8 +150,8 @@ oh                     # once installed: chats on https://app.oharness.dev
                        #   and then opens the chat on the default model it picked
 
 yarn oh                # from a checkout of this repo: builds the CLI and runs it against
-                       # the local server on http://localhost:3000 (`yarn oh:staging` /
-                       # `yarn oh:prod` for staging and production)
+                       # the local server on http://localhost:3000 (`yarn oh:prod` for
+                       # https://app.oharness.dev)
 ```
 
 `oh` is the whole onboarding: sign in → a provider key → a chat, with the browser opened only
