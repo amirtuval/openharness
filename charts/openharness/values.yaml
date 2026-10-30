@@ -3,8 +3,8 @@
 # These are **safe defaults for no environment in particular**, and they render on their own:
 # `helm template charts/openharness` produces a valid Deployment, Service, PodDisruptionBudget
 # and autoscaler — and, with no host, no Gateway at all — with none of the keys marked (TF)
-# set. Every key marked (TF) below is filled in by Terraform per environment — staging and
-# production — and nothing else should fill them: Terraform is the only thing that deploys.
+# set. Every key marked (TF) below is filled in by Terraform (`infra/modules/app`) and nothing
+# else should fill them: Terraform is the only thing that deploys.
 # The chart ⇄ Terraform contract is written out in `README.md`, and a realistic staging
 # rendering lives in `ci/staging-values.yaml`.
 
@@ -24,8 +24,10 @@ image:
 # `autoscaling.minReplicas` and `maxReplicas` (the two agree at 2, so nothing moves at boot).
 replicaCount: 2
 
-# CPU-based autoscaling. Kept on in every environment: two pods is the floor that keeps a
-# rolling update (maxUnavailable: 0) and a node upgrade from ever taking the last one down.
+# CPU-based autoscaling. Two pods is the floor that keeps a rolling update (maxUnavailable: 0)
+# and a node upgrade from ever taking the last one down. A cost-first deployment may run one
+# (openharness's own does — infra/envs/staging): a rollout is still zero-downtime, because the
+# new pod is ready before the old one goes, and only a node drain briefly takes the app away.
 autoscaling:
   enabled: true
   minReplicas: 2
@@ -34,11 +36,17 @@ autoscaling:
   # Percentage of the CPU request below, not of a core.
   targetCPUUtilizationPercentage: 70
 
-# Requests sized for GKE Autopilot, which schedules on requests and bills on requests. 250m /
-# 512Mi is Autopilot's own floor for a container, so this is the smallest a pod can be asked
-# for — a request below it is silently rounded up. The memory limit equals the request: the
-# server's footprint is steady (it holds session state and runs model turns), so a limit above
-# the request would only buy a slower OOM.
+# The PodDisruptionBudget (minAvailable: 1). Turn it off when running a single replica: over
+# one pod it forbids every voluntary eviction, so a node drain stalls instead of moving the pod.
+podDisruptionBudget:
+  enabled: true
+
+# Requests sized for GKE Autopilot, which schedules on requests and bills on requests. These are
+# generous defaults; on a cluster that supports bursting (new clusters from 1.29 on) Autopilot's
+# floor is 50m / 52Mi per pod, not the 250m / 512Mi of older clusters, so a deployment may ask
+# for much less — openharness's own sets them in infra/envs/staging. The memory limit equals
+# the request: the server's footprint is steady (it holds session state and runs model turns),
+# so a limit above the request would only buy a slower OOM.
 resources:
   requests:
     cpu: 250m
@@ -87,8 +95,8 @@ cloudSqlProxy:
   # Connect to the instance over its private IP — there is no public one (`ipv4_enabled = false`).
   privateIp: true
   # The proxy is a TCP forwarder: it holds no state and does almost no work, so its resources are
-  # the smallest that will schedule. On GKE Autopilot, requests below its container floor
-  # (250m / 512Mi) are rounded up, so treat these as a statement of intent rather than a saving.
+  # small. They are billed as asked on an Autopilot cluster that supports bursting (its pod floor
+  # is 50m / 52Mi); an older cluster rounds a pod up to 250m / 512Mi.
   resources:
     requests:
       cpu: 100m
@@ -102,7 +110,7 @@ cloudSqlProxy:
 # `IngressClass` object that does not exist on the cluster, while a GatewayClass is owned by
 # name. An empty `host` renders no Gateway at all.
 gateway:
-  # The serving host, staging.oharness.dev | app.oharness.dev. (TF)
+  # The serving host, e.g. app.oharness.dev. (TF)
   host: ''
   # The name of the `google_compute_global_address` the load balancer answers on. (TF) It becomes
   # `spec.addresses` (`type: NamedAddress`); without it GKE allocates an address of its own,
@@ -157,8 +165,9 @@ gcpProject: ''
 # unfenced, so a pod booting during a rolling deploy recovers every session in every
 # partition — closing turns still running on live pods as `brain_lost` and re-running them,
 # with two brains in one session — and its `signal()` is in-process, so an interrupt that
-# lands on the wrong pod starts a second brain. This chart runs `replicaCount: 2` and its HPA
-# scales to `maxReplicas: 4`; `postgres` is the scheduler that makes that safe, and every
+# lands on the wrong pod starts a second brain. The chart's own defaults run `replicaCount: 2`
+# with the HPA at `maxReplicas: 4`, and openharness's environment runs one replica with the HPA
+# allowed to reach two; `postgres` is the scheduler that makes more than one pod safe, and every
 # deployment of this chart has `DATABASE_URL`, which it needs.
 #
 # `local` is therefore allowed only where exactly one pod can run. A template helper

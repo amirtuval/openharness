@@ -19,7 +19,7 @@ output "url" {
 }
 
 output "name_servers" {
-  description = "Name servers of the staging zone. Production takes these as staging_name_servers to delegate staging.oharness.dev."
+  description = "Name servers of the app.oharness.dev zone: the NS record in the parent zone, oharness.dev (openharness-510710), that delegates the host here."
   value       = module.dns.name_servers
 }
 

@@ -1,5 +1,6 @@
 import { ApiError, AuthenticationError } from '@openharness/client'
 import { EVENT_TYPES } from '@openharness/protocol'
+import { makeSkill } from '@openharness/protocol/fixtures'
 import type { ModelEntry } from '@openharness/protocol'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -1356,6 +1357,73 @@ describe('the sidebar below md', () => {
     expect(sidebar).toHaveClass('w-64', 'shrink-0')
     expect(sidebar).not.toHaveClass('hidden')
     expect([...sidebar.classList].filter((name) => name.startsWith('max-md:'))).not.toHaveLength(0)
+  })
+})
+
+describe('a skill invocation from the / menu (#349, K7; #353)', () => {
+  it('sends the line as a message carrying the skill, and the transcript draws the chip', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({ skills: [makeSkill({ name: 'release-notes' })] })
+    fake.respondWith('Notes written.')
+    renderApp(fake)
+
+    const input = await screen.findByLabelText('Message')
+    await user.type(input, '/release-notes v1.2')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    // The message is stored as the reader typed it, with the skill it named beside it (K7) —
+    // that field is what the brain loads the instructions from.
+    await waitFor(() => {
+      const sent = fake
+        .history()
+        .find((event) => event.type === EVENT_TYPES.userMessage && event.content.length > 0)
+      expect(sent).toMatchObject({
+        content: [{ type: 'text', text: '/release-notes v1.2' }],
+        skill: { name: 'release-notes', arguments: 'v1.2' },
+      })
+    })
+
+    // And the transcript says which skill it was, from the log rather than from the text.
+    const chip = await screen.findByText('/release-notes', {
+      selector: '[data-slot="message-skill"] *',
+    })
+    expect(chip.closest('[data-slot="message-skill"]')).not.toBeNull()
+    expect(await screen.findByText('Notes written.')).toBeInTheDocument()
+  })
+
+  it('draws the same chip after a reload, from the stored event', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({ skills: [makeSkill({ name: 'release-notes' })] })
+    fake.respondWith('Notes written.')
+
+    const first = renderApp(fake)
+    await user.type(await screen.findByLabelText('Message'), '/release-notes v1.2')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(await screen.findByText('Notes written.')).toBeInTheDocument()
+
+    first.unmount()
+    renderApp(fake)
+
+    // The invocation is the stored event's own field, so a replay renders it the same way.
+    expect(
+      await screen.findByText('/release-notes', { selector: '[data-slot="message-skill"] *' }),
+    ).toBeInTheDocument()
+  })
+
+  it('leaves an unknown slash line an ordinary message', async () => {
+    const user = userEvent.setup({ delay: null })
+    const fake = makeFake({ skills: [makeSkill({ name: 'release-notes' })] })
+    fake.respondWith('Sure.')
+    renderApp(fake)
+
+    await user.type(await screen.findByLabelText('Message'), '/not-a-skill hello')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => {
+      const sent = fake.history().find((event) => event.type === EVENT_TYPES.userMessage)
+      expect(sent).toMatchObject({ content: [{ type: 'text', text: '/not-a-skill hello' }] })
+      expect(sent).not.toHaveProperty('skill')
+    })
   })
 })
 

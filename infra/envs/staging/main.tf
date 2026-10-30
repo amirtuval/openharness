@@ -160,7 +160,7 @@ module "certs" {
   project_id = var.project_id
   host       = var.host
 
-  # Staging can be torn down, so its certificate resources can be too.
+  # Mirrors the environment's deletion_protection.
   deletion_protection = var.deletion_protection
 
   depends_on = [google_project_service.services]
@@ -172,23 +172,9 @@ module "registry" {
   project_id = var.project_id
   region     = var.region
 
-  # Both node service accounts pull this repository's images. Staging's own
-  # nodes pull the staging deployment's image; production's nodes pull the same
-  # image across projects, which their project-level roles cannot cover.
-  # roles/container.defaultNodeServiceAccount does not include
-  # artifactregistry.reader, so the grant is needed on both.
-  #
-  # `compact` drops the production account while the variable is empty — its
-  # default, and the value on a first staging deploy. Production's account is
-  # created by production's Terraform, and GCP rejects an IAM member that does
-  # not exist yet, so naming it before that first production apply is what broke
-  # the first staging deploy. It is set (TF_PRODUCTION_NODE_SA) and re-applied
-  # once production has created the account; see docs/DEPLOYMENT.md, "The first
-  # deploy".
-  reader_service_accounts = compact([
-    module.gke.node_service_account_email,
-    var.production_node_service_account,
-  ])
+  # The nodes pull the image from here. roles/container.defaultNodeServiceAccount
+  # does not include artifactregistry.reader, so the grant is explicit.
+  reader_service_accounts = [module.gke.node_service_account_email]
 
   depends_on = [google_project_service.services]
 }
@@ -206,6 +192,13 @@ module "app" {
   # The Gateway's TLS (#159): the certificate map the Gateway names in its
   # `networking.gke.io/certmap` annotation.
   certificate_map_name = module.certs.certificate_map_name
+
+  # Cost-first sizing for a demo: one pod, sized to what it uses (a few
+  # millicores and ~130Mi idle; the memory request leaves room for turns and
+  # tool calls). See docs/DEPLOYMENT.md, "Cost".
+  replicas        = { min = 1, max = 2 }
+  resources       = { cpu = "100m", memory = "384Mi" }
+  proxy_resources = { cpu = "50m", memory = "64Mi", memory_limit = "128Mi" }
 
   kms_key_id             = module.kms.crypto_key_id
   database_url_secret_id = module.secrets.database_url_secret_id
@@ -258,9 +251,11 @@ module "dns" {
   project_id  = var.project_id
   zone_name   = var.dns_zone_name
   dns_name    = "${var.host}."
-  description = "openharness staging"
+  description = "openharness"
 
-  # staging.oharness.dev is the zone's apex.
+  # The host (app.oharness.dev) is the zone's apex. The parent zone, oharness.dev,
+  # lives in openharness-510710 with the domain's registration, and delegates
+  # this name here with one NS record (docs/DEPLOYMENT.md, "DNS").
   a_records = {
     "${var.host}." = module.app.static_ip_address
   }

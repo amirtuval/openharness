@@ -3,6 +3,7 @@ import {
   compactionThreshold,
   confirmationSummary,
   contextMeter,
+  invocationSkill,
   mcpFailureNotice,
   mcpServerByName,
   waitForMcpConnection,
@@ -25,7 +26,9 @@ import type { Client, TaskCard, TranscriptError, TranscriptToolCall } from '@ope
 import type {
   GetPreferencesResponse,
   Mode,
+  ModeId,
   ModelEntry,
+  Skill,
   Session,
   UserToolConfirmationEventInput,
 } from '@openharness/protocol'
@@ -44,6 +47,7 @@ import { TextEntry } from '../components/text-entry'
 import { usePromptSlot } from '../components/prompt-slot'
 import { ProviderSetup } from '../components/provider-setup'
 import { formatCostTotal } from '../components/reply-meta'
+import { SkillsScreen } from '../components/skills'
 import { InputRule, modelLabel, modelPriceLookup, StatusLine } from '../components/status-line'
 import { TODO_AUTO_FOLD_THRESHOLD, TodoPanel } from '../components/todo-panel'
 import { ToolSettingsScreen } from '../components/tool-settings'
@@ -56,8 +60,8 @@ import { setTodoFoldChoice, todoFoldChoice } from './todo-fold'
 import type { ErrorContext } from '../errors'
 import { clearScreen } from '../terminal'
 import {
-  CHAT_COMMANDS,
   currentModelOf,
+  menuCommands,
   parseChatInput,
   unknownCommandNotice,
   type ChatCommand,
@@ -112,6 +116,33 @@ export interface ChatScreenProps {
   readonly onOpenSession: (session: Session) => void
 }
 
+/** The three pieces of chat state the status line's mode clause reads. */
+export interface StatusModeView {
+  readonly modeId: ModeId | null
+  readonly pendingMode: ModeId | null
+  readonly pendingModel: string | null
+}
+
+/**
+ * The mode clause the status line draws (#245, M6), or `undefined` for no clause.
+ *
+ * A pending mode is named with `(next message)`. A pending **plain model** is a pending
+ * **detach**: the session still follows its mode until that message is sent, but the line must
+ * show the switch the moment it is made — naming the mode there is the web bug's terminal twin,
+ * where the reader sees nothing happen until they send. The model itself is drawn by the
+ * `model` clause beside this one.
+ */
+export function statusModeLabel(modes: readonly Mode[], view: StatusModeView): string | undefined {
+  const pendingModeName = view.pendingMode === null ? null : modeNameOf(modes, view.pendingMode)
+  if (pendingModeName !== null) {
+    return `${pendingModeName} (next message)`
+  }
+  if (view.pendingModel !== null) {
+    return undefined
+  }
+  return modeNameOf(modes, view.modeId) ?? undefined
+}
+
 /**
  * The chat screen: transcript, status line, prompt.
  *
@@ -150,6 +181,11 @@ export function ChatScreen({
   // either list is in. `null` is "not read yet"; a failed read leaves it empty, so the line
   // falls back to the model rather than to a name it does not have.
   const [modeList, setModeList] = useState<readonly Mode[] | null>(null)
+  // The reader's skills (#349, K7), read once in the background for the `/` menu: an enabled,
+  // user-invocable skill is a command they can type, with its `argument-hint`. `null` is "not
+  // read yet"; a read that failed leaves the menu with the chat's own commands, which is what a
+  // chat that cannot list its skills still needs.
+  const [skillList, setSkillList] = useState<readonly Skill[] | null>(null)
   // The caller's stored preferences, read once in the background for one field of them: the
   // share of the budget a chat compacts at (epic #277, K10; #280). It is the same read the other
   // frontend makes, through the same `compactionThreshold`, and a failure — or a server that
@@ -252,6 +288,42 @@ export function ChatScreen({
     }
   }, [session, modeList])
 
+  useEffect(() => {
+    if (skillList !== null) return undefined
+    let cancelled = false
+    void client.skills
+      .list()
+      .then(({ data }) => {
+        if (!cancelled) setSkillList(data)
+      })
+      .catch(() => {
+        // A read that failed is an answered question: the menu keeps the chat's own commands
+        // rather than waiting for a list that is not coming.
+        if (!cancelled) setSkillList([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client, skillList])
+
+  // The mode the chat follows — or the one a `/model` pick is about to switch to — and its
+  // tool/skill override. The `/` menu applies it over the reader's switches (K8), so a skill
+  // the mode turns off is not offered and one it turns on is, exactly as the server answers.
+  // A pending plain model detaches the chat from its mode on the next message, so the mode's
+  // override stops applying to the menu at once — the display may not lag the switch (#349, B8).
+  const menuModeId = view.pendingMode ?? (view.pendingModel === null ? view.modeId : null)
+  const menuModeOverride = useMemo(
+    () => (modeList ?? []).find((mode) => mode.id === menuModeId)?.tools ?? null,
+    [modeList, menuModeId],
+  )
+  // The whole `/` menu (#349, K7): the chat's commands and the reader's skills in one list, so a
+  // skill is offered, filtered, completed and corrected exactly as `/compact` is. Memoised on the
+  // list because the prompt re-renders on every keystroke.
+  const commands = useMemo(
+    () => menuCommands(skillList ?? [], menuModeOverride),
+    [skillList, menuModeOverride],
+  )
+
   // The preferences go with the two lists above and for the same reason: the status line's meter
   // needs one field of them, and a chat must not wait for a read to open. `null` is "not read
   // yet", which is the same answer as a failed read here — the default threshold.
@@ -321,13 +393,7 @@ export function ChatScreen({
   // The mode the chat follows (#245, M6), named the way the picker names it — or the one a
   // `/model` pick is about to switch to, said so. Absent until the modes are read, or for a
   // chat without one.
-  const knownModes = modeList ?? []
-  const pendingModeName =
-    view.pendingMode === null ? null : modeNameOf(knownModes, view.pendingMode)
-  const mode =
-    pendingModeName !== null
-      ? `${pendingModeName} (next message)`
-      : (modeNameOf(knownModes, view.modeId) ?? undefined)
+  const mode = statusModeLabel(modeList ?? [], view)
 
   // What the session has spent (#247), priced from the transcript's own totals — the running
   // ones the log reported, or the ones derived from its replies for a session stored before
@@ -593,6 +659,36 @@ export function ChatScreen({
   }, [client, context, request, session])
 
   /**
+   * Open the reader's skills in the prompt slot — `/skills` (epic #349, K3/K7/K8; #354).
+   *
+   * The same list `oh skills` reads and the same import flow `oh skills add` runs: the stored
+   * skills with their badge and source, space to switch one on or off, `i` to import one from a
+   * public git URL (the preview, then the pick), `d` to remove one. It settles when the reader
+   * leaves, and the menu is rebuilt from the list as it changes.
+   */
+  const openSkills = useCallback((): void => {
+    void (async () => {
+      await request<void>((settle) => (
+        <SkillsScreen
+          client={client}
+          context={context}
+          onDone={() => {
+            settle()
+          }}
+        />
+      ))
+      // A skill switched on or off changes what the `/` menu offers (K8), so the list is read
+      // again when the screen closes rather than only when the chat opens.
+      try {
+        const { data } = await client.skills.list()
+        setSkillList(data)
+      } catch {
+        // The screen already showed whatever went wrong; the menu keeps what it had.
+      }
+    })()
+  }, [client, context, request])
+
+  /**
    * Open the chat's background tasks in the prompt slot — `/agents` (epic #340, S9; #347).
    *
    * The list is the same one the cards in the transcript draw from, and its two verbs are the
@@ -725,23 +821,27 @@ export function ChatScreen({
       setupProviders: openProviders,
       openMcpServers,
       openToolSettings,
+      openSkills,
       openAgents,
       compact: (instructions) => void session.compact(instructions),
       clearScreen: clear,
       exit: onExit,
       showNotice: session.showNotice,
     }
-    void command.run(commandContext, args)
+    void command.run?.(commandContext, args)
   }
 
   /**
-   * What the prompt submitted: a command to run, or a message to send.
+   * What the prompt submitted: a command to run, a skill to invoke, or a message to send.
    *
-   * An unknown command is neither — it is named back to the user with the closest match and
-   * sent nowhere, because the model would answer about a command nobody has (#207).
+   * An unknown command is none of them — it is named back to the user with the closest match and
+   * sent nowhere, because the model would answer about a command nobody has (#207). A line that
+   * names one of the reader's skills is an ordinary message whose text is what they typed,
+   * carrying the `skill` it named (K7), and the client's own `invocationSkill` builds that field,
+   * so the terminal and the web app send the same event for the same line.
    */
   const onSubmit = (text: string): void => {
-    const parsed = parseChatInput(text, CHAT_COMMANDS)
+    const parsed = parseChatInput(text, commands)
     switch (parsed.kind) {
       case 'message':
         void session.send(parsed.text)
@@ -749,6 +849,11 @@ export function ChatScreen({
       case 'command':
         runCommand(parsed.command, parsed.args)
         return
+      case 'skill': {
+        const skill = invocationSkill(parsed.invocation)
+        if (skill !== null) void session.send(parsed.invocation.text, { skill })
+        return
+      }
       case 'unknown':
         session.showNotice(unknownCommandNotice(parsed.name, parsed.suggestion))
         return
@@ -946,7 +1051,7 @@ export function ChatScreen({
       />
       {element ?? (
         <PromptInput
-          commands={CHAT_COMMANDS}
+          commands={commands}
           history={history}
           // The pending list owns the keyboard while calls wait (epic #303, #310): its keys are
           // the prompt's own, and a message is written by picking its "write a message instead"

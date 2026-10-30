@@ -1,4 +1,4 @@
-import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
+import { SKILL_READ_TOOL_NAME, SKILL_TOOL_NAME, WEB_FETCH_TOOL_NAME } from '@openharness/hands'
 import { MOCK_TOOL_MARKER, TEST_TASK_TOOL_NAME, TEST_TOOL_NAME } from '@openharness/server'
 import {
   AGENT_MESSAGE_TOOL_NAME,
@@ -105,10 +105,13 @@ describe('the tool settings over the wire', () => {
 
     // Every deployment registers `ask_user` (#309), the five subagent tools (epic #340, S5;
     // #344) and #305's built-ins; the mock process adds the test tool and the task it can
-    // start. Each is on under its own declared `allow`, and a call to `ask_user` is answered by
-    // the user rather than run, which is what its `policy: 'allow'` says about the *tool* — the
-    // registry the settings and the chat read alike. `web_search` is listed beside them without
-    // any registry carrying it (#335): it is the provider's own.
+    // start. Each is on under its own declared `allow`, and a call to `ask_user` is answered
+    // by the user rather than run, which is what its `policy: 'allow'` says about the *tool* —
+    // the registry the settings and the chat read alike. `web_search` is listed beside them
+    // without any registry carrying it (#335): it is the provider's own. `skill` and
+    // `skill_read` are listed the same way (#352): the loop builds them per request out of
+    // whatever that request's owner has, so no registry holds them either — and this account
+    // has no skills, so neither is offered to the chat below.
     expect(await listTools(server, me)).toEqual([
       listed(ASK_USER_TOOL_NAME),
       listed(TEST_TOOL_NAME),
@@ -121,6 +124,8 @@ describe('the tool settings over the wire', () => {
       listed(WEB_FETCH_TOOL_NAME),
       listed('todo_write'),
       listed(WEB_SEARCH_TOOL_NAME),
+      listed(SKILL_TOOL_NAME),
+      listed(SKILL_READ_TOOL_NAME),
     ])
 
     const session = await me.client.sessions.create({ model: { id: 'anthropic/claude-sonnet-5' } })

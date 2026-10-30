@@ -5,6 +5,7 @@ import {
   EVENT_TYPES,
   isQueuedEventType,
   MAX_MCP_SERVERS_PER_USER,
+  MAX_SKILLS_PER_USER,
   StoredEventSchema,
   encodeKeyCursor,
   encodeSeqCursor,
@@ -16,7 +17,9 @@ import {
   newModeId,
   newProviderCredentialId,
   newSessionId,
+  newSkillId,
   partitionOf,
+  skillFileSize,
   toolCallSource,
   type Agent,
   type AgentId,
@@ -39,6 +42,10 @@ import {
   type Session,
   type SessionId,
   type SessionTaskNotificationEvent,
+  type Skill,
+  type SkillFileContent,
+  type SkillFileEncoding,
+  type SkillId,
   type StoredEvent,
   type Supersedes,
   type SummaryModel,
@@ -67,10 +74,12 @@ import {
   DuplicateEventIdError,
   DuplicateMcpServerNameError,
   DuplicateModeNameError,
+  DuplicateSkillNameError,
   FencedError,
   McpServerLimitReachedError,
   ModeLimitReachedError,
   SessionNotFoundError,
+  SkillLimitReachedError,
 } from './errors'
 import {
   assertRewinds,
@@ -103,6 +112,13 @@ import {
   sessionTree,
   usageWindowOf,
 } from './inputs'
+import {
+  assertSkillSnapshot,
+  type CreateSkillInput,
+  type SkillFileInput,
+  type SkillSnapshotInput,
+  type SkillStore,
+} from './skills'
 import type {
   AppendableEvent,
   AppendEventsOptions,
@@ -2278,4 +2294,199 @@ function mergeSecrets(
     }
   }
   return merged
+}
+
+/**
+ * The in-memory {@link SkillStore} (epic #349, K4): the test fake and the reference behaviour
+ * for the contract.
+ *
+ * One record per skill, holding the resource's fields beside the snapshot's files as a `Map`
+ * from path to content — there is no second table in memory — so a replaced snapshot is one
+ * assignment and a listing can hand out paths and sizes without ever touching a content. A
+ * create reads the owner's whole set, the count and the name check together, which is serial
+ * by construction: no two creates can interleave, so the cap and the unique name hold the way
+ * the Postgres store's per-owner advisory lock makes them hold.
+ */
+export class InMemorySkillStore implements SkillStore {
+  readonly #clock: Clock
+
+  /** One record per skill, keyed by its `skl_` id. */
+  readonly #skills = new Map<SkillId, SkillRecord>()
+
+  constructor(options: InMemorySkillStoreOptions = {}) {
+    this.#clock = options.now ?? systemClock
+  }
+
+  create(input: CreateSkillInput): Promise<Skill> {
+    assertSkillSnapshot(input)
+    const owned = [...this.#skills.values()].filter((skill) => skill.owner_id === input.ownerId)
+    if (owned.some((skill) => skill.name === input.name)) {
+      throw new DuplicateSkillNameError(input.ownerId, input.name)
+    }
+    if (owned.length >= MAX_SKILLS_PER_USER) {
+      throw new SkillLimitReachedError(input.ownerId, MAX_SKILLS_PER_USER)
+    }
+    const now = this.#clock()
+    const at = timestampAt(now)
+    const record: SkillRecord = {
+      id: input.id ?? newSkillId(now),
+      type: 'skill',
+      owner_id: input.ownerId,
+      name: input.name,
+      description: input.description,
+      frontmatter: structuredClone(input.frontmatter),
+      source: { ...input.source },
+      files: filesOf(input.files),
+      enabled: input.enabled,
+      imported_at: at,
+      refreshed_at: at,
+    }
+    this.#skills.set(record.id, record)
+    return resolved(deepFreeze(skillOf(record)))
+  }
+
+  get(skillId: SkillId, options: OwnerScope): Promise<Skill | null> {
+    const record = this.#skills.get(skillId)
+    if (record === undefined || !matchesOwner(record, options)) {
+      return resolved(null)
+    }
+    return resolved(deepFreeze(skillOf(record)))
+  }
+
+  list(options: OwnerScope): Promise<Skill[]> {
+    const skills = [...this.#skills.values()]
+      .filter((skill) => matchesOwner(skill, options))
+      .sort(compareSkillKeys)
+      .map((skill) => deepFreeze(skillOf(skill)))
+    return resolved(skills)
+  }
+
+  getFile(skillId: SkillId, options: OwnerScope, path: string): Promise<SkillFileContent | null> {
+    const record = this.#skills.get(skillId)
+    const file = record === undefined ? undefined : record.files.get(path)
+    if (record === undefined || !matchesOwner(record, options) || file === undefined) {
+      return resolved(null)
+    }
+    return resolved(
+      deepFreeze({
+        path,
+        size: skillFileSize(file.content, file.encoding),
+        encoding: file.encoding,
+        content: file.content,
+      }),
+    )
+  }
+
+  replaceSnapshot(
+    skillId: SkillId,
+    options: OwnerScope,
+    input: SkillSnapshotInput,
+  ): Promise<Skill | null> {
+    const record = this.#skills.get(skillId)
+    if (record === undefined || !matchesOwner(record, options)) {
+      return resolved(null)
+    }
+    assertSkillSnapshot(input)
+    // One assignment: nothing can read a half-replaced snapshot out of this store, however the
+    // files changed (the reference behaviour the Postgres transaction implements).
+    const replaced: SkillRecord = {
+      ...record,
+      description: input.description,
+      frontmatter: structuredClone(input.frontmatter),
+      source: { ...input.source },
+      files: filesOf(input.files),
+      refreshed_at: timestampAt(this.#clock()),
+    }
+    this.#skills.set(skillId, replaced)
+    return resolved(deepFreeze(skillOf(replaced)))
+  }
+
+  setEnabled(skillId: SkillId, options: OwnerScope, enabled: boolean): Promise<Skill | null> {
+    const record = this.#skills.get(skillId)
+    if (record === undefined || !matchesOwner(record, options)) {
+      return resolved(null)
+    }
+    const updated: SkillRecord = { ...record, enabled }
+    this.#skills.set(skillId, updated)
+    return resolved(deepFreeze(skillOf(updated)))
+  }
+
+  delete(skillId: SkillId, options: OwnerScope): Promise<boolean> {
+    const record = this.#skills.get(skillId)
+    if (record === undefined || !matchesOwner(record, options)) {
+      return resolved(false)
+    }
+    // The snapshot goes with the skill: nothing else references a file's content, which is
+    // what the Postgres schema's `on delete cascade` writes as a foreign key.
+    this.#skills.delete(skillId)
+    return resolved(true)
+  }
+}
+
+/** Everything {@link InMemorySkillStore} takes. */
+export interface InMemorySkillStoreOptions {
+  /**
+   * The store's time source. Defaults to {@link systemClock}; pass a controllable clock in
+   * tests, which is what the conformance suite does.
+   */
+  readonly now?: Clock
+}
+
+/**
+ * A stored skill: the resource's own fields, with the snapshot's files as a map from path to
+ * content.
+ *
+ * The map is a lookup, not an order: a listing sorts its entries by path
+ * ({@link skillOf}), which is the order the Postgres store's `(skill_id, path)` rows come back
+ * in — the two implementations have to agree on the answer, and only the path is a fact both
+ * of them hold.
+ */
+type SkillRecord = Omit<Skill, 'files'> & {
+  readonly files: ReadonlyMap<string, StoredSkillFile>
+}
+
+/** One stored file: its content in the spelling it was written with. */
+interface StoredSkillFile {
+  readonly content: string
+  readonly encoding: SkillFileEncoding
+}
+
+/** The snapshot's files as the record keeps them: a path → file map, in the input's order. */
+function filesOf(files: readonly SkillFileInput[]): ReadonlyMap<string, StoredSkillFile> {
+  return new Map(
+    files.map((file) => [file.path, { content: file.content, encoding: file.encoding ?? 'utf8' }]),
+  )
+}
+
+/**
+ * The protocol's resource a record carries: the metadata and the file **listing** — each
+ * path with the size of the content behind it, in path order — and never a content.
+ */
+function skillOf(record: SkillRecord): Skill {
+  return {
+    id: record.id,
+    type: 'skill',
+    owner_id: record.owner_id,
+    name: record.name,
+    description: record.description,
+    frontmatter: structuredClone(record.frontmatter),
+    source: { ...record.source },
+    files: [...record.files]
+      .map(([path, file]) => ({ path, size: skillFileSize(file.content, file.encoding) }))
+      .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)),
+    enabled: record.enabled,
+    imported_at: record.imported_at,
+    refreshed_at: record.refreshed_at,
+  }
+}
+
+/** `(imported_at, id)` order: the order a skill list is in, oldest first. */
+function compareSkillKeys(left: SkillRecord, right: SkillRecord): number {
+  if (left.imported_at !== right.imported_at) {
+    return left.imported_at < right.imported_at ? -1 : 1
+  }
+  if (left.id === right.id) {
+    return 0
+  }
+  return left.id < right.id ? -1 : 1
 }

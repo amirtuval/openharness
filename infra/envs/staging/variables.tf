@@ -1,9 +1,10 @@
-# Every value below is a *default* for the staging environment. Override any of
+# Every value below is a *default* for the environment — the only one: this root
+# is named `staging` for history, and serves app.oharness.dev. Override any of
 # them with -var / a tfvars file; image_tag has no default and must be passed
 # (the deploy workflow passes the git SHA).
 
 variable "project_id" {
-  description = "Staging GCP project ID (never the display name)."
+  description = "GCP project ID (never the display name)."
   type        = string
   default     = "openharness-dev"
 }
@@ -28,25 +29,19 @@ variable "image_tag" {
 variable "host" {
   description = "Public hostname; the DNS zone's apex and the Ingress host."
   type        = string
-  default     = "staging.oharness.dev"
+  default     = "app.oharness.dev"
 }
 
 variable "dns_zone_name" {
   description = "Cloud DNS managed zone resource name to create for this environment."
   type        = string
-  default     = "staging-oharness-dev"
+  default     = "app-oharness-dev"
 }
 
 variable "app_service_account_id" {
   description = "Account ID of the app GCP service account. Its email is <id>@<project>.iam.gserviceaccount.com."
   type        = string
   default     = "openharness-app"
-}
-
-variable "production_node_service_account" {
-  description = "Production's GKE node service account, granted resource-level read on this project's Artifact Registry repository. Empty (the default) grants nothing: production's account is not created until production's own Terraform creates its cluster, and GCP rejects an IAM member that does not exist yet, so a first staging apply must not name it. Set it to gke-nodes@openharness-510710.iam.gserviceaccount.com — the repository variable TF_PRODUCTION_NODE_SA — after the first production deploy has created that account, then re-apply. See docs/DEPLOYMENT.md, 'The first deploy'."
-  type        = string
-  default     = ""
 }
 
 variable "google_client_id" {
@@ -74,31 +69,31 @@ variable "microsoft_tenant_id" {
 }
 
 variable "db_tier" {
-  description = "Cloud SQL machine tier. A shared-core tier in staging."
+  description = "Cloud SQL machine tier. The smallest shared-core tier: a demo's load fits, and it costs about a third of db-g1-small."
   type        = string
-  default     = "db-g1-small"
+  default     = "db-f1-micro"
 }
 
 variable "db_availability_type" {
-  description = "Cloud SQL availability. Staging runs a single zone."
+  description = "Cloud SQL availability. A single zone; REGIONAL (HA) roughly doubles the database's cost."
   type        = string
   default     = "ZONAL"
 }
 
 variable "db_backup_enabled" {
-  description = "Automated Cloud SQL backups. Off in staging."
+  description = "Automated daily Cloud SQL backups. On: this is the only environment, so its database is the only copy of the data."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "db_point_in_time_recovery_enabled" {
-  description = "Cloud SQL point-in-time recovery. Off in staging."
+  description = "Cloud SQL point-in-time recovery. Off: daily backups are enough for a demo, and the write-ahead logs it keeps are billed as storage."
   type        = bool
   default     = false
 }
 
 variable "deletion_protection" {
-  description = "Block Terraform from destroying the cluster, the database and the secrets. Off in staging so the environment can be torn down."
+  description = "Block Terraform from destroying the cluster, the database, the secrets and the certificate. Off, so the host can move and the environment can be torn down; the database's daily backups are the safety net."
   type        = bool
   default     = false
 }

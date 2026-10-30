@@ -15,6 +15,13 @@ import { PACKAGE_NAME as PROTOCOL_PACKAGE_NAME } from '@openharness/protocol'
  * provider's native search tool to the request, so the provider runs it and nothing of ours
  * ever executes a search.
  *
+ * `cloneRepository` (epic #349, K3) is the one other thing that reaches a URL a user supplied:
+ * a shallow, in-memory `isomorphic-git` clone whose HTTP client is {@link safeFetch}, so a
+ * skill can be imported from a public repository without a `git` binary, a subprocess or a
+ * byte on the host's disk. {@link parseGitUrl} is the reading of the URL itself, and
+ * {@link repositoryName} the one name it implies — what a `SKILL.md` at a repository's root is
+ * called.
+ *
  * `openMcpClient` and `createMcpTool` (epic #303, X10; #312) are the other half: a Streamable
  * HTTP client for a remote MCP server, over the official `@modelcontextprotocol/sdk`, and the
  * `ToolDefinition` that makes one of its tools an ordinary tool the registry runs. The server
@@ -65,6 +72,28 @@ export {
 } from './web-fetch'
 export { todoWriteTool } from './todo'
 export {
+  SKILL_LISTING_MAX_CHARS,
+  SKILL_LISTING_MIN_DESCRIPTION_CHARS,
+  SKILL_READ_MAX_RESULT_TOKENS,
+  SKILL_READ_TOOL_NAME,
+  SKILL_SCRIPTS_NOTICE,
+  SKILL_TOOL_MAX_RESULT_TOKENS,
+  SKILL_TOOL_NAME,
+  SkillInputSchema,
+  SkillReadInputSchema,
+  createSkillReadTool,
+  createSkillTool,
+  createSkillTools,
+  looksBinary,
+  skillListingDescription,
+  skillToolsOffered,
+  type OfferedSkill,
+  type SkillInput,
+  type SkillReadInput,
+  type SkillToolOptions,
+} from './skill'
+
+export {
   AGENT_TOOL_DESCRIPTION,
   HARNESS_ANSWERED,
   HARNESS_TOOL_HANDLERS,
@@ -114,6 +143,27 @@ export {
   type McpResultOptions,
   type McpToolOptions,
 } from './mcp-tool'
+export {
+  DEFAULT_CLONE_MAX_BYTES,
+  DEFAULT_CLONE_MAX_REDIRECTS,
+  DEFAULT_CLONE_TIMEOUT_MS,
+  GitCloneError,
+  cloneRepository,
+  isGitCloneError,
+  type CloneRepositoryOptions,
+  type ClonedFile,
+  type ClonedRepository,
+  type GitCloneErrorCode,
+} from './git-clone'
+export {
+  GitUrlError,
+  isGitUrlError,
+  parseGitUrl,
+  repositoryName,
+  type GitSourceLocation,
+  type GitUrlErrorCode,
+} from './git-url'
+export { createMemoryFileSystem, type MemoryFileSystem, type MemoryStats } from './memory-fs'
 export {
   isBlockedAddress,
   isMetadataHostname,

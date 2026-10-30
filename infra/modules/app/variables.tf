@@ -48,7 +48,7 @@ variable "image_tag" {
 }
 
 variable "host" {
-  description = "Public hostname, e.g. staging.oharness.dev. Becomes the Gateway listener's hostname, both HTTPRoutes' hostnames and BETTER_AUTH_URL."
+  description = "Public hostname, e.g. app.oharness.dev. Becomes the Gateway listener's hostname, both HTTPRoutes' hostnames and BETTER_AUTH_URL."
   type        = string
 }
 
@@ -135,4 +135,37 @@ variable "helm_timeout" {
   description = "Seconds helm_release waits for the release to become ready before it gives up and (with atomic = true) rolls the release back. 600 rather than the old 900 (#159): a rollout that has not converged in ten minutes is broken, and every second past that is a second the failed release is held open. A cold environment is slower — a first deploy's nodes still have to pull the image before the pods can start — so raise it with -var helm_timeout=<seconds> if one needs longer."
   type        = number
   default     = 600
+}
+
+variable "replicas" {
+  description = "The autoscaler's floor and ceiling (and the Deployment's starting count, the floor). One pod is the cost-first shape: a rollout is still zero-downtime (maxSurge: 1, maxUnavailable: 0), and only a node drain briefly takes the app away."
+  type = object({
+    min = number
+    max = number
+  })
+  default = { min = 2, max = 4 }
+
+  validation {
+    condition     = var.replicas.min >= 1 && var.replicas.max >= var.replicas.min
+    error_message = "replicas.min must be at least 1 and no more than replicas.max."
+  }
+}
+
+variable "resources" {
+  description = "The app container's CPU and memory request; the memory limit equals the request. Autopilot bills on requests, and on a cluster that supports bursting its floor is 50m / 52Mi per pod."
+  type = object({
+    cpu    = string
+    memory = string
+  })
+  default = { cpu = "250m", memory = "512Mi" }
+}
+
+variable "proxy_resources" {
+  description = "The Cloud SQL Auth Proxy sidecar's CPU and memory request, and its memory limit. It is a TCP forwarder and uses a few megabytes."
+  type = object({
+    cpu          = string
+    memory       = string
+    memory_limit = string
+  })
+  default = { cpu = "100m", memory = "128Mi", memory_limit = "256Mi" }
 }

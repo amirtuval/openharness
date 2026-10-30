@@ -2,6 +2,7 @@ import { createTranscript, initialTranscriptState } from '@openharness/client'
 import type { Client, Transcript, TranscriptState } from '@openharness/client'
 import { EVENT_TYPES } from '@openharness/protocol'
 import type {
+  MessageSkill,
   Mode,
   ModeId,
   ModelEntry,
@@ -12,6 +13,15 @@ import type {
 
 import { describeError, type ErrorContext } from '../errors'
 import { CTRL_C_WINDOW_MS, decideCtrlC, type CtrlCAction } from './ctrl-c'
+
+/** What a send may carry beyond its text (#349, K7). */
+export interface SendOptions {
+  /**
+   * The skill this message invokes, when the line named one. The text stays what the reader
+   * typed; the brain loads the skill's instructions into the turn (K7).
+   */
+  readonly skill?: MessageSkill | undefined
+}
 
 /**
  * A line the chat shows above the status bar.
@@ -149,8 +159,13 @@ export interface ChatSession {
    * the transcript's `lastSeq` so the seam between them cannot drop or repeat an event.
    */
   readonly start: () => Promise<void>
-  /** Send a message. Allowed while a turn is running — that is what steering is. */
-  readonly send: (text: string) => Promise<void>
+  /**
+   * Send a message. Allowed while a turn is running — that is what steering is.
+   *
+   * `options.skill` rides the message when the line named one of the reader's skills (#349,
+   * K7): the text is what they typed, and the `skill` is the `{ name, arguments }` it named.
+   */
+  readonly send: (text: string, options?: SendOptions) => Promise<void>
   /**
    * Ask the brain to compact the older history now — `/compact [instructions]` (#283).
    *
@@ -350,7 +365,7 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       void follow()
     },
 
-    async send(text) {
+    async send(text, options) {
       if (text.trim() === '') return
       armedAt = null
       // Sending is the end of whatever the last turn was, interrupted or not (issue #208):
@@ -364,6 +379,7 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       try {
         const stored = await client.sendMessage(sessionId, text, {
           signal: lifetime.signal,
+          ...(options?.skill === undefined ? {} : { skill: options.skill }),
           ...(pendingMode === null ? {} : { mode: pendingMode }),
           ...(pendingMode !== null || pending === null ? {} : { model: { id: pending } }),
         })

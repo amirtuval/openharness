@@ -4,7 +4,7 @@ variable "project_id" {
 }
 
 variable "host" {
-  description = "The hostname to certify, e.g. staging.oharness.dev. It is the DNS authorization's domain, the certificate's domain, and the certificate map entry's hostname — the Gateway answers for exactly this name."
+  description = "The hostname to certify, e.g. app.oharness.dev. It is the DNS authorization's domain, the certificate's domain, and the certificate map entry's hostname — the Gateway answers for exactly this name."
   type        = string
 }
 

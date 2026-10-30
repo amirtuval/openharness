@@ -62,7 +62,7 @@ a `tls.certificateRefs` on one Gateway is an error GKE rejects.
 
 Release name `openharness`, namespace `openharness`. Terraform's `helm_release` uses
 `create_namespace = true`, points at `charts/openharness`, and sets every key marked **(TF)**
-below per environment (staging `openharness-dev`, production `openharness-510710`). The
+below — openharness runs one environment, `infra/envs/staging` in `openharness-dev`. The
 Kubernetes service account is named `openharness`.
 
 ### Values
@@ -77,8 +77,9 @@ Kubernetes service account is named `openharness`.
 | `autoscaling.minReplicas`                    |      | `2`                       | the floor                                                                                                   |
 | `autoscaling.maxReplicas`                    |  ✔   | `4`                       | the ceiling                                                                                                 |
 | `autoscaling.targetCPUUtilizationPercentage` |      | `70`                      | scale on CPU, as a percentage of the **request** below                                                      |
-| `resources.requests.cpu`                     |      | `250m`                    | Autopilot schedules and bills on requests; 250m is Autopilot's floor for a container                        |
-| `resources.requests.memory`                  |      | `512Mi`                   | the other half of Autopilot's floor                                                                         |
+| `podDisruptionBudget.enabled`                |      | `true`                    | render the PDB (`minAvailable: 1`); off for a single replica, where it would block drains                   |
+| `resources.requests.cpu`                     |      | `250m`                    | Autopilot schedules and bills on requests; with bursting its floor is 50m/52Mi per pod                      |
+| `resources.requests.memory`                  |      | `512Mi`                   | the memory request                                                                                          |
 | `resources.limits.memory`                    |      | `512Mi`                   | equal to the request: a steady footprint, so a higher limit buys nothing                                    |
 | `serviceAccount.name`                        |      | `openharness`             | the KSA the pods run as — and the name the Workload Identity binding uses                                   |
 | `serviceAccount.gcpServiceAccount`           |  ✔   | `""`                      | the app GSA's email → the `iam.gke.io/gcp-service-account` annotation                                       |
@@ -88,7 +89,7 @@ Kubernetes service account is named `openharness`.
 | `cloudSqlProxy.image.tag`                    |      | `2.26.0`                  | pinned to a release, never `latest`                                                                         |
 | `cloudSqlProxy.port`                         |      | `5432`                    | the loopback port the proxy listens on, and the port in `database_url`                                      |
 | `cloudSqlProxy.privateIp`                    |      | `true`                    | pass `--private-ip`: the instance has no public address                                                     |
-| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi`            | requests for the forwarder; Autopilot rounds them up to its container floor                                 |
+| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi`            | requests for the forwarder                                                                                  |
 | `gateway.host`                               |  ✔   | `""`                      | the serving host. Empty ⇒ none of the Gateway objects is rendered                                           |
 | `gateway.staticIpName`                       |  ✔   | `""`                      | the `google_compute_global_address` name → the Gateway's `spec.addresses` (`NamedAddress`)                  |
 | `gateway.certificateMapName`                 |  ✔   | `""`                      | the Certificate Manager map → `networking.gke.io/certmap` on the Gateway                                    |
@@ -126,11 +127,11 @@ own settings.
 
 **`SCHEDULER=postgres` is the chart's default, and no environment may forget it.** The server
 defaults to `local` (`apps/server/src/config.ts`), which owns all 64 partitions in one process
-and writes unfenced. That is safe only for a single pod: a second pod — the chart runs
-`replicaCount: 2` and the HPA scales to 4 — recovers every session in every partition on boot,
-closing turns still running on live pods as `brain_lost` and re-running them (two brains in one
-session), and an interrupt that lands on the wrong pod starts a second brain because `signal()`
-is in-process. `postgres` needs `DATABASE_URL`, which every deployment of this chart has. The
+and writes unfenced. That is safe only for a single pod: a second pod — the chart's own defaults
+are `replicaCount: 2` and an HPA to 4, and openharness's environment runs one replica with the
+HPA allowed to reach 2 — recovers every session in every partition on boot, closing turns still
+running on live pods as `brain_lost` and re-running them (two brains in one session), and an
+interrupt that lands on the wrong pod starts a second brain because `signal()` is in-process. `postgres` needs `DATABASE_URL`, which every deployment of this chart has. The
 value lives in `values.yaml`, is repeated in Terraform (`infra/modules/app/locals.tf`) so the
 two agree, and a template helper refuses to render `local` when `replicaCount > 1` or the HPA
 is enabled with `maxReplicas > 1`; use `local` only with `replicaCount: 1` and the autoscaler

@@ -48,19 +48,25 @@ schema.
 
 ## The schema
 
-Fourteen tables, in `migrations/`. Nine are this package's:
+Twenty tables, in `migrations/`. Fifteen are this package's:
 
-| table                  | what a row is                                                                                                                              |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `agents`               | an agent configuration: `owner_id`, name, description, model, system prompt, timestamps                                                    |
-| `sessions`             | a log's header: `owner_id`, `status`, `partition`, title, metadata, the effective `model`/`system`, and the agent snapshot (nullable, #93) |
-| `events`               | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`                                         |
-| `event_claims`         | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`                                          |
-| `event_supersessions`  | one recorded range: `from_seq`, `to_seq`, `kind` (`chunks` / `rewind`), `by_event_id` (primary key), `by_seq`, `created_at`                |
-| `partition_leases`     | who holds a partition, at which epoch, until when                                                                                          |
-| `scheduler_instances`  | one row per live scheduler instance: `instance_id` (primary key), `last_seen` (#122)                                                       |
-| `provider_credentials` | a user's sealed model-provider key, one per `(user_id, provider)`: the sealed blob, `last4`, timestamps                                    |
-| `user_preferences`     | a user's settings across sessions — the default `model`, the web theme and the compaction controls — one row per user (#111, #201, #282)   |
+| table                  | what a row is                                                                                                                                                   |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agents`               | an agent configuration: `owner_id`, name, description, model, system prompt, timestamps                                                                         |
+| `sessions`             | a log's header: `owner_id`, `status`, `partition`, title, metadata, the effective `model`/`system`, and the agent snapshot (nullable, #93)                      |
+| `events`               | one stored event: `id`, `session_id`, `seq`, `type`, `payload jsonb`, `created_at`, `processed_at`                                                              |
+| `event_claims`         | one claim of one user event: `event_id` (primary key), the claiming event or `null`, `claimed_at`                                                               |
+| `event_supersessions`  | one recorded range: `from_seq`, `to_seq`, `kind` (`chunks` / `rewind`), `by_event_id` (primary key), `by_seq`, `created_at`                                     |
+| `partition_leases`     | who holds a partition, at which epoch, until when                                                                                                               |
+| `scheduler_instances`  | one row per live scheduler instance: `instance_id` (primary key), `last_seen` (#122)                                                                            |
+| `provider_credentials` | a user's sealed model-provider key, one per `(user_id, name)`: the sealed blob, `last4`, the public `details`, timestamps                                       |
+| `user_preferences`     | a user's settings across sessions — the default `model`, the web theme and the compaction controls — one row per user (#111, #201, #282)                        |
+| `user_tool_settings`   | a user's tool choices — the built-in map and the remote MCP tool policies — one row per user (#307, #312)                                                       |
+| `modes`                | a user's named presets: name (unique per owner), model, effort, prompt addition, tool override (#245, M6; #307)                                                 |
+| `mcp_servers`          | a user's remote MCP servers: URL, auth type, `enabled`, status, the public tool summaries and the **sealed** header map, tokens and client (#303, X10)          |
+| `mcp_oauth_states`     | one pending OAuth authorization per row: the `state`, the user, the server, the PKCE verifier, where the flow started, its expiry (#303, #311)                  |
+| `skills`               | a user's imported skills: name (unique per owner), description, `frontmatter jsonb`, source URL/ref/path/commit, `enabled`, imported/refreshed times (#349, K4) |
+| `skill_files`          | the files of a skill's snapshot, one row per `(skill_id, path)`: the content and its byte size; `on delete cascade` from `skills` (#349, K4)                    |
 
 and five are **Better Auth's**, created by the same migrations and read and written by Better
 Auth itself (epic #65, decision A1): `user`, `session`, `account`, `verification` and
@@ -241,6 +247,7 @@ The rules for a new file, which also live in `migrate.ts`'s header:
 | `0028_paused_confirmation_work.sql`    | the partial index behind the paused-confirmation work scan: `(session_id)` where the type is a tool confirmation (#309)                                                      |
 | `0031_mcp_tool_policies.sql`           | `user_tool_settings.mcp`, the per-tool policies a user set for remote MCP tools (#312)                                                                                       |
 | `0034_task_notifications.sql`          | the indexes behind background-task notifications: `(session_id)` where the type is a notification, and the **unique** `(session_id, payload->>'source_key')` under it (#343) |
+| `0036_skills.sql`                      | `skills` and `skill_files`: a user's imported skills in the Agent Skills format, and the files of each snapshot (#349, K4; #350)                                             |
 
 To run them outside an application:
 

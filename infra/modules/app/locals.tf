@@ -30,10 +30,11 @@ locals {
   env = merge(
     {
       BETTER_AUTH_URL = "https://${var.host}"
-      # The chart runs 2–4 pods, so this must be the partitioned scheduler: `local` owns every
-      # partition in one process and writes unfenced, which multi-replica deployments cannot
-      # use (issue #378). The chart defaults to this too and refuses to render `local` with
-      # more than one pod; it is set here as well so the two sides say the same thing.
+      # The deployment can run more than one pod — one replica with the HPA allowed to reach
+      # two, and the chart's own defaults are two to four — so this must be the partitioned
+      # scheduler: `local` owns every partition in one process and writes unfenced, which
+      # multi-replica deployments cannot use (issue #378). The chart defaults to this too and
+      # refuses to render `local` with more than one pod; it is set here so both sides agree.
       SCHEDULER                      = "postgres"
       OPENHARNESS_TRUSTED_PROXY_HOPS = "1"
       OPENHARNESS_KEY_PROVIDER       = "gcp-kms"
@@ -74,6 +75,19 @@ locals {
       repository = var.image_repository
       tag        = var.image_tag
     }
+    replicaCount = var.replicas.min
+    autoscaling = {
+      minReplicas = var.replicas.min
+      maxReplicas = var.replicas.max
+    }
+    # A budget of minAvailable: 1 over a single pod would block every node drain.
+    podDisruptionBudget = {
+      enabled = var.replicas.min > 1
+    }
+    resources = {
+      requests = { cpu = var.resources.cpu, memory = var.resources.memory }
+      limits   = { memory = var.resources.memory }
+    }
     gcpProject = var.project_id
     serviceAccount = {
       gcpServiceAccount = var.app_service_account_email
@@ -86,6 +100,10 @@ locals {
     cloudSqlProxy = {
       enabled                = true
       instanceConnectionName = var.cloudsql_instance_connection_name
+      resources = {
+        requests = { cpu = var.proxy_resources.cpu, memory = var.proxy_resources.memory }
+        limits   = { memory = var.proxy_resources.memory_limit }
+      }
     }
     # The GKE Gateway (#159), not an Ingress: the chart renders a Gateway, two
     # HTTPRoutes, a HealthCheckPolicy, a GCPBackendPolicy and — while the CDN is on

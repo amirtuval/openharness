@@ -4,8 +4,39 @@ import { ContentBlocksSchema } from '../content'
 import { EventIdSchema, ModeIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
 import { ModelConfigSchema } from '../resources/agent'
+import { SKILL_ARGUMENTS_MAX_LENGTH, SkillNameSchema } from '../resources/skill'
 import { ReasoningEffortSchema } from '../reasoning'
 import { EVENT_TYPES, EventSeqSchema, QueuedProcessedAtSchema } from './common'
+
+/**
+ * // extension: the skill a message invokes as a slash command (epic #349, K7).
+ *
+ * `/name arguments` is how a user runs a skill: the composer sends an ordinary `user.message`
+ * whose {@link UserMessageEventSchema.content} is **what was typed** — the transcript shows the
+ * command a reader wrote, and a client that knows nothing of skills renders it as the text it is
+ * — carrying this field to say which skill it named and with what. The body itself is *not*
+ * here: the model is given it, and what the model was given is the `session.skill_loaded` event
+ * the brain writes when it first handles the message (K7), so an edit or a refresh of the skill
+ * never rewrites a chat that already ran it.
+ *
+ * A built-in command is a **client action**, not a skill: `/compact`, `/new`, `/model` and the
+ * rest are not invocable this way, which is what {@link RESERVED_SKILL_NAMES} keeps a skill's
+ * name from colliding with.
+ */
+export const MessageSkillSchema = z.object({
+  /** The skill's name, as the user typed it after the `/`. */
+  name: SkillNameSchema,
+  /**
+   * What the user typed after the command, or absent when they typed nothing.
+   *
+   * Substituted into the body's `$ARGUMENTS` placeholders, or appended after it when the body
+   * has none; see the brain's substitution rule. Absent and `''` mean the same thing to a skill
+   * with placeholders, and only the absent spelling is normalised away.
+   */
+  arguments: z.string().max(SKILL_ARGUMENTS_MAX_LENGTH).optional(),
+})
+
+export type MessageSkill = z.infer<typeof MessageSkillSchema>
 
 /**
  * Events the user sends to a session.
@@ -70,6 +101,19 @@ export const UserMessageEventSchema = z.object({
    * asked for beside what was applied (see `ReasoningEffortRunSchema`).
    */
   reasoning_effort: ReasoningEffortSchema.nullable().optional(),
+  /**
+   * // extension: the skill this message invoked as a slash command (epic #349, K7).
+   *
+   * Stored on the event because the invocation *is* what the user did — a client reading the log
+   * back says "/release-notes v1.2" rather than showing text that happens to start with a slash
+   * — and because the brain uses it to find the `session.skill_loaded` event it wrote for this
+   * message (K7): the two name each other by name and by `seq`. See {@link MessageSkillSchema}.
+   *
+   * The server refuses a message naming a skill its owner cannot run — unknown, turned off, or
+   * `user-invocable: false` — before anything is stored, so an event carrying this field always
+   * named a skill that was in force when it landed.
+   */
+  skill: MessageSkillSchema.optional(),
 })
 
 /** A stored `user.message`, deep-readonly (D9, issue #46). */
@@ -127,6 +171,12 @@ export const UserMessageEventInputSchema = z.object({
   mode: ModeIdSchema.nullable().optional(),
   /** Run at a reasoning effort from this message on; `null` returns to the provider's default (#252). */
   reasoning_effort: ReasoningEffortSchema.nullable().optional(),
+  /**
+   * Invoke one of the user's skills as a slash command (epic #349, K7): the skill's name and the
+   * arguments typed after it, while `content` stays whatever the user typed. Refused with a 400
+   * when the skill is unknown, off, or not user-invocable.
+   */
+  skill: MessageSkillSchema.optional(),
 })
 
 export type UserMessageEventInput = z.infer<typeof UserMessageEventInputSchema>

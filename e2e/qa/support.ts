@@ -69,8 +69,13 @@ export function uniqueName(prefix: string): string {
  * and the server under test runs `OPENHARNESS_TEST_MODEL=mock`, which answers every turn
  * itself and never resolves the id. A pass against a real provider sets `QA_MODEL` to a
  * router id (e.g. `openai/gpt-4.1-mini`) and runs the stack without that variable.
+ *
+ * `OPENHARNESS_QA_MODEL` is the same signal under the name issue #355's plan gives it (the
+ * real-model cases S4 and S7 "are tagged and skipped unless `OPENHARNESS_QA_MODEL` names a real
+ * model"): either variable set means a real provider, so a pass may be spelled either way.
  */
-export const QA_MODEL = process.env.QA_MODEL ?? 'anthropic/claude-sonnet-5'
+export const QA_MODEL =
+  process.env.QA_MODEL ?? process.env.OPENHARNESS_QA_MODEL ?? 'anthropic/claude-sonnet-5'
 
 /**
  * The heading of the web app's New chat screen (epic #201, U10, #211; U12, #227).
@@ -100,7 +105,8 @@ export const FIRST_RUN_HEADING = "Let's get you chatting"
  * replies — the `__slow__`/`__fail_*__` markers, or the way it echoes its prompt — asks this
  * and either adapts or skips.
  */
-export const isRealModel = process.env.QA_MODEL !== undefined
+export const isRealModel =
+  process.env.QA_MODEL !== undefined || process.env.OPENHARNESS_QA_MODEL !== undefined
 
 /**
  * How far the long reply counts.

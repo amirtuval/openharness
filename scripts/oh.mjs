@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * `yarn oh`, `yarn oh:staging`, `yarn oh:prod`: build this checkout's CLI and run it against
- * the environment the name stands for (#192).
+ * `yarn oh`, `yarn oh:prod`: build this checkout's CLI and run it against the server the name
+ * stands for (#192).
  *
- * An installed `oh` defaults to production, so a checkout has to say otherwise out loud —
+ * An installed `oh` defaults to the deployment (app.oharness.dev), so a checkout has to say otherwise out loud —
  * and one `OPENHARNESS_URL` per name, set on the child, is the whole of it. It is a script
  * rather than a line of `package.json` because setting an environment variable portably
  * would otherwise mean a dependency (`cross-env`), and this repo takes none it does not need.
@@ -15,7 +15,7 @@
  * printed then, to stderr.
  *
  * Everything after the environment name goes to the CLI untouched, which is what makes
- * `yarn oh:staging login --no-browser` mean `oh login --no-browser` against staging.
+ * `yarn oh:prod login --no-browser` mean `oh login --no-browser` against the deployment.
  *
  * Run from the repo root, through the root `package.json` scripts.
  */
@@ -28,7 +28,6 @@ import { fileURLToPath } from 'node:url'
 /** The environment names, and the server each one runs against. */
 const ENVIRONMENTS = {
   dev: 'http://localhost:3000',
-  staging: 'https://staging.oharness.dev',
   prod: 'https://app.oharness.dev',
 }
 

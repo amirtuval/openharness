@@ -4,17 +4,17 @@ variable "project_id" {
 }
 
 variable "zone_name" {
-  description = "Resource name of the managed zone: the name to create, or the name of the existing zone production adopts."
+  description = "Resource name of the managed zone to create."
   type        = string
 }
 
 variable "dns_name" {
-  description = "The zone's DNS name with a trailing dot, e.g. staging.oharness.dev."
+  description = "The zone's DNS name with a trailing dot, e.g. app.oharness.dev."
   type        = string
 }
 
 variable "description" {
-  description = "Zone description. On production's adopted zone this overwrites the existing description."
+  description = "Zone description."
   type        = string
   default     = "openharness"
 }

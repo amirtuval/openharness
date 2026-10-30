@@ -138,6 +138,15 @@ the only way an event is ever removed together with its session.
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | start OAuth 2.1; optional `client` (`web`/`cli`); answers the authorization URL                                                                                                                                                                  |
 | `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | drop the OAuth tokens; the server lands on `needs_reconnect`                                                                                                                                                                                     |
 | `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                                                                                                                                     |
+| `GET`    | `/v1/me/skills`                                 | list the caller's imported skills, oldest first (no cursor: at most 50)                                                                                                                                                                          |
+| `GET`    | `/v1/me/skills/{skill_id}`                      | read one skill, with its `SKILL.md`'s content                                                                                                                                                                                                    |
+| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill: its content, size and `encoding` (`utf8`, or `base64` for a binary file)                                                                                                                                               |
+| `POST`   | `/v1/me/skills/{skill_id}`                      | switch a skill on or off (`enabled`); the snapshot itself is not editable                                                                                                                                                                        |
+| `DELETE` | `/v1/me/skills/{skill_id}`                      | delete a skill and its whole snapshot; `204`                                                                                                                                                                                                     |
+| `POST`   | `/v1/me/skills/import/preview`                  | read a public repository and answer the candidate skills; stores nothing                                                                                                                                                                         |
+| `POST`   | `/v1/me/skills/import`                          | store the picked candidates; `201` with the new skills                                                                                                                                                                                           |
+| `POST`   | `/v1/me/skills/{skill_id}/refresh/preview`      | re-clone the skill's stored source and answer what changed                                                                                                                                                                                       |
+| `POST`   | `/v1/me/skills/{skill_id}/refresh`              | replace the snapshot with the commit the preview named                                                                                                                                                                                           |
 | `GET`    | `/v1/models`                                    | the chat models the caller's own keys can use, with per-provider status                                                                                                                                                                          |
 | `GET`    | `/v1/sessions/{session_id}/usage`               | what one session **and its descendants** spent: totals, cost, the per-model breakdown, and the subtree's own share as `descendants` (epic #340, S8; #344)                                                                                        |
 | `GET`    | `/v1/me/usage`                                  | what the caller spent between two local days (`from`, `to`, `tz`): by model and by day                                                                                                                                                           |
@@ -146,8 +155,8 @@ Every `/v1` resource belongs to the caller and is scoped to them.
 
 Paginated lists answer `{ data, next_page }` — `next_page` is an opaque cursor handed back as
 `page`, and `null` means there is nothing more. The credential list and the model catalog have
-no cursor: `/v1/provider-credentials`, `/v1/me/modes` and `/v1/me/mcp_servers` answer
-`{ data }` and `/v1/models` `{ data, providers }`, all bounded by the caller's own rows.
+no cursor: `/v1/provider-credentials`, `/v1/me/modes`, `/v1/me/mcp_servers` and `/v1/me/skills`
+answer `{ data }` and `/v1/models` `{ data, providers }`, all bounded by the caller's own rows.
 
 ## Events
 
@@ -155,41 +164,76 @@ The log is the source of truth, and `seq` is the order it happened in: `1`, `2`,
 session. It is also the SSE `id` and the resume position, so a client that reconnects with
 `last-event-id: 7` gets `8` next — never `7` twice, never a gap.
 
-| event                              | who writes it | what it means                                                                           |
-| ---------------------------------- | ------------- | --------------------------------------------------------------------------------------- |
-| `user.message`                     | the client    | a message, until the brain claims it                                                    |
-| `user.interrupt`                   | the client    | stop the turn in flight                                                                 |
-| `user.tool_confirmation`           | the server    | // extension: the user answered a call that was waiting on them (#309)                  |
-| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
-| `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                         |
-| `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
-| `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)     |
-| `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)         |
-| `agent.opaque_content`             | the brain     | // extension: the parts of a step only its own provider can read back (#334)            |
-| `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
-| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
-| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
-| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is    |
-| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at                 |
-| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                                  |
-| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                     |
-| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                     |
-| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage      |
-| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)       |
-| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)                 |
-| `session.compact`                  | the server    | // extension: the user asked for a manual compaction, `/compact [instructions]` (#283)  |
-| `session.compaction`               | the brain     | // extension: what came of it — `summarized`, `nothing_to_summarize` or `failed` (#283) |
-| `session.task_started`             | the server    | // extension: a background task was started and is not waited for (epic #340, #343)     |
-| `session.task_status`              | the server    | // extension: what a background task is doing — running, idle, failed, stopped (#343)   |
-| `session.task_notification`        | the server    | // extension: **queued**: what a task produced, for the parent model (epic #340, #343)  |
-| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)                |
-| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)          |
+| event                              | who writes it | what it means                                                                                      |
+| ---------------------------------- | ------------- | -------------------------------------------------------------------------------------------------- |
+| `user.message`                     | the client    | a message, until the brain claims it                                                               |
+| `user.interrupt`                   | the client    | stop the turn in flight                                                                            |
+| `user.tool_confirmation`           | the server    | // extension: the user answered a call that was waiting on them (#309)                             |
+| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                                 |
+| `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                                    |
+| `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)                     |
+| `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)                |
+| `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)                    |
+| `agent.opaque_content`             | the brain     | // extension: the parts of a step only its own provider can read back (#334)                       |
+| `session.status_running`           | the brain     | a turn started (also after a retry)                                                                |
+| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                                   |
+| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                                |
+| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is               |
+| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at                            |
+| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                                             |
+| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                                |
+| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                                |
+| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage                 |
+| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)                  |
+| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)                            |
+| `session.compact`                  | the server    | // extension: the user asked for a manual compaction, `/compact [instructions]` (#283)             |
+| `session.compaction`               | the brain     | // extension: what came of it — `summarized`, `nothing_to_summarize` or `failed` (#283)            |
+| `session.skill_loaded`             | the brain     | // extension: the instructions a slash invocation loaded — the body the model was given (#349, K7) |
+| `session.task_started`             | the server    | // extension: a background task was started and is not waited for (epic #340, #343)                |
+| `session.task_status`              | the server    | // extension: what a background task is doing — running, idle, failed, stopped (#343)              |
+| `session.task_notification`        | the server    | // extension: **queued**: what a task produced, for the parent model (epic #340, #343)             |
+| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)                           |
+| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)                     |
 
 A `user.message` may also carry a `model` (`{ "id": "provider/model" }`): it switches the
 model the session runs from that message on, and the session keeps running it until another
 message changes it (epic #116, U3). The switch is stored on the message — the log stays the
 source of truth — and each `span.model_request_start` still records the model its request
 actually used.
+
+A `user.message` may also carry a `skill` — `{ "name": "release-notes", "arguments": "v1.2" }`
+— which is how a skill is run as a slash command (epic #349, K7): `/release-notes v1.2`. The
+message's `content` stays **what the user typed**, so a transcript shows the command and a
+client that knows nothing of skills renders it as the text it is. The server refuses, with a
+`400` and nothing stored, a name that is not one of the caller's skills in force for the chat
+(or a mode turns off), and one whose frontmatter says `user-invocable: false`; a
+`disable-model-invocation: true` skill is exactly the kind the user runs by hand.
+
+```json
+{
+  "type": "user.message",
+  "content": [{ "type": "text", "text": "/release-notes v1.2" }],
+  "skill": { "name": "release-notes", "arguments": "v1.2" }
+}
+```
+
+When the brain first handles that message it writes a `session.skill_loaded` naming it, whose
+`content` is the skill's `SKILL.md` **body** with the arguments substituted — every
+`$ARGUMENTS` replaced, or the arguments appended after a body that has none. The log therefore
+holds exactly what the model was given, and from then on the chat is built from that event and
+never from the snapshot: refreshing a skill or editing it changes what the _next_ `/name` loads
+and nothing about a conversation that already ran.
+
+```json
+{
+  "type": "session.skill_loaded",
+  "message_seq": 7,
+  "name": "release-notes",
+  "skill_id": "skl_01J…",
+  "commit_sha": "9f2c1b4…",
+  "content": "Write the release notes for v1.2."
+}
+```
 
 ### Background tasks
 
@@ -1205,25 +1249,40 @@ it (`POST /v1/sessions`) or continuing one (`POST …/events`) is the `422`
 stored. A mode is stored even when its model is not usable yet: the key may come later.
 
 **A mode may also carry a tool override.** `Mode.tools` is
-`{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false } }` or `null`: an on/off
-patch applied over the user's own choices, so a `deep` mode can insist on `web_search`, do
-without `todo_write`, and leave `notes` (a remote MCP server) out of every chat that follows it.
-It decides **which** tools and **which MCP servers** a chat has, never what a call to one may do
-— permissions are the user's (see
-[Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)).
+`{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false }, "skills": { "<skl_…>":
+true } }` (each map optional) or `null`: an on/off patch applied over the user's own choices, so
+a `deep` mode can insist on `web_search`, do without `todo_write`, leave `notes` (a remote MCP
+server) out of every chat that follows it, and bring its own `release-notes` skill with it. It
+decides **which** tools, **which MCP servers** and **which skills** a chat has, never what a
+call to one may do — permissions are the user's (see
+[Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)) — and never what a
+skill is.
 
 - **`builtin`** is keyed by tool name and patches the user's `/v1/me/tools` choices.
 - **`mcp_servers`** (epic #303, X10; #311) is a sibling key, keyed by a remote MCP server's
-  `mcps_` id, and patches the server's own `enabled` field — the user's default. A server the map
-  does not name follows the user; a mode that names one turns it on or off for the chats that
-  follow it, live, from the next request on. It is **server granularity, never per MCP tool**:
-  which of a server's tools a request offers, and under which permission, is the server's own
-  listing and the user's settings, not a mode's.
-- **A mode naming a server the caller no longer has is simply ignored.** The mode routes store
-  the map as written and do not check the id against the servers present, so deleting an MCP
-  server neither fails nor rewrites the modes that named it — the entry just matches nothing.
-  The servers in force for a request are resolved as _the user's `enabled`, overridden by the
-  mode_, per request.
+  `mcps_` id, and patches the server's own `enabled` field — the user's default. It is **server
+  granularity, never per MCP tool**: which of a server's tools a request offers, and under which
+  permission, is the server's own listing and the user's settings, not a mode's.
+- **`skills`** (epic #349, K8) is the third sibling key, keyed by a skill's `skl_` id, and
+  patches the skill's own `enabled` field. A subagent type (epic #340) is a mode, so this is
+  what gives one its own skills.
+- **`builtin_default`, `mcp_servers_default` and `skills_default`** (epic #349, B8) say what an
+  item the corresponding map does **not** name does. Each is `"follow"`, `"off"` or `"on"`,
+  optional, and **absent means `"follow"`** — the behaviour every existing mode and every newly
+  created one has. `"follow"` uses the user's own setting (a built-in tool's `/v1/me/tools`
+  choice, a server's `enabled`, a skill's `enabled`); `"off"` makes the map an **allowlist**
+  (only the items it turns on are on, so an item added later stays off in that mode); `"on"`
+  turns every item on except the ones the map turns off, **even items the user turned off
+  globally**. An explicit map entry always wins. A default is never a permission, and it cannot
+  undo a hard rule: `ask_user` is still absent from a non-interactive child, the subagent tools a
+  depth does not offer are still absent, and a `disable-model-invocation` skill still stays out
+  of the model's listing.
+- **A mode naming a server or a skill the caller no longer has is simply ignored.** The mode
+  routes store the maps as written and do not check the ids against what is present, so deleting
+  an MCP server or a skill neither fails nor rewrites the modes that named it — the entry just
+  matches nothing. The servers and skills in force for a request are resolved as _the user's
+  `enabled`, overridden by the mode_, per request; the one shared rule per kind is
+  `builtinToolInForce`, `mcpServerInForce` and the protocol's `skillInForce`.
 
 **A mode with a description is a subagent type.** `Mode.subagent_description` (epic #340, S2;
 #342) is one short sentence — at most 500 characters — saying what the mode is **good for**, or
@@ -1456,6 +1515,199 @@ curl -X POST localhost:3000/v1/me/mcp_servers/mcps_01J…/connect \
   therefore the caller's `enabled` ones with the mode's patch over them; a mode that names a
   server the caller no longer has is ignored rather than refused, so deleting a server leaves
   such a mode untroubled. See [Modes](#modes).
+
+### Skills
+
+A **skill** (epic #349, decision K1) is a folder of instructions in the open
+[Agent Skills](https://agentskills.io) format: a `SKILL.md` — YAML frontmatter with a `name`
+and a `description`, then a Markdown body — plus any other files the folder holds. A user
+**imports** one from a public git repository and reviews it before it is stored (K3), and from
+then on it is a **snapshot**: nothing is read from git again, so a skill a chat loaded cannot
+change under it and a chat never depends on a git host being up. [Importing and
+refreshing](#importing-and-refreshing-a-skill) are the four routes that read a repository; the
+rest are the routes over a skill a caller already has.
+
+The routes are `/v1/me/skills`, owner-scoped like the rest of `/v1/me`: another user's skill is
+a `404`, never a `403`, and so is a file of one — the same answer an unknown path gets, so a
+path cannot be used to probe for a skill.
+
+```bash
+curl localhost:3000/v1/me/skills -H "Authorization: Bearer $TOKEN"
+# → 200 {"data":[
+#      {"id":"skl_01J…","type":"skill","name":"release-notes",
+#       "description":"Writes the release notes for a version from the commits since the last tag.",
+#       "frontmatter":{"argument-hint":"[version]","license":"MIT"},
+#       "source":{"url":"https://github.com/example/skills","ref":"main","path":"release-notes",
+#                 "commit_sha":"9f2c1b4…"},
+#       "files":[{"path":"SKILL.md","size":1240},{"path":"reference/tone.md","size":380}],
+#       "enabled":true,"imported_at":"2026-10-12T09:00:00Z","refreshed_at":"2026-10-12T09:00:00Z"}
+#    ]}
+
+# The one read that carries a file's content without a second request: the SKILL.md itself.
+curl localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN"
+# → 200 { …the resource…, "content":"---\nname: release-notes\n---\n\nWrite them.\n" }
+
+# Any other file, by its path — which may hold slashes.
+curl localhost:3000/v1/me/skills/skl_01J…/files/reference/tone.md -H "Authorization: Bearer $TOKEN"
+# → 200 {"path":"reference/tone.md","size":380,"encoding":"utf8","content":"Be terse.\n"}
+
+# A file that is not text: the bytes, base64-encoded, and the original size in bytes.
+curl localhost:3000/v1/me/skills/skl_01J…/files/assets/icon.png -H "Authorization: Bearer $TOKEN"
+# → 200 {"path":"assets/icon.png","size":33,"encoding":"base64","content":"iVBORw0KGgo…"}
+
+# On or off. The snapshot is not editable: a new one comes from a refresh.
+curl -X POST localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"enabled":false}'
+# → 200 { …the resource…, "enabled":false }
+
+curl -X DELETE localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN"
+# → 204
+```
+
+**A listing never carries a file's content.** `files` is a path and a size each; the `SKILL.md`
+comes with the single-skill read and any other file with its own. That keeps a listing of fifty
+skills one small answer whatever the snapshots hold, and it keeps the contents free to move to
+object storage later (K4) without a resource changing shape.
+
+**A file that is not text is stored losslessly, and says so.** A skill folder may ship an icon,
+a font or a `.docx`, and some of those bytes are not valid UTF-8 — or contain a NUL, which
+Postgres `text` refuses outright. The import detects such a file and stores its bytes
+base64-encoded; `encoding` is `utf8` or `base64`, and `size` is always the **original** byte
+length, so the K4 limits count the file rather than its base64 spelling. The `skill_read` tool
+answers a binary file with a marker naming its path and size instead of its content; `utf8` and
+`base64` are the only two spellings.
+
+**The format's three optional fields are honoured**, and the rest are stored and shown and
+otherwise ignored: `disable-model-invocation: true` is a command only the user runs,
+`user-invocable: false` one only the model uses, and `argument-hint` is shown in the `/` menu.
+They ride in `frontmatter` beside `license`, `metadata` and everything else the file said.
+
+**The limits** are what an import refuses on (K4): `SKILL.md` at most 20 KB, any one file at
+most 256 KB, a skill at most 2 MB and 100 files, a caller at most 50 skills, and a clone at
+most 20 MB. A `SKILL.md` over 20 KB and a file over 256 KB are the same kind of refusal, and a
+caller's fifty-first skill is the `409` a mode's and an MCP server's are — a store rule, so two
+imports racing for the last slot cannot both land.
+
+**A skill's name is unique among the caller's own**, and it is what the skill is run by: the
+format requires it to match the folder's name, and a built-in slash command's name is
+**reserved** — `compact`, `new`, `model`, `mode`, `agents`, `skills` — because a built-in is a
+client action and never a skill (K7). A skill cannot be called `compact`.
+
+**The model can read a skill, and nothing runs.** A chat whose owner has a skill enabled is
+offered two tools (K6): `skill { "name": "release-notes" }` answers the skill's instructions —
+`SKILL.md` with its frontmatter removed — and the list of files the folder holds, and
+`skill_read { "name": "release-notes", "path": "reference/tone.md" }` answers one of them. A
+skill's scripts are files to read and never to execute, and the tool's own description says so.
+`skill`'s description **is** the listing: the names and descriptions of every skill the model
+may invoke, so a chat with none offers neither tool. A `disable-model-invocation: true` skill is
+left out of that listing and refused by both tools — only the user runs it, with `/name` — until
+the user **has** run it in the chat: the flag stops the model picking the skill on its own, and
+once `/name` has loaded its instructions the files those instructions name are readable. An
+unknown name answers the names there are, and an unknown path the files the skill holds.
+
+**A skill is the user's own instructions, not third-party data** (K10). Its text is framed to
+the model as the user's own request, and it cannot grant a permission: a skill's frontmatter may
+say anything — `allowed-tools` is stored and otherwise ignored — and what a tool call is
+evaluated under comes from the caller's own settings and the mode in force, never from a skill.
+
+**A skill is on when it is imported, and a mode may override which are on** (K8):
+`Mode.tools.skills` is an on/off map keyed by skill id, a sibling of `builtin` and
+`mcp_servers`, and it decides which skills a request has — never what a skill is. The skills
+**in force for a request** are the caller's `enabled` ones with the mode's patch over them, and
+a mode naming a skill the caller no longer has is ignored rather than refused. See
+[Modes](#modes).
+
+### Importing and refreshing a skill
+
+An import is **two steps** (K3), and neither holds anything between them:
+
+```bash
+# 1. Preview: clone the repository, and answer every SKILL.md under the path.
+curl -X POST localhost:3000/v1/me/skills/import/preview -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://github.com/anthropics/skills/tree/main/skills"}'
+# → 200 {"url":"https://github.com/anthropics/skills","ref":"main","path":"skills",
+#        "commit_sha":"e1f2a…",
+#        "candidates":[
+#          {"name":"pdf","folder":"skills/pdf","description":"Works with PDFs.",
+#           "files":[{"path":"SKILL.md","size":4210}],
+#           "skill_md":"---\nname: pdf\n…","problems":[],"name_taken":false},
+#          {"name":"broken","folder":"skills/broken","description":null,"files":[…],
+#           "skill_md":"no frontmatter here","name_taken":false,
+#           "problems":[{"code":"invalid-frontmatter","message":"SKILL.md must open with YAML frontmatter and a closing `---` line."}]}
+#        ]}
+
+# 2. Import the ones the reader picked, naming the commit the preview resolved.
+curl -X POST localhost:3000/v1/me/skills/import -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://github.com/anthropics/skills/tree/main/skills","commit_sha":"e1f2a…","names":["pdf"]}'
+# → 201 {"data":[ { …the new skill… } ]}
+```
+
+**The URL** is `https://` only, and may be a browse URL: `…/tree/<ref>/<path>` on GitHub and
+`…/-/tree/<ref>/<path>` on GitLab are split into the repository, the ref and the path, so a
+reader can paste the address bar. An explicit `ref` or `path` in the body wins over what the URL
+implied. A URL that is not `https`, carries credentials (`user:token@`) or names no repository
+is the `400` `invalid_request_error`; credentials are never sent, and a private repository is
+not supported (K3).
+
+**Every `SKILL.md` under the path is a candidate** — one folder each, its files read
+recursively, its frontmatter parsed (K1) — and each carries its **problems** rather than failing
+the preview: `invalid-frontmatter`, `name-mismatch` (the frontmatter's `name` is not the
+folder's), `reserved-name` (a built-in command's), `duplicate-name` (two candidates of one name)
+and `over-limit` (one of the limits below). `name_taken` is separate and says the caller already
+has a skill by that name.
+
+**A `SKILL.md` at the repository's own root is a candidate**, because a single-skill repository
+puts one there. A skill's name is its folder's (K1) and the root is not a folder, so the
+repository itself is read as the folder: the candidate's `folder` is `""` and its **name is the
+repository's** — the last segment of the repo URL's path with a trailing `.git` dropped, so
+`https://github.com/acme/release-notes.git` is named `release-notes`. The frontmatter has to
+agree with that name like any other, and a mismatch is the usual `name-mismatch`. A `SKILL.md`
+sitting directly under a named `path` keeps **that folder's** own name. A root skill's files are
+the **whole tree under the root**, except that a folder below it holding a `SKILL.md` is a
+candidate of its own and its subtree is that candidate's, not the root's — so a repository whose
+root holds the skill and one subfolder holds another offers two candidates with no duplicated
+files. (A **nested** candidate keeps the ordinary rule: its files are its parent folder's too.)
+
+**The import re-clones and refuses a ref that has moved**: the ref must still resolve to the
+`commit_sha` the preview answered, or the answer is the `409` `conflict_error` telling the
+caller to preview again. Everything is checked before anything is stored, so a refused import
+stores nothing — a name no candidate has is a `400`, a candidate that cannot be imported (or a
+skill that cannot be stored) is a `422` `skill_import_error` carrying the candidate's own
+problems, and a name the caller already has is a `409`.
+
+```bash
+# A refresh is by hand (K5): preview what changed, then confirm the commit.
+curl -X POST localhost:3000/v1/me/skills/skl_01J…/refresh/preview -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{}'
+# → 200 {"commit_sha":"a4b5c…","changed":true,
+#        "files_added":["reference/format.md"],"files_removed":[],"files_changed":["SKILL.md"],
+#        "skill_md_diff":"--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1,4 +1,4 @@\n …",
+#        "problems":[]}
+
+curl -X POST localhost:3000/v1/me/skills/skl_01J…/refresh -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"commit_sha":"a4b5c…"}'
+# → 200 { …the skill, with the new snapshot and a moved refreshed_at… }
+```
+
+The refresh clones the skill's **stored** source — the same URL, ref and path it was imported
+from — and compares the result against the snapshot the caller has, so nothing depends on the
+client remembering anything. `changed` is the whole answer in one boolean, the three lists are
+the file story (paths, not listings), and `skill_md_diff` is a unified diff of the one file a
+skill is read by. An unchanged commit answers `changed: false`; confirming it is allowed and
+moves no snapshot. A preview of a repository that no longer holds the skill, or one that would
+replace a working skill with a broken one, is a `422` `skill_import_error` — and the confirm of
+a broken snapshot is refused rather than stored. There are **no automatic updates**: nothing
+refreshes a skill in the background, and a chat that already loaded one keeps what it loaded.
+
+**The errors are specific**, because a pasted URL can be wrong in ways a user can fix
+(`skill_import_error`, `422`): `unreachable`, `not_a_repository`, `authentication_required`
+(private or credentials needed — a forge answers `401` for both, so the message claims no
+more), `ref_not_found`, `path_not_found`, `no_skills_found`, `over_limit` (the 20 MB clone or
+its deadline), `refused_address` (a private, loopback, link-local or metadata address this
+deployment will not dial — see `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`), and
+`skill_not_importable` (the repository read worked; the skill itself cannot be stored).
 
 ## The model catalog
 

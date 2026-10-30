@@ -195,6 +195,20 @@ export interface NativeToolDeclaration {
   readonly name: string
   /** The permission a call is evaluated under when the user has chosen nothing. */
   readonly permission: ToolPermission
+  /**
+   * Whether the **chat's model** decides whether the tool can be offered at all (issue #335).
+   *
+   * True for `web_search`, and that is the whole reason the field exists: the search tool is the
+   * model's own provider's, so a model whose provider has none cannot be offered it, and the
+   * settings read's `?model_id=` is what answers which case a chat is in. It is also why the
+   * settings refuse an `ask` for a tool declared this way (#335): the provider runs the search
+   * inside the request, so there is no moment at which this build could hold it for an answer.
+   *
+   * Absent means the tool is offered wherever this process offers tools at all — a tool the
+   * build's own turn puts together, like the two that read a user's skills (#352), which no
+   * model capability has a say in.
+   */
+  readonly modelGated?: boolean
 }
 
 /**
@@ -207,7 +221,7 @@ export interface NativeToolDeclaration {
  * be, which is why the settings refuse it (#335).
  */
 export const NATIVE_TOOL_DECLARATIONS: readonly NativeToolDeclaration[] = [
-  { name: WEB_SEARCH_TOOL_NAME, permission: 'allow' },
+  { name: WEB_SEARCH_TOOL_NAME, permission: 'allow', modelGated: true },
 ]
 
 /**

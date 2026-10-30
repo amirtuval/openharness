@@ -146,9 +146,10 @@ describe('the chart values staging boots with (#159)', () => {
 
       // The values took effect, and the dev login is off because nothing set it.
       expect(config.devLogin).toBe(false)
-      // The chart runs 2–4 pods, so staging must be on the partitioned scheduler (#378).
+      // The environment runs one pod and its HPA may scale to two, so it must be on the
+      // partitioned scheduler (#378).
       expect(config.scheduler).toBe('postgres')
-      expect(config.betterAuthUrl).toBe('https://staging.oharness.dev')
+      expect(config.betterAuthUrl).toBe('https://app.oharness.dev')
       expect(config.keyProvider).toBe('gcp-kms')
       expect(config.databaseUrl).toBe('database-url-placeholder')
       expect(config.betterAuthSecret).toBe('better-auth-secret-placeholder')
@@ -199,9 +200,10 @@ describe('the chart values staging boots with (#159)', () => {
 
 describe('the deployed scheduler (#378)', () => {
   it('defaults to the partitioned scheduler wherever the deployment is described', () => {
-    // `local` owns every partition in one process and writes unfenced; the chart runs 2–4 pods,
-    // so the default has to be the multi-instance scheduler. Terraform repeats the value so the
-    // chart, its CI values and the infrastructure all say the same thing.
+    // `local` owns every partition in one process and writes unfenced; the chart can run more
+    // than one pod (its own defaults are replicaCount 2 with the HPA at 4, and the environment's
+    // HPA reaches 2), so the default has to be the multi-instance scheduler. Terraform repeats
+    // the value so the chart, its CI values and the infrastructure all say the same thing.
     expect(readChartDefaults().env.SCHEDULER).toBe('postgres')
     expect(readStagingValues().env.SCHEDULER).toBe('postgres')
     expect(terraformEnvVars()).toContain('SCHEDULER')
@@ -215,7 +217,8 @@ describe('the deployed scheduler (#378)', () => {
     })
 
     it('refuses local when the Deployment can have more than one pod', () => {
-      // The defaults are replicaCount: 2 and an HPA to 4, so either half of the guard refuses.
+      // The chart's own defaults are replicaCount: 2 and an HPA to 4, so either half of the
+      // guard refuses.
       expect(render(['env.SCHEDULER=local']).stderr).toContain(
         'SCHEDULER=local is single-instance only',
       )

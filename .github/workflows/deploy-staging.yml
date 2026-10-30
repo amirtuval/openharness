@@ -1,6 +1,8 @@
 name: deploy-staging
 
-# Build the image for a commit, apply staging, and prove it answers (issue #155, epic #148).
+# Build the image for a commit, apply the environment, and prove it answers (issue #155, epic
+# #148). This is the only deploy: openharness runs one environment, named `staging` for history
+# (the Terraform root, the GitHub environment and the variables), serving app.oharness.dev.
 #
 # Triggered by CI finishing successfully on main. `workflow_run` is the point: the deploy
 # must be of the commit CI **passed**, which is `github.event.workflow_run.head_sha` — not
@@ -163,12 +165,6 @@ jobs:
         working-directory: infra/envs/staging
         env:
           IMAGE_TAG: ${{ steps.commit.outputs.sha }}
-          # Production's node service account, granted read on this project's registry. Empty
-          # on a first deploy — the account does not exist until production's Terraform creates
-          # it, and GCP rejects an IAM member that does not exist. Set TF_PRODUCTION_NODE_SA
-          # after the first production deploy and re-run this workflow to turn the grant on:
-          # docs/DEPLOYMENT.md, "The first deploy".
-          PRODUCTION_NODE_SA: ${{ vars.TF_PRODUCTION_NODE_SA }}
           # The sign-in providers and the alert address (#159). Repository-level variables with
           # an environment suffix — one naming scheme for the deploys and the PR plan, which
           # runs outside any GitHub environment and so can only read repository-level ones.
@@ -179,7 +175,6 @@ jobs:
           MICROSOFT_CLIENT_ID: ${{ vars.OAUTH_MICROSOFT_CLIENT_ID_STAGING }}
           MICROSOFT_TENANT_ID: ${{ vars.OAUTH_MICROSOFT_TENANT_ID_STAGING }}
           ALERT_EMAIL: ${{ vars.TF_ALERT_EMAIL_STAGING }}
-          # One billing account for both projects, so this one carries no environment suffix.
           BILLING_ACCOUNT_ID: ${{ vars.TF_BILLING_ACCOUNT_ID }}
           # The monthly budget amount, in the billing account's currency — this account is
           # denominated in ILS, and the module sends no currency code (#159). Unset is not an
@@ -190,7 +185,6 @@ jobs:
           args=(
             -auto-approve -input=false -no-color -lock-timeout=10m
             -var "image_tag=$IMAGE_TAG"
-            -var "production_node_service_account=${PRODUCTION_NODE_SA:-}"
             -var "google_client_id=${GOOGLE_CLIENT_ID:-}"
             -var "github_client_id=${GITHUB_CLIENT_ID:-}"
             -var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}"
@@ -252,9 +246,8 @@ jobs:
           file: docker/Dockerfile
           push: true
           tags: ${{ env.REGISTRY_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ env.IMAGE_REPOSITORY }}:${{ steps.commit.outputs.sha }}
-          # The layer cache lives in the Actions cache, not in the registry: staging is the
-          # only place that builds, so a cache in the registry would be a second artefact
-          # to keep.
+          # The layer cache lives in the Actions cache, not in the registry: a cache in the
+          # registry would be a second artefact to keep.
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -265,9 +258,6 @@ jobs:
         working-directory: infra/envs/staging
         env:
           IMAGE_TAG: ${{ steps.commit.outputs.sha }}
-          # Same value as the targeted apply above; on a first deploy the first stage already
-          # granted it, and this apply is the one that adds it on every re-run after that.
-          PRODUCTION_NODE_SA: ${{ vars.TF_PRODUCTION_NODE_SA }}
           # Same values as the targeted apply above — every apply reads the same inputs, so a
           # re-deploy cannot drift from the first one (#159).
           GOOGLE_CLIENT_ID: ${{ vars.OAUTH_GOOGLE_CLIENT_ID_STAGING }}
@@ -282,7 +272,6 @@ jobs:
           args=(
             -auto-approve -input=false -no-color -lock-timeout=10m
             -var "image_tag=$IMAGE_TAG"
-            -var "production_node_service_account=${PRODUCTION_NODE_SA:-}"
             -var "google_client_id=${GOOGLE_CLIENT_ID:-}"
             -var "github_client_id=${GITHUB_CLIENT_ID:-}"
             -var "microsoft_client_id=${MICROSOFT_CLIENT_ID:-}"
@@ -381,29 +370,20 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Print the staging name servers
-        # Production delegates staging.oharness.dev to these. It cannot read this state
-        # (deploy@openharness-510710 holds no rights on this project's bucket) and the
-        # staging job cannot write a variable into the production environment
-        # (GITHUB_TOKEN has no `variables: write`, and environment variables of another
-        # environment are out of its reach), so they are printed and copied into the
-        # repository variable TF_STAGING_NAME_SERVERS by hand — a one-time step, documented
-        # in docs/DEPLOYMENT.md.
+      - name: Print the zone's name servers
+        # The parent zone, oharness.dev, lives in openharness-510710 with the domain's
+        # registration, and delegates the host to this zone with one NS record. That record is
+        # set by hand, once (docs/DEPLOYMENT.md, "DNS"); the name servers only change if the
+        # zone is ever recreated, which is why they are printed on every deploy.
         working-directory: infra/envs/staging
         run: |
           set -euo pipefail
           name_servers="$(terraform output -json name_servers)"
-          echo "::notice::Staging name servers: $name_servers — copy these into the repository variable TF_STAGING_NAME_SERVERS for production."
           {
-            echo '### Staging name servers'
+            echo '### Zone name servers'
             echo
-            echo 'Production delegates staging.oharness.dev to these, and reads them from the'
-            echo 'repository variable TF_STAGING_NAME_SERVERS. Setting it is a one-time step'
-            echo '(docs/DEPLOYMENT.md, "The first deploy"):'
-            echo
-            echo '~~~'
-            echo "gh variable set TF_STAGING_NAME_SERVERS --body '$name_servers'"
-            echo '~~~'
+            echo 'The NS record for the host in the oharness.dev zone (openharness-510710) must'
+            echo 'hold exactly these (docs/DEPLOYMENT.md, "DNS"):'
             echo
             echo '~~~json'
             echo "$name_servers"

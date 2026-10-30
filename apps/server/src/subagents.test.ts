@@ -12,6 +12,7 @@ import {
   type Session,
   type SessionId,
   type SessionTaskNotificationEvent,
+  type Skill,
   type StoredEvent,
   type TaskId,
 } from '@openharness/protocol'
@@ -45,6 +46,55 @@ import type { TestContext, TestOptions } from './test-support'
  */
 
 const SESSIONS = `${API_VERSION_PREFIX}/sessions`
+const MODES = `${API_VERSION_PREFIX}/me/modes`
+const CREDENTIALS = `${API_VERSION_PREFIX}/provider-credentials`
+
+/** A credential for `provider`, saved through the real route (the default validator accepts). */
+async function putKey(context: TestContext, provider: string): Promise<void> {
+  const response = await context.request(`${CREDENTIALS}/${provider}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'api_key', api_key: `sk-test-${provider}-0123456789` }),
+  })
+  expect(response.status).toBe(200)
+}
+
+/** A skill snapshot stored through the app's own store, so a request's resolver reads it. */
+async function seedSkill(context: TestContext, name: string): Promise<Skill> {
+  const me = await context.currentUser()
+  return context.skills.create({
+    ownerId: me.id,
+    name,
+    description: `The ${name} skill.`,
+    frontmatter: {},
+    source: {
+      url: 'https://github.com/example/skills',
+      ref: 'main',
+      path: name,
+      commit_sha: '9f2c1b4e5a6d7c8b9a0f1e2d3c4b5a69788796a5',
+    },
+    enabled: true,
+    files: [
+      {
+        path: 'SKILL.md',
+        content: `---\nname: ${name}\ndescription: The ${name} skill.\n---\n\nDo ${name}.`,
+      },
+    ],
+  })
+}
+
+/** `/name` as a client sends it: the text the user typed and the skill it names. */
+function invocation(name: string): {
+  type: string
+  content: { type: string; text: string }[]
+  skill: { name: string }
+} {
+  return {
+    type: EVENT_TYPES.userMessage,
+    content: [{ type: 'text', text: `/${name}` }],
+    skill: { name },
+  }
+}
 
 /** The registry the harness runs with — the same one a mock deployment registers. */
 function registry(): ToolRegistry {
@@ -214,6 +264,50 @@ describe('starting a helper (S3/S4/S5; #344)', () => {
     )
     expect(claim).toBeDefined()
     expect(await context.store.getPendingTaskNotifications(session.id)).toEqual([])
+  })
+
+  it('gives a child on a subagent type only its allowlisted skills (B8)', async () => {
+    const context = test()
+    await putKey(context, 'openai')
+    // The type's mode says `skills_default: 'off'` and turns exactly one skill on: the child is
+    // created **on** that mode, so its every request resolves the same allowlist a chat would.
+    const allowed = await seedSkill(context, 'release-notes')
+    const created = await postJson(context, MODES, {
+      name: 'tidy',
+      model: 'openai/gpt-5-mini',
+      subagent_description: 'Tidies a changelog.',
+      tools: { skills_default: 'off', skills: { [allowed.id]: true } },
+    })
+    expect(created.status).toBe(201)
+
+    const session = await createSession(context)
+    const parent = await say(
+      context,
+      session.id,
+      `${MOCK_AGENT_MARKER} tidy | Use only the allowed skills.`,
+    )
+    const child = childId(parent)
+    await waitForIdle(context.store, child)
+
+    // A skill imported **after** the mode was defined is not in force in the child: the
+    // allowlist is the map, so anything added later stays off in this mode.
+    await seedSkill(context, 'later-skill')
+    const refused = await postJson(context, `${SESSIONS}/${child}/events`, {
+      events: [invocation('later-skill')],
+    })
+    expect(refused.status).toBe(400)
+
+    // The one the mode names is accepted, and the brain loads its instructions once. The
+    // request that answers it is offered the skill tools because a skill is in force there.
+    const accepted = await postJson(context, `${SESSIONS}/${child}/events`, {
+      events: [invocation('release-notes')],
+    })
+    expect(accepted.status).toBe(200)
+    await waitForIdle(context.store, child)
+    const childLog = await log(context, child)
+    const loaded = of(childLog, EVENT_TYPES.sessionSkillLoaded)
+    expect(loaded.some((event) => event.name === 'release-notes')).toBe(true)
+    expect(loaded.some((event) => event.name === 'later-skill')).toBe(false)
   })
 
   it('runs two helpers in parallel and reports both', async () => {

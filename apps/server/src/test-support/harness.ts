@@ -26,6 +26,7 @@ import {
   InMemorySessionStore,
   type CredentialStore,
   type SessionStore,
+  type SkillStore,
 } from '@openharness/session'
 import {
   DEFAULT_KEY_CACHE_TTL_MS,
@@ -34,7 +35,13 @@ import {
   type Vault,
 } from '@openharness/vault'
 
-import { alwaysReady, createApp, type McpServersAppOptions, type Readiness } from '../app'
+import {
+  alwaysReady,
+  createApp,
+  type McpServersAppOptions,
+  type Readiness,
+  type SkillImportAppOptions,
+} from '../app'
 import {
   DEV_LOGIN_EMAIL,
   DEV_LOGIN_PASSWORD,
@@ -53,7 +60,7 @@ import { createModeResolver } from '../modes'
 import { emptyRegistry, type ModelRegistry } from '../catalog/registry'
 import { createMcpFetch } from '../mcp/fetch'
 import { createMcpServerService } from '../mcp/service'
-import { InMemoryMcpServerStore } from '@openharness/session'
+import { InMemoryMcpServerStore, InMemorySkillStore } from '@openharness/session'
 import { createSubagentTypeResolver } from '../subagent-types'
 import { createTurnTools } from '../tools'
 import { DEFAULT_DELTA_RETENTION_MS } from '../compaction'
@@ -118,6 +125,11 @@ export interface TestContext {
   readonly store: SessionStore
   /** Where the app's sealed provider credentials live. */
   readonly credentials: CredentialStore
+  /**
+   * Where the app's imported skills live (epic #349, K4). A test seeds one through it: import
+   * and refresh are #351's, so there is no route that writes a snapshot yet.
+   */
+  readonly skills: SkillStore
   /** The vault the credential routes seal with. */
   readonly vault: Vault
   /** The Better Auth instance the app was built with. */
@@ -291,6 +303,17 @@ export interface TestOptions {
   /** `OPENHARNESS_TODO_NUDGE` for {@link testConfig} (#331). */
   readonly todoNudge?: boolean
   /**
+   * Where a test's imported skills live (epic #349, K4), instead of a fresh in-memory store.
+   * A test that needs a skill seeds one through it, or imports one through the routes (#351).
+   */
+  readonly skills?: SkillStore
+  /**
+   * How the skill import and refresh routes read a repository (epic #349, K3/K5), instead of
+   * the deployment's guarded clone. A test points it at its own repository fixture, so the
+   * routes are driven over a real git server on loopback rather than the internet.
+   */
+  readonly skillImport?: SkillImportAppOptions
+  /**
    * Where the app and Better Auth log. Silent by default; a test that asserts on a log line —
    * or on the absence of one — passes a logger that keeps them.
    */
@@ -389,6 +412,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   const logger = options.logger ?? silentLogger
   const store = options.store ?? new InMemorySessionStore()
   const credentials = options.credentials ?? new InMemoryCredentialStore()
+  const skills = options.skills ?? new InMemorySkillStore()
   const vault = options.vault ?? createVault(envKeyProvider(TEST_SECRETS_KEY))
   const model = createScriptedModel(...(options.replies ?? []))
   const registry = options.registry ?? emptyRegistry
@@ -425,6 +449,9 @@ export function createTestApp(options: TestOptions = {}): TestContext {
           tools: options.tools,
           store,
           registry,
+          // The skills a chat has (epic #349, K6; #352): the same store the `/v1/me/skills`
+          // routes read, so a test seeds one through it and drives the tools over HTTP.
+          skills,
           ...(options.mcpTools === true ? { mcp: { service: mcpServers, fetch: mcpFetch } } : {}),
           // The subagent half (#344), built the way `main.ts` builds it — the resolver over the
           // same store, credentials and registry, and the signals the scheduler below receives.
@@ -505,6 +532,11 @@ export function createTestApp(options: TestOptions = {}): TestContext {
     // The one service instance both readers share, so a server a test's route changes is the one
     // its chat lists (#312).
     mcpServers: { service: mcpServers },
+    // The skill store the routes read and a test seeds through (epic #349, K4).
+    skills,
+    // How an import reads a repository (epic #349, K3/K5): a test's fixture-backed clone, or
+    // the real guarded one when the test said nothing.
+    ...(options.skillImport === undefined ? {} : { skillImport: options.skillImport }),
     ...(options.tools === undefined ? {} : { tools: options.tools }),
     // What `GET /v1/me/preferences` reports as the default trigger share (C3, #282).
     compactionThreshold,
@@ -525,6 +557,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
   return context({
     store,
     credentials,
+    skills,
     vault,
     auth,
     model,
@@ -541,6 +574,7 @@ export function createTestApp(options: TestOptions = {}): TestContext {
 export async function startTestServer(options: TestOptions = {}): Promise<TestContext> {
   const store = options.store ?? new InMemorySessionStore()
   const credentials = options.credentials ?? new InMemoryCredentialStore()
+  const skills = options.skills ?? new InMemorySkillStore()
   const vault = options.vault ?? createVault(envKeyProvider(TEST_SECRETS_KEY))
   const model = createScriptedModel(...(options.replies ?? []))
   const catalog = options.catalog ?? inertCatalog(credentials, vault)
@@ -550,6 +584,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
     model: options.model ?? model.factory,
     resolveCredential: resolveTestSessionCredential,
     credentials,
+    skills,
     vault,
     ...(options.authDatabase === undefined ? {} : { authDatabase: options.authDatabase }),
     validateProviderCredential: options.validateProviderCredential ?? acceptAnyCredential,
@@ -565,6 +600,7 @@ export async function startTestServer(options: TestOptions = {}): Promise<TestCo
   return context({
     store,
     credentials,
+    skills,
     vault,
     auth: started.auth,
     model,
@@ -644,6 +680,7 @@ function buildTestAuth(options: TestOptions, store: SessionStore, logger: Logger
 function context(base: {
   store: SessionStore
   credentials: CredentialStore
+  skills: SkillStore
   vault: Vault
   auth: Auth
   model: ScriptedModel
@@ -679,6 +716,7 @@ function context(base: {
   return {
     store: base.store,
     credentials: base.credentials,
+    skills: base.skills,
     vault: base.vault,
     auth: base.auth,
     model: base.model,

@@ -1,29 +1,73 @@
 # Deployment
 
-How openharness runs on GCP: two environments, one GCP project each, deployed by GitHub
-Actions. The plan and its decisions live on the deployment epic
-([#148](https://github.com/amirtuval/openharness/issues/148)) — this page grows with each
-wave of that epic.
+How openharness runs on GCP: **one environment**, in one GCP project, deployed by GitHub
+Actions on every green `main`. The plan and its decisions live on the deployment epic
+([#148](https://github.com/amirtuval/openharness/issues/148)); there used to be a second
+environment, production, retired to cut cost (see [Cost](#cost) and
+[One environment, and why](#one-environment-and-why)).
 
-Everything runs in `us-central1`, and the same image is built once per commit and promoted
-by digest, never rebuilt. GitHub Actions reaches GCP only through Workload Identity
-Federation — there are no service-account keys.
+Everything runs in `us-central1`, and each commit's image is built once and deployed by its
+git SHA. GitHub Actions reaches GCP only through Workload Identity Federation — there are no
+service-account keys.
 
 ## Environments
 
-| Environment | GCP project ID       | Display name      | GitHub environment | URL                    |
-| ----------- | -------------------- | ----------------- | ------------------ | ---------------------- |
-| staging     | `openharness-dev`    | `openharness-dev` | `staging`          | `staging.oharness.dev` |
-| production  | `openharness-510710` | `openharness`     | `production`       | `app.oharness.dev`     |
+| Environment | GCP project ID    | Display name      | GitHub environment | URL                |
+| ----------- | ----------------- | ----------------- | ------------------ | ------------------ |
+| (the one)   | `openharness-dev` | `openharness-dev` | `staging`          | `app.oharness.dev` |
 
-The ID is what gcloud and every resource name take — the display name is only a label, and
-production's `openharness` is not an ID. The setup script derives the state bucket
-(`<id>-tfstate`), the service-account emails and the GitHub variables from the ID. To see
-both side by side:
+**It is named `staging` everywhere but the URL** — the Terraform root (`infra/envs/staging`),
+the GitHub environment, the `*_STAGING` repository variables and `deploy-staging.yml`. Those
+names are wired into the Workload Identity bindings and the setup script, so renaming them is
+a re-run of the setup script for no change in behaviour; they were left as they are.
+
+A second project, `openharness-510710` (display name `openharness`), holds only the
+`oharness.dev` domain's Cloud Domains registration and its parent DNS zone — see [DNS](#dns).
+Nothing in it is managed by Terraform any more.
+
+The ID is what gcloud and every resource name take — the display name is only a label. The
+setup script derives the state bucket (`<id>-tfstate`), the service-account emails and the
+GitHub variables from the ID.
+
+## DNS
+
+`oharness.dev` is registered with Cloud Domains in `openharness-510710`, and its zone
+(`oharness-dev`) lives there too: a registration's name servers are the zone's, and moving
+either is a DNS migration with no benefit. The environment owns a zone of its own,
+`app.oharness.dev` (`app-oharness-dev`, in `openharness-dev`), holding the host's A record
+and Certificate Manager's `_acme-challenge` CNAME, and the parent delegates to it with **one NS
+record, set by hand**. The record changes only if the child zone is recreated; every deploy
+prints the zone's name servers in its job summary so a mismatch is easy to see.
 
 ```bash
-gcloud projects list --format="table(projectId,name)"
+# The child zone's name servers (also in the deploy's job summary):
+terraform -chdir=infra/envs/staging output -json name_servers
+
+# The delegation, in the parent zone:
+gcloud dns record-sets create app.oharness.dev. --zone oharness-dev --project openharness-510710 \
+  --type NS --ttl 300 --rrdatas '<ns1>,<ns2>,<ns3>,<ns4>'
 ```
+
+## Cost
+
+About **$45–50 a month**, at list price, down from about $300 for two environments (#148
+follow-up, October 2026). Roughly:
+
+| Item                                        | $/mo | Note                                                                                   |
+| ------------------------------------------- | ---: | -------------------------------------------------------------------------------------- |
+| GKE Autopilot cluster fee                   |    0 | $73, covered by the billing account's monthly free-tier credit for **one** cluster     |
+| App pod (1 replica, 150m / 448Mi)           |   ~7 | Autopilot bills requests; the pod idles at a few millicores and ~130Mi                 |
+| Cloud SQL `db-f1-micro`, 10 GB SSD, backups |  ~10 |                                                                                        |
+| Load balancer forwarding rules              |   18 | the Gateway's global external load balancer — the largest line, and fixed              |
+| Static IPs (load balancer, Cloud NAT)       |    7 | in-use external IPv4 is billed                                                         |
+| Cloud NAT, DNS, KMS, secrets, registry      |   ~4 |                                                                                        |
+| Logging, metrics                            |    0 | under the free tiers; the chargeable GKE metric packages are off (`infra/modules/gke`) |
+
+The levers that were pulled, and what each costs in robustness: one replica (a node drain
+briefly takes the app away; a rollout still does not, since the new pod is ready first),
+requests sized to use, `db-f1-micro` (shared core, no SLA), and only the free system metrics.
+Going lower means leaving GKE — Cloud Run would drop the load balancer, NAT and IPs — which is
+an architecture change, not a setting.
 
 ## One-time setup
 
@@ -57,16 +101,11 @@ Terraform writes into a `database-url` secret; Cloud KMS for the vault's master 
 service account for the app, linked to the `openharness/openharness` Kubernetes service
 account; a Certificate Manager certificate and certificate map for the host; and a global
 static IP, a DNS zone and a `helm_release` of [`charts/openharness`](../charts/openharness)
-that ties them together. The one Artifact Registry repository lives in staging, in
-`openharness-dev`; each environment's GKE nodes are granted resource-level read on it and
-pull the image staging built.
+that ties them together. The Artifact Registry repository lives in the same project, and the
+GKE nodes are granted resource-level read on it.
 
-**Apply staging first, then production.** Staging's zone exports the name servers production
-writes as the `staging.oharness.dev` delegation, and staging holds the registry. State lives
-in the bucket the setup script created, one per project (`<project-id>-tfstate`), with the
-backend hardcoded per environment. The production root adopts the pre-existing `oharness.dev`
-zone with an `import` block, so it needs `existing_zone_name` — the zone's resource name,
-from `gcloud dns managed-zones list --project openharness-510710` — passed on the apply.
+State lives in the bucket the setup script created (`openharness-dev-tfstate`), with the
+backend hardcoded in the root.
 
 ### The database URL, and why the pod runs a proxy (#159)
 
@@ -110,7 +149,7 @@ Two things worth knowing about rolling it out:
   private IP — is an instance change and is deliberately left to its own reviewed plan.
 
 The four things Terraform cannot do alone — re-running the setup script after this change,
-finding the production zone name, adding the OAuth client secrets with
+delegating the host from the parent zone, adding the OAuth client secrets with
 `gcloud secrets versions add`, and granting the billing account `roles/billing.costsManager`
 before setting `TF_BILLING_ACCOUNT_ID` — are steps in
 [`infra/README.md`](../infra/README.md#manual-steps), which also carries the full variable
@@ -193,39 +232,35 @@ Three workflows under `.github/workflows`, and one rule that governs all of them
 they pass to Terraform comes from a GitHub variable, and no project ID, hostname or image
 path is written into a workflow.
 
-| Workflow                | Runs on                                                   | What it does                                                                                                                                                         |
-| ----------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `terraform-pr.yml`      | a pull request touching `infra/**`, `charts/**` or itself | `terraform fmt`/`validate`/`tflint`, `helm lint` + `helm template` when the chart exists, and a `terraform plan` per environment, posted as one collapsed PR comment |
-| `deploy-staging.yml`    | a successful `CI` run on `main`, or by hand with a SHA    | builds and pushes the image for that commit, applies staging, waits for the rollout, smoke tests `staging.oharness.dev`                                              |
-| `deploy-production.yml` | a push of the tag `production`                            | verifies the image already exists, applies production with it, waits for the rollout, smoke tests `app.oharness.dev`                                                 |
+| Workflow             | Runs on                                                   | What it does                                                                                                                       |
+| -------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `terraform-ci.yml`   | called by `terraform-pr.yml`                              | `terraform fmt`/`validate`/`tflint`, no credentials                                                                                |
+| `terraform-pr.yml`   | a pull request touching `infra/**`, `charts/**` or itself | the checks above, `helm lint` + `helm template`, and a `terraform plan` posted as one collapsed PR comment                         |
+| `deploy-staging.yml` | a successful `CI` run on `main`, or by hand with a SHA    | builds and pushes the image for that commit, applies the environment, waits for the rollout, smoke tests the URL Terraform outputs |
 
 `terraform-pr.yml` calls `terraform-ci.yml` (the format/validate/lint jobs, no credentials)
 rather than repeating them, and adds the credentialed jobs on top. It uses **`pull_request`,
 never `pull_request_target`**: the plan runs against the PR's own tree, and the plan job is
 skipped outright when `github.event.pull_request.head.repo.full_name` is not this repository,
 so a fork gets no plan at all. It authenticates as `tf-plan@` with the repository-level
-variables (`*_STAGING` / `*_PRODUCTION`), because a job outside a GitHub environment cannot
-read the environment-scoped copies.
+`*_STAGING` variables, because a job outside a GitHub environment cannot read the
+environment-scoped copies.
 
-Each plan passes `image_tag` = the tag that environment currently runs, read from remote state
-with `terraform output -raw image_tag`; an environment with no state yet is skipped with a
-note in the comment, since a plan of an empty project cannot render the release.
+The plan passes `image_tag` = the tag the environment currently runs, read from remote state
+with `terraform output -json`; with no state yet it is skipped with a note in the comment,
+since a plan of an empty project cannot render the release.
 
-### Releasing
+### Releasing and rolling back
 
-Production deploys on a tag, and the tag is the release's identity — a moving pointer, not an
-immutable marker. Cut one from any commit that has already deployed to staging:
+Every commit that passes CI on `main` is deployed. To deploy another commit — to roll back,
+or to re-run a deploy — dispatch `deploy-staging` by hand with its SHA (see
+[Re-running a deploy](#re-running-a-deploy)). The registry keeps every image it has pushed, so
+an older SHA is a re-apply, not a rebuild. Rolling back does not revert Terraform state — a
+schema migration is not undone by an older image — so treat a rollback as "run the previous
+server build", and fix forward if the change was a migration.
 
-```bash
-git tag -f production <sha>
-git push -f origin production
-```
-
-The workflow resolves the tag's commit, checks that
-`us-central1-docker.pkg.dev/openharness-dev/openharness/server:<sha>` already exists in the
-staging registry, and **fails if it does not**: production never builds an image. So the order
-is always the same — a commit reaches `main`, CI passes, `deploy-staging` builds and deploys
-it, you check staging, and only then do you point the tag at it.
+That is the rollback you _choose_. A rollout that never becomes ready rolls itself back
+automatically — see [When a deploy fails](#when-a-deploy-fails).
 
 ### Migrations on boot
 
@@ -268,24 +303,6 @@ predictable.
   The recovery cap itself is `OPENHARNESS_MAX_RECOVERY_ATTEMPTS` (3): a poison turn ends after
   that many takeovers rather than looping through pods (#378, P4).
 
-### Rolling back
-
-Re-point the tag at the commit that was good:
-
-```bash
-git tag -f production <earlier-sha>
-git push -f origin production
-```
-
-The workflow applies `image_tag=<that sha>`, which rolls the release back to the image it built
-then. That is why the tag is force-updated rather than immutable: rolling back is moving the
-tag, and the registry keeps every image it has pushed. Rolling back does not revert Terraform
-state — a schema migration is not undone by an older image — so treat a rollback as "run the
-previous server build", and fix forward if the change was a migration.
-
-This is the rollback you _choose_. A rollout that never becomes ready rolls itself back
-automatically — see [When a deploy fails](#when-a-deploy-fails) — and that one needs no tag.
-
 ### When a deploy fails
 
 `helm_release.app` is installed `atomic = true, cleanup_on_fail = true` (#159), so an install
@@ -296,10 +313,9 @@ attempt created are deleted. Two consequences for a failed `terraform apply`:
 
 - **It is safe to re-run.** Nothing is left in the cluster holding the release name. That is
   what used to make one bad rollout poison every retry with Helm's "cannot re-use a name that
-  is still in use"; now re-dispatching the workflow (staging) or re-pushing the tag
-  (production) converges.
+  is still in use"; now re-dispatching the workflow converges.
 - **The pods are already gone when the run ends**, so "look at the pods" is no longer a
-  diagnosis. That is why both deploy workflows run a **Rollout diagnostics** step when an
+  diagnosis. That is why the deploy workflow runs a **Rollout diagnostics** step when an
   apply fails: cluster credentials, then `helm list -a` / `helm history` (tolerating errors),
   `kubectl get pods -o wide`, `kubectl describe pods`, recent events
   (`kubectl get events --sort-by=.lastTimestamp | tail -50`, which survive about an hour),
@@ -316,7 +332,7 @@ gcloud logging read 'resource.type="k8s_container" AND resource.labels.namespace
 
 Reading Cloud Logging needs `roles/logging.viewer` on `deploy@`, which the setup script now
 grants (#159). A project set up before that needs the script re-run for it
-(`.github/setup/workload-identity.sh staging`, then `production`); until then the Cloud Logging
+(`.github/setup/workload-identity.sh staging`); until then the Cloud Logging
 probe of the diagnostics step fails and everything else in it still runs. There is no
 Terraform-side action for this — the role is on `deploy@`, which Terraform does not manage.
 
@@ -329,10 +345,10 @@ gcloud container clusters get-credentials openharness --region us-central1 --pro
 helm -n openharness uninstall openharness
 ```
 
-(`openharness-dev` is staging's `GCP_PROJECT_ID`. For production substitute
-`openharness-510710`. `helm uninstall` reporting no release means there is nothing to clean up.)
+(`openharness-dev` is the environment's `GCP_PROJECT_ID`. `helm uninstall` reporting no release
+means there is nothing to clean up.)
 
-### Re-running a staging deploy
+### Re-running a deploy
 
 `deploy-staging` runs by hand from Actions (`workflow_dispatch`), with an optional SHA:
 
@@ -343,27 +359,22 @@ helm -n openharness uninstall openharness
 Re-running is safe and idempotent: the build step checks whether the image already exists and
 skips the build if it does, and `terraform apply` is a no-op when nothing changed.
 `concurrency: deploy-staging` with `cancel-in-progress: false` means two deploys queue rather
-than race, and a staging deploy never cancels the one before it.
+than race, and a deploy never cancels the one before it.
 
 ### The first deploy
 
-The order matters, and only the first time. Staging exists before production, because
-production's zone delegates `staging.oharness.dev` to staging's name servers and pulls images
-from staging's registry.
+Only relevant when building the environment from an empty project.
 
-1. **Run the setup script for both projects** (`.github/setup/README.md`), then set the two
-   variables the script cannot know: `TF_EXISTING_ZONE_NAME_PRODUCTION` and — after step 3
-   below — `TF_STAGING_NAME_SERVERS`. See
-   [Variables the workflows read](#variables-the-workflows-read).
+1. **Run the setup script** for the project (`.github/setup/README.md`).
 2. **Decide who signs in.** The first deploy creates all three provider secret containers —
    `google-client-secret`, `github-client-secret`, `microsoft-client-secret` — empty, whatever
    the client ID variables say (#159). A provider is therefore turned on _between_ deploys:
    create the OAuth app, add its client secret, set its client ID variable, and re-run. The
    sequence is [Turning on a sign-in provider](#turning-on-a-sign-in-provider) and
    [`infra/README.md`](../infra/README.md#manual-steps), step 3.
-3. **Deploy staging** — merge to `main`, let CI pass, and `deploy-staging` runs. The first run
-   is a _two-stage apply_: the `helm` and `kubernetes` providers are configured from the
-   cluster endpoint, which does not exist on a first plan, so the workflow first applies
+3. **Deploy** — merge to `main`, let CI pass, and `deploy-staging` runs. The first run is a
+   _two-stage apply_: the `helm` and `kubernetes` providers are configured from the cluster
+   endpoint, which does not exist on a first plan, so the workflow first applies
    `-target=google_project_service.services -target=module.network -target=module.gke
 -target=module.registry` and then runs the full apply. Terraform state after the first stage
    holds only the services, the VPC, the cluster and the registry. Every later deploy is the
@@ -373,39 +384,32 @@ from staging's registry.
    exist**, and Terraform is what creates it, so on a first deploy the targeted apply has to
    come before the build. A re-deploy skips the targeted apply and goes build → apply.
 
-4. **Check the name servers, then set `TF_STAGING_NAME_SERVERS`** from the staging run's job
-   summary — the workflow prints `terraform output -json name_servers` there for exactly this.
-   Production reads it and writes the delegation; until it is set, production's `-var`
-   defaults to an empty list and simply skips the NS records.
-5. **Point `oharness.dev`'s nameservers at the production zone** if that is still outstanding.
-   Production's own hostname (`app.oharness.dev`) is in the zone production adopts, so it
-   works as soon as the domain's registration delegates to it.
-6. **Cut the production tag** (`git tag -f production <sha> && git push -f origin production`)
-   with the SHA staging just deployed, and watch `deploy-production`. Production's nodes cannot
-   read staging's registry yet, so the pods sit in `ImagePullBackOff` and **this first apply is
-   expected to fail** — the release never becomes ready, so `helm_timeout` expires and the
-   `atomic` release rolls itself back (`helm -n openharness uninstall` by hand is not needed;
-   it already happened). Production's node service account exists as of this apply, and that is
-   the point of it. The failure diagnostics step prints the `ImagePullBackOff` events that say
-   so. Steps 7–9 turn the read on.
-7. **Set `TF_PRODUCTION_NODE_SA`** to production's node service account, whose email is
-   predictable and needs no lookup:
-   `gh variable set TF_PRODUCTION_NODE_SA --body gke-nodes@openharness-510710.iam.gserviceaccount.com`.
-   Empty is the correct value until now: staging's registry only grants read while the account
-   in that variable exists, and naming an account that does not exist yet would fail the apply.
-8. **Re-run staging** (`workflow_dispatch`). This is the apply that adds the reader grant on the
-   repository for production's now-existing account — staging passes
-   `-var production_node_service_account=${{ vars.TF_PRODUCTION_NODE_SA }}`.
-9. **Re-run production** — re-push the `production` tag, or dispatch `deploy-production.yml` by
-   hand. Its nodes can read the registry now, so the rollout finishes and the smoke test runs.
-   That is the end of the bootstrap: the grant is part of staging's ordinary apply from here on.
+4. **Delegate the host** from the parent zone with the name servers the run printed — see
+   [DNS](#dns). The certificate stays `PROVISIONING` until the delegation resolves.
 
-Two things can only be verified on the first real deploy, because they are the first time any
-of this touches GCP: the two-stage apply actually finding an empty project (the detection is
-`gcloud container clusters describe`, so it is the cluster — not the state — that decides), and
-whether `tf-plan@` really can refresh every resource the plan walks. Everything else the
-workflows do — building, pushing, applying, waiting for the rollout — is exercised on every
-deploy after it.
+The first real deploy is also the first time the two-stage apply finds an empty project (the
+detection is `gcloud container clusters describe`, so it is the cluster — not the state — that
+decides), and the first time `tf-plan@` refreshes every resource the plan walks.
+
+### One environment, and why
+
+openharness ran staging (`staging.oharness.dev`, `openharness-dev`) and production
+(`app.oharness.dev`, `openharness-510710`) until October 2026. Production promoted the image
+staging built, by digest, when the `production` tag moved. For a demo the second environment
+was most of the bill — a second cluster fee the free-tier credit does not cover, a second load
+balancer, NAT and database — so it was retired: the staging root took over `app.oharness.dev`,
+and production's infrastructure was destroyed. Its data was not migrated. The cutover, in
+order:
+
+1. Point the `OAUTH_*_CLIENT_ID_STAGING` variables at the OAuth apps registered for
+   `app.oharness.dev` (the old production ones), and add their client secrets to the
+   environment's Secret Manager.
+2. Deploy the change that moves the host (`host`, `dns_zone_name`) to `app.oharness.dev`.
+3. In the parent zone: delete the old `app.oharness.dev` A and `_acme-challenge` CNAME records
+   and the `staging.oharness.dev` NS record, and add the NS record for the new child zone
+   ([DNS](#dns)).
+4. Destroy production's Terraform-managed resources, except the zone (removed from state
+   first). The domain registration and the parent zone stay.
 
 ### Turning on a sign-in provider
 
@@ -417,9 +421,9 @@ created its secret, and a secret with no version blocks the pod from starting, s
 created an empty secret, failed, and rolled itself back.
 
 1. **Create the OAuth app** with the provider. The callback URL is
-   `https://<host>/api/auth/callback/<provider>`, where the host is `staging.oharness.dev` or
-   `app.oharness.dev` and the provider is `google`, `github` or `microsoft` — so
-   `https://staging.oharness.dev/api/auth/callback/google`, for instance. `/api/auth` is Better
+   `https://<host>/api/auth/callback/<provider>`, where the host is `app.oharness.dev` and the
+   provider is `google`, `github` or `microsoft` — so
+   `https://app.oharness.dev/api/auth/callback/google`, for instance. `/api/auth` is Better
    Auth's base path (`basePath` in `apps/server/src/auth.ts`) and the provider ids are the ones
    that file enables.
 
@@ -435,7 +439,7 @@ created an empty secret, failed, and rolled itself back.
    both spellings (`affirmativeClaim`).
 
 2. **Add the client secret** to the container Terraform created, filling in the provider and
-   the project (`openharness-dev` for staging, `openharness-510710` for production):
+   the project (`openharness-dev`):
 
    ```bash
    printf %s "$SECRET" | gcloud secrets versions add google-client-secret \
@@ -451,7 +455,7 @@ created an empty secret, failed, and rolled itself back.
    gh variable set OAUTH_MICROSOFT_TENANT_ID_STAGING --body <tenant id>
    ```
 
-4. **Re-run the deploy** — dispatch `deploy-staging` by hand, or move the `production` tag.
+4. **Re-run the deploy** — dispatch `deploy-staging` by hand.
    The next apply passes the client ID, the app module mounts the secret, and the provider
    appears on the sign-in page. Re-running is safe: the apply is idempotent and the build step
    skips an image that is already in the registry
@@ -506,7 +510,7 @@ Then the two things #159 asks about, which only a live environment can answer:
 
 ### The smoke test
 
-Both deploy workflows run `.github/scripts/smoke-test.sh <url>` after the rollout:
+The deploy workflow runs `.github/scripts/smoke-test.sh <url>` after the rollout:
 
 | Probe          | Expected                                                            |
 | -------------- | ------------------------------------------------------------------- |
@@ -523,54 +527,41 @@ because it is what tells a healthy API from a proxy that has not found its backe
 ## Variables the workflows read
 
 The six the setup script sets (`GCP_PROJECT_ID`, `GCP_PROJECT_NUMBER`, `GCP_WIF_PROVIDER`,
-`GCP_DEPLOY_SA`, `GCP_PLAN_SA`, `TF_STATE_BUCKET`) exist in each environment and again at
-repository level with a `_STAGING` / `_PRODUCTION` suffix — see
+`GCP_DEPLOY_SA`, `GCP_PLAN_SA`, `TF_STATE_BUCKET`) exist in the `staging` environment and
+again at repository level with a `_STAGING` suffix — see
 [`.github/setup/README.md`](../.github/setup/README.md#variables-it-sets). Those are the ones
 the workflows read for project IDs, Workload Identity and the state bucket; no project ID is
 written into a workflow.
 
-Beyond them, every workflow reads these. **They are not set by the setup script.**
+Beyond them, the workflows read these. **They are not set by the setup script.**
 
-| Variable                                            | Scope      | Read by                            | What it is                                                                                                                                                                                                                                     |
-| --------------------------------------------------- | ---------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TF_EXISTING_ZONE_NAME_PRODUCTION`                  | repository | plan job, `deploy-production`      | **Required for production.** Resource name of the existing `oharness.dev` zone, from `gcloud dns managed-zones list`.                                                                                                                          |
-| `TF_STAGING_NAME_SERVERS`                           | repository | plan job, `deploy-production`      | Staging's `terraform output -json name_servers`, printed by the first staging deploy. Unset (or `[]`) skips the delegation.                                                                                                                    |
-| `TF_PRODUCTION_NODE_SA`                             | repository | staging plan job, `deploy-staging` | Production's GKE node service account email, granted read on staging's registry. **Empty until production's first deploy has created the account** — setting it earlier names a member GCP rejects. See [The first deploy](#the-first-deploy). |
-| `OAUTH_GOOGLE_CLIENT_ID_STAGING` / `_PRODUCTION`    | repository | plan job, deploys                  | Google OAuth client ID. Empty disables Google sign-in.                                                                                                                                                                                         |
-| `OAUTH_GITHUB_CLIENT_ID_STAGING` / `_PRODUCTION`    | repository | plan job, deploys                  | GitHub OAuth client ID. Empty disables GitHub sign-in.                                                                                                                                                                                         |
-| `OAUTH_MICROSOFT_CLIENT_ID_STAGING` / `_PRODUCTION` | repository | plan job, deploys                  | Microsoft OAuth client ID. Empty disables Microsoft sign-in.                                                                                                                                                                                   |
-| `OAUTH_MICROSOFT_TENANT_ID_STAGING` / `_PRODUCTION` | repository | plan job, deploys                  | Microsoft tenant ID, used only with the client ID above.                                                                                                                                                                                       |
-| `TF_ALERT_EMAIL_STAGING` / `_PRODUCTION`            | repository | plan job, deploys                  | Address the monitoring alerts go to (#158). Empty creates no notification channel and no alert policies.                                                                                                                                       |
-| `TF_BILLING_ACCOUNT_ID`                             | repository | plan job, deploys                  | Billing account the budget is created on, as the bare ID (`gcloud billing accounts list`) — no `billingAccounts/` prefix, which the provider adds itself (#159). One account serves both projects. Unset leaves `enable_budget` off.           |
-| `TF_BUDGET_AMOUNT_STAGING` / `_PRODUCTION`          | repository | plan job, deploys                  | Monthly budget amount, **in the billing account's currency** — not USD: the account is ILS, and the Budgets API rejects a budget in any other currency with a 400 (#159). Unset leaves Terraform's default, `100`, in that same currency.      |
+| Variable                            | Scope      | Read by          | What it is                                                                                                                                                                                                                                |
+| ----------------------------------- | ---------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OAUTH_GOOGLE_CLIENT_ID_STAGING`    | repository | plan job, deploy | Google OAuth client ID. Empty disables Google sign-in.                                                                                                                                                                                    |
+| `OAUTH_GITHUB_CLIENT_ID_STAGING`    | repository | plan job, deploy | GitHub OAuth client ID. Empty disables GitHub sign-in.                                                                                                                                                                                    |
+| `OAUTH_MICROSOFT_CLIENT_ID_STAGING` | repository | plan job, deploy | Microsoft OAuth client ID. Empty disables Microsoft sign-in.                                                                                                                                                                              |
+| `OAUTH_MICROSOFT_TENANT_ID_STAGING` | repository | plan job, deploy | Microsoft tenant ID, used only with the client ID above.                                                                                                                                                                                  |
+| `TF_ALERT_EMAIL_STAGING`            | repository | plan job, deploy | Address the monitoring alerts go to (#158). Empty creates no notification channel and no alert policies.                                                                                                                                  |
+| `TF_BILLING_ACCOUNT_ID`             | repository | plan job, deploy | Billing account the budget is created on, as the bare ID (`gcloud billing accounts list`) — no `billingAccounts/` prefix, which the provider adds itself (#159). Unset leaves `enable_budget` off.                                        |
+| `TF_BUDGET_AMOUNT_STAGING`          | repository | plan job, deploy | Monthly budget amount, **in the billing account's currency** — not USD: the account is ILS, and the Budgets API rejects a budget in any other currency with a 400 (#159). Unset leaves Terraform's default, `100`, in that same currency. |
 
-All of these are **repository-level** variables — no GitHub environment defines them — and every
-apply reads the same set, the deploys and the PR plan alike. That is deliberate: the plan job
-runs outside any GitHub environment and so can only read repository-level variables, and a
-single naming scheme is what makes the plan the PR shows the plan of what the deploy will do.
-The `_STAGING` / `_PRODUCTION` suffix on most of them is an environment marker, not a scope;
-`TF_BILLING_ACCOUNT_ID` carries none because one billing account serves both projects. The OAuth
-names are not the Terraform variables' own (`google_client_id`, …) for one reason: GitHub
-rejects a configuration variable whose name starts with `GITHUB_`, so `github_client_id` cannot
-be spelled that way.
+All of these are **repository-level** variables — no GitHub environment defines them — and the
+deploy and the PR plan read the same set. That is deliberate: the plan job runs outside any
+GitHub environment and so can only read repository-level variables, and a single naming scheme
+is what makes the plan the PR shows the plan of what the deploy will do. The OAuth names are
+not the Terraform variables' own (`google_client_id`, …) for one reason: GitHub rejects a
+configuration variable whose name starts with `GITHUB_`, so `github_client_id` cannot be
+spelled that way.
 
-These are also the values that cannot be derived — an OAuth client ID is the provider's, the
-zone name is whatever the maintainer created it as — so they are set by hand rather than
-written into a workflow.
+The six the setup script sets are the one place the environment-scoped copies are read: the
+deploy job runs _inside_ the `staging` environment, so `vars.GCP_PROJECT_ID`,
+`vars.GCP_WIF_PROVIDER` and `vars.GCP_DEPLOY_SA` resolve to the environment-scoped values the
+script wrote there, while the plan job reads the repository-level `_STAGING` copies.
 
-The six the setup script sets are the one place the environment-scoped copies are read: a
-deploy job runs _inside_ its environment, so `vars.GCP_PROJECT_ID`, `vars.GCP_WIF_PROVIDER` and
-`vars.GCP_DEPLOY_SA` resolve to the environment-scoped values the script wrote there, while the
-plan job reads the repository-level `_STAGING` / `_PRODUCTION` copies for the same values.
-`TF_EXISTING_ZONE_NAME` (environment `production`) is read the same way and takes precedence
-over the suffixed copy; it exists so the zone name can live inside the environment, but the
-plan job needs the repository-level one regardless.
-
-Everything else Terraform takes has a default (`infra/envs/*/variables.tf`), including the
-budget amount — `TF_BUDGET_AMOUNT_STAGING` / `_PRODUCTION` only overrides it, so an unset
-variable is the same apply as no variable at all. The budget itself is on exactly while
-`TF_BILLING_ACCOUNT_ID` is set — every apply passes
-`-var enable_budget=true -var billing_account_id=<id>` when it is, and
+Everything else Terraform takes has a default (`infra/envs/staging/variables.tf`), including the
+budget amount — `TF_BUDGET_AMOUNT_STAGING` only overrides it, so an unset variable is the same
+apply as no variable at all. The budget itself is on exactly while `TF_BILLING_ACCOUNT_ID` is
+set — every apply passes `-var enable_budget=true -var billing_account_id=<id>` when it is, and
 `-var enable_budget=false` when it is not — so grant `roles/billing.costsManager` on the
 billing account **before** setting it
 ([`infra/README.md`](../infra/README.md#manual-steps), step 4). The amount is denominated in
@@ -595,7 +586,7 @@ account, and nothing outside the free tiers at this scale (issue
 
 ### Logs — Cloud Logging
 
-With `OPENHARNESS_LOG_FORMAT=json` (which Terraform sets on both environments) the server
+With `OPENHARNESS_LOG_FORMAT=json` (which Terraform sets) the server
 writes **one JSON object per line to stdout**, in the shape Cloud Logging reads without a
 parser: `severity` (`DEBUG`/`INFO`/`WARNING`/`ERROR`), `message`, `time`, and
 `logging.googleapis.com/trace` + `logging.googleapis.com/spanId` when the line was written
@@ -637,15 +628,15 @@ nothing.
   model requests). At a few thousand requests a month that is well inside Cloud Trace's free
   tier of **2.5 million spans per month**; spans are kept 30 days.
 - **Changing the sample rate:** it is the Terraform variable `trace_sample_rate` (0..1), passed
-  to the pods as `OPENHARNESS_TRACE_SAMPLE_RATE`. It has a default of `0.1` in both environment
-  roots, so either edit that default or apply with `-var trace_sample_rate=0.5` (a re-apply —
+  to the pods as `OPENHARNESS_TRACE_SAMPLE_RATE`. It has a default of `0.1` in the environment
+  root, so either edit that default or apply with `-var trace_sample_rate=0.5` (a re-apply —
   the value reaches the pods through the Helm release). Sampling is decided per root trace and
   inherited by its child spans, so a kept request is kept whole; `0` keeps none while leaving
   the exporter wired, `1` keeps everything.
 
 ### Alerts — Cloud Monitoring
 
-`infra/modules/monitoring`, instantiated in both environments, creates:
+`infra/modules/monitoring`, instantiated in the environment root, creates:
 
 - an **uptime check** on `https://<host>/health`, HTTPS, every five minutes, from three probe
   regions — always created, and what the console's uptime dashboard reads;
@@ -656,17 +647,17 @@ nothing.
 
 `alert_email` is empty by default, and an empty value creates **no channel and no alert
 policies** — so the first apply of an environment succeeds before anyone has decided who is on
-call. Set it to turn alerting on: the repository variable `TF_ALERT_EMAIL_STAGING` or
-`TF_ALERT_EMAIL_PRODUCTION`, which every deploy and every PR plan passes as `-var alert_email`:
+call. Set it to turn alerting on: the repository variable `TF_ALERT_EMAIL_STAGING`, which every deploy and every PR plan passes
+as `-var alert_email`:
 
 ```bash
-gh variable set TF_ALERT_EMAIL_PRODUCTION --body oncall@example.com
+gh variable set TF_ALERT_EMAIL_STAGING --body oncall@example.com
 ```
 
 From a laptop the Terraform variable is `alert_email`:
 
 ```bash
-terraform -chdir=infra/envs/production apply -var alert_email=oncall@example.com -var image_tag=<sha>
+terraform -chdir=infra/envs/staging apply -var alert_email=oncall@example.com -var image_tag=<sha>
 ```
 
 The thresholds are the module's own variables — `http_5xx_threshold` (5xx per second),
@@ -693,13 +684,13 @@ exists for run in the app's namespace (issue
 
 ### Private addresses for custom provider URLs, and why they stay off
 
-A **custom OpenAI-compatible** credential, and a **remote MCP server** (epic #303, X10), are
-URLs a user typed, and every request to them goes through the SSRF guard (`safeFetch`):
-loopback, private, link-local and cloud-metadata addresses are refused, on save and on every
-model call, listing and MCP connection check afterwards. A
-**self-hosted** deployment whose users point that credential type at a server on its own
-network — an Ollama or vLLM beside the app, a gateway on a private subnet — can turn the
-refusal off for that one credential type with:
+A **custom OpenAI-compatible** credential, a **remote MCP server** (epic #303, X10) and a **skill
+import** (epic #349, K3) all take a URL a user typed, and every request to one goes through the
+SSRF guard (`safeFetch`): loopback, private, link-local and cloud-metadata addresses are
+refused, on save and on every model call, listing, MCP connection check or clone afterwards. A
+**self-hosted** deployment whose users point at a server on its own network — an Ollama or vLLM
+beside the app, a gateway on a private subnet, a git host inside the network — can turn the
+refusal off for those user-supplied URLs with:
 
 ```
 OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1
@@ -707,14 +698,17 @@ OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1
 
 It is deliberately **not set anywhere in this infrastructure**: `charts/openharness/values.yaml`
 does not carry it, `charts/openharness/ci/staging-values.yaml` does not, and
-`infra/modules/app/locals.tf` does not set it for any environment. Staging and production run
+`infra/modules/app/locals.tf` does not set it. The deployment runs
 behind a public load balancer with sign-in to the open internet, where the guard is doing
 exactly the job it exists for: a private address in a credential can only be a mistake or an
 attack. The flag is for a single-tenant, self-hosted install whose operator knows the network;
 turning it on here would let any signed-in user make the service connect anywhere it can
-reach. It applies to the `openai_compatible` credential type and to remote MCP servers — Azure OpenAI
-never reads it — and the server says so loudly at startup when it is on
-(`custom provider URLs: PRIVATE ADDRESSES ALLOWED`).
+reach. It applies to the `openai_compatible` credential type, to remote MCP servers and to a
+skill import's clone — Azure OpenAI never reads it — and the server says so loudly at startup
+when it is on (`user-supplied URLs: PRIVATE ADDRESSES ALLOWED`). With skills, the consequence is
+worth stating on its own: an import clones whatever public `https://` URL a user pastes, so with
+this flag on a user can make the server fetch a repository on its own network
+([`docs/threat-model.md`](./threat-model.md#importing-a-skill-from-a-repository)).
 
 ### Remote MCP servers and the OAuth callback (#303, X10)
 
@@ -738,8 +732,8 @@ it is a variable this infrastructure sets.
 - **The SSRF guard applies, and the self-host flag above is the one exception.** An MCP
   server's URL, and every endpoint the OAuth flow discovers, go through `safeFetch`. A
   self-hosted deployment that runs MCP servers on a private network turns the refusal off with
-  the same `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1` documented above. Staging and production
-  leave it off, so an MCP server there must be on the public internet.
+  the same `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1` documented above. The deployment
+  leaves it off, so an MCP server there must be on the public internet.
 
 ### Web search, and whose key pays for it
 

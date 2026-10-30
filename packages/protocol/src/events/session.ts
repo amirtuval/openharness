@@ -1,7 +1,8 @@
 import { z } from 'zod'
 
-import { EventIdSchema, SessionIdSchema, TaskIdSchema } from '../ids'
+import { EventIdSchema, SessionIdSchema, SkillIdSchema, TaskIdSchema } from '../ids'
 import type { DeepReadonly } from '../readonly'
+import { SkillNameSchema } from '../resources/skill'
 import { TimestampSchema } from '../common'
 import { EVENT_TYPES, EventSeqSchema, ProcessedAtSchema, SupersedesSchema } from './common'
 import { ModelUsageSchema } from './span'
@@ -673,6 +674,48 @@ export type SessionUsageEvent = DeepReadonly<z.infer<typeof SessionUsageEventSch
 export type ImmutableSessionUsageEvent = SessionUsageEvent
 
 /**
+ * // extension: the instructions a slash invocation loaded (epic #349, K7).
+ *
+ * `/name arguments` sends a `user.message` that names a skill; when the brain first handles that
+ * message it writes this event, and from then on this event — never the current snapshot — is
+ * what the chat ran on. `content` is the skill's **body** with the arguments substituted, so the
+ * log holds exactly what the model was given, and `commit_sha` names the snapshot it came from
+ * (K5: a refresh stores a new commit under the same id, and the chats that already ran say which
+ * one they ran). `message_seq` is the `user.message` this belongs to, which is how the context
+ * builder knows to render that message as instructions rather than as the text the user typed.
+ *
+ * The brain writes it, like `session.usage` and `session.context_summary`: it is a fact about a
+ * request the brain made, not something a client may append. It is written **once** per invoked
+ * message — the "first handles" in K7 — so a resume, a replay or a second brain appends nothing
+ * and the body a chat was built on cannot change under it.
+ *
+ * The event carries no `name`-to-snapshot pointer a reader could re-resolve: `skill_id` is here
+ * so a client can link back to the skill, and the body is here so nothing has to.
+ */
+export const SessionSkillLoadedEventSchema = z.object({
+  id: EventIdSchema,
+  type: z.literal(EVENT_TYPES.sessionSkillLoaded),
+  seq: EventSeqSchema,
+  processed_at: ProcessedAtSchema,
+  /** The `seq` of the `user.message` that invoked the skill. */
+  message_seq: EventSeqSchema,
+  /** The skill's name, as the message named it. */
+  name: SkillNameSchema,
+  /** The `skl_` id of the skill whose snapshot was read. */
+  skill_id: SkillIdSchema,
+  /** The commit the snapshot was cloned at, or `null` for a snapshot nothing cloned (K4). */
+  commit_sha: z.string().nullable(),
+  /** The body the model was given: the skill's instructions, arguments substituted in. */
+  content: z.string(),
+})
+
+/** A stored `session.skill_loaded`, deep-readonly like every event (epic #349, K7). */
+export type SessionSkillLoadedEvent = DeepReadonly<z.infer<typeof SessionSkillLoadedEventSchema>>
+
+/** @deprecated The plain name is deep-readonly now; use {@link SessionSkillLoadedEvent}. */
+export type ImmutableSessionSkillLoadedEvent = SessionSkillLoadedEvent
+
+/**
  * A `session.rewind` as a client sends it: the message the session should restart from.
  *
  * The input names `from_seq` alone. How far the restart reaches is not the caller's to say:
@@ -701,6 +744,7 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
   ContextSummaryProgressEventSchema,
   SessionCompactEventSchema,
   SessionCompactionEventSchema,
+  SessionSkillLoadedEventSchema,
   SessionTaskStartedEventSchema,
   SessionTaskStatusEventSchema,
   SessionTaskNotificationEventSchema,

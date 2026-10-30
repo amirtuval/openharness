@@ -2,7 +2,7 @@
 # generated password (issue #153, epic #148 D4/D5).
 #
 # Cloud SQL 18 is the newest Postgres major the provider's `database_version`
-# accepts (POSTGRES_18), so that is what both environments run.
+# accepts (POSTGRES_18), so that is what the environment runs.
 
 resource "random_password" "db" {
   length      = 32

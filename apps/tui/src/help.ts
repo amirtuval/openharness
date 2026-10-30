@@ -29,6 +29,11 @@ Usage:
   oh settings [flags]          show or set the context (compaction) settings
   oh tools [name] [flags]      show which tools your chats may use, or change one
   oh mcp                       your remote MCP servers: add, edit, connect, test them
+  oh skills                    list your imported skills
+  oh skills add <url> [flags]  import skills from a public git repository
+  oh skills refresh <name>     show what changed upstream, and replace the snapshot
+  oh skills enable <name>      offer the skill to your chats (disable turns it off)
+  oh skills remove <name>      delete the skill and its snapshot (asks; --yes skips)
   oh login                     sign in through the browser (the device flow)
   oh logout                    end the session and forget the token
   oh whoami                    print the signed-in user
@@ -52,8 +57,14 @@ Options:
                                offering it
       --policy <p>             with \`oh tools <name>\`: what a call is evaluated
                                under — allow, ask or deny
-      --yes                    with \`oh sessions delete\` / \`oh providers remove\`:
-                               do not ask to confirm
+      --ref <ref>              with \`oh skills add\`: the branch, tag or commit to read
+                               (default: the repository's own)
+      --path <path>            with \`oh skills add\`: the folder inside the repository
+                               (default: its root)
+      --all                    with \`oh skills add\`: import every candidate found
+      --name <n>               with \`oh skills add\`: import this candidate (repeatable)
+      --yes                    with \`oh sessions delete\` / \`oh providers remove\` /
+                               \`oh skills refresh|remove <name>\`: do not ask to confirm
       --server <url>           server root (default https://app.oharness.dev)
       --no-browser             with \`oh login\`: print the URL and code instead of
                                opening a browser
@@ -106,6 +117,17 @@ Model providers:
   sent over HTTPS, and never written to this machine. oh providers lists what is
   stored (provider, last four, when it was added); oh providers remove <provider>
   forgets one. Signed out, oh offers to run the device-flow sign-in itself.
+
+Skills:
+  A skill is a folder of instructions from a public git repository, imported as a
+  snapshot you review first. oh skills add <url> prints what the repository holds —
+  a clone of the folder, its SKILL.md and its files, per candidate — and then either
+  imports what --all or --name <n> named or opens a pick to choose from. oh skills
+  lists yours; enable/disable switches one on for your chats; refresh re-reads its
+  source, shows the diff, and replaces the snapshot only when you confirm; remove
+  deletes it. /skills does the same inside a chat, and typing / offers your enabled,
+  user-invocable skills beside the chat's own commands: /release-notes v1.2 sends
+  the message and loads the skill's instructions into that turn.
 
 In the chat:
 ${CHAT_REFERENCE}

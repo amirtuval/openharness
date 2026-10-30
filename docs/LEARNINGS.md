@@ -284,10 +284,12 @@ loop ([epic #116](https://github.com/amirtuval/openharness/issues/116), U5).
 
 **A server default can be right for a laptop and wrong for every deployment, so the chart has to
 own the deployment's value.** `DEFAULT_SCHEDULER` is `local` (`apps/server/src/config.ts`) because
-that is what one process wants, but the Helm chart runs two replicas and scales to four; `local`
-owns all 64 partitions, writes unfenced, recovers every session on boot and handles interrupts
-in-process, so a second pod closes turns the first is still running as `brain_lost` and re-runs
-them, and an interrupt on the wrong pod starts a second brain (#378). The chart now defaults
+that is what one process wants, but openharness's deployment runs one replica with the HPA allowed
+to reach two — and the chart's own defaults are two to four, so the chart itself can always run
+more than one pod; `local` owns all 64 partitions, writes unfenced, recovers every session on
+boot and handles interrupts in-process, so a second pod closes turns the first is still running
+as `brain_lost` and re-runs them, and an interrupt on the wrong pod starts a second brain
+(#378). The chart now defaults
 `env.SCHEDULER` to `postgres` — repeated in `infra/modules/app/locals.tf` so the two agree — and a
 template helper refuses to render `local` when `replicaCount > 1` or the HPA's `maxReplicas > 1`.
 Because Helm deep-merges a values file into the chart's defaults, a Terraform `env` map that omits
@@ -612,13 +614,11 @@ migration: KMS keeps old versions for `Decrypt` and the next `Encrypt` picks the
 are turned on _between_ deploys.** The `helm` and `kubernetes` providers are configured from a
 cluster endpoint that does not exist on a first plan, so the workflow targets the services, VPC,
 cluster and registry first — the registry because the image push needs it and Terraform creates it
-— and then runs the full apply; every later deploy is a single apply. Production's first apply is
-**expected** to fail with `ImagePullBackOff`: its node service account does not exist until that
-apply and staging has not yet granted it registry read, so the release rolls itself back and the
-remaining steps finish the bootstrap, with `TF_PRODUCTION_NODE_SA` staying empty until then because
-naming a member GCP does not know yet fails the apply. Staging must be applied before production
-for a real dependency: staging's zone exports the name servers production writes, and staging holds
-the one Artifact Registry repository every environment pulls from. All three provider secret
+— and then runs the full apply; every later deploy is a single apply. (With two environments, a
+second project pulling the first one's images could not be granted registry read until its own
+node service account existed — GCP rejects an IAM member that does not exist — so its first deploy
+was expected to fail with `ImagePullBackOff`; that bootstrap went away with the second
+environment.) All three provider secret
 containers are created unconditionally and empty on the first deploy — doing it the other way round
 meant the turning-on deploy created an _empty_ secret, and a secret with no version blocks the pod,
 so that deploy failed and rolled back
@@ -626,13 +626,13 @@ so that deploy failed and rolled back
 
 **`atomic = true, cleanup_on_fail = true` changes how you debug a failed deploy, and a rollback does
 not revert Terraform state.** A failed install is uninstalled and a failed upgrade returns to the
-last good revision, so "look at the pods" is no longer a diagnosis — they are gone. Both deploy
-workflows therefore run a Rollout diagnostics step on failure that prints `helm history`, pods,
+last good revision, so "look at the pods" is no longer a diagnosis — they are gone. The deploy
+workflow therefore runs a Rollout diagnostics step on failure that prints `helm history`, pods,
 events (which survive about an hour) and Cloud Logging (which outlives the rollback entirely),
-never a secret value. In the release train the `production` tag is a moving pointer that rollback
-re-points at an earlier SHA, and a schema migration is not undone by an older image — so a rollback
-means "run the previous server build" and a migration fix has to go forward. Production's GCP
-project **ID** is `openharness-510710`; `openharness` is only its display name.
+never a secret value. A rollback is a deploy of an earlier SHA, and a schema migration is not
+undone by an older image — so a rollback means "run the previous server build" and a migration fix
+has to go forward. The domain's project **ID** is `openharness-510710`; `openharness` is only its
+display name.
 
 **Some cloud-side values are dictated by somebody else's validation rules, and a smoke test that
 asserts "not 200" proves nothing.** GitHub rejects an Actions configuration variable whose name
@@ -641,12 +641,46 @@ budget's amount is in the **billing account's** currency (ILS here) because the 
 any other with a 400, and `TF_BILLING_ACCOUNT_ID` is the bare ID with no `billingAccounts/` prefix,
 which the provider adds itself. Every Terraform workflow value is repository-level, because the
 plan job runs outside any GitHub environment and cannot read the environment-scoped copies — the
-`_STAGING`/`_PRODUCTION` suffix is an environment marker, not a scope. The deploy smoke test asserts
+`_STAGING` suffix is an environment marker, not a scope. The deploy smoke test asserts
 `/v1/sessions` returns exactly **401**, because `/health` is served whether or not the database is
 reachable: a deployment whose `database-url` secret is wrong passes `/health` and fails
 `/v1/sessions`. `curl -k` is deliberately absent, so a certificate that does not validate is a
-failure this catches, and a first production deploy that fails this way is the bootstrap rather
-than a broken release — the workflow prints the exact `gh variable set TF_PRODUCTION_NODE_SA` fix.
+failure this catches.
+
+**A demo's GCP bill is mostly fixed cost, and two environments double the fixed part while the
+free tier covers only one of them.** Two environments cost about $300 a month while serving almost
+no traffic: each had a GKE cluster fee ($73 — the billing account's monthly free-tier credit covers
+exactly one Autopilot or zonal cluster), a global load balancer ($18 in forwarding rules), two
+in-use external IPs, Cloud NAT and a database. Production was retired and the staging root took over
+`app.oharness.dev`, which by itself makes the remaining cluster free; the rest came from sizing
+(October 2026, [`DEPLOYMENT.md`](./DEPLOYMENT.md#cost)). The domain's registration and parent zone
+stay in the old project — moving a Cloud Domains registration's zone is a DNS migration for nothing
+— and the host is delegated to the environment's own zone with one NS record.
+
+**Autopilot bills metrics you never asked for.** Left unset, an Autopilot cluster's
+`monitoring_config` turns on the kube-state-metrics packages, cAdvisor, kubelet, DCGM and advanced
+datapath observability — Managed Prometheus samples, about 300 million a month (~$20) on one idle
+two-pod cluster, read by nothing here. They show up only in `monitoring.googleapis.com/billing/
+samples_ingested` under the `prometheus.googleapis.com` domain, not as a line anyone would
+recognise. `infra/modules/gke` now pins `enable_components = ["SYSTEM_COMPONENTS"]` (free) and turns
+datapath metrics off; the alert policies use only `kubernetes.io/`, Cloud SQL, load-balancer and
+uptime metrics, and the HPA reads metrics-server.
+
+**"250m / 512Mi is Autopilot's floor" stopped being true, and the chart said it anyway.** On a
+cluster that supports bursting (created on 1.29+ — these run 1.35) Autopilot's minimum is 50m / 52Mi
+per **pod**, and requests are billed as written: the 100m Cloud SQL proxy sidecar was never rounded
+up (no `autopilot.gke.io/resource-adjustment` annotation). The pods idled at ~2m CPU and ~130Mi
+against 350m / 640Mi requested, two of them; one pod at 150m / 448Mi costs a quarter as much. A
+single replica also needs the PodDisruptionBudget off — `minAvailable: 1` over one pod forbids every
+voluntary eviction, so a node drain waits out GKE's one-hour PDB grace instead of moving the pod.
+
+**A resource another resource refers to by a generated id has to be replaced create-before-destroy,
+or the replacement is refused.** Moving the host to `app.oharness.dev` replaced the uptime check
+(its host is immutable), and Terraform's default order deletes first — which Cloud Monitoring
+rejects with a bare 400, "please ensure all associated Alert Policies are deleted", because the
+uptime alert policy's filter names the check's id. Everything else in that apply had already
+landed, so the deploy failed on the last resource. The check is now `create_before_destroy`, so the
+policy moves to the new check before the old one is deleted ([#397](https://github.com/amirtuval/openharness/issues/397)).
 
 **An alert that is too broad is an alert nobody reads, and an empty alert email is a supported
 state.** Autopilot's `OPTIMIZE_UTILIZATION` profile replaces nodes often and GKE's own DaemonSet
@@ -666,8 +700,8 @@ ADC and refreshes its own OAuth token, which is what keeps a long-running pod ex
 header cannot be refreshed. Load-balancer request logging is deliberately off — the most expensive
 thing in the picture, and the server's own logs already carry path and status joined to the trace.
 And the self-host escape hatch, `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`, is set nowhere in the
-infrastructure on purpose: it applies only to the `openai_compatible` credential type, and staging
-and production run behind a public load balancer with open sign-in, where the SSRF guard is doing
+infrastructure on purpose: it applies only to the `openai_compatible` credential type, and the
+deployment runs behind a public load balancer with open sign-in, where the SSRF guard is doing
 its job ([#249](https://github.com/amirtuval/openharness/issues/249)).
 
 ## Providers and models
@@ -948,6 +982,62 @@ argument becoming `{}`. One reader abstraction covers built-in and MCP tool call
 pairs differ only in their event type strings, their id field and `mcp_server_name` — a duplicated
 branch is exactly how a reader silently handles one pair and not the other
 ([#312](https://github.com/amirtuval/openharness/issues/312)).
+
+## Skills
+
+**A tool built per request is not a registry tool, and the settings have to be told it exists.**
+The two tools that read a skill are built from the skills _that request_ has — the user's
+`enabled`, with the mode's override — so nothing a deployment registers holds them, and
+`GET /v1/me/tools` would list neither and offer no switch for one. `SKILL_TOOL_DECLARATIONS`
+(`packages/brain/src/skills.ts`) is what the settings add beside `web_search`'s declaration
+(#335). The trap is that the first such list was written for `web_search` and carries two
+behaviours that suit only it: a **model-gated** availability (the chat model's provider decides)
+and `ask` rewritten to `allow` (a provider-executed search has no moment to pause at). Declaring
+the skill tools through it unchanged made both wrong — a chat on a model with no web search was
+told it had no skills, and a user could not ask to approve a skill read. The fix was to make the
+gate a field of the declaration (`modelGated`) rather than a property of the list, so one list
+can hold a tool the provider runs and a tool this build runs
+([#349](https://github.com/amirtuval/openharness/issues/349),
+[#352](https://github.com/amirtuval/openharness/issues/352)).
+
+**What the model was given is written down, never recomputed.** A skill's instructions reach a
+request through `session.skill_loaded`, whose `content` is the skill's body with the message's
+arguments already substituted in — written once, by the brain that first handles the message, and
+read by the context builder, the size accounting and the summarizer from then on. The tempting
+simpler design (resolve the skill per request and build the text then) loses twice: a refresh or
+an edit of the skill would silently rewrite a conversation that had already run, and the two
+readers that must agree — the request the strategy builds and the request the compaction trigger
+measures — would be reading a snapshot that can move between them. The same reasoning is why the
+`user.message` keeps the text the user typed while the _instructions_ live in their own event:
+the transcript is the user's, the prompt is the model's
+([#349](https://github.com/amirtuval/openharness/issues/349) K5/K7).
+
+**A schema-level refusal refuses the whole batch, and the e2e database is shared.** Two things
+that cost a debugging round. A `user.message` may not land half-checked: the slash-invocation
+check runs before the append, so a batch naming a skill the chat cannot run stores nothing at all
+— which is the property the log needs, and which means a test that expects "the message is there
+but the skill is not" is testing the wrong thing. And in `e2e/` a file's tests share **one**
+database and, unless they ask otherwise, **one** dev account: a skill seeded for one test is in
+force for every later test in the file, so per-test accounts are not politeness but the fixture
+([#352](https://github.com/amirtuval/openharness/issues/352)).
+
+**A boolean patch over "the user's setting" cannot say "only these", and the missing statement is
+the whole difference between a preset and a policy.** `Mode.tools` was a map of exceptions: a name
+absent from it followed the user's own switch, so a server or skill added after the mode was
+written was silently on in it, and no mode could be the allowlist a reviewed helper needs. The
+fix is one tri-state per kind — `builtin_default`, `mcp_servers_default`, `skills_default`, each
+`follow | off | on` with absent meaning `follow` — and the trap is that the three kinds were
+already resolved in three places (`tool-settings.ts`'s `effectiveTools`, `mcp/in-force.ts`,
+`skill.ts`'s `skillInForce`). Adding the default at each site would have been three chances to
+disagree with the brain, the frontends' `/` menus and a child session; instead one
+`modeItemInForce(entry, follows, fallback)` in the protocol is applied by one helper per kind,
+and every consumer calls it. `off` is an allowlist (an item added later stays off), `on` turns
+every unlisted item on even where the user turned it off globally, and **an explicit entry still
+wins**; a default is never a permission, and it cannot undo a hard rule — `withoutAskUser`, the
+subagent tools a depth withholds and `disable-model-invocation` are applied outside it. Storage
+needed no migration because all of it rides inside the existing `tools jsonb`
+([#349](https://github.com/amirtuval/openharness/issues/349) B8,
+`packages/protocol/src/resources/mode.ts`).
 
 ## Pausing for the user
 
@@ -1278,6 +1368,170 @@ it is — `notes__search (mcp: notes)` — because "allowing `search` on a serve
 different decision from allowing their own `web_fetch`, and two servers' `search` differ by nothing
 else on the line" ([#313](https://github.com/amirtuval/openharness/issues/313),
 [#327](https://github.com/amirtuval/openharness/pull/327)).
+
+## Skills: importing from git
+
+**`isomorphic-git`'s `listFiles` walks into a submodule and fails the whole clone; a `TREE` walk that
+skips non-blob entries does not.** A tree entry of mode `160000` is a gitlink — a commit whose object
+lives in another repository — and `listFiles` reads it, so a repository with one submodule anywhere in
+its tree ends the import with `Could not find <sha>` however unrelated the submodule is to the skill.
+Walking the tree yourself (`git.walk` with `TREE({ ref })`, keeping entries whose `type()` is `blob`)
+reports the type without reading the object, which is what makes "no submodules" (K3) a property of
+our code rather than of a library's error path
+([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**Read the ref advert before cloning, because `HEAD` locally does not resolve after a shallow
+single-branch clone.** `_init` writes `ref: refs/heads/master`, and a `singleBranch` fetch writes the
+branch it fetched as a **remote-tracking** ref (`refs/remotes/origin/main`) — so `resolveRef('HEAD')`
+on the fresh clone answers `NotFoundError: master`, and there is no local ref that names what was just
+fetched. The way out is one extra `GET /info/refs`: `git.getRemoteInfo` answers the default branch,
+and the clone is then made with an explicit `ref`, so the commit the clone landed on is resolvable by
+name. That call's own shape is worth knowing too — refs come back as a tree (`refs.heads.main`,
+`refs.tags.v1`) while the symref `HEAD` is a **top-level** field holding the target verbatim
+(`refs/heads/main`) ([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**A clone failure has to be classified from more than its error code.** `isomorphic-git` raises
+`HttpError` with a status, `NotFoundError` for a ref that is not there, and `RemoteCapabilityError` for
+a server that is not a git server at all — but a connection that never opened surfaces as undici's
+bare `TypeError: fetch failed` with no `code` at all, so "unreachable" is the case with _nothing_ to
+read rather than another code to add. The same lesson from the other side: a download cap enforced
+inside the response body is reported by the library as its own `Empty response from git server`, so the
+cap records a flag as well as throwing — the flag is what survives the library's translation
+([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**`allowPrivate` is coarser than "loopback", and a sandbox's egress proxy can answer for an address
+the guard was supposed to refuse.** The self-host flag lets **every** non-public address through,
+link-local and the metadata service included; a test that wants to show a redirect landing on
+`169.254.169.254` being refused therefore has to keep its first hop on a **public** name (an injected
+resolver plus a transport that connects to the fixture, the pattern `web-fetch.test.ts` uses) rather
+than turning the flag on. And with `HTTP_PROXY`/`HTTPS_PROXY` set — as in the sandbox this was built
+in — a hop to a link-local address is answered **by the proxy** (`No MMDS token provided`, a 401), so a
+refusal test that forgets to delete the proxy variables fails for the wrong reason, or worse, passes
+by accident ([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**A test fixture for smart HTTP is real `git`, not a hand-written packfile.** `git upload-pack
+--stateless-rpc --advertise-refs` behind `GET /info/refs` and `--stateless-rpc` behind the `POST` is
+all a clone needs, and it is what `git http-backend` runs — so the _client_ is what is under test, and
+the fixture cannot agree with a bug in our own idea of the pack format. Two details that cost time:
+the responses must be assembled and written as **binary** (a UTF-8 round trip corrupts a packfile only
+on the repositories whose deltas hold invalid sequences), and the advertisement needs the
+`001e# service=git-upload-pack\n0000` preamble in front of git's own lines. It is exported from
+`@openharness/hands/testing` rather than kept in a test file, because the server's import tests and
+the QA specs of [#355](https://github.com/amirtuval/openharness/issues/355) want the same repository
+([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**Sort a preview's file listing the way the store does, or the preview and the skill it becomes
+disagree.** `SkillStore` lists a snapshot's files in code-point path order (`'SKILL.md'` before
+`'reference/tone.md'`), which is **not** `localeCompare`'s order — a locale-aware sort puts
+`reference/…` first, so an import that sorted that way showed one order in the preview and another
+after the import succeeded ([#351](https://github.com/amirtuval/openharness/issues/351)).
+
+**A repository's root is a candidate, so the repository's _name_ has to be a skill name — and some
+repositories can never have one.** "A skill's name is its folder's" has no folder to read at a
+repository's root, so a `SKILL.md` sitting there is named for the repository instead: the last
+segment of its URL path with a trailing `.git` dropped (`packages/hands/src/git-url.ts`'s
+`repositoryName`, read off the `url` `parseGitUrl` answered so a browse URL's `/tree/…` half can
+never leak in). Two consequences are easy to miss. A root `SKILL.md` whose frontmatter disagrees
+with that name is an ordinary `name-mismatch`; and a repository called for a built-in command
+(`skills`, `compact`, …) or with an uppercase or underscored name can only ever answer
+`reserved-name`/`invalid-frontmatter` at its root — such a repository is still importable by naming
+its folder, which is what `path` is for, so the root rule is an addition rather than the only way
+in. The rule that is the root's **alone** is which files it takes: the whole tree under the root,
+minus the subtree of every folder below it that holds a `SKILL.md`, because that folder is a
+candidate of its own and its files are its own. Without that exclusion the shape single-skill
+repositories actually have — a `SKILL.md` at the root beside a `skills/` directory — would store
+every other skill's files twice, or blow the K4 limits doing it
+([#364](https://github.com/amirtuval/openharness/pull/364)).
+
+**The import route takes `https://` and nothing else, so the repo's own git fixture cannot be imported through it.**
+`createGitFixture` (`@openharness/hands/testing`) serves a real repository over **smart HTTP on
+loopback** — `http://127.0.0.1:<port>/skills.git` — because that is what makes a clone testable
+offline, and `parseGitUrl` refuses any scheme but `https` (K3: "a public `https://` git URL"). A
+hands-on pass against the real server therefore cannot hand the fixture's own URL to the import
+route: it is answered with the 400 `A skill is imported from an \`https://\` git URL.` before a clone
+is ever attempted. The way through is a TLS-terminating proxy in front of the fixture with a
+certificate the server trusts (`NODE_EXTRA_CA_CERTS`) and
+`OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1`, which is what `e2e/qa/w30-skills.spec.ts` does — and
+when that is too much machinery, the pass imports from a real public repository instead and proves
+the real path over the network instead of over loopback
+([#353](https://github.com/amirtuval/openharness/issues/353)). Importing a real public repository
+(`https://github.com/anthropics/skills`, 5.7 MB, well under the 20 MB clone cap) works unchanged
+and is what a public-repo smoke can use — but only a **fixture** can move a branch, so a refresh
+diff is the half that needs the terminator
+([#354](https://github.com/amirtuval/openharness/issues/354)).
+
+**A loopback browse URL has to carry `owner/repo` before its `/tree/…`, so the pass's TLS front answers under `/org/skills.git` and not at `/skills.git`.**
+`parseGitUrl` only reads a browse URL's `tree` (or GitLab's `-`) separator from the **third** path
+segment on — a marker with no `owner/repo` in front of it is a repository's own name
+(`https://github.com/tree/main` names the repository `tree`) — so
+`https://127.0.0.1:<port>/skills.git/tree/main/skills/release-notes`, which is the shape the
+fixture's own URL has, is read as a clone URL for a repository called
+`skills.git/tree/main/skills/release-notes` and never split. `e2e/qa/skills-fixture.ts` therefore
+mounts the front at `https://127.0.0.1:<port>/org/skills.git` and drops the `/org` when it proxies:
+the separator now has two segments in front of it, S2's browse-URL split runs on the loopback
+fixture with no network at all, and `repositoryName` still answers `skills`
+([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**A mock stack chats without a key but still shows the first-run screen, so a hands-on pass has to seed a credential.**
+`OPENHARNESS_TEST_MODEL=mock` swaps the model factory and `resolveMockCredential` answers for every
+session, so a turn needs no provider key — but the root route's gate is the **credentials list**, and
+an account that holds none gets "Let's get you chatting ✨" instead of a composer, whatever its
+`default_model` preference says. Saving a key through the API is not an option either: `PUT
+/v1/provider-credentials` validates with one real provider call. The pass writes the row the route
+would write, with the server's own `sealCredential`/`credentialUpsert` and the stack's
+`OPENHARNESS_SECRETS_KEY` — the approach `e2e/src/harness/credentials.ts` already documents, which
+means a QA stack that is going to be driven by browser automation needs its secrets key **fixed** at
+start-up rather than generated per boot
+([#353](https://github.com/amirtuval/openharness/issues/353)).
+
+**The credentials gate is the root route's alone, so a pass can drive a whole chat without one.**
+`#/` and `#/new` render the first-run flow for an account with no provider key; `#/s/<id>` does
+not — a chat opened at its own route gets its transcript and its composer whatever the account
+holds, and the mock answers its turns either way. So the #355 specs need no credential at all: the
+one case that does is S11, because `requireUsableMode` refuses a chat on a mode whose model has no
+stored credential (422 `mode_unavailable_error`) — a check about the **mode**, not about chatting —
+and that scenario skips with that reason when the stack holds none. It is the cheaper answer than
+seeding a sealed row: no database access, no fixed secrets key, and a spec that runs against any
+deployment ([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**A screenshot pass has to set the theme the way the app does, and re-build the view after every reload.**
+Setting `data-theme` (or the `localStorage` cache) from the page looks like it works and does not:
+the app reads the reader's preferences and repaints once they arrive, so the capture races a value
+that is about to be overwritten — and the account's stored theme is the only thing that really
+decides it. Writing it through `PUT /v1/me/preferences` and reloading is both correct and the flow
+a person uses, but the reload drops whatever state the view was showing (an open import preview, a
+refresh diff), so each capture re-establishes the view with a real interaction. Two screenshots of
+the same screen in two themes are otherwise two different screens
+([#353](https://github.com/amirtuval/openharness/issues/353)).
+
+**A NUL byte is valid UTF-8 and Postgres `text` still refuses it, so a binary file has to be detected at the import and stored as base64.** `TextDecoder` happily decodes a PNG's `0x00` into `\u0000`, and the in-memory store accepts the string — which is why every test passed while a Postgres import of a skill with an image failed with `invalid byte sequence for encoding "UTF8": 0x00`. The import now decodes **fatally** and treats a NUL as non-text: `skill_files.encoding` is `'utf8' | 'base64'`, `content` is the file's bytes base64-encoded when it is `base64`, and `size` is always the original byte length, so K4's limits count the file rather than its spelling. Two places downstream depend on the column rather than on guessing from the string: `skill_read` reports a binary file by its path and size instead of returning base64 text, and the refresh diff compares encoding beside content. The general lesson is the one `looksBinary` had backwards: a heuristic over decoded text cannot be the storage contract, because the storage is what the heuristic was standing in for
+([#364](https://github.com/amirtuval/openharness/pull/364), `packages/session/migrations/0036_skills.sql`, `apps/server/src/skills-import.ts`).
+
+**A download cap bounds the pack, not what the pack inflates to, and `git.walk` can tell you paths without reading blobs.** `SKILL_CLONE_MAX_BYTES` counted downloaded bytes while `readTree` then read **every** blob of the commit — including folders the import never looks at — with no bound on the total, so 20 MB of highly compressible content could expand to gigabytes in the shared server process. The clone now takes the caller's `path` and reads only the blobs under it (a root `SKILL.md` still reads the whole tree, because the repository is the candidate), and a cumulative `SKILL_INFLATE_MAX_BYTES` refuses `over_limit` past it. A tree entry carries no size, so an individual oversized blob cannot be skipped from the tree; discovery still reports the file's own K4 problem when it fits
+([#364](https://github.com/amirtuval/openharness/pull/364), `packages/hands/src/git-clone.ts`).
+
+**`isomorphic-git` inflates every object of a pack to index it, so a cap on what the clone _reads_ does not bound its memory.** The cumulative check in `readTree` ran after `git.readBlob`, but a shallow clone is one pack, and `GitPackIndex.fromPack` computes each object's id by reading it — so a 20 GB zero-blob was inflated while the index was being built, before `readTree` was reached at all, and a small injected `maxInflatedBytes` did not help. The pack's own index and entry headers carry the sizes a tree entry does not: the clone now buffers the (≤20 MB) upload-pack response, demultiplexes its side-band stream, and refuses `over_limit` before `isomorphic-git` sees a pack with any object past `SKILL_INFLATE_MAX_BYTES`; a delta's result size comes from the first varints of its (small) instruction stream, and ordinary blobs are inflated with zlib's `maxOutputLength` set to what is left of the read cap. The indexing ceiling is deliberately the protocol cap rather than the caller's read cap, because an import naming one folder may still sit in a repository with a large unrelated file — refusing that would undo the path filter. Regression test: a sparse 101 MiB file, refused with the process never allocating it
+([#390](https://github.com/amirtuval/openharness/pull/390), `packages/hands/src/git-pack.ts`, `packages/hands/src/git-clone.ts`).
+
+**`disable-model-invocation` stops the model _choosing_ a skill, not following the instructions the user loaded.** Both skill tools refused such a skill unconditionally, which made a perfectly ordinary user-run command fail the moment its body said "read `references/style.md`": the user had run `/name`, its instructions were in the request, and the file they named was unreadable. The turn now reads the log before resolving the skills and passes the names of the `session.skill_loaded` events (plus the ones this batch is about to load) into `resolveSkills`; a name in that set is readable by both tools while staying out of the listing, so the model still cannot pick the command on its own. A child session applies its own log's answer the same way
+([#366](https://github.com/amirtuval/openharness/pull/366), `packages/hands/src/skill.ts`, `packages/brain/src/turn.ts`).
+
+**A batch that stores one row per picked item must count the cap before the first write, because the store's per-owner lock only protects one create.** `importSkills` created the picked candidates in a loop, so a user at 48 who picked three got two stored and then `SkillLimitReachedError`: the response was an error, the UI showed neither of the two that landed, and a retry reported their names as taken. The import now refuses the whole request (`existing + picked > MAX_SKILLS_PER_USER`) before anything is created; the store's lock still guards the race between that count and the writes
+([#364](https://github.com/amirtuval/openharness/pull/364), `apps/server/src/skills-import.ts`).
+
+**The `/` menu and the server each re-derived "which skills are on", and the two answers drifted in both directions.** A menu built from `skill.enabled` alone offers a skill the chat's mode turned off — choosing it gets a 400 from `assertInvocableSkills` — and hides one the mode turned on, which the server would accept. The rule (a mode that names a skill wins, one it does not name follows `enabled`) is now `skillInForce`/`skillsInForce` in `@openharness/protocol`; the server's in-force read and both frontends' `slashCommands` call it, so there is one answer. The menu takes the chat's mode override — the web chat's current (or just-switched) mode, New chat's picked mode, `oh`'s current or pending mode — which is also what makes it follow a mode switch
+([#375](https://github.com/amirtuval/openharness/pull/375), [#372](https://github.com/amirtuval/openharness/pull/372), `packages/protocol/src/resources/skill.ts`, `packages/client/src/skills.ts`).
+
+## The HTTP layer
+
+**A route whose path parameter may hold slashes is written `:path{.+}`, not `*` — Hono 4 does not
+expose a wildcard's matched text as a parameter.** Serving a skill's files needs the rest of the URL
+(`/v1/me/skills/{id}/files/reference/tone.md`), because a skill's paths are relative and nested, and
+`app.get('/…/files/*', c => c.req.param('*'))` answers `undefined` in hono 4.13.9: `c.req.param()`
+carries only the named parameters. `:path{.+}` is the spelling that works, and Hono **decodes** it —
+`a%20b.md` reaches the handler as `a b.md` — while leaving a malformed escape (`%zz`) as it is rather
+than throwing, so a lookup by that path is simply a 404 and the handler needs no `try`
+(`apps/server/src/routes/skills.ts`, epic #349).
 
 ## Subagents (epic #340)
 
@@ -1654,6 +1908,31 @@ rows an arrow key should not have to walk. Colour is never the selection: the ma
 is the one thing that survives `NO_COLOR`, and a test per screen asserts the frame carries it
 ([#335](https://github.com/amirtuval/openharness/issues/335)).
 
+**The Agent Skills format's own `argument-hint: [version]` is a YAML flow sequence, and
+`argument-hint: [pr-number] [priority]` is not YAML at all — a format whose _convention_ is in the
+brackets cannot be round-tripped by a YAML parser.** The protocol read the field as a string and
+silently ignored anything else, so a skill written for Claude Code shipped with no hint at all
+(`/release-notes` in the `/` menu) while the same field written as a bare word showed one — and the
+second spelling went further and made the whole frontmatter fail to parse, so the skill could not be
+imported. The import therefore reads `argument-hint`'s **own line** whenever YAML does not answer with a
+plain string, and a block whose YAML fails _only_ because of that line is read with the line set aside
+rather than refused (`apps/server/src/skills-import.ts`'s `parseFrontmatterBlock`); `argumentHintOf`
+renders an already-stored array back as `[a, b]`, so a snapshot imported before the fix shows the hint
+too. The lesson is the shape: an open, untyped frontmatter carries fields whose meaning is a convention
+rather than a value, and the parser has to keep the line that wrote it, not the parse
+([#354](https://github.com/amirtuval/openharness/issues/354)).
+
+**A `/` menu whose one Enter rule is "take the highlighted row" charges the reader a second keystroke
+for every command that is already complete.** Typing `/compact` and pressing Enter used to leave
+`/compact ` in the box and need another Enter to run it, because the same rule served the complete
+command and the skill whose arguments were still to come. What Enter means is a client decision now
+(`slashEnterAction` in `packages/client/src/skills.ts`): a **built-in** the line names in full runs at
+once, a **skill** still completes to `/name ` — it is never run from the menu, since it is sent as an
+ordinary message carrying its arguments (K7) — and a line that already has arguments sends. Both
+frontends call the one function, so the web composer and `oh` cannot drift; `oh`'s menu still closes
+once a name is a command of its own (a one-row list is noise), and the same rule decides what Enter does
+with that line anyway ([#354](https://github.com/amirtuval/openharness/issues/354)).
+
 **A tool call and the thing it started were not linked by an id, so the client's join had to be a
 heuristic — and a heuristic keyed on the wrong field is a bug that waits for a second matching
 call.** `agent { type, description, prompt }` returns a handle as a **text** result, and the
@@ -1772,6 +2051,20 @@ read said `idle` and the card said `done` (found by the #348 pass). The fix is o
 about what an effect is keyed on: the thing the reader sees is the status, and a count is only
 ever a proxy for it that happens to be wrong exactly when work stops.
 
+**"Pending switch" and "the mode in effect" are two states, and collapsing them made one
+direction of a mode switch invisible.** In the web chat, picking a **mode** while on a model was
+visible at once because the picked mode was rendered as the current one; picking a **model**
+while on a mode was not, because the current mode id still came from the session and the picker's
+trigger prefers a selected mode over a model name — so the reader saw the mode until the next
+message detached it. Clearing the mode id on the pick would have fixed the display and broken the
+send: choosing the very model the mode resolves to must still send `{ model }`, and the switch
+test needs to know the session was on a mode at that moment. The fix was a separate
+`detachingMode` flag (display: detached now) beside a committed mode id (send: still on a mode),
+with `oh`'s status line dropping its mode clause on the same rule and its `/` menu reading the
+override of the mode the next message will _not_ follow
+(`apps/web/src/components/chat/chat-view.tsx`,
+`apps/tui/src/chat/screen.tsx`'s `statusModeLabel`).
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take
@@ -1802,6 +2095,45 @@ call should not be in the offer that test asserts. The general rule is that the 
 **shared** test surface, so anything one suite adds to it must be opt-in, not implied by a
 setting every suite has set ([#378](https://github.com/amirtuval/openharness/issues/378), P4;
 `apps/server/src/tools.ts`).
+
+**Playwright restarts the worker after a failed test, so a `beforeAll` that cleans the account silently empties the run after the first failure.**
+`fullyParallel: false` with `workers: 1` runs a file's tests in order in one worker — but Playwright
+discards that worker when a test fails, and a fresh worker re-runs its `beforeAll`. A skills pass
+whose `beforeAll` deleted the account's imported skills therefore failed one case and then reported
+every later case against an empty account, which reads as "the settings screen stopped rendering
+skills" rather than "the fixture was cleaned" — five failures for one cause
+([#355](https://github.com/amirtuval/openharness/issues/355)). The rule the specs now follow is that
+**each scenario establishes its own state** (`ensureSkills(request, names)`) instead of inheriting
+it, so order and a failure's fallout cannot matter.
+
+**A fixture served from the test process cannot answer while that process is blocked in `execFileSync`.**
+The skills pass's git fixture listens **in the Playwright worker** and the server under test clones
+from it — so every `oh` the CLI spec ran with the synchronous runner (`execFileSync`, `stdio:
+'ignore'`) froze the worker's event loop for the length of the command, the fixture's listeners
+stopped accepting, and the clone reached the server as `fetch failed` and the reader as a 422
+`The repository could not be reached.` The same `oh skills add` worked from a shell, which is what
+made it look like a server problem. `e2e/qa/tmux.ts` gained `ohAsync` (a `spawn`, with stdin still
+ignored so a confirm question reads end-of-file) for exactly this: a scenario that serves something
+to the stack under test has to let its own loop turn ([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**`waitForIdle` passes vacuously between two sends on one session, because the idle a finished turn wrote is already the log's last status.**
+"Wait until the session is idle" is true the instant the second message is appended and the new
+turn has not started — the new turn's `session.status_running` has not been written yet — so a
+scenario that waited that way read the log before the brain had loaded the skill it was asserting
+on, and reported no `session.skill_loaded` at all. The fix is to wait for the thing that really
+changed (`waitForLoaded`: the count of `session.skill_loaded` events) rather than for a state the
+previous turn had already left behind — the same "a wait anchored on nothing returns immediately on
+an empty state" trap the e2e harness documents for `afterSeq`
+([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**The fixture's TLS certificate and the sandbox's egress proxy are two CAs, and `NODE_EXTRA_CA_CERTS` names one file.**
+A QA stack started with `NODE_EXTRA_CA_CERTS=<skills fixture ca>.pem` **replaces** whatever the
+environment already had — so a container behind an egress proxy lost the proxy's CA with it, and
+every provider call the stack made came back `fetch failed` while `curl` from the same shell worked.
+The skills pass's stack therefore starts with both `cat`-ed into one bundle (the fixture's
+`e2e/fixtures/skills-https/README.md` says so in as many words), which is the same instruction
+`e2e/AGENTS.md` already gave for a deployment with a CA of its own
+([#353](https://github.com/amirtuval/openharness/issues/353), [#355](https://github.com/amirtuval/openharness/issues/355)).
 
 **An assertion that cannot fail is worse than no assertion, because it is counted as coverage.** A
 test review of every package found them everywhere: `expect(p.partitionOf(id)).toBe(p.partitionOf(id))`,
