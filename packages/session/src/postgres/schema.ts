@@ -428,8 +428,27 @@ export interface UserToolSettingsTable {
   updated_at: Date
 }
 
+/**
+ * `schema_migrations`: the migration ledger (issue #378, PR 3/6).
+ *
+ * One row per SQL file {@link migrate} has applied — the file name is the primary key, and
+ * `applied_at` is when that transaction committed, from the database's `now()` (the runner has
+ * no injected clock; this is bookkeeping, not a store value). The table belongs to the runner
+ * rather than to a migration file: creating it from a file would require the ledger to exist
+ * before its own row could be written. A database migrated before the ledger existed has every
+ * other table and this one empty; the first boot after the change runs the files once more and
+ * fills it in.
+ */
+export interface SchemaMigrationsTable {
+  /** The migration file's name, e.g. `0032_session_tree.sql`. */
+  file: string
+  /** When the transaction that applied it committed. */
+  applied_at: Date
+}
+
 /** The database as this package sees it. */
 export interface PostgresSchema {
+  schema_migrations: SchemaMigrationsTable
   agents: AgentsTable
   modes: ModesTable
   sessions: SessionsTable

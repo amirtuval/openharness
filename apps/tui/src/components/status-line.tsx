@@ -1,4 +1,4 @@
-import { COMPACTING_LABEL } from '@openharness/client'
+import { COMPACTING_LABEL, DEFAULT_STALL_MS } from '@openharness/client'
 import type { ModelPriceLookup } from '@openharness/client'
 import type { ModelEntry, SessionStatus } from '@openharness/protocol'
 import { Text, useStdout } from 'ink'
@@ -121,6 +121,15 @@ export interface StatusLineProps {
   readonly runningSince?: number | null | undefined
   /** When the last text of the turn arrived, in epoch milliseconds; `null` before any has. */
   readonly lastTextAt?: number | null | undefined
+  /**
+   * When the last streamed event arrived, in epoch milliseconds (#378, P4).
+   *
+   * The stall indicator's baseline: a running turn with nothing arriving for the client's
+   * stall window is shown as waiting for the server rather than as a reply being written.
+   */
+  readonly lastEventAt?: number | null | undefined
+  /** Whether the event stream is reconnecting (#378, P4); outranks the quiet window. */
+  readonly reconnecting?: boolean | undefined
   /** The reason a retrying turn gave, while the server is retrying it. */
   readonly retrying?: string | undefined
   /**
@@ -177,6 +186,8 @@ export function StatusLine(props: StatusLineProps) {
     status: props.status,
     runningSince,
     lastTextAt: props.lastTextAt ?? null,
+    lastEventAt: props.lastEventAt ?? null,
+    reconnecting: props.reconnecting === true,
     retrying: props.retrying,
     summarizing: props.summarizing ?? null,
     compacting: props.compacting === true,
@@ -275,6 +286,10 @@ export interface StatusFieldInput {
   readonly status: SessionStatus
   readonly runningSince: number | null
   readonly lastTextAt: number | null
+  /** When the last streamed event arrived (#378, P4); `null` before any. */
+  readonly lastEventAt?: number | null | undefined
+  /** Whether the event stream is reconnecting (#378, P4). */
+  readonly reconnecting?: boolean | undefined
   /** The reason a retrying turn gave; `undefined` when the turn is not retrying. */
   readonly retrying: string | undefined
   /** The summary being written right now; `null` when no compaction is running (epic #277; #280). */
@@ -308,6 +323,12 @@ export function statusField(input: StatusFieldInput): StatusField {
   }
 
   const running = input.status === 'running' && input.runningSince !== null
+  if (running && input.reconnecting === true) {
+    // The client knows the connection is gone. That is a different fact from a quiet stream,
+    // and it is true even while a summary, a compaction or a retry would otherwise be what
+    // the line says.
+    return { text: 'Reconnecting…', spinner: true, tone: 'busy' }
+  }
   const summarizing = input.summarizing ?? null
   if (running && summarizing !== null) {
     // A compaction is several model calls, so it says which pass it is on rather than leaving a
@@ -328,6 +349,12 @@ export function statusField(input: StatusFieldInput): StatusField {
   }
   if (running && input.retrying !== undefined) {
     return { text: `Retrying… ${input.retrying}`, spinner: true, tone: 'busy' }
+  }
+  if (running && isStalled(input.lastEventAt, input.now)) {
+    // A crash's stall (#378, P4) is otherwise indistinguishable from a model that is thinking.
+    // Shown even when text arrived earlier: a reply that stops mid-stream is the case this
+    // exists for.
+    return { text: 'Waiting for the server…', spinner: true, tone: 'busy' }
   }
   if (running && isQuiet(input.lastTextAt, input.now)) {
     return {
@@ -352,6 +379,17 @@ export function statusField(input: StatusFieldInput): StatusField {
  */
 export function isQuiet(lastTextAt: number | null, now: number): boolean {
   return lastTextAt === null || now - lastTextAt >= WORKING_QUIET_MS
+}
+
+/**
+ * Whether a running turn has heard nothing for the client's stall window (#378, P4).
+ *
+ * The same number the web app uses (`DEFAULT_STALL_MS`, 15 s — the server's SSE keep-alive
+ * cadence), so a crash stalls in the same words in both frontends. A `null` baseline means no
+ * event has been folded in yet, which is not a stall.
+ */
+export function isStalled(lastEventAt: number | null | undefined, now: number): boolean {
+  return lastEventAt !== null && lastEventAt !== undefined && now - lastEventAt >= DEFAULT_STALL_MS
 }
 
 /** A running turn's elapsed time: `0s`, `12s`, `4m 5s`. Whole seconds — it is a heartbeat. */

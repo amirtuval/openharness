@@ -298,7 +298,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // routes (`createApp`) — so a tool the settings screen calls available is one a chat can
   // really call. `web_search` is not in it (#335): the brain attaches the chat model's own
   // provider's search tool per request, and nothing of ours runs a search.
-  const turnRegistry = createTurnRegistry({ kind: resolvedModel.kind })
+  const turnRegistry = createTurnRegistry({
+    kind: resolvedModel.kind,
+    executionLog: config.testToolExecutionLog,
+  })
   // The remote-MCP-server resource (epic #303, X10; the loop's half: #312). Built once here and
   // handed to **both** readers — the turn options, whose provider lists a chat's in-force
   // servers and calls their tools, and `createApp`, whose routes manage them — so a settings
@@ -561,11 +564,13 @@ function createScheduler(
       ...(tools === undefined ? {} : { tools }),
       clearThreshold: config.clearThreshold,
       todoNudge: config.todoNudge,
+      maxRecoveryAttempts: config.maxRecoveryAttempts,
       instanceId: config.instanceId,
       partitions: config.partitions,
       ttlMs: config.leaseTtlMs,
       heartbeatMs: config.heartbeatMs,
       sweepMs: config.sweepMs,
+      balanceStabilityMs: config.balanceStabilityMs,
       maxConcurrentSessions: config.maxConcurrentSessions,
       drainTimeoutMs: config.drainTimeoutMs,
       onError,
@@ -585,6 +590,7 @@ function createScheduler(
     ...(tools === undefined ? {} : { tools }),
     clearThreshold: config.clearThreshold,
     todoNudge: config.todoNudge,
+    maxRecoveryAttempts: config.maxRecoveryAttempts,
     maxConcurrentSessions: config.maxConcurrentSessions,
     drainTimeoutMs: config.drainTimeoutMs,
     partitionCount: config.partitions,
@@ -738,9 +744,11 @@ async function listening(server: ReturnType<typeof serve>): Promise<void> {
  * and release the store.
  *
  * The order matters. Closing the listener first stops new work arriving; the compaction job is
- * then stopped — it deletes, so it must not outlive the store — and the scheduler drained (its
- * turns are aborted, and given a timeout to write their last events); only then are the
- * remaining connections — the SSE streams, which would otherwise never end — cut off. The
+ * then stopped — it deletes, so it must not outlive the store — and the scheduler drained. The
+ * drain is soft first (#378, P2): a model request or tool step in flight finishes and stores its
+ * result for up to `OPENHARNESS_DRAIN_TIMEOUT_MS`, and only what the deadline catches is
+ * handed off to the next owner. The SSE streams are deliberately left open through that drain —
+ * they are how a reader sees the reply that is finishing — and are cut off only after it. The
  * store is closed last, because everything above it may still be writing to it. The tracer is
  * shut down after everything else, so the spans this process opened are flushed to Cloud Trace
  * before it exits (#158).

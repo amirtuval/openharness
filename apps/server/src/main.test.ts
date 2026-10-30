@@ -148,12 +148,13 @@ describe('startServer', () => {
   })
 
   it('hands a turn in flight off on shutdown, rather than ending it', async () => {
-    // A shutdown is a deploy (#378, P1): the turn is left **open** for the next process, not
-    // ended with a partial reply and an idle. The next owner closes the span as `brain_lost`
-    // and finishes the request.
+    // A shutdown is a deploy (#378, P1): a step that outlives the drain is left **open** for
+    // the next process, not ended with a partial reply and an idle. The reply below (about
+    // 60 ms) outlives the 20 ms drain, so the soft phase cannot finish it and the hard handoff
+    // is what this test sees; `scheduler.test.ts` covers the drain that lets it finish.
     const store = new InMemorySessionStore()
     const server = await startServer({
-      config: testConfig({ drainTimeoutMs: 3000 }),
+      config: testConfig({ drainTimeoutMs: 20 }),
       store,
       model: createScriptedModel({ text: ['one ', 'two ', 'three'], delayMs: 20 }).factory,
       resolveCredential: resolveTestSessionCredential,

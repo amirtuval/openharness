@@ -89,6 +89,18 @@ const NO_SWEEP_MS = 3_600_000
 /** How long a test waits for something that should happen in a heartbeat or two. */
 const WAIT_MS = 5_000
 
+/**
+ * The membership-stability window the tests that **resume** a paused instance run with
+ * (#378, P3).
+ *
+ * Resuming re-announces the instance, so under P2 the survivor would immediately read the
+ * membership as two again, find itself over its share, and could give up the very partition
+ * it had just recovered — a churn race that has nothing to do with what these tests are about
+ * (lease loss and the handoff). The deployment's default is longer still, and the scheduler's
+ * own tests of the window set their own; this is simply "not inside the test".
+ */
+const LONG_STABILITY_MS = 30_000
+
 const SOURCE = postgresSource()
 
 if (SOURCE === null) {
@@ -137,6 +149,13 @@ if (SOURCE === null) {
       readonly ttlMs?: number
       readonly heartbeatMs?: number
       readonly sweepMs?: number
+      readonly drainTimeoutMs?: number
+      /**
+       * The membership-stability window (#378, P3). `0` by default, so every test that is not
+       * about the window balances exactly as it did before it existed; the tests that are
+       * about it set it explicitly.
+       */
+      readonly balanceStabilityMs?: number
       readonly store?: SessionStore
       readonly model?: ScriptedModel
     } = {},
@@ -154,7 +173,8 @@ if (SOURCE === null) {
       ttlMs: options.ttlMs ?? TTL_MS,
       heartbeatMs: options.heartbeatMs ?? HEARTBEAT_MS,
       sweepMs: options.sweepMs ?? NO_SWEEP_MS,
-      drainTimeoutMs: 500,
+      balanceStabilityMs: options.balanceStabilityMs ?? 0,
+      drainTimeoutMs: options.drainTimeoutMs ?? 500,
       onError: (error, sessionId) => {
         errors.push({ error, sessionId })
       },
@@ -353,6 +373,210 @@ if (SOURCE === null) {
       // nothing is free, so nothing changes hands.
       await sleep(4 * HEARTBEAT_MS)
       expect(members.map((member) => sorted(member.scheduler.heldPartitions()))).toEqual(held)
+    })
+
+    it('spreads three instances that boot together when a stability window is set', async () => {
+      // The same division with the debounce on (#378, P3): boot changes the membership twice or
+      // three times in quick succession, and no member may release anything before the window
+      // has run. Once it has, the space still divides the way it always did.
+      const members = [
+        instance('a', { ttlMs: LONG_TTL_MS, balanceStabilityMs: 200 }),
+        instance('b', { ttlMs: LONG_TTL_MS, balanceStabilityMs: 200 }),
+        instance('c', { ttlMs: LONG_TTL_MS, balanceStabilityMs: 200 }),
+      ]
+      await Promise.all(members.map(async (member) => member.scheduler.start()))
+
+      const counts = (): number[] =>
+        members.map((member) => member.scheduler.heldPartitions().length)
+      await waitFor(
+        () =>
+          counts().every((count) => count <= 3) &&
+          counts().reduce((total, count) => total + count, 0) === PARTITIONS,
+        { timeoutMs: WAIT_MS, message: 'three instances never settled at their shares' },
+      )
+      expect(overlaps(members.map((member) => sorted(member.scheduler.heldPartitions())))).toEqual(
+        [],
+      )
+      // Once the space is divided, nothing else changes hands: the releases the boot's race
+      // needed are done, and a stable membership has no further surplus to give up.
+      const settled = members.map((member) => sorted(member.scheduler.heldPartitions()))
+      await sleep(4 * HEARTBEAT_MS)
+      expect(members.map((member) => sorted(member.scheduler.heldPartitions()))).toEqual(settled)
+    })
+
+    it('a join with no leave converges to fair shares after the window', async () => {
+      // The scale-up case: an HPA adds a pod and nobody leaves. The holder keeps the space
+      // while the window is open — the newcomer has nothing free to take — and gives half of it
+      // up once the membership has been stable for the window.
+      const WINDOW_MS = 2_000
+      const first = instance('first', {
+        ttlMs: LONG_TTL_MS,
+        balanceStabilityMs: WINDOW_MS,
+      })
+      await first.scheduler.start()
+      await waitFor(() => first.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the single instance never claimed the whole space',
+      })
+
+      const second = instance('second', {
+        ttlMs: LONG_TTL_MS,
+        balanceStabilityMs: WINDOW_MS,
+      })
+      await second.scheduler.start()
+
+      // Inside the window: the holder keeps everything (nothing is given up), so the newcomer
+      // holds nothing — there is no free partition for it to take.
+      await sleep(4 * HEARTBEAT_MS)
+      expect(sorted(first.scheduler.heldPartitions())).toHaveLength(PARTITIONS)
+      expect(second.scheduler.heldPartitions()).toEqual([])
+      expect(first.notices.filter(isGivingUp)).toEqual([])
+
+      // After the window the surplus is released, and the newcomer takes its share.
+      await waitFor(
+        () =>
+          first.scheduler.heldPartitions().length === PARTITIONS / 2 &&
+          second.scheduler.heldPartitions().length === PARTITIONS / 2,
+        { timeoutMs: WAIT_MS, message: 'the join never converged to fair shares' },
+      )
+      expect(
+        overlaps([first.scheduler.heldPartitions(), second.scheduler.heldPartitions()]),
+      ).toEqual([])
+    })
+
+    it('a newcomer takes a free partition at once, before the stability window passes', async () => {
+      // The window delays a *give-up*, not the scan: a partition that is already free is taken
+      // by whoever is under its share, so the partitions a leaving pod releases during a
+      // rollout still reach the newcomer without waiting for the window.
+      // Long enough that the window cannot expire inside the test: this is about the scan, not
+      // about what happens after stability.
+      const WINDOW_MS = 10_000
+      const first = instance('first', {
+        ttlMs: LONG_TTL_MS,
+        balanceStabilityMs: WINDOW_MS,
+      })
+      await first.scheduler.start()
+      await waitFor(() => first.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the single instance never claimed the whole space',
+      })
+      const second = instance('second', {
+        ttlMs: LONG_TTL_MS,
+        balanceStabilityMs: WINDOW_MS,
+      })
+      await second.scheduler.start()
+
+      // Free one partition the first instance holds, as a departure would: the newcomer's next
+      // scan takes it, well inside the window.
+      const reader = db.store()
+      const partition = first.scheduler.heldPartitions()[0] as number
+      const epoch = await reader.currentEpoch(partition)
+      await reader.releasePartition(partition, 'first', epoch)
+
+      await waitFor(() => second.scheduler.heldPartitions().includes(partition), {
+        timeoutMs: WAIT_MS,
+        message: 'the newcomer did not take a free partition while the window was open',
+      })
+      expect(first.notices.filter(isGivingUp)).toEqual([])
+    })
+
+    it('a join-then-leave inside the window moves each partition at most once', async () => {
+      // The rolling-update shape (#378, P3): three members have settled, a surge pod joins,
+      // and — before the window has passed — one original leaves. Nothing may be given up for
+      // the join (the leave is about to make the shares grow back), and the leaving member's
+      // partitions move to the newcomer exactly once. The survivors' partitions must not have
+      // moved at all, which their epochs state exactly.
+      // Long enough to cover boot's own membership changes plus the join→leave below (one
+      // heartbeat apart), and short enough that the test is willing to wait for boot to settle.
+      const WINDOW_MS = 1_000
+      const options = { ttlMs: LONG_TTL_MS, balanceStabilityMs: WINDOW_MS }
+      const members = [instance('a', options), instance('b', options), instance('c', options)]
+      await Promise.all(members.map(async (member) => member.scheduler.start()))
+      await waitFor(
+        () =>
+          members.every((member) => member.scheduler.heldPartitions().length <= 3) &&
+          members.reduce((total, member) => total + member.scheduler.heldPartitions().length, 0) ===
+            PARTITIONS,
+        { timeoutMs: WAIT_MS, message: 'the three originals never settled' },
+      )
+
+      // The member with the most to give back is the one our synthetic `SIGTERM` picks, so the
+      // test is about a real handover rather than an idle partition.
+      const leaving = [...members].sort(
+        (left, right) =>
+          right.scheduler.heldPartitions().length - left.scheduler.heldPartitions().length,
+      )[0] as Instance
+      const survivors = members.filter((member) => member !== leaving)
+      const leavingHeld = sorted(leaving.scheduler.heldPartitions())
+      // Boot itself may have needed a release (a first scan that raced the others' arrival).
+      // What this test is about is that the *rollout* releases nothing, so the count is what
+      // matters, not zero.
+      const gaveUpAtSettle = new Map(
+        members.map((member) => [member, member.notices.filter(isGivingUp).length]),
+      )
+      const reader = db.store()
+      const survivorHeldBefore = new Map<Instance, { partition: number; epoch: number }[]>()
+      for (const survivor of survivors) {
+        survivorHeldBefore.set(
+          survivor,
+          await Promise.all(
+            survivor.scheduler.heldPartitions().map(async (partition) => ({
+              partition,
+              epoch: await reader.currentEpoch(partition),
+            })),
+          ),
+        )
+      }
+
+      // The surge pod joins...
+      const newcomer = instance('newcomer', options)
+      await newcomer.scheduler.start()
+      // ...the membership is seen, and the original leaves inside the window.
+      await waitFor(
+        async () => (await reader.listLiveInstances(LONG_TTL_MS)).includes('newcomer'),
+        {
+          timeoutMs: WAIT_MS,
+          message: "the newcomer's membership never became visible",
+        },
+      )
+      await leaving.scheduler.stop()
+
+      // The leaving member's partitions end up with a survivor or the newcomer — once — and
+      // every survivor keeps every tenure it had. The epochs state the second half exactly: a
+      // partition a survivor gave up and took back would have advanced its epoch even though
+      // the owner ended as it started.
+      await waitFor(
+        () => {
+          const now = new Set([
+            ...survivors.flatMap((survivor) => survivor.scheduler.heldPartitions()),
+            ...newcomer.scheduler.heldPartitions(),
+          ])
+          return leavingHeld.every((partition) => now.has(partition))
+        },
+        { timeoutMs: WAIT_MS, message: 'the leaving partitions were not taken over' },
+      )
+      expect(
+        overlaps(survivors.concat(newcomer).map((member) => member.scheduler.heldPartitions())),
+      ).toEqual([])
+      for (const survivor of survivors) {
+        for (const { partition, epoch } of survivorHeldBefore.get(survivor) ?? []) {
+          expect(
+            survivor.scheduler.heldPartitions(),
+            `a survivor lost partition ${partition}`,
+          ).toContain(partition)
+          expect(
+            await reader.currentEpoch(partition),
+            `partition ${partition} moved off a survivor`,
+          ).toBe(epoch)
+        }
+      }
+      // Nothing was given up for the join — the whole point of waiting for stability.
+      for (const member of survivors.concat(newcomer)) {
+        expect(
+          member.notices.filter(isGivingUp).length,
+          `${member.name} gave up surplus for a membership the leave was about to undo`,
+        ).toBe(gaveUpAtSettle.get(member) ?? 0)
+      }
     })
 
     it('keeps every partition while it is the only member: an idle instance releases nothing', async () => {
@@ -780,8 +1004,10 @@ if (SOURCE === null) {
     })
 
     it('drops the lease of a partition it can no longer renew, and stops running it', async () => {
-      const victim = instance('victim')
-      const survivor = instance('survivor')
+      // The stability window keeps the resumed victim's re-announcement from making the
+      // survivor rebalance the partition it is recovering (see LONG_STABILITY_MS).
+      const victim = instance('victim', { balanceStabilityMs: LONG_STABILITY_MS })
+      const survivor = instance('survivor', { balanceStabilityMs: LONG_STABILITY_MS })
       await Promise.all([victim.scheduler.start(), survivor.scheduler.start()])
 
       const store = db.store()
@@ -896,8 +1122,10 @@ if (SOURCE === null) {
     })
 
     it('hands a turn off when its lease is lost, and the taker finishes it', async () => {
-      const victim = instance('victim')
-      const survivor = instance('survivor')
+      // Same window as the test above: the resumed victim must not make the survivor give up
+      // the partition mid-recovery.
+      const victim = instance('victim', { balanceStabilityMs: LONG_STABILITY_MS })
+      const survivor = instance('survivor', { balanceStabilityMs: LONG_STABILITY_MS })
       await Promise.all([victim.scheduler.start(), survivor.scheduler.start()])
 
       const store = db.store()
@@ -975,6 +1203,186 @@ if (SOURCE === null) {
       expect(result !== undefined ? JSON.stringify(result.content) : '').toContain('timed out')
       expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
       expect(Date.now() - deadlineMs).toBeLessThan(4_000)
+    })
+  })
+
+  describe('draining instead of cutting a step off (#378, P2)', () => {
+    /** The lease row for a partition, as the database holds it. */
+    async function leaseOf(
+      partition: number,
+    ): Promise<{ owner: string | null; expires_at: Date } | undefined> {
+      const result = await db.pool.query<{ owner: string | null; expires_at: Date }>(
+        'select owner, expires_at from partition_leases where partition = $1',
+        [partition],
+      )
+      return result.rows[0]
+    }
+
+    it('releases an idle partition at once on shutdown, so the peer serves its message during the drain', async () => {
+      // One partition is held open by a turn, the other is idle. The idle one must not wait
+      // for the busy one's drain: it goes back immediately, and a user message to a session in
+      // it is served by the peer while the old instance is still draining.
+      const first = instance('first', { ttlMs: LONG_TTL_MS, drainTimeoutMs: 3000 })
+      const second = instance('second', {
+        ttlMs: LONG_TTL_MS,
+        replies: [{ text: ['served by the peer'] }],
+      })
+      await Promise.all([first.scheduler.start(), second.scheduler.start()])
+      await waitFor(() => first.scheduler.heldPartitions().length > 1, {
+        timeoutMs: WAIT_MS,
+        message: 'the first instance never held more than one partition',
+      })
+      const store = db.store()
+      const held = first.scheduler.heldPartitions()
+      const idlePartition = held[0] as number
+      const busyPartition = held[1] as number
+
+      // The busy partition's turn is held mid-stream, so its drain cannot finish quickly.
+      const busy = await sessionIn(store, busyPartition)
+      const release = gate()
+      first.model.push({
+        text: Array.from({ length: 30 }, (_, index) => `part ${index + 1} `),
+        delayMs: 50,
+        onChunk: (_chunk, index) => (index === 0 ? release.wait() : Promise.resolve()),
+      })
+      await appendMessage(store, busy.id, 'a long one')
+      first.scheduler.signal(busy.id, 'work')
+      await first.model.waitForRequests(1)
+
+      // An idle session in the other partition — no turn has ever run for it.
+      const idle = await sessionIn(store, idlePartition)
+
+      const stopping = first.scheduler.stop()
+      let stopped = false
+      void stopping.then(() => {
+        stopped = true
+      })
+
+      // The peer takes the idle partition while the shutdown is still draining the busy one.
+      await waitFor(() => second.scheduler.heldPartitions().includes(idlePartition), {
+        timeoutMs: WAIT_MS,
+        message: 'the idle partition was not released before the drain ended',
+      })
+      expect(stopped, 'the shutdown finished before the busy turn did').toBe(false)
+
+      // A message to the idle session is served by the peer — promptly, while the old
+      // instance is still draining.
+      await appendMessage(store, idle.id, 'hello from the drain')
+      second.scheduler.signal(idle.id, 'work')
+      await waitForIdle(store, idle.id, WAIT_MS)
+      expect(second.model.requests).toBe(1)
+      expect(repliesIn(await readHistory(store, idle.id))).toEqual(['served by the peer'])
+
+      release.open()
+      await stopping
+    })
+
+    it('releases a partition as soon as its short turn finishes, not at the drain deadline', async () => {
+      // A five-second drain, but the turn takes a fraction of a second: the release waits for
+      // the pass, not for the timer. The whole stop is measured, so a release that slept to the
+      // deadline fails by seconds.
+      const first = instance('first', {
+        ttlMs: LONG_TTL_MS,
+        drainTimeoutMs: 5000,
+        replies: [{ text: ['a ', 'short ', 'answer'], delayMs: 60 }],
+      })
+      const second = instance('second', { ttlMs: LONG_TTL_MS })
+      await Promise.all([first.scheduler.start(), second.scheduler.start()])
+      await waitFor(() => first.scheduler.heldPartitions().length > 0, {
+        timeoutMs: WAIT_MS,
+      })
+      const store = db.store()
+      const partition = first.scheduler.heldPartitions()[0] as number
+      const session = await sessionIn(store, partition)
+
+      await appendMessage(store, session.id, 'hello')
+      first.scheduler.signal(session.id, 'work')
+      await first.model.waitForRequests(1)
+
+      const before = Date.now()
+      await first.scheduler.stop()
+      const elapsed = Date.now() - before
+
+      // The step ended naturally — the best case — so the turn is closed here, not handed off.
+      const history = await readHistory(store, session.id)
+      expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+      expect(spanErrors(history)).toEqual([null])
+      expect(elapsed, 'the release waited for the drain deadline').toBeLessThan(2_000)
+      await waitFor(() => second.scheduler.heldPartitions().includes(partition), {
+        timeoutMs: WAIT_MS,
+        message: 'the partition was not released after its turn ended',
+      })
+    })
+
+    it('keeps renewing a surplus partition while it drains, with a drain longer than the TTL', async () => {
+      // The constraint P2 removes: the old surplus release drained inside the heartbeat cycle,
+      // so the TTL had to outlast the drain. Here the drain (4 s) is eight times the TTL
+      // (500 ms), and both the draining partition and the partitions the instance keeps are
+      // still renewed throughout — owner unchanged, expiry moving forward.
+      const TTL = 500
+      const first = instance('first', { ttlMs: TTL, heartbeatMs: 30, drainTimeoutMs: 4000 })
+      await first.scheduler.start()
+      await waitFor(() => first.scheduler.heldPartitions().length === PARTITIONS, {
+        timeoutMs: WAIT_MS,
+        message: 'the single instance never claimed the whole space',
+      })
+      const held = first.scheduler.heldPartitions()
+      const keptPartition = held[0] as number
+      // The surplus is given up newest-tenure first, and the held turn keeps one of those
+      // partitions in its drain.
+      const drainingPartition = held[held.length - 1] as number
+
+      const store = db.store()
+      const session = await sessionIn(store, drainingPartition)
+      const release = gate()
+      first.model.push({
+        text: ['kept ', 'open'],
+        delayMs: 50,
+        onChunk: (_chunk, index) => (index === 0 ? release.wait() : Promise.resolve()),
+      })
+      await appendMessage(store, session.id, 'hold this partition')
+      first.scheduler.signal(session.id, 'work')
+      await first.model.waitForRequests(1)
+
+      const second = instance('second', { ttlMs: TTL, heartbeatMs: 30 })
+      await second.scheduler.start()
+
+      // The other surplus partitions are released at once; this one stays ours (and is
+      // renewed) until its turn finishes.
+      await waitFor(
+        () =>
+          first.scheduler.heldPartitions().includes(drainingPartition) &&
+          first.scheduler.heldPartitions().length === PARTITIONS / 2 + 1,
+        {
+          timeoutMs: WAIT_MS,
+          message: 'the surplus was not released, or the draining partition was dropped early',
+        },
+      )
+
+      const startLease = await leaseOf(drainingPartition)
+      expect(startLease?.owner).toBe('first')
+      // Several TTLs — long enough that a blocked heartbeat would have expired both leases.
+      await new Promise((resolve) => setTimeout(resolve, TTL * 4))
+      const endLease = await leaseOf(drainingPartition)
+      expect(endLease?.owner, 'the draining partition stopped being renewed').toBe('first')
+      expect(
+        endLease?.expires_at.getTime() ?? 0,
+        'the draining lease was not renewed while it drained',
+      ).toBeGreaterThan(startLease?.expires_at.getTime() ?? 0)
+      expect((await leaseOf(keptPartition))?.owner, 'a kept lease lapsed during the drain').toBe(
+        'first',
+      )
+      // Nothing was fenced, and no lease was lost: the heartbeat never waited on the drain.
+      expect(first.errors).toEqual([])
+      expect(first.notices.join('\n')).not.toContain('lost partition')
+
+      release.open()
+      await waitForIdle(store, session.id, WAIT_MS)
+      await waitFor(() => second.scheduler.heldPartitions().includes(drainingPartition), {
+        timeoutMs: WAIT_MS,
+        message: 'the drained partition was not released to the peer',
+      })
+      expect(repliesIn(await readHistory(store, session.id))).toEqual(['kept open'])
     })
   })
 
@@ -1154,6 +1562,11 @@ class SlowFirstRenewStore extends PostgresSessionStore {
 
 function sorted(partitions: readonly number[]): number[] {
   return [...partitions].sort((left, right) => left - right)
+}
+
+/** Whether a scheduler notice is the one a surplus release emits. */
+function isGivingUp(line: string): boolean {
+  return line.includes('giving up')
 }
 
 /** The partitions held by more than one of the given instances — must always be empty. */

@@ -247,7 +247,10 @@ export {
 } from './approvals'
 export type { ApprovalChoice, PendingCall, PendingCallKind, QuestionDraft } from './approvals'
 
-export type { StreamOptions } from './events/stream'
+export type { StreamConnection, StreamOptions } from './events/stream'
+
+export { DEFAULT_STALL_MS, stallState } from './stall'
+export type { StallInput, StallState } from './stall'
 
 export { isTaskToolName, taskCardStatus, taskIsLive, tasksFromEvents } from './tasks'
 export type { TaskCard, TaskCardStatus, TaskMessage, TaskResult } from './tasks'

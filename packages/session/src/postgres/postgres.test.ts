@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { copyFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   EVENT_TYPES,
@@ -117,6 +119,7 @@ if (target === null) {
   })
 } else {
   let container: StartedPostgreSqlContainer | undefined
+  let connectionString = DATABASE_URL
   let pool: Pool
   let db: Kysely<PostgresSchema>
 
@@ -129,8 +132,10 @@ if (target === null) {
   /** Every MCP server store a test made, closed again afterwards. */
   const mcpStores: ReturnType<typeof createPostgresMcpServerStore>[] = []
 
+  /** How many migration-test schemas this run has made; the name has to be unique per process. */
+  let migrationSchemas = 0
+
   beforeAll(async () => {
-    let connectionString = DATABASE_URL
     if (connectionString === '') {
       container = await new PostgreSqlContainer(POSTGRES_IMAGE).start()
       connectionString = container.getConnectionUri()
@@ -562,8 +567,16 @@ if (target === null) {
     })
 
     it('applies its migrations idempotently', async () => {
-      // The suite's `beforeAll` has already migrated this database; running again must be a
-      // no-op that leaves the schema usable, which is what makes it safe on every deploy.
+      // The suite's `beforeAll` has already migrated this database, and the ledger says so:
+      // a second call is the fast path, applies nothing, and touches no application table —
+      // which is what makes every pod boot during a rollout harmless (#378, PR 3/6).
+      expect(await migrate(db)).toEqual([])
+
+      // Emptying the ledger makes this an old runner's database: every table exists and the
+      // record of what built it is gone. The bootstrap path runs every idempotent file once
+      // more, and the checks below prove that re-run leaves the tables, indexes and columns
+      // working.
+      await sql`delete from schema_migrations`.execute(db)
       const files = await migrate(db)
       expect(files.length).toBeGreaterThan(0)
       // `0016_user_preferences.sql` and `0017_scheduler_instances.sql` are each one
@@ -645,7 +658,8 @@ if (target === null) {
       expect(files.indexOf('0034_task_notifications.sql')).toBeLessThan(
         files.indexOf('0035_drop_sessions_root_idx.sql'),
       )
-      expect(await migrate(db)).toEqual(files)
+      // The bootstrap run recorded every file, so the next boot is the fast path again.
+      expect(await migrate(db)).toEqual([])
 
       const { store, session } = await seeded()
       expect(await store.getSession(session.id, { ownerId: OWNER_A })).toEqual(session)
@@ -789,8 +803,11 @@ if (target === null) {
         )
       `.execute(db)
 
-      // The runner re-runs every file on every `migrate()` call, so this applies the backfill
-      // to the row above — which is exactly what a deploy of #93 does to a real database.
+      // Emptying the ledger makes this a database migrated by the old runner: the next
+      // `migrate()` runs every file once more, which is what applies the backfill to the row
+      // above — exactly what a deploy of #93 does to a real database, and what the one-time
+      // bootstrap boot after this change does to every existing one.
+      await sql`delete from schema_migrations`.execute(db)
       await migrate(db)
 
       const session = await store.getSession(legacyId, { ownerId: OWNER_A })
@@ -840,8 +857,10 @@ if (target === null) {
       `.execute(db)
       expect(before.rows[0]).toEqual({ root_session_id: null, interactive: true })
 
-      // The runner re-runs every file on every `migrate()` call, so this applies 0032's
-      // backfill to the row above — which is what a deploy of #340 does to a real database.
+      // Emptying the ledger makes this a database migrated by the old runner, so `migrate()`
+      // runs every file once more and applies 0032's backfill to the row above — what a deploy
+      // of #340 does to a real database, and what the bootstrap boot does once.
+      await sql`delete from schema_migrations`.execute(db)
       await migrate(db)
 
       const session = await store.getSession(legacyId, { ownerId: OWNER_A })
@@ -982,6 +1001,324 @@ if (target === null) {
     })
   })
 
+  // ------------------------------------------------------ the ledger and its locks
+
+  describe('migrate(): the ledger, bootstrap and bounded locks (#378, PR 3/6)', () => {
+    it('applies and records every file on a fresh database, then takes the fast path', async () => {
+      const target = await migrationSchema('fresh')
+      try {
+        const expected = await migrationFiles()
+        expect(await migrate(target.db)).toEqual(expected)
+
+        const ledger = await sql<{ file: string }>`
+          select file from schema_migrations order by file
+        `.execute(target.db)
+        expect(ledger.rows.map((row) => row.file)).toEqual(expected)
+
+        // The schema really is there: the newest table, and a column and index from the tip of
+        // the stack. A ledger row with no table behind it would be the failure this guards.
+        const objects = await sql<{
+          modes: string | null
+          description: string | null
+          notifications: string | null
+        }>`
+          select
+            to_regclass('modes')::text as modes,
+            to_regclass('events_task_notification_source_key_idx')::text as notifications,
+            (select column_name
+               from information_schema.columns
+              where table_schema = current_schema()
+                and table_name = 'modes'
+                and column_name = 'subagent_description') as description
+        `.execute(target.db)
+        expect(objects.rows[0]).toEqual({
+          modes: 'modes',
+          description: 'subagent_description',
+          notifications: 'events_task_notification_source_key_idx',
+        })
+
+        // Every file is recorded, so a boot has nothing to do — and, below, takes no lock.
+        expect(await migrate(target.db)).toEqual([])
+      } finally {
+        await target.dispose()
+      }
+    })
+
+    it('takes no lock on an application table when the ledger is complete', async () => {
+      const target = await migrationSchema('fastpath')
+      try {
+        await migrate(target.db)
+
+        // Hold the strongest lock on `events` in another connection, as a streaming turn's
+        // append and an old runner's `create index if not exists` would contend. If the fast
+        // path executed any file, its first statement against `events` would wait here — and
+        // the old runner had no `lock_timeout`, so it would wait for as long as the lock is
+        // held. A boot must not even ask.
+        const holder = await target.pool.connect()
+        try {
+          await holder.query('begin')
+          await holder.query('lock table events in access exclusive mode')
+
+          const startedAt = Date.now()
+          const applied = await Promise.race([
+            migrate(target.db, { lockTimeoutMs: 2_000 }),
+            pause(8_000).then(() => {
+              throw new Error('migrate() waited on the events lock the ledger should avoid')
+            }),
+          ])
+          expect(applied).toEqual([])
+          expect(Date.now() - startedAt).toBeLessThan(2_000)
+
+          // The fast path held nothing on `events` of its own: the one lock in `pg_locks` for
+          // this schema's table is the holder's.
+          const locks = await sql<{ held: number }>`
+            select count(*)::int as held
+              from pg_locks
+             where relation = to_regclass('events')
+               and mode = 'AccessExclusiveLock'
+          `.execute(target.db)
+          expect(locks.rows[0]?.held).toBe(1)
+        } finally {
+          await holder.query('rollback')
+          holder.release()
+        }
+      } finally {
+        await target.dispose()
+      }
+    })
+
+    it('bootstraps a database the old runner migrated: every table, no ledger', async () => {
+      const target = await migrationSchema('bootstrap')
+      try {
+        const expected = await migrationFiles()
+        await migrate(target.db)
+
+        // The old runner left no record at all. An empty ledger is exactly that database:
+        // every table is in place and nothing says which files built them.
+        await sql`delete from schema_migrations`.execute(target.db)
+        expect(await migrate(target.db)).toEqual(expected)
+
+        const ledger = await sql<{ file: string }>`
+          select file from schema_migrations order by file
+        `.execute(target.db)
+        expect(ledger.rows.map((row) => row.file)).toEqual(expected)
+
+        // The one boot that still takes the locks left a usable schema behind, and the next
+        // boot is the fast path.
+        await sql`
+          insert into scheduler_instances (instance_id, last_seen)
+          values ('bootstrap-check', now())
+        `.execute(target.db)
+        const instances = await sql<{ instance_id: string }>`
+          select instance_id from scheduler_instances
+        `.execute(target.db)
+        expect(instances.rows).toEqual([{ instance_id: 'bootstrap-check' }])
+        expect(await migrate(target.db)).toEqual([])
+      } finally {
+        await target.dispose()
+      }
+    })
+
+    it('runs only a file the ledger does not name', async () => {
+      const target = await migrationSchema('newfile')
+      try {
+        await migrate(target.db)
+
+        await withMigrationDir(
+          '0036_migration_probe.sql',
+          'create table if not exists migration_probe (id integer primary key);',
+          async (directory) => {
+            expect(await migrate(target.db, { migrationsDir: directory })).toEqual([
+              '0036_migration_probe.sql',
+            ])
+            const probe = await sql<{ table: string | null }>`
+              select to_regclass('migration_probe')::text as table
+            `.execute(target.db)
+            expect(probe.rows[0]?.table).toBe('migration_probe')
+            // The old files are still recorded, so a second boot runs none of them.
+            expect(await migrate(target.db, { migrationsDir: directory })).toEqual([])
+          },
+        )
+      } finally {
+        await target.dispose()
+      }
+    })
+
+    it('times out, retries, and fails the boot clearly when a lock never clears', async () => {
+      const target = await migrationSchema('blocked')
+      try {
+        await migrate(target.db)
+
+        await withMigrationDir(
+          '0036_blocked.sql',
+          'alter table events add column if not exists migration_blocked boolean;',
+          async (directory) => {
+            const holder = await target.pool.connect()
+            try {
+              await holder.query('begin')
+              await holder.query('lock table events in access exclusive mode')
+
+              const error = await thrownBy(() =>
+                migrate(target.db, {
+                  migrationsDir: directory,
+                  lockTimeoutMs: 100,
+                  maxAttempts: 2,
+                  retryBackoffMs: 10,
+                }),
+              )
+              expect(error).toBeInstanceOf(Error)
+              const message = (error as Error).message
+              expect(message).toContain('0036_blocked.sql')
+              expect(message).toMatch(/lock timeout/u)
+              expect(message).toMatch(/2 of 2 attempt/u)
+              expect(message).toContain('SQLSTATE 55P03')
+
+              // The failed transaction rolled the schema and the ledger back together: the
+              // column is not there, and the file is still pending.
+              const column = await sql<{ present: number }>`
+                select count(*)::int as present
+                  from information_schema.columns
+                 where table_schema = current_schema()
+                   and table_name = 'events'
+                   and column_name = 'migration_blocked'
+              `.execute(target.db)
+              expect(column.rows[0]?.present).toBe(0)
+              const pending = await sql<{ file: string }>`
+                select file from schema_migrations where file = '0036_blocked.sql'
+              `.execute(target.db)
+              expect(pending.rows).toEqual([])
+            } finally {
+              await holder.query('rollback')
+              holder.release()
+            }
+
+            // With the lock gone, the same file applies, once.
+            expect(
+              await migrate(target.db, {
+                migrationsDir: directory,
+                lockTimeoutMs: 2_000,
+                maxAttempts: 1,
+              }),
+            ).toEqual(['0036_blocked.sql'])
+            const column = await sql<{ present: number }>`
+              select count(*)::int as present
+                from information_schema.columns
+               where table_schema = current_schema()
+                 and table_name = 'events'
+                 and column_name = 'migration_blocked'
+            `.execute(target.db)
+            expect(column.rows[0]?.present).toBe(1)
+          },
+        )
+      } finally {
+        await target.dispose()
+      }
+    })
+
+    it('succeeds when the lock clears between attempts', async () => {
+      const target = await migrationSchema('retry')
+      try {
+        await migrate(target.db)
+
+        await withMigrationDir(
+          '0036_retried.sql',
+          'alter table events add column if not exists migration_retried boolean;',
+          async (directory) => {
+            const holder = await target.pool.connect()
+            await holder.query('begin')
+            await holder.query('lock table events in access exclusive mode')
+
+            // Attempt one times out at 100 ms; the second attempt is scheduled a backoff later.
+            // Release the lock in between, and the whole transaction runs then.
+            const pending = migrate(target.db, {
+              migrationsDir: directory,
+              lockTimeoutMs: 100,
+              maxAttempts: 10,
+              retryBackoffMs: 100,
+            })
+            await pause(150)
+            await holder.query('rollback')
+            holder.release()
+
+            await expect(pending).resolves.toEqual(['0036_retried.sql'])
+          },
+        )
+      } finally {
+        await target.dispose()
+      }
+    })
+  })
+
+  /** The SQL files this package ships, in the order `migrate()` applies them. */
+  function migrationFiles(): Promise<string[]> {
+    return readdir(migrationsDirectory()).then((names) =>
+      names.filter((name) => name.endsWith('.sql')).sort(),
+    )
+  }
+
+  /** The `migrations/` directory beside the package, from either `src/` or `dist/`. */
+  function migrationsDirectory(): string {
+    return fileURLToPath(new URL('../../migrations/', import.meta.url))
+  }
+
+  /**
+   * A database of its own for one migration test: a schema on the shared server, reached by a
+   * pool whose `search_path` is that schema. Every migration is unqualified SQL, so this is a
+   * whole separate database as far as the tables, indexes and the ledger are concerned — and it
+   * costs nothing to create or drop, unlike a database per test.
+   */
+  async function migrationSchema(label: string): Promise<{
+    readonly db: Kysely<PostgresSchema>
+    readonly pool: Pool
+    dispose(): Promise<void>
+  }> {
+    migrationSchemas += 1
+    const name = `migrate_test_${label}_${process.pid}_${migrationSchemas}`.toLowerCase()
+    await sql`create schema ${sql.id(name)}`.execute(db)
+    const schemaPool = new Pool({
+      connectionString,
+      max: 2,
+      options: `-c search_path=${name}`,
+    })
+    const schemaDb = new Kysely<PostgresSchema>({
+      dialect: new PostgresDialect({ pool: schemaPool }),
+    })
+    return {
+      db: schemaDb,
+      pool: schemaPool,
+      dispose: async () => {
+        await schemaDb.destroy()
+        await sql`drop schema ${sql.id(name)} cascade`.execute(db)
+      },
+    }
+  }
+
+  /**
+   * A copy of the shipped migrations plus one extra file, for the tests that add a migration
+   * the ledger has never seen. `migrate()` takes the directory as an option.
+   */
+  async function withMigrationDir(
+    name: string,
+    contents: string,
+    work: (directory: string) => Promise<void>,
+  ): Promise<void> {
+    const directory = await mkdtemp(join(tmpdir(), 'openharness-migrations-'))
+    try {
+      for (const file of await migrationFiles()) {
+        await copyFile(join(migrationsDirectory(), file), join(directory, file))
+      }
+      await writeFile(join(directory, name), contents, 'utf8')
+      await work(directory)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  }
+
+  /** Wait for `ms`; the lock tests need the middle of a retry's backoff, not a condition. */
+  function pause(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
   /** The store a test works with: a clock it can move, and one seeded session. */
   async function seeded(clock: TestClock = createTestClock(START_MS)): Promise<{
     store: ReturnType<typeof createPostgresSessionStore>
@@ -1080,7 +1417,11 @@ if (target === null) {
     // preferences cannot leak into the next (#111), `user_tool_settings` so one test's tool
     // choices cannot (#307), `mcp_servers` and `mcp_oauth_states` so one test's remote MCP
     // servers and their pending OAuth flows cannot (#303, X10; #311), and `scheduler_instances`
-    // so one test's memberships cannot (#122).
+    // so one test's memberships cannot (#122). `schema_migrations` is deliberately *not* here:
+    // it records the schema, not data, and truncating it would tell the next `migrate()` that a
+    // database with every table is fresh (the bootstrap boot, once per database, is the price
+    // of not trusting a heuristic). A test that means to simulate the old runner drops it
+    // explicitly, which is also what proves that path (#378, PR 3/6).
     await sql`truncate table
       events, event_claims, event_supersessions, sessions, agents, modes, partition_leases,
       scheduler_instances, provider_credentials, user_preferences, user_tool_settings,

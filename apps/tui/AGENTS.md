@@ -1065,6 +1065,15 @@ would re-render the transcript with it. A retrying turn says so here instead of 
 line of its own. The rules, the palette and the metadata line's formats are
 [`docs/status.md`](./docs/status.md).
 
+**A stalled turn says so (#378, P4).** `ChatViewState.lastEventAt` is when the last streamed
+event was folded in (arrival time, not `processed_at`) and `ChatViewState.reconnecting` is what
+the client's stream loop reports through `onConnection`. The status field reads them as the web
+row does: **Waiting for the server…** after 15 s with no event (`DEFAULT_STALL_MS`, the same
+number and the same client function), or **Reconnecting…** as soon as the loop knows the
+connection dropped. A reconnect outranks a summary, a compaction and a retry; the quiet window
+is outranked by those (the server is saying what it is doing) but outranks plain `running`. Both
+disappear when an event arrives or the turn ends.
+
 ### Terminal hygiene
 
 Ink restores raw mode and the cursor when it unmounts, and the CLI unmounts on every path out:

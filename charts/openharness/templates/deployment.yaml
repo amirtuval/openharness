@@ -34,9 +34,10 @@ spec:
         {{- include "openharness.labels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "openharness.serviceAccountName" . }}
-      # Longer than the server's drain timeout (OPENHARNESS_DRAIN_TIMEOUT_MS, 5s by default) and
-      # than the load balancer's connection draining, so SIGTERM has time to finish the turns in
-      # flight and an in-place migration has time to finish too.
+      # Longer than the server's drain timeout (OPENHARNESS_DRAIN_TIMEOUT_MS, 40s by default) and
+      # than the load balancer's connection draining, so SIGTERM has time to finish the step in
+      # flight and hand the rest off, and an in-place migration has time to finish too. The
+      # defaults are one budget: 60 (grace) > 45 (draining) > 40 (drain).
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
