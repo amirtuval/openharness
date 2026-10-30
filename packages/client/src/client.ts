@@ -6,6 +6,7 @@ import {
 } from '@openharness/protocol'
 import type {
   EventSeq,
+  MessageSkill,
   ModeId,
   ModelConfig,
   ReasoningEffort,
@@ -32,6 +33,7 @@ import {
   sessionEventsPath,
   type SessionsResource,
 } from './resources/sessions'
+import { createSkillsResource, type SkillsResource } from './resources/skills'
 import { createToolsResource, type ToolsResource } from './resources/tools'
 import { createUsageResource, type UsageResource } from './resources/usage'
 
@@ -117,6 +119,23 @@ export interface SendMessageOptions extends RequestOptions {
    * {@link TranscriptMessage.position} carries for a message the client already has.
    */
   rewindTo?: EventSeq | undefined
+  /**
+   * The skill this message invokes, when it is a slash command (epic #349, K7).
+   *
+   * `/release-notes v1.2` is an ordinary message whose **text** is what the reader typed, with
+   * `{ name: 'release-notes', arguments: 'v1.2' }` beside it: the log records the command as it
+   * was run, and the brain loads that skill's instructions into the turn, substituting the
+   * arguments for `$ARGUMENTS`. A message with no `skill` is a message like any other.
+   *
+   * The value comes from `@openharness/client`'s `invocationSkill` over
+   * `parseSlashCommand(text, commands)` — so both frontends send the same field for the same
+   * line. A built-in command (`/compact`)
+   * carries none: it is a client action, not a skill, and is never sent as a message.
+   *
+   * The server refuses the invocation (400 `invalid_request_error`) when the skill is unknown,
+   * off, or `user-invocable: false`, storing nothing.
+   */
+  skill?: MessageSkill | undefined
 }
 
 /**
@@ -208,6 +227,17 @@ export interface Client {
    */
   readonly mcpServers: McpServersResource
 
+  /**
+   * The caller's own imported skills (epic #349, K4/K5; the screens are #353 and #354).
+   *
+   * `skills.list/get/file/update/delete` are `/v1/me/skills`: a skill is a snapshot of a folder
+   * of files taken from a public git repository, per user, and another user's is a 404.
+   * `previewImport`/`import` are the two steps of an import (K3) and `previewRefresh`/`refresh`
+   * the two of a by-hand refresh (K5) — both previewed first, both confirming the commit the
+   * preview resolved.
+   */
+  readonly skills: SkillsResource
+
   /** Signing in (the CLI's device flow) and signing out (epic #65, A6). */
   readonly auth: AuthResource
 
@@ -291,6 +321,7 @@ export function createClient(options: ClientOptions): Client {
     models: createModelsResource(transport),
     modes: createModesResource(transport),
     mcpServers: createMcpServersResource(transport),
+    skills: createSkillsResource(transport),
     tools: createToolsResource(transport),
     auth: createAuthResource(transport),
     preferences: createPreferencesResource(transport),
@@ -321,6 +352,9 @@ export function createClient(options: ClientOptions): Client {
               content: [{ type: 'text', text }],
               ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
               ...(messageOptions?.mode === undefined ? {} : { mode: messageOptions.mode }),
+              // A slash invocation rides the message it is (epic #349, K7): the text is what the
+              // reader typed, and this is the skill it names.
+              ...(messageOptions?.skill === undefined ? {} : { skill: messageOptions.skill }),
               ...(messageOptions?.reasoningEffort === undefined
                 ? {}
                 : { reasoning_effort: messageOptions.reasoningEffort }),

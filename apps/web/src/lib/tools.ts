@@ -1,4 +1,4 @@
-import type { ModeToolOverride, ToolPermission } from '@openharness/protocol'
+import type { ModeItemDefault, ModeToolOverride, ToolPermission } from '@openharness/protocol'
 
 /**
  * The tool settings a form offers, in one place (epic #303, X4; #307; the screen is #308).
@@ -13,9 +13,11 @@ import type { ModeToolOverride, ToolPermission } from '@openharness/protocol'
  *   setting" — which a two-state switch cannot express. The two helpers read a choice out of an
  *   override and put one back, so the mode form never writes the patch inline.
  *
- * Only the `builtin` half is offered here: a mode's `tools.mcp_servers` is a per-**server**
- * patch whose editor is #313, and {@link withModeToolChoice} carries it through a save
- * unchanged rather than dropping it with the patch it rebuilds.
+ * Three things a mode can override are offered through the same tri-state, one per granularity:
+ * a **built-in tool** by name ({@link modeToolChoice}), a remote **MCP server** by id
+ * ({@link modeMcpServerChoice}, #311/#313) and an imported **skill** by id
+ * ({@link modeSkillChoice}, epic #349 K8/#353). Each `with…` carries the other two through a
+ * save unchanged rather than dropping them with the patch it rebuilds.
  */
 
 /** One permission a form offers: the protocol's value and what it does. */
@@ -55,7 +57,7 @@ export type ModeToolChoice = 'follow' | 'on' | 'off'
  * @param name the tool's name
  */
 export function modeToolChoice(override: ModeToolOverride | null, name: string): ModeToolChoice {
-  const chosen = override?.builtin[name]
+  const chosen = override?.builtin?.[name]
   if (chosen === undefined) {
     return 'follow'
   }
@@ -68,12 +70,13 @@ export function modeToolChoice(override: ModeToolOverride | null, name: string):
  * A patch that ends up empty is returned as `null` rather than `{ builtin: {} }` — the two mean
  * the same thing to the server, and `null` is the reading a reader sees ("follow my settings").
  *
- * **The MCP half is carried through untouched** (#311, #312). `Mode.tools.mcp_servers` is a
- * per-server on/off patch, edited by {@link withModeMcpServerChoice}, so a mode a reader edits
- * here must keep whatever it already says about servers: the form writes back the whole `tools`
- * value, and rebuilding it from `builtin` alone would silently drop those choices on the next
- * save. A patch holding only `mcp_servers` is not empty — it is a mode that says something — so
- * it is returned as it stands rather than folded to `null`.
+ * **The other halves are carried through untouched** (#311, #312; #349 K8). `tools.mcp_servers`
+ * and `tools.skills` are per-server and per-skill on/off patches, edited by
+ * {@link withModeMcpServerChoice} and {@link withModeSkillChoice}, so a mode a reader edits here
+ * must keep what it already says about them: the form writes back the whole `tools` value, and
+ * rebuilding it from `builtin` alone would silently drop those choices on the next save. A patch
+ * holding only one of the other halves is not empty — it is a mode that says something — so it is
+ * returned as it stands rather than folded to `null`.
  *
  * @param override the mode's current `tools`
  * @param name the tool to set
@@ -138,24 +141,147 @@ export function withModeMcpServerChoice(
 }
 
 /**
- * Fold the two halves back into one override, or `null` when neither says anything.
+ * What a mode says about one of the reader's imported skills (epic #349, K8; #353).
+ *
+ * The same tri-state again, at **skill** granularity: a mode turns a whole skill on or off for
+ * the chats that follow it — the sibling of its `mcp_servers` patch, keyed by a `skl_` id — and
+ * a skill the patch does not name follows the reader's own `enabled` on the resource. There is
+ * no per-file or per-command switch: a skill is one thing.
+ *
+ * @param override the mode's `tools`, or `null` for a mode that says nothing
+ * @param skillId the `skl_` id
+ */
+export function modeSkillChoice(
+  override: ModeToolOverride | null,
+  skillId: string,
+): ModeToolChoice {
+  const patch: Record<string, boolean> | undefined = override?.skills
+  const chosen = patch?.[skillId]
+  if (chosen === undefined) {
+    return 'follow'
+  }
+  return chosen ? 'on' : 'off'
+}
+
+/**
+ * The override a skill's choice makes, keeping every other choice exactly as it was (K8).
+ *
+ * @param override the mode's current `tools`
+ * @param skillId the skill to set
+ * @param choice what to set it to
+ */
+export function withModeSkillChoice(
+  override: ModeToolOverride | null,
+  skillId: string,
+  choice: ModeToolChoice,
+): ModeToolOverride | null {
+  const skills: Record<string, boolean> = { ...(override?.skills ?? {}) }
+  if (choice === 'follow') {
+    delete skills[skillId]
+  } else {
+    skills[skillId] = choice === 'on'
+  }
+  return rebuild(
+    override,
+    { ...(override?.builtin ?? {}) },
+    { ...(override?.mcp_servers ?? {}) },
+    skills,
+  )
+}
+
+/** The three sections a mode's editor has a "not listed below" default for (epic #349, B8). */
+export type ModeSection = 'builtin' | 'mcp_servers' | 'skills'
+
+/** The mode's default for one section — `follow` when it has none (epic #349, B8). */
+export function modeSectionDefault(
+  override: ModeToolOverride | null,
+  section: ModeSection,
+): ModeItemDefault {
+  return (
+    override?.[
+      section === 'builtin'
+        ? 'builtin_default'
+        : section === 'mcp_servers'
+          ? 'mcp_servers_default'
+          : 'skills_default'
+    ] ?? 'follow'
+  )
+}
+
+/**
+ * The override a section default makes, keeping every map and every other default exactly as
+ * it was (epic #349, B8).
+ *
+ * `follow` is the absence of the field — the value every mode created before this setting
+ * reads as — so choosing it removes the key rather than storing `'follow'`. An override that
+ * says nothing at all afterwards folds back to `null`.
+ */
+export function withModeSectionDefault(
+  override: ModeToolOverride | null,
+  section: ModeSection,
+  value: ModeItemDefault,
+): ModeToolOverride | null {
+  const defaults: Partial<
+    Pick<ModeToolOverride, 'builtin_default' | 'mcp_servers_default' | 'skills_default'>
+  > = {
+    builtin_default: override?.builtin_default,
+    mcp_servers_default: override?.mcp_servers_default,
+    skills_default: override?.skills_default,
+  }
+  // `undefined` is written rather than the key deleted: `rebuild` uses the key's **presence**
+  // to tell "the caller decided this" from "the caller said nothing", and deleting would let
+  // the stored value fall back in — which is exactly what choosing Follow must undo.
+  defaults[`${section}_default`] = value === 'follow' ? undefined : value
+  return rebuild(
+    override,
+    { ...(override?.builtin ?? {}) },
+    { ...(override?.mcp_servers ?? {}) },
+    { ...(override?.skills ?? {}) },
+    defaults,
+  )
+}
+
+/**
+ * Fold the halves back into one override, or `null` when none of them says anything.
  *
  * A patch that ends up empty is `null` — the reading a reader sees ("follow my settings") and
- * the value the server treats as no override. Otherwise the `builtin` map is always written,
- * empty included, because it is the one required field of the wire's override: a mode that says
- * something about servers and nothing about tools is `{ builtin: {}, mcp_servers: { … } }`. An
- * empty `mcp_servers` is left out altogether — it means the same thing as none, and the patch a
- * reader's choice produces should be the smallest one that says it.
+ * the value the server treats as no override (epic #349, B8 made `builtin` optional, so a mode
+ * that says something only about servers is `{ mcp_servers: { … } }`). An empty map is left out
+ * altogether — it means the same thing as none, and the patch a reader's choice produces
+ * should be the smallest one that says it. A section default that is not `follow` is part of
+ * what the patch says, so a mode with one and no entries is still not `null`.
  */
 function rebuild(
   override: ModeToolOverride | null,
   builtin: Record<string, boolean>,
   mcpServers: Record<string, boolean> = override?.mcp_servers ?? {},
+  skills: Record<string, boolean> = override?.skills ?? {},
+  defaults: Partial<
+    Pick<ModeToolOverride, 'builtin_default' | 'mcp_servers_default' | 'skills_default'>
+  > = {},
 ): ModeToolOverride | null {
-  if (Object.keys(builtin).length === 0 && isEmpty(mcpServers)) {
-    return null
+  // Presence, not truthiness: a key the caller wrote as `undefined` means "clear this default",
+  // while a key the caller did not write at all means "keep the stored one".
+  const taken = (key: keyof typeof defaults, stored: ModeItemDefault | undefined) =>
+    Object.prototype.hasOwnProperty.call(defaults, key) ? defaults[key] : stored
+  const builtinDefault = taken('builtin_default', override?.builtin_default)
+  const mcpDefault = taken('mcp_servers_default', override?.mcp_servers_default)
+  const skillsDefault = taken('skills_default', override?.skills_default)
+  const next: ModeToolOverride = {
+    ...(isEmpty(builtin) ? {} : { builtin }),
+    ...(isEmpty(mcpServers) ? {} : { mcp_servers: mcpServers }),
+    ...(isEmpty(skills) ? {} : { skills }),
+    ...(builtinDefault === undefined || builtinDefault === 'follow'
+      ? {}
+      : { builtin_default: builtinDefault }),
+    ...(mcpDefault === undefined || mcpDefault === 'follow'
+      ? {}
+      : { mcp_servers_default: mcpDefault }),
+    ...(skillsDefault === undefined || skillsDefault === 'follow'
+      ? {}
+      : { skills_default: skillsDefault }),
   }
-  return isEmpty(mcpServers) ? { builtin } : { builtin, mcp_servers: mcpServers }
+  return Object.keys(next).length === 0 ? null : next
 }
 
 /** Whether a record holds no entries at all. */

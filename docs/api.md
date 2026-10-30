@@ -140,7 +140,7 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                                                                                                                                     |
 | `GET`    | `/v1/me/skills`                                 | list the caller's imported skills, oldest first (no cursor: at most 50)                                                                                                                                                                          |
 | `GET`    | `/v1/me/skills/{skill_id}`                      | read one skill, with its `SKILL.md`'s content                                                                                                                                                                                                    |
-| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill, with its content and size                                                                                                                                                                                              |
+| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill: its content, size and `encoding` (`utf8`, or `base64` for a binary file)                                                                                                                                               |
 | `POST`   | `/v1/me/skills/{skill_id}`                      | switch a skill on or off (`enabled`); the snapshot itself is not editable                                                                                                                                                                        |
 | `DELETE` | `/v1/me/skills/{skill_id}`                      | delete a skill and its whole snapshot; `204`                                                                                                                                                                                                     |
 | `POST`   | `/v1/me/skills/import/preview`                  | read a public repository and answer the candidate skills; stores nothing                                                                                                                                                                         |
@@ -164,41 +164,76 @@ The log is the source of truth, and `seq` is the order it happened in: `1`, `2`,
 session. It is also the SSE `id` and the resume position, so a client that reconnects with
 `last-event-id: 7` gets `8` next — never `7` twice, never a gap.
 
-| event                              | who writes it | what it means                                                                           |
-| ---------------------------------- | ------------- | --------------------------------------------------------------------------------------- |
-| `user.message`                     | the client    | a message, until the brain claims it                                                    |
-| `user.interrupt`                   | the client    | stop the turn in flight                                                                 |
-| `user.tool_confirmation`           | the server    | // extension: the user answered a call that was waiting on them (#309)                  |
-| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                      |
-| `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                         |
-| `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)          |
-| `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)     |
-| `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)         |
-| `agent.opaque_content`             | the brain     | // extension: the parts of a step only its own provider can read back (#334)            |
-| `session.status_running`           | the brain     | a turn started (also after a retry)                                                     |
-| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                        |
-| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                     |
-| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is    |
-| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at                 |
-| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                                  |
-| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                     |
-| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                     |
-| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage      |
-| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)       |
-| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)                 |
-| `session.compact`                  | the server    | // extension: the user asked for a manual compaction, `/compact [instructions]` (#283)  |
-| `session.compaction`               | the brain     | // extension: what came of it — `summarized`, `nothing_to_summarize` or `failed` (#283) |
-| `session.task_started`             | the server    | // extension: a background task was started and is not waited for (epic #340, #343)     |
-| `session.task_status`              | the server    | // extension: what a background task is doing — running, idle, failed, stopped (#343)   |
-| `session.task_notification`        | the server    | // extension: **queued**: what a task produced, for the parent model (epic #340, #343)  |
-| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)                |
-| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)          |
+| event                              | who writes it | what it means                                                                                      |
+| ---------------------------------- | ------------- | -------------------------------------------------------------------------------------------------- |
+| `user.message`                     | the client    | a message, until the brain claims it                                                               |
+| `user.interrupt`                   | the client    | stop the turn in flight                                                                            |
+| `user.tool_confirmation`           | the server    | // extension: the user answered a call that was waiting on them (#309)                             |
+| `agent.message`                    | the brain     | a reply, under the `sevt_` id its chunks announced                                                 |
+| `agent.tool_use`                   | the brain     | the model asked for a tool — its own id is the call's id (#304)                                    |
+| `agent.tool_result`                | the brain     | what the call produced, or why it did not — always written by the brain (#304)                     |
+| `agent.mcp_tool_use`               | the brain     | the model asked for a remote MCP server's tool — its own id is the call's id (#312)                |
+| `agent.mcp_tool_result`            | the brain     | what that call produced, or why it did not — always written by the brain (#312)                    |
+| `agent.opaque_content`             | the brain     | // extension: the parts of a step only its own provider can read back (#334)                       |
+| `session.status_running`           | the brain     | a turn started (also after a retry)                                                                |
+| `session.status_idle`              | the brain     | the turn ended; the session is waiting for input                                                   |
+| `session.status_rescheduled`       | the brain     | a transient failure; it is retrying                                                                |
+| `session.error`                    | the brain     | what went wrong, and whether it is retrying — `missing_provider_credential` never is               |
+| `span.model_request_start`         | the brain     | a model request began, the messages it claims, and the effort it ran at                            |
+| `span.model_request_end`           | the brain     | it finished — usage, any error, the interrupts it ends                                             |
+| `event_start`                      | the brain     | a reply started streaming — a stored chunk since D9                                                |
+| `event_delta`                      | the brain     | a streamed fragment of it — a stored chunk since D9                                                |
+| `session.usage`                    | the brain     | the session's running token totals, per model, after a request that reported usage                 |
+| `session.context_summary`          | the brain     | // extension: older history replaced for the model by a summary (epic #277, #278)                  |
+| `session.context_summary_progress` | the brain     | // extension: a summary is being written — which pass is running (#279)                            |
+| `session.compact`                  | the server    | // extension: the user asked for a manual compaction, `/compact [instructions]` (#283)             |
+| `session.compaction`               | the brain     | // extension: what came of it — `summarized`, `nothing_to_summarize` or `failed` (#283)            |
+| `session.skill_loaded`             | the brain     | // extension: the instructions a slash invocation loaded — the body the model was given (#349, K7) |
+| `session.task_started`             | the server    | // extension: a background task was started and is not waited for (epic #340, #343)                |
+| `session.task_status`              | the server    | // extension: what a background task is doing — running, idle, failed, stopped (#343)              |
+| `session.task_notification`        | the server    | // extension: **queued**: what a task produced, for the parent model (epic #340, #343)             |
+| `session.rewind`                   | the server    | // extension: the session restarts from an earlier `user.message` (#238)                           |
+| `session.deleted`                  | the server    | stream-only: the session was deleted; sent last, then the stream closes (#111)                     |
 
 A `user.message` may also carry a `model` (`{ "id": "provider/model" }`): it switches the
 model the session runs from that message on, and the session keeps running it until another
 message changes it (epic #116, U3). The switch is stored on the message — the log stays the
 source of truth — and each `span.model_request_start` still records the model its request
 actually used.
+
+A `user.message` may also carry a `skill` — `{ "name": "release-notes", "arguments": "v1.2" }`
+— which is how a skill is run as a slash command (epic #349, K7): `/release-notes v1.2`. The
+message's `content` stays **what the user typed**, so a transcript shows the command and a
+client that knows nothing of skills renders it as the text it is. The server refuses, with a
+`400` and nothing stored, a name that is not one of the caller's skills in force for the chat
+(or a mode turns off), and one whose frontmatter says `user-invocable: false`; a
+`disable-model-invocation: true` skill is exactly the kind the user runs by hand.
+
+```json
+{
+  "type": "user.message",
+  "content": [{ "type": "text", "text": "/release-notes v1.2" }],
+  "skill": { "name": "release-notes", "arguments": "v1.2" }
+}
+```
+
+When the brain first handles that message it writes a `session.skill_loaded` naming it, whose
+`content` is the skill's `SKILL.md` **body** with the arguments substituted — every
+`$ARGUMENTS` replaced, or the arguments appended after a body that has none. The log therefore
+holds exactly what the model was given, and from then on the chat is built from that event and
+never from the snapshot: refreshing a skill or editing it changes what the _next_ `/name` loads
+and nothing about a conversation that already ran.
+
+```json
+{
+  "type": "session.skill_loaded",
+  "message_seq": 7,
+  "name": "release-notes",
+  "skill_id": "skl_01J…",
+  "commit_sha": "9f2c1b4…",
+  "content": "Write the release notes for v1.2."
+}
+```
 
 ### Background tasks
 
@@ -1215,29 +1250,39 @@ stored. A mode is stored even when its model is not usable yet: the key may come
 
 **A mode may also carry a tool override.** `Mode.tools` is
 `{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false }, "skills": { "<skl_…>":
-true } }` or `null`: an on/off patch applied over the user's own choices, so a `deep` mode can
-insist on `web_search`, do without `todo_write`, leave `notes` (a remote MCP server) out of
-every chat that follows it, and bring its own `release-notes` skill with it. It decides **which**
-tools, **which MCP servers** and **which skills** a chat has, never what a call to one may do —
-permissions are the user's (see
+true } }` (each map optional) or `null`: an on/off patch applied over the user's own choices, so
+a `deep` mode can insist on `web_search`, do without `todo_write`, leave `notes` (a remote MCP
+server) out of every chat that follows it, and bring its own `release-notes` skill with it. It
+decides **which** tools, **which MCP servers** and **which skills** a chat has, never what a
+call to one may do — permissions are the user's (see
 [Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)) — and never what a
 skill is.
 
 - **`builtin`** is keyed by tool name and patches the user's `/v1/me/tools` choices.
 - **`mcp_servers`** (epic #303, X10; #311) is a sibling key, keyed by a remote MCP server's
-  `mcps_` id, and patches the server's own `enabled` field — the user's default. A server the map
-  does not name follows the user; a mode that names one turns it on or off for the chats that
-  follow it, live, from the next request on. It is **server granularity, never per MCP tool**:
-  which of a server's tools a request offers, and under which permission, is the server's own
-  listing and the user's settings, not a mode's.
+  `mcps_` id, and patches the server's own `enabled` field — the user's default. It is **server
+  granularity, never per MCP tool**: which of a server's tools a request offers, and under which
+  permission, is the server's own listing and the user's settings, not a mode's.
 - **`skills`** (epic #349, K8) is the third sibling key, keyed by a skill's `skl_` id, and
   patches the skill's own `enabled` field. A subagent type (epic #340) is a mode, so this is
   what gives one its own skills.
+- **`builtin_default`, `mcp_servers_default` and `skills_default`** (epic #349, B8) say what an
+  item the corresponding map does **not** name does. Each is `"follow"`, `"off"` or `"on"`,
+  optional, and **absent means `"follow"`** — the behaviour every existing mode and every newly
+  created one has. `"follow"` uses the user's own setting (a built-in tool's `/v1/me/tools`
+  choice, a server's `enabled`, a skill's `enabled`); `"off"` makes the map an **allowlist**
+  (only the items it turns on are on, so an item added later stays off in that mode); `"on"`
+  turns every item on except the ones the map turns off, **even items the user turned off
+  globally**. An explicit map entry always wins. A default is never a permission, and it cannot
+  undo a hard rule: `ask_user` is still absent from a non-interactive child, the subagent tools a
+  depth does not offer are still absent, and a `disable-model-invocation` skill still stays out
+  of the model's listing.
 - **A mode naming a server or a skill the caller no longer has is simply ignored.** The mode
   routes store the maps as written and do not check the ids against what is present, so deleting
   an MCP server or a skill neither fails nor rewrites the modes that named it — the entry just
   matches nothing. The servers and skills in force for a request are resolved as _the user's
-  `enabled`, overridden by the mode_, per request.
+  `enabled`, overridden by the mode_, per request; the one shared rule per kind is
+  `builtinToolInForce`, `mcpServerInForce` and the protocol's `skillInForce`.
 
 **A mode with a description is a subagent type.** `Mode.subagent_description` (epic #340, S2;
 #342) is one short sentence — at most 500 characters — saying what the mode is **good for**, or
@@ -1504,7 +1549,11 @@ curl localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN"
 
 # Any other file, by its path — which may hold slashes.
 curl localhost:3000/v1/me/skills/skl_01J…/files/reference/tone.md -H "Authorization: Bearer $TOKEN"
-# → 200 {"path":"reference/tone.md","size":380,"content":"Be terse.\n"}
+# → 200 {"path":"reference/tone.md","size":380,"encoding":"utf8","content":"Be terse.\n"}
+
+# A file that is not text: the bytes, base64-encoded, and the original size in bytes.
+curl localhost:3000/v1/me/skills/skl_01J…/files/assets/icon.png -H "Authorization: Bearer $TOKEN"
+# → 200 {"path":"assets/icon.png","size":33,"encoding":"base64","content":"iVBORw0KGgo…"}
 
 # On or off. The snapshot is not editable: a new one comes from a refresh.
 curl -X POST localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN" \
@@ -1519,6 +1568,14 @@ curl -X DELETE localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer 
 comes with the single-skill read and any other file with its own. That keeps a listing of fifty
 skills one small answer whatever the snapshots hold, and it keeps the contents free to move to
 object storage later (K4) without a resource changing shape.
+
+**A file that is not text is stored losslessly, and says so.** A skill folder may ship an icon,
+a font or a `.docx`, and some of those bytes are not valid UTF-8 — or contain a NUL, which
+Postgres `text` refuses outright. The import detects such a file and stores its bytes
+base64-encoded; `encoding` is `utf8` or `base64`, and `size` is always the **original** byte
+length, so the K4 limits count the file rather than its base64 spelling. The `skill_read` tool
+answers a binary file with a marker naming its path and size instead of its content; `utf8` and
+`base64` are the only two spellings.
 
 **The format's three optional fields are honoured**, and the rest are stored and shown and
 otherwise ignored: `disable-model-invocation: true` is a command only the user runs,
@@ -1535,6 +1592,23 @@ imports racing for the last slot cannot both land.
 format requires it to match the folder's name, and a built-in slash command's name is
 **reserved** — `compact`, `new`, `model`, `mode`, `agents`, `skills` — because a built-in is a
 client action and never a skill (K7). A skill cannot be called `compact`.
+
+**The model can read a skill, and nothing runs.** A chat whose owner has a skill enabled is
+offered two tools (K6): `skill { "name": "release-notes" }` answers the skill's instructions —
+`SKILL.md` with its frontmatter removed — and the list of files the folder holds, and
+`skill_read { "name": "release-notes", "path": "reference/tone.md" }` answers one of them. A
+skill's scripts are files to read and never to execute, and the tool's own description says so.
+`skill`'s description **is** the listing: the names and descriptions of every skill the model
+may invoke, so a chat with none offers neither tool. A `disable-model-invocation: true` skill is
+left out of that listing and refused by both tools — only the user runs it, with `/name` — until
+the user **has** run it in the chat: the flag stops the model picking the skill on its own, and
+once `/name` has loaded its instructions the files those instructions name are readable. An
+unknown name answers the names there are, and an unknown path the files the skill holds.
+
+**A skill is the user's own instructions, not third-party data** (K10). Its text is framed to
+the model as the user's own request, and it cannot grant a permission: a skill's frontmatter may
+say anything — `allowed-tools` is stored and otherwise ignored — and what a tool call is
+evaluated under comes from the caller's own settings and the mode in force, never from a skill.
 
 **A skill is on when it is imported, and a mode may override which are on** (K8):
 `Mode.tools.skills` is an on/off map keyed by skill id, a sibling of `builtin` and

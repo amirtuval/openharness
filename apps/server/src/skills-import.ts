@@ -11,6 +11,7 @@ import {
 } from '@openharness/hands'
 import {
   MAX_SKILL_FILES,
+  MAX_SKILLS_PER_USER,
   SKILL_DESCRIPTION_MAX_LENGTH,
   SKILL_FILE_MAX_BYTES,
   SKILL_IMPORT_MESSAGES,
@@ -24,6 +25,7 @@ import {
   type RefreshSkillPreviewResponse,
   type Skill,
   type SkillFile,
+  type SkillFileEncoding,
   type SkillFrontmatter,
   type SkillId,
   type SkillImportFailure,
@@ -35,6 +37,7 @@ import {
 } from '@openharness/protocol'
 import {
   DuplicateSkillNameError,
+  SkillLimitReachedError,
   type SkillFileInput,
   type SkillSnapshotInput,
   type SkillStore,
@@ -189,6 +192,10 @@ export function createSkillImportService(options: SkillImportOptions): SkillImpo
       return await clone({
         url: location.url,
         ref: location.ref,
+        // Only the folder's own blobs are inflated: a repository's unrelated content — a
+        // multi-gigabyte asset beside the skill — is never read, and the clone's cumulative
+        // unpacked-byte cap bounds what under the path can cost (K4).
+        path: location.path,
         ...(options.allowPrivateUrls === true ? { allowPrivate: true } : {}),
         ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
@@ -211,7 +218,11 @@ export function createSkillImportService(options: SkillImportOptions): SkillImpo
     const stored: DiffableFile[] = []
     for (const file of skill.files) {
       const content = await options.skills.getFile(skill.id, { ownerId }, file.path)
-      stored.push({ path: file.path, content: content?.content ?? '' })
+      stored.push({
+        path: file.path,
+        content: content?.content ?? '',
+        encoding: content?.encoding ?? 'utf8',
+      })
     }
 
     const location = readStoredSource(skill.source)
@@ -294,11 +305,19 @@ export function createSkillImportService(options: SkillImportOptions): SkillImpo
           )
         }
       }
-      const taken = new Set((await options.skills.list({ ownerId })).map((skill) => skill.name))
+      const existing = await options.skills.list({ ownerId })
+      const taken = new Set(existing.map((skill) => skill.name))
       for (const candidate of picked) {
         if (taken.has(candidate.name)) {
           throw new DuplicateSkillNameError(ownerId, candidate.name)
         }
+      }
+      // Refuse the whole batch **before the first create**, rather than storing two of three
+      // and failing on the third: a user at 48 who picks three would otherwise get two, an
+      // error, and — on retry — two of the names already taken. The store's own lock still
+      // guards the race between this count and the writes (K4).
+      if (existing.length + picked.length > MAX_SKILLS_PER_USER) {
+        throw new SkillLimitReachedError(ownerId, MAX_SKILLS_PER_USER)
       }
 
       const stored: Skill[] = []
@@ -592,7 +611,14 @@ function discover(
     const own = files
       .filter((file) => (found.folder === '' ? true : isWithin(file.path, found.folder)))
       .filter((file) => found.folder !== '' || !nested.some((other) => isWithin(file.path, other)))
-      .map((file) => ({ path: relativeTo(found.folder, file.path), content: decode(file.content) }))
+      .map((file) => {
+        const decoded = decode(file.content)
+        return {
+          path: relativeTo(found.folder, file.path),
+          content: decoded.content,
+          encoding: decoded.encoding,
+        }
+      })
       .sort((left, right) => comparePaths(left.path, right.path))
 
     const skillMd = own.find((file) => file.path === SKILL_MD_FILENAME)?.content ?? ''
@@ -651,7 +677,9 @@ function discover(
       )
     }
 
-    const sizes = new Map(own.map((file) => [file.path, skillFileSize(file.content)]))
+    const sizes = new Map(
+      own.map((file) => [file.path, skillFileSize(file.content, file.encoding)]),
+    )
     const mdSize = sizes.get(SKILL_MD_FILENAME) ?? 0
     if (mdSize > SKILL_MD_MAX_BYTES) {
       problems.push(limitProblem(SKILL_MD_FILENAME, mdSize, SKILL_MD_MAX_BYTES))
@@ -732,7 +760,61 @@ function parseFrontmatter(text: string): Record<string, unknown> | null {
   if (end === -1) {
     return null
   }
-  return parseYamlBlock(lines.slice(1, end).join('\n'))
+  return parseFrontmatterBlock(lines.slice(1, end))
+}
+
+/** The field `argument-hint` at the start of its own line — the format's own spelling, top level. */
+const ARGUMENT_HINT_LINE = /^argument-hint\s*:/
+
+/**
+ * A frontmatter block as a mapping, with `argument-hint` kept as the file wrote it (K1).
+ *
+ * The Agent Skills format and Claude Code both spell an argument hint as a bracketed
+ * placeholder, and **neither is a YAML string**: `argument-hint: [version]` is a flow sequence,
+ * and `argument-hint: [pr-number] [priority]` is not valid YAML at all. The hint is free text
+ * the format only ever shows, so it is read off its own line (the text after the colon,
+ * trimmed) whenever YAML does not already answer with a plain string — and a block whose YAML
+ * fails **only** because of that line is read with the line set aside rather than refused, so a
+ * skill written for Claude Code imports unchanged. A value the file quoted (`"[version]"`) is a
+ * string already and is left to YAML, which is the one spelling that keeps its own quotes.
+ */
+function parseFrontmatterBlock(lines: readonly string[]): Record<string, unknown> | null {
+  const parsed = parseYamlBlock(lines.join('\n'))
+  if (parsed !== null) {
+    return withRawArgumentHint(parsed, lines)
+  }
+  // The YAML did not parse. It may be the one line the format's own bracket spelling made
+  // unparseable: read the block again without it, and only if the rest is a mapping has the
+  // failure been understood rather than papered over.
+  const hintIndex = lines.findIndex((line) => ARGUMENT_HINT_LINE.test(line))
+  if (hintIndex === -1) {
+    return null
+  }
+  const rest = parseYamlBlock(lines.filter((_, index) => index !== hintIndex).join('\n'))
+  if (rest === null) {
+    return null
+  }
+  const raw = lineValue(lines[hintIndex] ?? '')
+  return raw === null ? rest : { ...rest, 'argument-hint': raw }
+}
+
+/** A value YAML did not answer as a plain string is replaced by the text its line carried. */
+function withRawArgumentHint(
+  parsed: Record<string, unknown>,
+  lines: readonly string[],
+): Record<string, unknown> {
+  if (typeof parsed['argument-hint'] === 'string') {
+    return parsed
+  }
+  const line = lines.find((candidate) => ARGUMENT_HINT_LINE.test(candidate))
+  const raw = line === undefined ? null : lineValue(line)
+  return raw === null ? parsed : { ...parsed, 'argument-hint': raw }
+}
+
+/** The text after a frontmatter field's colon, trimmed, or `null` when it is empty. */
+function lineValue(line: string): string | null {
+  const value = line.slice(line.indexOf(':') + 1).trim()
+  return value === '' ? null : value
 }
 
 /** Parse a block of YAML, answering `null` for anything that is not a mapping. */
@@ -849,15 +931,31 @@ function relativeTo(folder: string, path: string): string {
 }
 
 /**
- * A blob as text.
+ * A blob as the snapshot must store it: text, or the bytes base64-encoded (K4).
  *
- * A `SKILL.md` or any other file of a skill that is not valid UTF-8 is not text this build can
- * store — a snapshot's contents are strings — so the bytes are decoded with a replacement
- * character rather than failing the whole candidate: what the user sees is the file with what
- * could not be read marked, and the size checks (K4) are computed on what is really stored.
+ * A skill folder may hold an icon, a font or a `.docx`, and a string cannot carry those
+ * faithfully — a NUL byte is legal UTF-8 but Postgres `text` refuses it outright
+ * (`invalid byte sequence for encoding "UTF8": 0x00`), and invalid UTF-8 decoded with
+ * replacement characters loses the file. So a blob is decoded **fatally**: valid UTF-8 with no
+ * NUL is `utf8` text, and anything else is `base64` of its exact bytes. NUL is checked
+ * separately because `TextDecoder` accepts it as a valid code point — it is a legal UTF-8
+ * sequence, just not one a text file holds.
+ *
+ * Detection rather than a file extension: the bytes are the authority, and a PNG renamed
+ * `.txt` still fails to decode. The format's own `SKILL.md` is text or the candidate's
+ * frontmatter check refuses it, which is what keeps a base64 `SKILL.md` from becoming one.
  */
-function decode(bytes: Uint8Array): string {
-  return new TextDecoder().decode(bytes)
+function decode(bytes: Uint8Array): { content: string; encoding: SkillFileEncoding } {
+  let text: string
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return { content: Buffer.from(bytes).toString('base64'), encoding: 'base64' }
+  }
+  if (text.includes('\u0000')) {
+    return { content: Buffer.from(bytes).toString('base64'), encoding: 'base64' }
+  }
+  return { content: text, encoding: 'utf8' }
 }
 
 /**

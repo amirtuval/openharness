@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { TimestampSchema } from '../common'
 import { SkillIdSchema } from '../ids'
+import { modeItemInForce, type ModeToolOverride } from './mode'
 import { UserIdSchema } from './user'
 
 /**
@@ -108,6 +109,171 @@ export const SKILL_DESCRIPTION_MAX_LENGTH = 1024
 export const SKILL_MD_FILENAME = 'SKILL.md'
 
 /**
+ * The most characters a slash invocation's arguments may carry (K7).
+ *
+ * The arguments ride the `user.message` as typed and are substituted into the body the model is
+ * given, so they are part of a request's size like anything else; the cap keeps a paste from
+ * becoming a message the protocol stores without bound. It is generous — a skill invocation is a
+ * sentence, not a document.
+ */
+export const SKILL_ARGUMENTS_MAX_LENGTH = 10_000
+
+/**
+ * The honoured frontmatter fields, as a `Skill` states them (epic #349, K1).
+ *
+ * Three of the format's fields change what a skill *is* to this build, and every consumer that
+ * has to know — the listing (K6), the `/` menu (K7), the settings screens (#353) — reads them
+ * through {@link skillSettingsOf} rather than off `frontmatter` itself, so "what does
+ * `user-invocable` default to?" has one answer. The rest of the frontmatter is stored and shown
+ * and otherwise ignored.
+ */
+export interface SkillSettings {
+  /**
+   * `disable-model-invocation: true`: a command only the **user** runs (K6).
+   *
+   * The model is not told the skill exists — it is out of the listing — and `skill` refuses it
+   * if the model asks for it anyway by name.
+   */
+  readonly disableModelInvocation: boolean
+  /**
+   * `user-invocable: false`: a skill only the **model** uses (K7), refused as a slash command.
+   *
+   * Absent means `true`: a skill is something its user can run, which is the format's own
+   * reading and the one that makes importing a skill do something.
+   */
+  readonly userInvocable: boolean
+  /** `argument-hint`: shown beside the command in a `/` menu, or `null` when the file names none. */
+  readonly argumentHint: string | null
+}
+
+/**
+ * The three honoured fields of a skill's snapshot (K1), read one way by every consumer.
+ *
+ * A field is honoured only in the shape the format documents — a real `true` for
+ * `disable-model-invocation`, a real `false` for `user-invocable`, a string for `argument-hint`
+ * (or the flow-sequence array the format's own `[version]` spelling parses to, rendered back as
+ * written) — because the frontmatter is open and untyped ({@link SkillFrontmatterSchema}): a
+ * value a hand-written file got wrong is an ignored field rather than a skill that behaves
+ * differently from what it says. The lookup is case-sensitive to the field names the format uses.
+ */
+export function skillSettingsOf(skill: Skill): SkillSettings {
+  const frontmatter = skill.frontmatter
+  return {
+    disableModelInvocation: frontmatter['disable-model-invocation'] === true,
+    userInvocable: frontmatter['user-invocable'] !== false,
+    argumentHint: argumentHintOf(frontmatter['argument-hint']),
+  }
+}
+
+/**
+ * Whether one skill is **on** for a request, given the mode's override (epic #349, K8).
+ *
+ * The rule is the one every reader must apply: **a mode that names the skill wins; a skill it
+ * does not name follows {@link ModeToolOverride.skills_default} — `follow` (the user's
+ * `enabled`), `off` (an allowlist, so a skill imported later stays off in this mode) or `on`
+ * (every skill except the ones the mode turns off)**. A map entry naming a skill the user no
+ * longer has never matches anything, so a mode that named a deleted skill is simply ignored.
+ * It is exported from the protocol — rather than written once in the server and once in each
+ * frontend — because the server's `assertInvocableSkills` and the `/` menu have to answer with
+ * the same effective set: a menu row the server refuses, or a missing row the server would
+ * accept, is a bug that only one shared rule can prevent.
+ *
+ * A mode default cannot bring back a skill a **hard rule** removes: `disable-model-invocation`
+ * still keeps the skill out of the model's listing, and `resolveSkills` applies that beside this
+ * function.
+ *
+ * @param skill the skill as the store lists it (its stored `enabled`, never an effective one)
+ * @param override the resolved mode's `tools` patch, or `null` for no override
+ */
+export function skillInForce(skill: Skill, override: ModeToolOverride | null): boolean {
+  return modeItemInForce(override?.skills?.[skill.id], skill.enabled, override?.skills_default)
+}
+
+/**
+ * The effective skills of a list, in its own order (K8) — {@link skillInForce} applied to
+ * every one of them.
+ *
+ * The order is deliberately the input's (the store lists a user's skills oldest first), so a
+ * frontend that shows the effective set and one that shows the stored list agree on
+ * everything but the on/off answer.
+ */
+export function skillsInForce(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null,
+): Skill[] {
+  return skills.filter((skill) => skillInForce(skill, override))
+}
+
+/**
+ * `argument-hint` as the text a `/` menu shows, or `null` for a value that is not one.
+ *
+ * A string is the hint itself, trimmed; an empty one names nothing. An **array** is the
+ * format's own bracket spelling read as YAML — `argument-hint: [version]` is a flow sequence,
+ * not a string — and it is still the hint the file meant, so it is rendered back the way the
+ * line wrote it (`[version]`, `[a, b]`). A snapshot imported since the import keeps the raw
+ * line (see `apps/server`'s discovery), so this half is for one stored before that: the shape
+ * the file has never changes the hint a reader sees.
+ */
+function argumentHintOf(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const hint = value.trim()
+    return hint.length === 0 ? null : hint
+  }
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    const items = value.map((item) => item.trim()).filter((item) => item !== '')
+    return items.length === 0 ? null : `[${items.join(', ')}]`
+  }
+  return null
+}
+
+/**
+ * A `SKILL.md` file's **body**: everything after its YAML frontmatter (K1, K6).
+ *
+ * The one reading of where the frontmatter ends, so the body a model is handed is the same in
+ * the tool that serves it, the context builder that renders a slash invocation and any client
+ * that shows a skill. The rules are the format's own:
+ *
+ * - the file opens with a line that is exactly `---` (a leading byte-order mark is tolerated);
+ * - the frontmatter runs to the next line that is exactly `---` or `...`;
+ * - everything after it is the body, trimmed of the blank lines that separate the two.
+ *
+ * A file that does not open a frontmatter block has no frontmatter to strip and is its own body,
+ * and so is one whose block never closes — the markers are what make a block, and a file without
+ * them is not one. Nothing here parses YAML: the parsed frontmatter is the resource's own field
+ * ({@link Skill.frontmatter}), and this helper only knows where the text it came from begins.
+ */
+export function skillBody(content: string): string {
+  const text = content.startsWith(BOM) ? content.slice(BOM.length) : content
+  const lines = text.split('\n')
+  if (!isFrontmatterFence(lines[0])) {
+    return text.trim()
+  }
+  for (let index = 1; index < lines.length; index += 1) {
+    if (isClosingFence(lines[index])) {
+      return lines
+        .slice(index + 1)
+        .join('\n')
+        .trim()
+    }
+  }
+  return text.trim()
+}
+
+/** The byte-order mark a file saved by a Windows editor may open with. */
+const BOM = '\uFEFF'
+
+/** Whether a line opens a `SKILL.md`'s frontmatter block. */
+function isFrontmatterFence(line: string | undefined): boolean {
+  return line?.trim() === '---'
+}
+
+/** Whether a line closes one: the format's ending marker, or YAML's own document end. */
+function isClosingFence(line: string | undefined): boolean {
+  const trimmed = line?.trim()
+  return trimmed === '---' || trimmed === '...'
+}
+
+/**
  * The size limits of K4, in bytes.
  *
  * They bound what one import may store, and they are enforced by the store's callers — the
@@ -146,15 +312,58 @@ export const MAX_SKILLS_PER_USER = 50
 export const SKILL_CLONE_MAX_BYTES = 20 * 1024 * 1024
 
 /**
+ * Largest total of **unpacked** blob bytes one clone may read: 100 MB.
+ *
+ * The download cap above bounds the compressed pack, and a pack of highly compressible content
+ * can inflate to orders of magnitude more than its download size — `SKILL_CLONE_MAX_BYTES` of
+ * zeros is gigabytes once read. The clone therefore also caps the sum of the blobs it really
+ * inflates, and refuses past it with `over_limit`.
+ *
+ * The number is the most a legitimate import could need: fifty skills (§
+ * {@link MAX_SKILLS_PER_USER}) each at the whole-skill limit (§ {@link SKILL_MAX_BYTES}). A
+ * caller that reads only a folder's own blobs — the import passes its `path` to the clone —
+ * therefore cannot reach it with skills that pass K4, while a repository whose content unpacks
+ * past it is refused rather than left to exhaust the process.
+ */
+export const SKILL_INFLATE_MAX_BYTES = SKILL_MAX_BYTES * MAX_SKILLS_PER_USER
+
+/**
  * The size of a file's content in bytes — what {@link SkillFile.size} counts.
  *
  * Bytes rather than characters, because a limit of "20 KB" has to mean the same thing for a
  * file of ASCII and a file of CJK or emoji: `TextEncoder` counts what would really be stored,
  * and it is a Web API both a browser and Node 24 have, so this package stays browser-safe.
+ *
+ * A base64 file's `size` is the number of bytes it decodes to, not the length of the base64
+ * text: the limits of K4 count the file itself, and a base64 string is a third larger than the
+ * bytes it carries. The arithmetic below is exact for the canonical base64 the import writes
+ * (including a final group padded with `=` or `==`), and requires no `atob` — which keeps this
+ * function usable in `@openharness/protocol`'s browser-safe program.
  */
-export function skillFileSize(content: string): number {
+export function skillFileSize(content: string, encoding: SkillFileEncoding = 'utf8'): number {
+  if (encoding === 'base64') {
+    const padding = content.endsWith('==') ? 2 : content.endsWith('=') ? 1 : 0
+    return Math.floor((content.length * 3) / 4) - padding
+  }
   return new TextEncoder().encode(content).length
 }
+
+/**
+ * How a file's content is spelled in storage (K4).
+ *
+ * A skill's files are not all text: a folder may ship an icon, a font or a `.docx`, and the
+ * import stores those losslessly rather than decoding them into mojibake. `utf8` is the
+ * ordinary case — `content` is the file's text; `base64` is a non-text file — `content` is the
+ * file's bytes, base64-encoded — and `size` is the original byte length either way.
+ *
+ * The encoding is what Postgres needs: its `text` type rejects a NUL byte outright, so a
+ * binary file cannot be stored as text at all (`invalid byte sequence for encoding "UTF8":
+ * 0x00`), and a file that is not valid UTF-8 cannot be kept faithfully as a string. Base64 is
+ * the lossless spelling every store accepts.
+ */
+export const SkillFileEncodingSchema = z.enum(['utf8', 'base64'])
+
+export type SkillFileEncoding = z.infer<typeof SkillFileEncodingSchema>
 
 /**
  * // extension: the frontmatter fields besides `name` and `description`, as parsed.
@@ -272,9 +481,15 @@ export type Skill = z.infer<typeof SkillSchema>
 export const SkillFileContentSchema = z.object({
   /** The file's path inside the skill folder, the one that was asked for. */
   path: z.string().min(1),
-  /** The content's size in bytes (see {@link skillFileSize}). */
+  /** The content's size in bytes (see {@link skillFileSize}) — the original file's, in bytes. */
   size: z.number().int().min(0),
-  /** The file's content, as the snapshot holds it. */
+  /**
+   * How `content` is spelled: the file's text (`utf8`), or its bytes base64-encoded
+   * (`base64`). Required, because a reader that assumed text would show mojibake for a
+   * binary file — and a model that read one as base64 would be told nothing useful.
+   */
+  encoding: SkillFileEncodingSchema,
+  /** The file's content, as the snapshot holds it — see `encoding`. */
   content: z.string(),
 })
 

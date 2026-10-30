@@ -11,6 +11,7 @@ import {
   TODO_WRITE_TOOL_NAME,
   newTaskId,
 } from '@openharness/protocol'
+import { SKILL_READ_TOOL_NAME, SKILL_TOOL_NAME } from '@openharness/hands'
 import { MockLanguageModelV4 } from 'ai/test'
 
 import type { ModelFactory } from '@openharness/brain'
@@ -133,6 +134,34 @@ export const MOCK_MCP_MARKER = '__mcp__'
  * long enough to fold, or a short one that stays open.
  */
 export const MOCK_TODO_MARKER = '__todos__'
+
+/**
+ * The marker that makes the model read a skill (epic #349, K6).
+ *
+ * The text after it is the skill's **name**, so a test can drive a whole skill turn through the
+ * real server, scheduler, brain and skill store: the call is stored, the tool reads the
+ * snapshot, the result is stored and the model answers what it said — and a name no skill has
+ * comes back as the `is_error` listing the names that are there.
+ */
+export const MOCK_SKILL_MARKER = '__skill__'
+
+/**
+ * The marker that makes the model read one file of a skill (epic #349, K6).
+ *
+ * The text after it is `<the skill's name> <the file's path>`, split on the **first** space so a
+ * path may hold spaces and slashes — a path the snapshot does not hold answers the `is_error`
+ * that lists the files it has, which is what the marker exists to be able to assert.
+ */
+export const MOCK_SKILL_READ_MARKER = '__skill_read__'
+
+/** The call a `__skill_read__` prompt makes: the skill's name, and the path inside its folder. */
+export function skillReadCallOf(message: string): { name: string; path: string } {
+  const rest = message.slice(MOCK_SKILL_READ_MARKER.length).trim()
+  const space = rest.indexOf(' ')
+  return space === -1
+    ? { name: rest, path: '' }
+    : { name: rest.slice(0, space), path: rest.slice(space + 1).trim() }
+}
 
 /**
  * The marker that makes the model start a **background task** (epic #340, S4; #343).
@@ -447,6 +476,22 @@ export function planFor(message: string, attempt: number): ModelPlan {
   }
   if (message.startsWith(MOCK_MCP_MARKER)) {
     return { chunks: [], delayMs: 0, toolCalls: [mcpCallOf(message)] }
+  }
+  if (message.startsWith(MOCK_SKILL_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [
+        { name: SKILL_TOOL_NAME, input: { name: message.slice(MOCK_SKILL_MARKER.length).trim() } },
+      ],
+    }
+  }
+  if (message.startsWith(MOCK_SKILL_READ_MARKER)) {
+    return {
+      chunks: [],
+      delayMs: 0,
+      toolCalls: [{ name: SKILL_READ_TOOL_NAME, input: skillReadCallOf(message) }],
+    }
   }
   if (message.startsWith(MOCK_TODO_MARKER)) {
     return {

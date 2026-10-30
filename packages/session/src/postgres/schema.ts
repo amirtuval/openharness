@@ -20,6 +20,7 @@ import type {
   SessionId,
   SessionStatus,
   Skill,
+  SkillFileEncoding,
   SkillFrontmatter,
   SkillId,
   StoredEvent,
@@ -446,11 +447,13 @@ export interface SkillsTable {
  * `skill_files`: the files of a user's skills (epic #349, K4).
  *
  * One row per file, keyed by `(skill_id, path)`: the primary key is what makes a path appear
- * once in a snapshot, and it is also the index `getFile` seeks by. The content is text —
- * a skill's files are read by a model, and one that is not text is stored as the text it was
- * read as (K2) — and `size` is its byte length, computed by the store on the way in so it can
- * never disagree with what is stored. `on delete cascade` means a deleted skill takes its
- * snapshot, which is the whole of "delete a skill".
+ * once in a snapshot, and it is also the index `getFile` seeks by. `content` is the file in the
+ * spelling `encoding` names — its text (`utf8`) or its bytes base64-encoded (`base64`) — and
+ * `size` is the original byte length, computed by the store on the way in so it can never
+ * disagree with what is stored. The encoding column is what makes a binary file storable at
+ * all: Postgres `text` rejects a NUL byte (`invalid byte sequence for encoding "UTF8": 0x00`),
+ * so a PNG or a font stored as text would fail the write. `on delete cascade` means a deleted
+ * skill takes its snapshot, which is the whole of "delete a skill".
  *
  * The content lives here rather than beside the skill because a listing must never read it
  * (`skills` answers paths and sizes); moving these rows to object storage later changes this
@@ -461,9 +464,11 @@ export interface SkillFilesTable {
   skill_id: string
   /** The file's path inside the skill folder, relative and forward-slashed. `C`-collated. */
   path: string
-  /** The file's content, as the snapshot stored it. */
+  /** The file's content, in the spelling `encoding` names. */
   content: string
-  /** The content's size in bytes (`skillFileSize`). */
+  /** How `content` is spelled: its text (`utf8`) or its bytes base64-encoded (`base64`). */
+  encoding: SkillFileEncoding
+  /** The original file's size in bytes (`skillFileSize`). */
   size: number
 }
 

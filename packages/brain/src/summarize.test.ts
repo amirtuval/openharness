@@ -2,6 +2,7 @@ import type { LanguageModelV4CallOptions } from '@ai-sdk/provider'
 import { createToolRegistry, textResult } from '@openharness/hands'
 import type { ToolRegistry } from '@openharness/hands'
 import type { ModelRequestPurpose } from '@openharness/protocol'
+import { EVENT_TYPES, newSkillId } from '@openharness/protocol'
 import { APICallError } from 'ai'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -1086,7 +1087,7 @@ describe('clearing old results before summarizing (epic #303, X9; #306)', () => 
     expect(summary.reason).toBe('threshold')
     // The prompt a summary is written with has the tool-work section, and the history the
     // summarizer was handed carries the call and what it answered.
-    expect(summary.prompt_version).toBe('context-summary-v2')
+    expect(summary.prompt_version).toBe('context-summary-v3')
     // The summarizer wrote it in several passes (its own budget is small), so the tool work is
     // in the prompt of whichever pass folded it — the section asking for it is in every one.
     const sent = scripts.chat.calls
@@ -1133,5 +1134,74 @@ describe('summarizeContext — a step’s opaque parts (epic #303, X13; #334)', 
         (event) => event.type === 'agent.opaque_content' && event.seq > summary.covers.to_seq,
       ),
     ).toBe(false)
+  })
+})
+
+describe('summarizeContext — the skills a history used (epic #349, K9)', () => {
+  /**
+   * A log of `count` user messages with a `session.skill_loaded` after the ones named, so an
+   * invocation sits *inside* the span a summary covers rather than after it.
+   */
+  async function historyWithSkills(
+    loadedAt: readonly { readonly after: number; readonly name: string }[],
+  ): Promise<Awaited<ReturnType<typeof newSession>>> {
+    const session = await newSession([])
+    // Appended one message at a time, so a `session.skill_loaded` sits *between* two of them
+    // rather than after the whole history — which is where a real one lands, and what decides
+    // whether a summary's covered range includes it.
+    for (let index = 1; index <= 15; index += 1) {
+      await session.store.appendEvents(session.sessionId, [message(tagged(1_000, index))])
+      const loaded = loadedAt.find((entry) => entry.after === index)
+      if (loaded === undefined) {
+        continue
+      }
+      const read = await logOf(session.store, session.sessionId)
+      await session.store.appendEvents(session.sessionId, [
+        {
+          type: EVENT_TYPES.sessionSkillLoaded,
+          message_seq: read.at(-1)?.seq ?? index,
+          name: loaded.name,
+          skill_id: newSkillId(1_700_000_000_000),
+          commit_sha: 'abc123',
+          content: `${loaded.name} instructions`,
+        },
+      ])
+    }
+    return session
+  }
+
+  it('names the skills the covered history used', async () => {
+    const session = await historyWithSkills([
+      { after: 3, name: 'release-notes' },
+      { after: 9, name: 'deploy' },
+      // Invoked after the cut, so it belongs to the tail the summary does not stand in for.
+      { after: 11, name: 'ship-notes' },
+    ])
+    const scripts = scriptedModels([{ text: ['ok'] }])
+    const result = await runEngine(session, { scripts, config: budgets(20_000, 20_000) })
+
+    expect(result.outcome).toBe('summarized')
+    // The cut keeps the newest ten messages (the tail walk rounds up to the target), and the
+    // two `session.skill_loaded` events inside the covered span push the seqs along — which is
+    // why the range ends at 11 rather than 10.
+    expect(result.coversTo).toBe(11)
+    const sent = readPrompt(scripts.chat.calls[0]!)
+      .map((entry) => entry.text)
+      .join('\n')
+    expect(sent).toContain('Skills in use: release-notes, deploy')
+    expect(sent).not.toContain('ship-notes')
+  })
+
+  it('says nothing at all for a chat that never ran a skill', async () => {
+    const session = await newSession(history(15, 1_000))
+    const scripts = scriptedModels([{ text: ['ok'] }])
+    await runEngine(session, { scripts, config: budgets(20_000, 20_000) })
+
+    const sent = readPrompt(scripts.chat.calls[0]!)
+      .map((entry) => entry.text)
+      .join('\n')
+    expect(sent).not.toContain('Skills in use:')
+    // The prompt's meaning is otherwise unchanged, which is what the version alone records.
+    expect(sent).toContain('## Tool work')
   })
 })

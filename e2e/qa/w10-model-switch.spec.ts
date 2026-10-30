@@ -182,4 +182,56 @@ test.describe('W10 the composer model switch', () => {
 
     expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
   })
+
+  test('W10d switching from a mode back to a model shows at once, without sending (#349, B8)', async ({
+    page,
+    request,
+    consoleErrors,
+  }) => {
+    // A chat on a mode needs a usable model, so this case needs a stored provider credential.
+    const credentials = await request.get('/v1/provider-credentials')
+    const providers = ((await credentials.json()) as { data: { name: string }[] }).data
+    test.skip(
+      providers.length === 0,
+      'a mode whose model has no credential cannot be used — this stack has none',
+    )
+
+    const name = 'w10d-mode'
+    const existing = (await (await request.get('/v1/me/modes')).json()) as {
+      data: { id: string; name: string }[]
+    }
+    for (const mode of existing.data.filter((entry) => entry.name === name)) {
+      await request.delete(`/v1/me/modes/${mode.id}`)
+    }
+    const created = await request.post('/v1/me/modes', {
+      data: { name, model: QA_MODEL },
+    })
+    expect(created.status(), await created.text()).toBe(201)
+    const mode = (await created.json()) as { id: string }
+    const session = await request.post('/v1/sessions', { data: { mode: mode.id } })
+    expect(session.status(), await session.text()).toBe(201)
+    const id = ((await session.json()) as { id: string }).id
+
+    await openChat(page, id)
+    // The header names the mode; nothing has been sent, so the picker does too.
+    await expect(page.locator('[data-slot="session-mode"]')).toHaveText(new RegExp(name))
+    await expect(page.getByRole('button', { name: `Model: ${name}` })).toBeVisible()
+
+    // Pick a plain model. The chat still follows the mode until a message is sent — but the
+    // screen must show the switch **now**: the mode clause goes and the picker names the model.
+    // The reported bug was that neither changed until the next message.
+    await pickModel(page, SWITCHED)
+    await expect(page.getByRole('button', { name: `Model: ${SWITCHED}` })).toBeVisible()
+    await expect(page.locator('[data-slot="session-mode"]')).toHaveCount(0)
+    // Give a delayed update a chance to prove it is not what fixed the display.
+    await page.waitForTimeout(300)
+    await expect(page.locator('[data-slot="session-mode"]')).toHaveCount(0)
+
+    // Nothing was sent, and the server still has the chat on the mode.
+    await expect(page.getByText('Say something to start the conversation.')).toBeVisible()
+    expect((await getSession(request, id)).mode).toBe(mode.id)
+    await expectNoErrorBanner(page)
+    await shot(page, 'w10-05-mode-to-model-before-send')
+    expect(consoleErrors, consoleErrors.join('\n')).toEqual([])
+  })
 })

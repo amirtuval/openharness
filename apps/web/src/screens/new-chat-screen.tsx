@@ -1,5 +1,10 @@
-import { providerName } from '@openharness/client'
-import type { Mode, ModeId } from '@openharness/protocol'
+import {
+  invocationSkill,
+  parseSlashCommand,
+  providerName,
+  slashCommands,
+} from '@openharness/client'
+import type { Mode, ModeId, Skill } from '@openharness/protocol'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { ErrorBanner } from '../components/chat/error-banner'
@@ -52,12 +57,15 @@ export function NewChatScreen({
   createSession,
   catalog,
   modes,
+  skills,
 }: {
   /** Create the session — from a model, or from a mode (#245, M6) — and return it (`null` on failure). */
   createSession: (options: CreateChatOptions) => Promise<CreateChatResult>
   catalog: ModelsView
   /** The shell's modes: the presets the picker offers above the models. */
   modes: ModesView
+  /** The shell's skills (#349, K7; #353): the reader's own rows of the composer's `/` menu. */
+  skills: readonly Skill[]
 }) {
   const client = useClient()
   const { preferences, loading, error, dismissError } = usePreferences(client)
@@ -87,6 +95,16 @@ export function NewChatScreen({
   // The Add-provider dialog (X5): open with the provider left to the reader.
   const [addingProvider, setAddingProvider] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // The `/` menu (#349, K7; #353), built the way the chat builds it: the same client reading,
+  // so the box's rows and the send's parse cannot disagree. The mode picked for the new chat is
+  // applied over the user's switches (K8), so the menu is the effective set the server will
+  // accept — a mode can turn a skill on or off before the chat even exists. A first message may
+  // be a slash invocation like any other — the session is created on the picked mode and the
+  // message carries its `skill`.
+  const commands = useMemo(
+    () => slashCommands(skills, chosenMode?.tools ?? null),
+    [skills, chosenMode],
+  )
 
   const defaultModel = preferences?.default_model ?? null
   // No default, but the catalog has exactly one model (#146): it is the only thing a chat
@@ -151,7 +169,14 @@ export function NewChatScreen({
           : model !== null && model !== createdModel
             ? { model: { id: model } }
             : undefined
-      await client.sendMessage(sessionId, text, options)
+      // A slash invocation rides it too (K7): the text is what the reader typed, and the skill
+      // it names is what the brain loads the instructions from.
+      const invocation = parseSlashCommand(text, commands)
+      const skill = invocation === null ? null : invocationSkill(invocation)
+      await client.sendMessage(sessionId, text, {
+        ...options,
+        ...(skill === null ? {} : { skill }),
+      })
     } catch (caught) {
       setSending(false)
       setSendError(describeError(caught, { serverUrl }))
@@ -285,6 +310,7 @@ export function NewChatScreen({
             onStop={undefined}
             inputRef={inputRef}
             disabled={sending}
+            commands={commands}
             value={draft}
             onValueChange={setDraft}
             modelSelector={

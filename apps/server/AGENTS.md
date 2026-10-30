@@ -833,6 +833,15 @@ answer is the **effective** state of each tool:
 - **Called once per process, and read twice.** `main.ts` builds the registry once and hands the
   same instance to the turn options and to the app, so "available" and "a chat can call it" are
   one fact rather than two that could drift.
+- **The mode's override has three section defaults too** (epic #349, B8). `builtin_default`,
+  `mcp_servers_default` and `skills_default` are read by `builtinToolInForce`,
+  `mcpServerInForce` and the protocol's `skillInForce` — one rule per kind, applying an
+  explicit map entry first, then `off` (an allowlist), `on` (everything except the map's off
+  entries, even for items the user turned off) or `follow` (the user's own setting, which is
+  what an absent field means). The server's `effectiveTools`, `mcp/in-force.ts` and `skills.ts`
+  all call those functions, so the listing, the in-force servers/skills and the brain's
+  per-request answer cannot disagree. A hard rule still wins: `withoutAskUser` and the
+  structural subagent tool set are applied outside the override.
 - **The mode's override has an MCP half too** (#311). The same `Mode.tools` carries
   `mcp_servers`, an on/off patch over the user's remote MCP servers by id — a sibling of
   `builtin`, at **server** granularity and never per MCP tool. `tool-settings.ts` handles only
@@ -1185,7 +1194,9 @@ are #353/#354's. Everything here is wired so those land beside it rather than th
 - **The settings answer lives in `skills.ts`**, next to `tool-settings.ts` and for the same
   reason: it is the one place the user's own choice and a mode's override meet. `skillsInForce`
   is the rule — **a mode that names a skill wins; a skill it does not name follows the user's
-  `enabled`** — and `listSkillsInForce` is that rule over one store read per request, which is
+  `enabled`** — delegating to `@openharness/protocol`'s `skillsInForce` so the `/` menus on both
+  frontends and the server's `assertInvocableSkills` read one function, and `listSkillsInForce`
+  is that rule over one store read per request, which is
   what makes a switch flipped in the settings, or a mode edited, apply from the next request on.
   A map entry naming a deleted skill is ignored rather than refused, exactly as an MCP server's
   is. `createSkillSettingsResolver` is the seam the brain is handed (#352); it returns the
@@ -1227,6 +1238,15 @@ allowPrivateUrls?, maxBytes?, timeoutMs? })` — `clone` defaults to the package
   repository may offer a good skill and a broken one at once. The discovery checks the limits of
   K4 itself (`SKILL_MD_MAX_BYTES`, `SKILL_FILE_MAX_BYTES`, `SKILL_MAX_BYTES`, `MAX_SKILL_FILES`)
   because the store does not — those are the import's refusals, with the reason a user reads.
+- **`argument-hint` is kept as the file wrote it** (#354). The format's own spelling is a
+  bracketed placeholder — `argument-hint: [version]`, `argument-hint: [pr-number] [priority]` —
+  and neither is a YAML string: the first parses as a flow sequence and the second is not valid
+  YAML at all, so a parser that read the field as a string lost the hint and, for the second,
+  refused the whole frontmatter. `parseFrontmatterBlock` therefore takes the line's own text
+  (after the colon, trimmed) whenever YAML does not answer with a plain string, and reads a block
+  whose YAML fails **only** because of that line with the line set aside — so a skill written for
+  Claude Code imports unchanged and its hint shows exactly as typed. A quoted value is a string
+  and is left to YAML.
 - **A `SKILL.md` at the repository's own root is a candidate**, and its name is the
   **repository's**: a skill's name is its folder's (K1) and the root is not one, so the
   repository is read as the folder — the candidate's `folder` is `''` and its name is the URL
@@ -1241,7 +1261,21 @@ allowPrivateUrls?, maxBytes?, timeoutMs? })` — `clone` defaults to the package
   candidate has — or one picked twice — is a 400 (`InvalidSkillSelectionError`), a candidate
   that cannot be imported is
   a 422 carrying its problems, and a name the caller already has is a 409 the store's own
-  `DuplicateSkillNameError` — so a batch either lands whole or not at all.
+  `DuplicateSkillNameError` — so a batch either lands whole or not at all. The **per-user cap**
+  is checked here too, before the first write: `existing + picked > MAX_SKILLS_PER_USER` is the
+  same 409 `SkillLimitReachedError` the store raises, but refusing the whole batch rather than
+  storing two of three and failing on the third (the store's lock still guards the race).
+- **A file that is not text is stored losslessly.** `decode()` detects it — invalid UTF-8 (a
+  fatal `TextDecoder`) or a NUL, which is valid UTF-8 but which Postgres `text` refuses
+  (`invalid byte sequence for encoding "UTF8": 0x00`) — and stores its bytes base64 with
+  `encoding: 'base64'`; everything else is `utf8`. Sizes are `skillFileSize(content, encoding)`,
+  so K4 counts the real bytes. The refresh diff compares the encoding beside the content, so a
+  binary file is changed/unchanged by its bytes.
+- **The clone reads only the folder, and only so many bytes.** `readRepository` passes the
+  resolved `path` to `cloneRepository`, so a blob outside it is never inflated, and the clone's
+  cumulative unpacked-byte cap (`SKILL_INFLATE_MAX_BYTES`) refuses a repository whose pack
+  expands past it with `over_limit`. The root-`SKILL.md` case still reads the whole tree (the
+  repository is the candidate, K3), under the same cap.
 - **A refresh compares against the stored snapshot** (K5): the skill's own `source` is cloned
   again, the candidate is found by the skill's **name**, and the stored side is read file by file
   through `SkillStore.getFile` (a store never hands out contents in a listing, K4). The diff is
@@ -1255,6 +1289,42 @@ allowPrivateUrls?, maxBytes?, timeoutMs? })` — `clone` defaults to the package
   read is the 422 `skill_import_error`, whose message is the protocol's own sentence for the
   failure code (`SKILL_IMPORT_MESSAGES`); a ref that moved between a preview and its confirm is
   the 409 `conflict_error` (`StaleSkillCommitError`). `app.ts` maps all three.
+
+### The tools that read a skill, and the slash invocation (#352)
+
+#350 made a skill a resource and answered which ones a request has. #352 is what a request _does_
+with them, and its server half is small on purpose: the brain builds both tools, and the server
+answers the two questions only it can.
+
+- **The provider the brain is handed is the store plus one file read** (`createSkillProvider`).
+  A `SkillProvider` answers, per request, the skills in force — the same `list` the settings
+  resolver makes, with the same mode override — each paired with a closure that reads **one** file
+  of its snapshot. It answers the whole `SkillFileContent` (content, size and `encoding`), so the
+  tools can report a binary file rather than show its base64 spelling. That is why the loop can
+  list fifty skills without reading a folder: a file is read when a model asks for it, and the
+  store's own contract is what answers an unknown path (and another owner's skill) with `null`.
+- **A slash invocation is checked before anything is stored** (`assertInvocableSkills`).
+  `/name arguments` is a `user.message` carrying `skill`, and `POST /v1/sessions/{id}/events` and
+  the `initial_events` of `POST /v1/sessions` both refuse, with the protocol's 400
+  `invalid_request_error` and **nothing appended**, a name that is not among the skills in force
+  for the chat the batch leaves the session on (the user's `enabled` with the mode's override, K8)
+  and a skill whose frontmatter says `user-invocable: false`. `disable-model-invocation: true` is
+  accepted — that is the field's whole point, a command only the user runs. A refusal refuses the
+  whole batch, because a batch is one append: no log ever holds a message whose invocation the
+  brain would then have to skip.
+- **Both tools are declared in the settings, and neither is registered.** The brain builds them
+  per request from that request's skills, so `createTurnRegistry` has nothing to register and
+  `GET /v1/me/tools` would not know they exist — `SKILL_TOOL_DECLARATIONS` is what `tool-settings.ts`
+  adds to its listing, exactly as `web_search`'s declaration is added (#335): `allow` and on, a
+  name a stored choice and a mode's `builtin.skill` override are keyed by. Unlike `web_search`
+  they are **not** model-gated: whether a chat can read a skill is a question about the user's own
+  skills and not about the model, so `available` does not depend on `?model_id=`. `ask` is
+  therefore honourable on them — they are tools this build runs, so the pause really happens —
+  which is why the settings' refusal of `ask` now applies only to a model-gated declaration.
+- **What a settings screen shows and what a chat reads are one store.** `main.ts` builds the
+  durable `SkillStore` once and hands it to `createTurnTools` (the provider) and to `createApp`
+  (the routes), and the test harness does the same, so a skill seeded through either is visible to
+  both.
 
 ## Usage and cost (epic #245, A2; issue #247)
 
@@ -1868,6 +1938,8 @@ the only thing that constructs it, and it only does so when the variable says `m
 | `__fail_terminal__`                     | HTTP 400 (`model_request_failed_error`) on every attempt                                                                                                                                                                                                                              |
 | `__ask__`                               | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309)                                                                                                                                                                                                        |
 | `__todos__ [n]`                         | calls `todo_write` with `n` items (three when it is not said), so a chat's task list can be driven through the whole server (#305; the terminal's pinned list, #308)                                                                                                                  |
+| `__skill__ <name>`                      | calls `skill` with that name, so a chat’s skills can be read through the whole server (epic #349, K6; #352)                                                                                                                                                                           |
+| `__skill_read__ <name> <path>`          | calls `skill_read` for that file of that skill — the path is everything after the first space — so a file read and an unknown-path refusal are both drivable (epic #349, K6)                                                                                                          |
 | `__task__ [delay_ms]`                   | calls `task_start`, the test background tool (#343): the handle comes back at once, and the process's store proxy starts the task and reports back after the delay — the whole background-task path, through the real server                                                          |
 | `__wait__ [timeout_s]`                  | calls `agent_wait` (#343), so the turn ends `waiting_on_tasks` — resolved by a task's news, by its deadline (the queue's timer), or by a message                                                                                                                                      |
 | `__agent__ <type> \| <prompt>`          | calls `agent` (#344): the type is the first half and the prompt the rest, with the task's description derived from the prompt's first line (collapsed and bounded). The child then runs its own turn — a QA spec drives it by sending a message to the child session the handle names |
@@ -2111,7 +2183,8 @@ before the instance stops serving it (#151).
 | `testTaskTool`, `testTaskWaitTool`, `withTestBackgroundTasks`, `TestBackgroundTasksOptions`, `TestTaskInputSchema`, `TestTaskInput`, `TEST_TASK_TOOL_NAME`, `TEST_TASK_TOOL_DESCRIPTION`, `TEST_TASK_DELAY_MS`, `TEST_TASK_RESULT`                                                                                                                                                  | the test hooks (#343), wired only under `OPENHARNESS_TEST_MODEL=mock`: a tool that returns a handle at once, the `agent_wait` a test model pauses on, and the store proxy that starts a task on a call to it and delivers its notification after the delay the call asked for                                                                                                                              |
 | `askUserTool`, `assertConfirmations`, `rememberAlwaysApprovals`, `withAlwaysApprovals`, `isConfirmation`, `PausingDeps`, `RememberDeps`, `AlwaysApproval`                                                                                                                                                                                                                           | the pause's server half (epic #303, X6; #309; the remote pair: #312): the `ask_user` tool every deployment registers, the checks a `user.tool_confirmation` passes (a call of this session is waiting — built-in or remote — the answers fit its questions, the extensions make sense for it), and the stored policy an `always` approval writes (a built-in's `enabled`+`policy`, a remote tool's policy) |
 | `effectiveTools`, `toolSettingEntries`, `toolDecisions`, `createToolSettingsResolver`, `listToolSettings`, `ToolSettingsDeps`                                                                                                                                                                                                                                                       | the per-user tool settings (epic #303, X4; #307; the remote half: #312): the effective answer, as the wire's entries, as the brain's decisions, the resolver `runTurn` is handed, and the listing a route makes (a mode's override and the owner's in-force MCP servers included)                                                                                                                          |
-| `skillsInForce`, `listSkillsInForce`, `createSkillSettingsResolver`, `SkillSettingsDeps`, `SkillSettingsResolver`                                                                                                                                                                                                                                                                   | the skills in force for a request (epic #349, K8): the owner's own `enabled`, overridden by the mode's `skills` map — the pure rule, the read that applies it to a store's list, and the resolver the brain is handed (#352)                                                                                                                                                                               |
+| `assertInvocableSkills`, `createSkillProvider`, `modeToolOverride`, `SkillInvocationDeps`, `SkillProviderDeps`                                                                                                                                                                                                                                                                      | the two things #352 adds on top of the settings answer: the provider the loop's `skill`/`skill_read` tools read a snapshot through (K6), and the check a slash invocation passes before it is stored — the skills in force for the mode the batch leaves the chat on, `user-invocable: false` refused, all of it a 400 that stores nothing (K7)                                                            |
+| `skillsInForce`, `listSkillsInForce`, `createSkillSettingsResolver`, `SkillSettingsDeps`, `SkillSettingsResolver`                                                                                                                                                                                                                                                                   | the skills in force for a request (epic #349, K8): the owner's own `enabled`, overridden by the mode's `skills` map — the protocol's one rule (so both frontends' `/` menus cannot drift), the read that applies it to a store's list, and the resolver the brain is handed (#352)                                                                                                                         |
 | `createSkillImportService(options)`, `SkillImportService`, `SkillImportOptions`, `CloneRepository`                                                                                                                                                                                                                                                                                  | importing a skill from a public repository and refreshing one (epic #349, K3/K5; #351): the preview, the import, the refresh preview and the refresh — the clone arriving as a function, with the deployment's self-host flag and the clone's own limits                                                                                                                                                   |
 | `SkillImportFailureError`, `SkillSourceRefusalError`, `StaleSkillCommitError`, `InvalidSkillSelectionError`, `skillImportFailureMessage()`                                                                                                                                                                                                                                          | the four ways those routes refuse: a repository that could not be read (422 `skill_import_error`), a URL or path the caller got wrong (400), a ref that moved since the preview (409), and a picked name no candidate has or one picked twice (400)                                                                                                                                                        |
 | `diffSnapshots(before, after)`, `skillMdDiff(before, after)`, `DiffableFile`, `SnapshotDiff`                                                                                                                                                                                                                                                                                        | the refresh diff (epic #349, K5): which files were added, removed and changed between two snapshots, and the unified diff of `SKILL.md` — three lines of context, one hunk per change group, the shape `git diff` prints                                                                                                                                                                                   |
@@ -2679,7 +2752,10 @@ session` remembered for the chat and `remember: always` written to the user's se
   name a `name-mismatch`, and the root skill importing, storing and refreshing like any other; a
   path that is not there and a path holding no `SKILL.md` refused with the protocol's own
   sentence; an import storing the snapshot whole (frontmatter, source, files and sizes, read back
-  through the single-skill and file reads); a ref that moved since the preview a 409 that stores
+  through the single-skill and file reads) — a skill per `argument-hint` spelling (#354):
+  `[version]`, `[pr-number] [priority]`, a quoted string, a bare word and none all import with no
+  problems, and `skillSettingsOf` answers each exactly as the file wrote it; a ref that moved
+  since the preview a 409 that stores
   nothing; an
   unknown name a 400 and a candidate that cannot be imported a 422 that stores **none** of the
   batch; a name the caller already has a 409 that stores none of it; an explicit `ref`/`path`
@@ -2696,6 +2772,16 @@ session` remembered for the chat and `remember: always` written to the user's se
   really is, a whole-file hunk for a file that is only added (`@@ -0,0 +1,2 @@`) or only removed,
   changes far apart split into two hunks and near ones kept in one, and a file with no trailing
   newline.
+- `skills-loop.test.ts` (epic #349, K6/K7; #352) — what a request does with a skill: the provider
+  the brain is handed (the skills in force with a file read behind each, a mode's override
+  applying), the slash invocation over HTTP (stored as typed with its `skill` field, refused with
+  a 400 that stores nothing for a name that is off or unknown, for `user-invocable: false`, and —
+  through the real route — for a name the **mode** the batch leaves the chat on turns off, with
+  `initial_events` checked at creation too), and the turn itself through the mock model: the two
+  tools offered and reading the instructions and a file, a chat with no skill the model may
+  invoke offered neither, a `disable-model-invocation` skill left out of the listing and answered
+  as an unknown tool, and a slash invocation loaded once into the log with the body the model was
+  given.
 - `skills.test.ts` (epic #349, K4; the settings answer: K8) — the skill routes and the skills in
   force: a listing that carries no file's content, the single-skill read with `SKILL.md`'s
   content, a file read by a path that holds a slash, the 404s (an unknown skill, an unknown

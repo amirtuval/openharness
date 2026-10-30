@@ -1,4 +1,4 @@
-import { makeMcpServer, makeMode } from '@openharness/protocol/fixtures'
+import { makeMcpServer, makeSkill, makeMode } from '@openharness/protocol/fixtures'
 import { newMcpServerId, newModeId } from '@openharness/protocol'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -208,7 +208,108 @@ describe('Settings → Modes', () => {
 
     await waitFor(async () => {
       const { data } = await fake.modes.list()
-      expect(data[0]?.tools).toEqual({ builtin: {}, mcp_servers: { [server.id]: false } })
+      expect(data[0]?.tools).toEqual({ mcp_servers: { [server.id]: false } })
+    })
+  })
+
+  it('offers a "not listed below" default per section and round-trips it (B8)', async () => {
+    const fake = makeFake({
+      ...TWO_PROVIDERS,
+      skills: [makeSkill({ name: 'release-notes' })],
+      mcpServers: [makeMcpServer({ name: 'notes' })],
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: 'Create mode' }))
+    const dialog = await screen.findByRole('dialog')
+    // Every section starts at Follow for a new mode.
+    expect(within(dialog).getByLabelText('Tools not listed below')).toHaveValue('follow')
+    expect(within(dialog).getByLabelText('MCP servers not listed below')).toHaveValue('follow')
+    expect(within(dialog).getByLabelText('Skills not listed below')).toHaveValue('follow')
+    // The per-item choice is "Default" now: it follows the section's setting, not necessarily
+    // the reader's own.
+    expect(within(dialog).getAllByRole('option', { name: 'Default' }).length).toBeGreaterThan(0)
+
+    await user.type(within(dialog).getByLabelText('Name'), 'allowlist')
+    await user.click(within(dialog).getByLabelText(/My default model/))
+    await user.selectOptions(within(dialog).getByLabelText('Skills not listed below'), 'off')
+    await user.click(within(dialog).getByRole('button', { name: 'Create mode' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.tools).toEqual({ skills_default: 'off' })
+    })
+    // The row summarizes the default, so a mode that says something about a whole section does
+    // not read as a mode that follows the reader's settings.
+    expect(await screen.findByText('tools: skills not listed off')).toBeInTheDocument()
+
+    // Editing shows the stored value, and a change keeps the maps it did not touch.
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    const editing = await screen.findByRole('dialog')
+    expect(within(editing).getByLabelText('Skills not listed below')).toHaveValue('off')
+    await user.selectOptions(within(editing).getByLabelText('MCP servers not listed below'), 'on')
+    await user.click(within(editing).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.tools).toEqual({ skills_default: 'off', mcp_servers_default: 'on' })
+    })
+  })
+
+  it('offers a skill per mode, and keeps it as a sibling of the other halves (#349, K8; #353)', async () => {
+    const skill = makeSkill({ name: 'release-notes' })
+    const fake = makeFake({ ...TWO_PROVIDERS, skills: [skill] })
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: 'Create mode' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // A whole skill is on or off; there is no per-file or per-command switch.
+    const choice = within(dialog).getByLabelText('release-notes in this mode')
+    expect(choice).toHaveValue('follow')
+
+    await user.type(within(dialog).getByLabelText('Name'), 'notes-writer')
+    await user.click(within(dialog).getByLabelText(/My default model/))
+    await user.selectOptions(choice, 'on')
+    await user.click(within(dialog).getByRole('button', { name: 'Create mode' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.tools).toEqual({ skills: { [skill.id]: true } })
+    })
+    // The row names the skill, so a mode that says something about one does not read as a mode
+    // that follows the reader's settings.
+    expect(await screen.findByText('tools: release-notes on')).toBeInTheDocument()
+  })
+
+  it('keeps a mode’s skill patch when a built-in tool is edited (#353)', async () => {
+    const skill = makeSkill({ name: 'release-notes' })
+    const fake = makeFake({
+      ...TWO_PROVIDERS,
+      skills: [skill],
+      modes: [
+        makeMode({
+          name: 'research',
+          model: 'anthropic/claude-sonnet-5',
+          tools: { builtin: { web_search: true }, skills: { [skill.id]: false } },
+        }),
+      ],
+    })
+    renderApp(fake, { hash: '#/settings' })
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByLabelText('release-notes in this mode')).toHaveValue('off')
+
+    await user.selectOptions(within(dialog).getByLabelText('todo_write in this mode'), 'off')
+    await user.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(async () => {
+      const { data } = await fake.modes.list()
+      expect(data[0]?.tools).toEqual({
+        builtin: { web_search: true, todo_write: false },
+        skills: { [skill.id]: false },
+      })
     })
   })
 

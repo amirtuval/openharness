@@ -1,4 +1,9 @@
-import type { McpServer, ModeToolOverride, UserId } from '@openharness/protocol'
+import {
+  mcpServerInForce,
+  type McpServer,
+  type ModeToolOverride,
+  type UserId,
+} from '@openharness/protocol'
 
 import type { McpServerService } from './service'
 
@@ -44,7 +49,7 @@ export function mcpServersInForce(
   servers: readonly McpServer[],
   override: ModeToolOverride | null,
 ): McpServer[] {
-  return servers.filter((server) => override?.mcp_servers?.[server.id] ?? server.enabled)
+  return servers.filter((server) => mcpServerInForce(server.id, server.enabled, override))
 }
 
 /**

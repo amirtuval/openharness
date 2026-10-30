@@ -129,7 +129,7 @@ describe('POST /v1/sessions/{id}/compact', () => {
     // The base prompt is the one the engine ships — guidance never bumps its version (K7) —
     // and #306 bumped that base prompt for the tool-work section, so this is v2.
     expect(summary?.type === 'session.context_summary' && summary.prompt_version).toBe(
-      'context-summary-v2',
+      'context-summary-v3',
     )
   })
 

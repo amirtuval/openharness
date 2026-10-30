@@ -1,5 +1,6 @@
 import type {
   McpToolProvider,
+  SkillProvider,
   SubagentRuntime,
   SubagentTypeResolver,
   ToolSecretResolver,
@@ -16,7 +17,7 @@ import {
 } from '@openharness/hands'
 import type { McpFetch, ToolDefinition, ToolRegistry } from '@openharness/hands'
 import type { SessionId } from '@openharness/protocol'
-import type { SessionStore } from '@openharness/session'
+import type { SessionStore, SkillStore } from '@openharness/session'
 import { z } from 'zod'
 
 import type { ModelRegistry } from './catalog/registry'
@@ -25,6 +26,7 @@ import { createMcpToolProvider } from './mcp/tools'
 import type { McpServerService } from './mcp/service'
 import type { ResolvedModel } from './model'
 import { askUserTool } from './pausing'
+import { createSkillProvider } from './skills'
 import { testTaskTool } from './test-tasks'
 import { createToolSettingsResolver } from './tool-settings'
 import type { Logger } from './types'
@@ -172,6 +174,12 @@ export interface TurnToolOptions {
    * with the session's owner and the mode's tool override.
    */
   readonly mcpTools?: McpToolProvider
+  /**
+   * The skills a request has, and the two tools that read them (epic #349, K6; #352) — or
+   * `undefined` for a deployment with no skill store, which offers neither. A host that wired a
+   * store means it.
+   */
+  readonly skills?: SkillProvider
 }
 
 /**
@@ -214,6 +222,15 @@ export interface TurnToolsOptions {
     readonly service: Pick<McpServerService, 'list' | 'resolve' | 'disconnect'>
     readonly fetch: McpFetch
   }
+  /**
+   * Where users' imported skills live (epic #349, K4; the tools that read one: #352), or
+   * `undefined` for a deployment with none.
+   *
+   * The store itself — no service and no vault: a snapshot is stored text, so the provider the
+   * loop is handed reads the user's skills and one file of a snapshot and nothing else. Omitted,
+   * a chat offers neither `skill` nor `skill_read` and loads no slash invocation.
+   */
+  readonly skills?: Pick<SkillStore, 'list' | 'getFile'>
   /** The clock the MCP listing cache runs on; injectable for tests. */
   readonly now?: () => Date
   /** Where a failed listing is logged. Silent by default. */
@@ -292,5 +309,12 @@ export function createTurnTools(options: TurnToolsOptions): TurnToolOptions {
             ...(options.logger === undefined ? {} : { logger: options.logger }),
           }),
         }),
+    // The skills a request has, and the tools that read them (epic #349, K6; #352): resolved per
+    // request from the owner's own `enabled` with the mode's override, so a chat with no skill
+    // the model may invoke is offered neither tool, and a slash invocation loads what the
+    // snapshot held when the message was handled.
+    ...(options.skills === undefined
+      ? {}
+      : { skills: createSkillProvider({ skills: options.skills }) }),
   }
 }

@@ -10,10 +10,20 @@ import {
   DEFAULT_MCP_TOOL_PERMISSION,
   DEFAULT_USER_THEME,
   DEFAULT_USER_TOOL_SETTINGS,
+  GetSkillResponseSchema,
+  ImportSkillsResponseSchema,
   ListMcpServersResponseSchema,
   ListModelsResponseSchema,
+  ListSkillsResponseSchema,
   ListToolSettingsResponseSchema,
+  PreviewSkillImportRequestSchema,
+  PreviewSkillImportResponseSchema,
+  RefreshSkillPreviewResponseSchema,
+  RefreshSkillRequestSchema,
+  SKILL_IMPORT_MESSAGES,
+  SKILL_MD_FILENAME,
   MAX_MCP_SERVERS_PER_USER,
+  MAX_SKILLS_PER_USER,
   MODE_DEFAULT_MODEL,
   MAX_MODES_PER_USER,
   McpServerSchema,
@@ -29,14 +39,20 @@ import {
   SendEventsRequestSchema,
   SessionSchema,
   SessionUsageSchema,
+  SkillFileContentSchema,
+  SkillImportRequestSchema,
+  SkillSchema,
   UpdateAgentRequestSchema,
   UpdateModeRequestSchema,
+  UpdateSkillRequestSchema,
   UserMessageEventInputSchema,
   UserPreferencesSchema,
   UserToolSettingsSchema,
   UserUsageSchema,
+  builtinToolInForce,
   credentialDetails,
   encodeKeyCursor,
+  mcpServerInForce,
   mcpToolOfferedName,
   newAgentId,
   mcpServerNameFromUrl,
@@ -45,6 +61,7 @@ import {
   newModeId,
   newProviderCredentialId,
   newSessionId,
+  newSkillId,
   tryDecodePageCursor,
 } from '@openharness/protocol'
 import { makeAgent, makeModelEntry, makeSession, makeUser } from '@openharness/protocol/fixtures'
@@ -54,6 +71,8 @@ import type {
   ConnectMcpServerResponse,
   EventInput,
   GetPreferencesResponse,
+  ImportSkillsResponse,
+  ListSkillsResponse,
   PreferencesDefaults,
   ListAgentsResponse,
   ListEventsResponse,
@@ -71,8 +90,14 @@ import type {
   ModeToolOverride,
   ModelEntry,
   ProviderCatalogStatus,
+  PreviewSkillImportResponse,
   PutProviderCredentialRequest,
+  RefreshSkillPreviewResponse,
   SessionUsage,
+  Skill,
+  SkillFileContent,
+  SkillImportCandidate,
+  SkillImportFailure,
   ToolPermission,
   ToolSettingEntry,
   UserToolSettings,
@@ -334,7 +359,70 @@ export interface FakeClientOptions {
    * the server's save-time check does — a server it cannot reach is still stored.
    */
   mcpUnreachable?: readonly string[]
+  /**
+   * The skills {@link Client.skills} starts with, over the default of none (epic #349, K4; the
+   * screen is #353).
+   *
+   * Seeded rather than imported, like a mode or a credential: a settings screen renders from its
+   * first frame with a skill already there. A skill's `enabled` and its honoured frontmatter
+   * fields (`skillSettingsOf`) are what the row's switch and badge read, so a test seeds the
+   * frontmatter it wants the badge for.
+   */
+  skills?: readonly Skill[]
+  /**
+   * The contents of a seeded skill's files, keyed by skill id and then by path.
+   *
+   * A seeded skill's `SKILL.md` is synthesised from its own name and description when this says
+   * nothing, and a file of it that is not listed answers an empty string: the fake holds the
+   * resources a test seeds, and the contents only where a test says what they are — a refresh's
+   * diff and an expanded `SKILL.md` are about what a *snapshot* holds, which is what an import
+   * stores (a candidate's own `skill_md`).
+   */
+  skillContents?: Readonly<Record<string, Readonly<Record<string, string>>>>
+  /**
+   * What a clone of a repository finds, over the default of a network the fake does not have
+   * (epic #349, K3; the screen is #353).
+   *
+   * The fake cannot clone anything, so a test says what the repository holds and what a
+   * re-clone of a stored skill would find. An import from a source the fake was not told about
+   * answers the same candidates: the URL is the reader's input, and a component test about the
+   * two-step flow is not about parsing one.
+   */
+  skillImport?: FakeSkillImport
 }
+
+/**
+ * What the fake's skill import and refresh answer (epic #349, K3/K5; issue #353).
+ *
+ * Both halves are the *server's* answers, stated by the test: the candidates a preview finds
+ * (with their problems and their taken names, which is what a screen draws its checkboxes from),
+ * the commit a preview resolved, and what a re-clone of one stored skill would change.
+ */
+export interface FakeSkillImport {
+  /** Every candidate the clone finds, however the source was spelled. */
+  readonly candidates: readonly SkillImportCandidate[]
+  /** The commit the preview resolves; a fixed one when omitted. */
+  readonly commit_sha?: string
+  /**
+   * The failure a preview and an import answer with instead (422 `skill_import_error`).
+   *
+   * The message is the protocol's own sentence for the code (`SKILL_IMPORT_MESSAGES`), which is
+   * what the real route sends — a screen that shows it renders exactly what a real failure looks
+   * like.
+   */
+  readonly failure?: SkillImportFailure
+  /**
+   * What a refresh preview of a stored skill answers, by skill id.
+   *
+   * A skill this map does not name is unchanged: the fake answers the "already up to date"
+   * snapshot a re-clone of an untouched source would, which is the case a screen has to render
+   * as `unchanged` rather than as an empty diff.
+   */
+  readonly refresh?: Readonly<Record<string, RefreshSkillPreviewResponse>>
+}
+
+/** The commit a fake import resolves when the test names none. */
+export const FAKE_SKILL_COMMIT = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0'
 
 /**
  * One remote MCP tool the fake offers, as {@link FakeClientOptions.mcpTools} takes it (#312).
@@ -663,6 +751,15 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
   // the way the credentials are. The fake has one user, so ownership is only ever that user's
   // — a mode the map does not hold is the 404 an unknown id gets.
   const modes = new Map<string, Mode>((options.modes ?? []).map((mode) => [mode.id, mode]))
+  // The caller's skills (epic #349, K4; #353): one in-memory map behind `/v1/me/skills`, seeded
+  // by option the way the credentials and modes are. A skill the map does not hold is the 404 an
+  // unknown id gets, and `importedContents` is what an import stored for the snapshots it made
+  // — a seeded skill's files come from {@link FakeClientOptions.skillContents} instead.
+  const skills = new Map<string, Skill>((options.skills ?? []).map((skill) => [skill.id, skill]))
+  const importedContents = new Map<string, Readonly<Record<string, string>>>()
+  // What a clone of a repository finds and what a re-clone of a stored skill would change:
+  // the fake has no network, so a test states the repository's side of both flows.
+  const importOptions: FakeSkillImport | undefined = options.skillImport
   // The caller's tool settings (epic #303, X4; #307): one in-memory map behind `/v1/me/tools`,
   // seeded by option the way the credentials and modes are. A tool the map does not name
   // follows the fake registry's declaration, exactly as the server reads it.
@@ -1504,6 +1601,325 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     },
   }
 
+  /**
+   * The `SKILL.md` a seeded skill is read as, when the test did not say what its content is.
+   *
+   * The fake holds a resource, not a folder, so there is no file to read: this is the frontmatter
+   * the import would have written from the skill's own fields, then a body. A component test that
+   * is about what a `SKILL.md` *says* seeds it through {@link FakeClientOptions.skillContents} —
+   * or imports a candidate, whose own `skill_md` is stored whole.
+   */
+  function synthesizedSkillMd(skill: Skill): string {
+    return (
+      `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n\n` +
+      `# ${skill.name}\n\n${skill.description}\n`
+    )
+  }
+
+  /** The content of one file of a stored skill, or `null` when the skill holds no such file. */
+  function skillFileContent(skill: Skill, filePath: string): string | null {
+    const seeded = options.skillContents?.[skill.id]?.[filePath]
+    if (seeded !== undefined) {
+      return seeded
+    }
+    const imported = importedContents.get(skill.id)?.[filePath]
+    if (imported !== undefined) {
+      return imported
+    }
+    if (filePath === SKILL_MD_FILENAME) {
+      return synthesizedSkillMd(skill)
+    }
+    // A file the listing names but the test said nothing about: the snapshot holds something
+    // there, and the fake has no reason to invent what.
+    return skill.files.some((file) => file.path === filePath) ? '' : null
+  }
+
+  /** The skills resource: one in-memory map behind `/v1/me/skills` (epic #349, K4; #353). */
+  const skillsResource: Client['skills'] = {
+    list(requestOptions): Promise<ListSkillsResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      // Oldest first, the order the API's own list is in, so a menu and a settings screen show
+      // the reader's skills in one order.
+      const data = [...skills.values()]
+        .filter((skill) => skill.owner_id === user.id)
+        .sort(byImportedAtThenId)
+      return Promise.resolve(ListSkillsResponseSchema.parse({ data }))
+    },
+
+    get(skillId, requestOptions): Promise<Skill & { content: string }> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const skill = ownedSkill(skillId)
+      if (skill === null) {
+        return Promise.reject(notFoundSkill(skillId))
+      }
+      return Promise.resolve(
+        GetSkillResponseSchema.parse({
+          ...skill,
+          content: skillFileContent(skill, SKILL_MD_FILENAME) ?? '',
+        }),
+      )
+    },
+
+    file(skillId, filePath, requestOptions): Promise<SkillFileContent> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const skill = ownedSkill(skillId)
+      if (skill === null) {
+        return Promise.reject(notFoundSkill(skillId))
+      }
+      const content = skillFileContent(skill, filePath)
+      if (content === null) {
+        return Promise.reject(
+          new ApiError(404, `no file ${filePath} in skill ${skillId}`, {
+            type: 'not_found_error',
+          }),
+        )
+      }
+      return Promise.resolve(
+        SkillFileContentSchema.parse({
+          path: filePath,
+          // Bytes, the way the real route measures a file's size (the protocol's own rule).
+          size: new TextEncoder().encode(content).length,
+          // The fake holds text files only; a binary snapshot is the real store's business.
+          encoding: 'utf8',
+          content,
+        }),
+      )
+    },
+
+    update(skillId, body, requestOptions): Promise<Skill> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = UpdateSkillRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      const skill = ownedSkill(skillId)
+      if (skill === null) {
+        return Promise.reject(notFoundSkill(skillId))
+      }
+      // `enabled` is the whole body: what a skill is comes from its snapshot.
+      const updated = SkillSchema.parse({ ...skill, enabled: request.data.enabled })
+      skills.set(skillId, updated)
+      return Promise.resolve(updated)
+    },
+
+    delete(skillId, requestOptions): Promise<void> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      if (ownedSkill(skillId) === null) {
+        return Promise.reject(notFoundSkill(skillId))
+      }
+      skills.delete(skillId)
+      return Promise.resolve()
+    },
+
+    previewImport(body, requestOptions): Promise<PreviewSkillImportResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = PreviewSkillImportRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      const failure = importFailure()
+      if (failure !== null) {
+        return Promise.reject(failure)
+      }
+      return Promise.resolve(
+        PreviewSkillImportResponseSchema.parse({
+          url: request.data.url,
+          ref: request.data.ref ?? null,
+          path: request.data.path ?? null,
+          commit_sha: importOptions?.commit_sha ?? FAKE_SKILL_COMMIT,
+          candidates: importOptions?.candidates ?? [],
+        }),
+      )
+    },
+
+    import(body, requestOptions): Promise<ImportSkillsResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = SkillImportRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      const failure = importFailure()
+      if (failure !== null) {
+        return Promise.reject(failure)
+      }
+      const candidates = new Map(
+        (importOptions?.candidates ?? []).map((candidate) => [candidate.name, candidate]),
+      )
+      const picked: SkillImportCandidate[] = []
+      for (const name of request.data.names) {
+        const candidate = candidates.get(name)
+        if (candidate === undefined) {
+          return Promise.reject(
+            new ApiError(400, `no candidate named ${JSON.stringify(name)} was previewed`, {
+              type: 'invalid_request_error',
+            }),
+          )
+        }
+        picked.push(candidate)
+      }
+      // Every refusal the route gives, before the first skill is written: a candidate that
+      // cannot be imported, a name the caller already has, and the per-user limit.
+      for (const candidate of picked) {
+        if (candidate.problems.length > 0) {
+          return Promise.reject(
+            new ApiError(422, `${candidate.problems.map((problem) => problem.message).join(' ')}`, {
+              type: 'skill_import_error',
+            }),
+          )
+        }
+        if (
+          candidate.name_taken ||
+          [...skills.values()].some((skill) => skill.name === candidate.name)
+        ) {
+          return Promise.reject(
+            new ApiError(409, `a skill named ${JSON.stringify(candidate.name)} already exists`, {
+              type: 'conflict_error',
+            }),
+          )
+        }
+      }
+      const existing = [...skills.values()].filter((skill) => skill.owner_id === user.id).length
+      if (existing + picked.length > MAX_SKILLS_PER_USER) {
+        return Promise.reject(
+          new ApiError(
+            409,
+            `cannot import: the limit of ${MAX_SKILLS_PER_USER} skills is reached`,
+            { type: 'conflict_error' },
+          ),
+        )
+      }
+      const timestamp = now().toISOString()
+      const created = picked.map((candidate) => {
+        const skill = SkillSchema.parse({
+          id: newSkillId(),
+          type: 'skill',
+          owner_id: user.id,
+          name: candidate.name,
+          description: candidate.description ?? '',
+          // The fake parses no YAML: a candidate's frontmatter rides in its `skill_md`, and what
+          // the import stores beside it is empty. A screen that reads the honoured fields
+          // (`skillSettingsOf`) is therefore tested against a *seeded* skill, not an imported
+          // one — a documented difference from the server.
+          frontmatter: {},
+          source: {
+            url: request.data.url,
+            ref: request.data.ref ?? null,
+            path: request.data.path ?? null,
+            commit_sha: request.data.commit_sha,
+          },
+          files: candidate.files,
+          enabled: true,
+          imported_at: timestamp,
+          refreshed_at: timestamp,
+        })
+        skills.set(skill.id, skill)
+        // The preview's own `SKILL.md` is the snapshot's, so an imported skill is readable.
+        importedContents.set(skill.id, { [SKILL_MD_FILENAME]: candidate.skill_md })
+        return skill
+      })
+      return Promise.resolve(ImportSkillsResponseSchema.parse({ data: created }))
+    },
+
+    previewRefresh(skillId, requestOptions): Promise<RefreshSkillPreviewResponse> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const skill = ownedSkill(skillId)
+      if (skill === null) {
+        return Promise.reject(notFoundSkill(skillId))
+      }
+      const seeded = importOptions?.refresh?.[skillId]
+      if (seeded !== undefined) {
+        return Promise.resolve(RefreshSkillPreviewResponseSchema.parse(seeded))
+      }
+      // Nothing to say about a skill the test did not stage a change for: the source is where it
+      // was, and a re-clone of it finds the snapshot it already has.
+      return Promise.resolve(
+        RefreshSkillPreviewResponseSchema.parse({
+          commit_sha: skill.source.commit_sha ?? FAKE_SKILL_COMMIT,
+          changed: false,
+          files_added: [],
+          files_removed: [],
+          files_changed: [],
+          skill_md_diff: null,
+          problems: [],
+        }),
+      )
+    },
+
+    refresh(skillId, body, requestOptions): Promise<Skill> {
+      throwIfAborted(requestOptions)
+      if (!authenticated) {
+        return unauthenticated()
+      }
+      const request = RefreshSkillRequestSchema.safeParse(body)
+      if (!request.success) {
+        return Promise.reject(badRequestFor(request.error.issues))
+      }
+      const skill = ownedSkill(skillId)
+      if (skill === null) {
+        return Promise.reject(notFoundSkill(skillId))
+      }
+      const preview = importOptions?.refresh?.[skillId]
+      if (preview !== undefined && preview.problems.length > 0) {
+        // Replacing a working skill with a broken one is not a refresh — the route's own
+        // refusal.
+        return Promise.reject(
+          new ApiError(422, preview.problems.map((problem) => problem.message).join(' '), {
+            type: 'skill_import_error',
+          }),
+        )
+      }
+      const refreshed = SkillSchema.parse({
+        ...skill,
+        // What a confirm really moves: the commit the snapshot is at now. The fake holds no
+        // repository to re-clone, so the file listing and the contents are what they were — a
+        // refresh a screen renders from the preview's own three lists and diff.
+        source: { ...skill.source, commit_sha: request.data.commit_sha },
+        refreshed_at: now().toISOString(),
+      })
+      skills.set(skillId, refreshed)
+      return Promise.resolve(refreshed)
+    },
+  }
+
+  /** The stored skill with this id, or `null` — including another owner's, which is a 404. */
+  function ownedSkill(skillId: string): Skill | null {
+    const skill = skills.get(skillId)
+    return skill !== undefined && skill.owner_id === user.id ? skill : null
+  }
+
+  /** The 422 an import answers with, when the test staged one. */
+  function importFailure(): ApiError | null {
+    const failure = importOptions?.failure
+    if (failure === undefined) {
+      return null
+    }
+    return new ApiError(422, SKILL_IMPORT_MESSAGES[failure], { type: 'skill_import_error' })
+  }
+
   /** The effective tool list, as `GET /v1/me/tools` answers it (epic #303, X4; #307; #312). */
   /**
    * The remote MCP tools this fake offers: an explicit `mcpTools` seed as given, or one pair per
@@ -1529,8 +1945,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
    * is the rule `apps/server/src/mcp/in-force.ts` applies.
    */
   function serverInForce(server: McpServer, override: ModeToolOverride | null): boolean {
-    const patch: Record<string, boolean> | undefined = override?.mcp_servers
-    return patch?.[server.id] ?? server.enabled
+    // The protocol's one rule (epic #349, B8): an entry wins, then the section default, then
+    // the server's own `enabled`.
+    return mcpServerInForce(server.id, server.enabled, override)
   }
 
   function hasLiveTokens(server: McpServer): boolean {
@@ -1863,7 +2280,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         name: tool.name,
         source: 'builtin' as const,
         // A mode's override is on/off only (#307); the user's choice, else on.
-        enabled: override?.builtin[tool.name] ?? choice?.enabled ?? true,
+        enabled: builtinToolInForce(tool.name, choice?.enabled ?? true, override),
         policy: choice?.policy ?? tool.policy,
         // A tool this deployment does not register has no declaration to report; one it does
         // declare and cannot offer — a `reason` is what says so (#335) — still has one.
@@ -2138,6 +2555,7 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
     models: modelsResource,
     modes: modesResource,
     mcpServers: mcpServersResource,
+    skills: skillsResource,
     tools: toolsResource,
     usage: usageResource,
     auth: authResource,
@@ -2182,6 +2600,9 @@ export function createFakeClient(options: FakeClientOptions = {}): FakeClient {
         content: [{ type: 'text', text }],
         ...(messageOptions?.model === undefined ? {} : { model: messageOptions.model }),
         ...(messageOptions?.mode === undefined ? {} : { mode: messageOptions.mode }),
+        // A slash invocation rides the message (epic #349, K7; #353): the text is what the
+        // reader typed and the skill is the one it named.
+        ...(messageOptions?.skill === undefined ? {} : { skill: messageOptions.skill }),
       })
       if (!input.success) {
         throw badRequestFor(input.error.issues)
@@ -2407,6 +2828,11 @@ function notFoundMode(modeId: string): ApiError {
 }
 
 /** The 404 an unknown MCP server id gets (epic #303, X10; #313). */
+/** The 404 an unknown or another owner's skill gets (epic #349, K4; #353). */
+function notFoundSkill(skillId: string): ApiError {
+  return new ApiError(404, `no skill with id ${skillId}`, { type: 'not_found_error' })
+}
+
 function notFoundMcpServer(serverId: string): ApiError {
   return new ApiError(404, `no MCP server with id ${serverId}`, { type: 'not_found_error' })
 }
@@ -2520,6 +2946,20 @@ function byCreatedAtThenId(a: Keyed, b: Keyed): number {
 /** `(created_at, id)`, newest first, the way sessions are listed. */
 function byCreatedAtThenIdDescending(a: Keyed, b: Keyed): number {
   return compareKeys(b, a)
+}
+
+/**
+ * `(imported_at, id)`, oldest first — the order the skill list is in (epic #349, K4).
+ *
+ * A skill records `imported_at` rather than a `created_at`, so this is `compareKeys`' rule over
+ * the field the resource really has: two imports in one millisecond are told apart by their ids,
+ * which are ULIDs that sort by creation time too.
+ */
+function byImportedAtThenId(a: Skill, b: Skill): number {
+  if (a.imported_at !== b.imported_at) {
+    return a.imported_at < b.imported_at ? -1 : 1
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 }
 
 /** The model catalog's order: provider, then display name. */

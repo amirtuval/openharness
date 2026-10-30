@@ -15,9 +15,15 @@ export interface ChatCommand {
   readonly aliases?: readonly string[] // 'quit' for /exit
   readonly description: string // the one line the menu and /help show
   readonly args?: string // an argument hint for the usage column, e.g. '<mode>'
-  readonly run: (context: CommandContext, args: string) => void | Promise<void>
+  readonly skill?: SlashCommand // set on a row that stands for one of the reader's skills
+  readonly run?: (context: CommandContext, args: string) => void | Promise<void>
 }
 ```
+
+`run` is absent on a **skill row** (#349, K7): a skill is not an action the client runs, it is
+an ordinary message carrying `skill`, which the screen sends (see "What a line is"). The rows
+themselves come from `@openharness/client`'s `slashCommands(skills)` — the same list the web app
+draws — through `menuCommands`.
 
 `CHAT_COMMANDS` holds them in the order the menu lists them. Adding a command is adding one
 entry: the menu, the completion, `/help` and `oh --help` all read the registry, so none of
@@ -34,6 +40,9 @@ command that wants a new power has to grow the context, where it can be seen.
 | `/providers [provider]`   | connect a model provider — paste its key into a hidden input (#210, X7) |
 | `/new`                    | start a new chat on the current model                                   |
 | `/compact [instructions]` | summarize the older history now, with optional guidance (#283)          |
+| `/mcp`                    | your remote MCP servers, in the prompt slot (#303 X10; #313)            |
+| `/tools`                  | which tools may run, and whether each asks first (#303 X4; #335)        |
+| `/skills`                 | your imported skills: list, switch, remove, import (#349; #354)         |
 | `/clear`                  | clear the screen; the session stays (the same wipe as Ctrl+L)           |
 | `/help`                   | print the commands and the keys above the prompt                        |
 | `/exit`                   | leave the chat (`/quit` is the same command)                            |
@@ -47,6 +56,7 @@ with the answer:
 | --------------- | --------------------------------------------------------------------------- |
 | `//anything`    | sent to the model as `/anything` — the escape hatch for a literal slash     |
 | `/name args`    | `/name` runs, with `args` (everything after the name, trimmed)              |
+| `/skill args`   | sent as a message carrying `skill` — the reader's own skill (#349, K7)      |
 | `/name` unknown | "Unknown command", with the closest match, shown above the prompt; not sent |
 | anything else   | sent to the model, verbatim                                                 |
 
@@ -81,6 +91,13 @@ unknown-command message reachable.
 The rows are one `<Text>` each, the highlighted one in `cyan` (an ANSI named colour, per
 decision X4 — the TUI never names a hex one); the usage column is padded to the widest label
 in the **whole** registry, so the descriptions do not jump sideways as the filter narrows.
+
+**The reader's skills are rows in the same list** (#349, K7; #354). `menuCommands(skills)` puts
+`CHAT_COMMANDS` first and then one row per skill the client's `slashCommands` offers — which is
+to say **on** (K8) and **user-invocable**, with its `argument-hint` as the row's usage. The
+screen reads the skills once in the background and re-reads them when `/skills` closes, because
+a skill switched off stops being a command. A skill row completes and filters like any other,
+and a near miss of a skill name is suggested by name.
 
 ## The inline prompt slot
 
@@ -146,11 +163,14 @@ K8); this command is the terminal's way in.
 
 ## Tests
 
-| file                                     | covers                                                                                  |
-| ---------------------------------------- | --------------------------------------------------------------------------------------- |
-| `src/chat/commands.test.ts`              | the registry, the parse, the filter, the closest match, each command                    |
-| `src/components/command-menu.test.tsx`   | the rows, the highlight, the aligned usage column                                       |
-| `src/components/prompt-input.test.tsx`   | the menu's keys, filtering, and its precedence over the history                         |
-| `src/components/prompt-slot.test.tsx`    | an element in the prompt's place, settling, and a replaced flow                         |
-| `src/components/provider-setup.test.tsx` | the `/providers` flow itself: the list, the key entry, a save, a rejection (#210)       |
-| `src/app.test.tsx`                       | each command end to end, the unknown command, `//`, the picker, and `/providers` (#210) |
+| file                                     | covers                                                                                             |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `src/chat/commands.test.ts`              | the registry, the parse, the filter, the closest match, each command                               |
+| `src/components/command-menu.test.tsx`   | the rows, the highlight, the aligned usage column                                                  |
+| `src/components/prompt-input.test.tsx`   | the menu's keys, filtering, and its precedence over the history                                    |
+| `src/components/prompt-slot.test.tsx`    | an element in the prompt's place, settling, and a replaced flow                                    |
+| `src/components/provider-setup.test.tsx` | the `/providers` flow itself: the list, the key entry, a save, a rejection (#210)                  |
+| `src/app.test.tsx`                       | each command end to end, the unknown command, `//`, the picker, and `/providers` (#210)            |
+| `src/commands/skills.test.ts`            | `oh skills`' words and flows: the listing, the preview, the pick's payload, refresh, remove (#354) |
+| `src/components/skill-import.test.tsx`   | the import pick: marks, selection keys, what Enter hands back (#354)                               |
+| `src/components/skill-refresh.test.tsx`  | the refresh confirm: the summary, the file lines, `y`/`n`, and the problems case (#354)            |

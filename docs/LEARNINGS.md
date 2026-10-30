@@ -827,6 +827,62 @@ pairs differ only in their event type strings, their id field and `mcp_server_na
 branch is exactly how a reader silently handles one pair and not the other
 ([#312](https://github.com/amirtuval/openharness/issues/312)).
 
+## Skills
+
+**A tool built per request is not a registry tool, and the settings have to be told it exists.**
+The two tools that read a skill are built from the skills _that request_ has — the user's
+`enabled`, with the mode's override — so nothing a deployment registers holds them, and
+`GET /v1/me/tools` would list neither and offer no switch for one. `SKILL_TOOL_DECLARATIONS`
+(`packages/brain/src/skills.ts`) is what the settings add beside `web_search`'s declaration
+(#335). The trap is that the first such list was written for `web_search` and carries two
+behaviours that suit only it: a **model-gated** availability (the chat model's provider decides)
+and `ask` rewritten to `allow` (a provider-executed search has no moment to pause at). Declaring
+the skill tools through it unchanged made both wrong — a chat on a model with no web search was
+told it had no skills, and a user could not ask to approve a skill read. The fix was to make the
+gate a field of the declaration (`modelGated`) rather than a property of the list, so one list
+can hold a tool the provider runs and a tool this build runs
+([#349](https://github.com/amirtuval/openharness/issues/349),
+[#352](https://github.com/amirtuval/openharness/issues/352)).
+
+**What the model was given is written down, never recomputed.** A skill's instructions reach a
+request through `session.skill_loaded`, whose `content` is the skill's body with the message's
+arguments already substituted in — written once, by the brain that first handles the message, and
+read by the context builder, the size accounting and the summarizer from then on. The tempting
+simpler design (resolve the skill per request and build the text then) loses twice: a refresh or
+an edit of the skill would silently rewrite a conversation that had already run, and the two
+readers that must agree — the request the strategy builds and the request the compaction trigger
+measures — would be reading a snapshot that can move between them. The same reasoning is why the
+`user.message` keeps the text the user typed while the _instructions_ live in their own event:
+the transcript is the user's, the prompt is the model's
+([#349](https://github.com/amirtuval/openharness/issues/349) K5/K7).
+
+**A schema-level refusal refuses the whole batch, and the e2e database is shared.** Two things
+that cost a debugging round. A `user.message` may not land half-checked: the slash-invocation
+check runs before the append, so a batch naming a skill the chat cannot run stores nothing at all
+— which is the property the log needs, and which means a test that expects "the message is there
+but the skill is not" is testing the wrong thing. And in `e2e/` a file's tests share **one**
+database and, unless they ask otherwise, **one** dev account: a skill seeded for one test is in
+force for every later test in the file, so per-test accounts are not politeness but the fixture
+([#352](https://github.com/amirtuval/openharness/issues/352)).
+
+**A boolean patch over "the user's setting" cannot say "only these", and the missing statement is
+the whole difference between a preset and a policy.** `Mode.tools` was a map of exceptions: a name
+absent from it followed the user's own switch, so a server or skill added after the mode was
+written was silently on in it, and no mode could be the allowlist a reviewed helper needs. The
+fix is one tri-state per kind — `builtin_default`, `mcp_servers_default`, `skills_default`, each
+`follow | off | on` with absent meaning `follow` — and the trap is that the three kinds were
+already resolved in three places (`tool-settings.ts`'s `effectiveTools`, `mcp/in-force.ts`,
+`skill.ts`'s `skillInForce`). Adding the default at each site would have been three chances to
+disagree with the brain, the frontends' `/` menus and a child session; instead one
+`modeItemInForce(entry, follows, fallback)` in the protocol is applied by one helper per kind,
+and every consumer calls it. `off` is an allowlist (an item added later stays off), `on` turns
+every unlisted item on even where the user turned it off globally, and **an explicit entry still
+wins**; a default is never a permission, and it cannot undo a hard rule — `withoutAskUser`, the
+subagent tools a depth withholds and `disable-model-invocation` are applied outside it. Storage
+needed no migration because all of it rides inside the existing `tools jsonb`
+([#349](https://github.com/amirtuval/openharness/issues/349) B8,
+`packages/protocol/src/resources/mode.ts`).
+
 ## Pausing for the user
 
 **A pause is written down, not held in memory.** A call evaluated as `ask` (or any `ask_user` call)
@@ -1231,6 +1287,85 @@ repositories actually have — a `SKILL.md` at the root beside a `skills/` direc
 every other skill's files twice, or blow the K4 limits doing it
 ([#364](https://github.com/amirtuval/openharness/pull/364)).
 
+**The import route takes `https://` and nothing else, so the repo's own git fixture cannot be imported through it.**
+`createGitFixture` (`@openharness/hands/testing`) serves a real repository over **smart HTTP on
+loopback** — `http://127.0.0.1:<port>/skills.git` — because that is what makes a clone testable
+offline, and `parseGitUrl` refuses any scheme but `https` (K3: "a public `https://` git URL"). A
+hands-on pass against the real server therefore cannot hand the fixture's own URL to the import
+route: it is answered with the 400 `A skill is imported from an \`https://\` git URL.` before a clone
+is ever attempted. The way through is a TLS-terminating proxy in front of the fixture with a
+certificate the server trusts (`NODE_EXTRA_CA_CERTS`) and
+`OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1`, which is what `e2e/qa/w30-skills.spec.ts` does — and
+when that is too much machinery, the pass imports from a real public repository instead and proves
+the real path over the network instead of over loopback
+([#353](https://github.com/amirtuval/openharness/issues/353)). Importing a real public repository
+(`https://github.com/anthropics/skills`, 5.7 MB, well under the 20 MB clone cap) works unchanged
+and is what a public-repo smoke can use — but only a **fixture** can move a branch, so a refresh
+diff is the half that needs the terminator
+([#354](https://github.com/amirtuval/openharness/issues/354)).
+
+**A loopback browse URL has to carry `owner/repo` before its `/tree/…`, so the pass's TLS front answers under `/org/skills.git` and not at `/skills.git`.**
+`parseGitUrl` only reads a browse URL's `tree` (or GitLab's `-`) separator from the **third** path
+segment on — a marker with no `owner/repo` in front of it is a repository's own name
+(`https://github.com/tree/main` names the repository `tree`) — so
+`https://127.0.0.1:<port>/skills.git/tree/main/skills/release-notes`, which is the shape the
+fixture's own URL has, is read as a clone URL for a repository called
+`skills.git/tree/main/skills/release-notes` and never split. `e2e/qa/skills-fixture.ts` therefore
+mounts the front at `https://127.0.0.1:<port>/org/skills.git` and drops the `/org` when it proxies:
+the separator now has two segments in front of it, S2's browse-URL split runs on the loopback
+fixture with no network at all, and `repositoryName` still answers `skills`
+([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**A mock stack chats without a key but still shows the first-run screen, so a hands-on pass has to seed a credential.**
+`OPENHARNESS_TEST_MODEL=mock` swaps the model factory and `resolveMockCredential` answers for every
+session, so a turn needs no provider key — but the root route's gate is the **credentials list**, and
+an account that holds none gets "Let's get you chatting ✨" instead of a composer, whatever its
+`default_model` preference says. Saving a key through the API is not an option either: `PUT
+/v1/provider-credentials` validates with one real provider call. The pass writes the row the route
+would write, with the server's own `sealCredential`/`credentialUpsert` and the stack's
+`OPENHARNESS_SECRETS_KEY` — the approach `e2e/src/harness/credentials.ts` already documents, which
+means a QA stack that is going to be driven by browser automation needs its secrets key **fixed** at
+start-up rather than generated per boot
+([#353](https://github.com/amirtuval/openharness/issues/353)).
+
+**The credentials gate is the root route's alone, so a pass can drive a whole chat without one.**
+`#/` and `#/new` render the first-run flow for an account with no provider key; `#/s/<id>` does
+not — a chat opened at its own route gets its transcript and its composer whatever the account
+holds, and the mock answers its turns either way. So the #355 specs need no credential at all: the
+one case that does is S11, because `requireUsableMode` refuses a chat on a mode whose model has no
+stored credential (422 `mode_unavailable_error`) — a check about the **mode**, not about chatting —
+and that scenario skips with that reason when the stack holds none. It is the cheaper answer than
+seeding a sealed row: no database access, no fixed secrets key, and a spec that runs against any
+deployment ([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**A screenshot pass has to set the theme the way the app does, and re-build the view after every reload.**
+Setting `data-theme` (or the `localStorage` cache) from the page looks like it works and does not:
+the app reads the reader's preferences and repaints once they arrive, so the capture races a value
+that is about to be overwritten — and the account's stored theme is the only thing that really
+decides it. Writing it through `PUT /v1/me/preferences` and reloading is both correct and the flow
+a person uses, but the reload drops whatever state the view was showing (an open import preview, a
+refresh diff), so each capture re-establishes the view with a real interaction. Two screenshots of
+the same screen in two themes are otherwise two different screens
+([#353](https://github.com/amirtuval/openharness/issues/353)).
+
+**A NUL byte is valid UTF-8 and Postgres `text` still refuses it, so a binary file has to be detected at the import and stored as base64.** `TextDecoder` happily decodes a PNG's `0x00` into `\u0000`, and the in-memory store accepts the string — which is why every test passed while a Postgres import of a skill with an image failed with `invalid byte sequence for encoding "UTF8": 0x00`. The import now decodes **fatally** and treats a NUL as non-text: `skill_files.encoding` is `'utf8' | 'base64'`, `content` is the file's bytes base64-encoded when it is `base64`, and `size` is always the original byte length, so K4's limits count the file rather than its spelling. Two places downstream depend on the column rather than on guessing from the string: `skill_read` reports a binary file by its path and size instead of returning base64 text, and the refresh diff compares encoding beside content. The general lesson is the one `looksBinary` had backwards: a heuristic over decoded text cannot be the storage contract, because the storage is what the heuristic was standing in for
+([#364](https://github.com/amirtuval/openharness/pull/364), `packages/session/migrations/0036_skills.sql`, `apps/server/src/skills-import.ts`).
+
+**A download cap bounds the pack, not what the pack inflates to, and `git.walk` can tell you paths without reading blobs.** `SKILL_CLONE_MAX_BYTES` counted downloaded bytes while `readTree` then read **every** blob of the commit — including folders the import never looks at — with no bound on the total, so 20 MB of highly compressible content could expand to gigabytes in the shared server process. The clone now takes the caller's `path` and reads only the blobs under it (a root `SKILL.md` still reads the whole tree, because the repository is the candidate), and a cumulative `SKILL_INFLATE_MAX_BYTES` refuses `over_limit` past it. A tree entry carries no size, so an individual oversized blob cannot be skipped from the tree; discovery still reports the file's own K4 problem when it fits
+([#364](https://github.com/amirtuval/openharness/pull/364), `packages/hands/src/git-clone.ts`).
+
+**`isomorphic-git` inflates every object of a pack to index it, so a cap on what the clone _reads_ does not bound its memory.** The cumulative check in `readTree` ran after `git.readBlob`, but a shallow clone is one pack, and `GitPackIndex.fromPack` computes each object's id by reading it — so a 20 GB zero-blob was inflated while the index was being built, before `readTree` was reached at all, and a small injected `maxInflatedBytes` did not help. The pack's own index and entry headers carry the sizes a tree entry does not: the clone now buffers the (≤20 MB) upload-pack response, demultiplexes its side-band stream, and refuses `over_limit` before `isomorphic-git` sees a pack with any object past `SKILL_INFLATE_MAX_BYTES`; a delta's result size comes from the first varints of its (small) instruction stream, and ordinary blobs are inflated with zlib's `maxOutputLength` set to what is left of the read cap. The indexing ceiling is deliberately the protocol cap rather than the caller's read cap, because an import naming one folder may still sit in a repository with a large unrelated file — refusing that would undo the path filter. Regression test: a sparse 101 MiB file, refused with the process never allocating it
+([#390](https://github.com/amirtuval/openharness/pull/390), `packages/hands/src/git-pack.ts`, `packages/hands/src/git-clone.ts`).
+
+**`disable-model-invocation` stops the model _choosing_ a skill, not following the instructions the user loaded.** Both skill tools refused such a skill unconditionally, which made a perfectly ordinary user-run command fail the moment its body said "read `references/style.md`": the user had run `/name`, its instructions were in the request, and the file they named was unreadable. The turn now reads the log before resolving the skills and passes the names of the `session.skill_loaded` events (plus the ones this batch is about to load) into `resolveSkills`; a name in that set is readable by both tools while staying out of the listing, so the model still cannot pick the command on its own. A child session applies its own log's answer the same way
+([#366](https://github.com/amirtuval/openharness/pull/366), `packages/hands/src/skill.ts`, `packages/brain/src/turn.ts`).
+
+**A batch that stores one row per picked item must count the cap before the first write, because the store's per-owner lock only protects one create.** `importSkills` created the picked candidates in a loop, so a user at 48 who picked three got two stored and then `SkillLimitReachedError`: the response was an error, the UI showed neither of the two that landed, and a retry reported their names as taken. The import now refuses the whole request (`existing + picked > MAX_SKILLS_PER_USER`) before anything is created; the store's lock still guards the race between that count and the writes
+([#364](https://github.com/amirtuval/openharness/pull/364), `apps/server/src/skills-import.ts`).
+
+**The `/` menu and the server each re-derived "which skills are on", and the two answers drifted in both directions.** A menu built from `skill.enabled` alone offers a skill the chat's mode turned off — choosing it gets a 400 from `assertInvocableSkills` — and hides one the mode turned on, which the server would accept. The rule (a mode that names a skill wins, one it does not name follows `enabled`) is now `skillInForce`/`skillsInForce` in `@openharness/protocol`; the server's in-force read and both frontends' `slashCommands` call it, so there is one answer. The menu takes the chat's mode override — the web chat's current (or just-switched) mode, New chat's picked mode, `oh`'s current or pending mode — which is also what makes it follow a mode switch
+([#375](https://github.com/amirtuval/openharness/pull/375), [#372](https://github.com/amirtuval/openharness/pull/372), `packages/protocol/src/resources/skill.ts`, `packages/client/src/skills.ts`).
+
 ## The HTTP layer
 
 **A route whose path parameter may hold slashes is written `:path{.+}`, not `*` — Hono 4 does not
@@ -1617,6 +1752,31 @@ rows an arrow key should not have to walk. Colour is never the selection: the ma
 is the one thing that survives `NO_COLOR`, and a test per screen asserts the frame carries it
 ([#335](https://github.com/amirtuval/openharness/issues/335)).
 
+**The Agent Skills format's own `argument-hint: [version]` is a YAML flow sequence, and
+`argument-hint: [pr-number] [priority]` is not YAML at all — a format whose _convention_ is in the
+brackets cannot be round-tripped by a YAML parser.** The protocol read the field as a string and
+silently ignored anything else, so a skill written for Claude Code shipped with no hint at all
+(`/release-notes` in the `/` menu) while the same field written as a bare word showed one — and the
+second spelling went further and made the whole frontmatter fail to parse, so the skill could not be
+imported. The import therefore reads `argument-hint`'s **own line** whenever YAML does not answer with a
+plain string, and a block whose YAML fails _only_ because of that line is read with the line set aside
+rather than refused (`apps/server/src/skills-import.ts`'s `parseFrontmatterBlock`); `argumentHintOf`
+renders an already-stored array back as `[a, b]`, so a snapshot imported before the fix shows the hint
+too. The lesson is the shape: an open, untyped frontmatter carries fields whose meaning is a convention
+rather than a value, and the parser has to keep the line that wrote it, not the parse
+([#354](https://github.com/amirtuval/openharness/issues/354)).
+
+**A `/` menu whose one Enter rule is "take the highlighted row" charges the reader a second keystroke
+for every command that is already complete.** Typing `/compact` and pressing Enter used to leave
+`/compact ` in the box and need another Enter to run it, because the same rule served the complete
+command and the skill whose arguments were still to come. What Enter means is a client decision now
+(`slashEnterAction` in `packages/client/src/skills.ts`): a **built-in** the line names in full runs at
+once, a **skill** still completes to `/name ` — it is never run from the menu, since it is sent as an
+ordinary message carrying its arguments (K7) — and a line that already has arguments sends. Both
+frontends call the one function, so the web composer and `oh` cannot drift; `oh`'s menu still closes
+once a name is a command of its own (a one-row list is noise), and the same rule decides what Enter does
+with that line anyway ([#354](https://github.com/amirtuval/openharness/issues/354)).
+
 **A tool call and the thing it started were not linked by an id, so the client's join had to be a
 heuristic — and a heuristic keyed on the wrong field is a bug that waits for a second matching
 call.** `agent { type, description, prompt }` returns a handle as a **text** result, and the
@@ -1735,6 +1895,20 @@ read said `idle` and the card said `done` (found by the #348 pass). The fix is o
 about what an effect is keyed on: the thing the reader sees is the status, and a count is only
 ever a proxy for it that happens to be wrong exactly when work stops.
 
+**"Pending switch" and "the mode in effect" are two states, and collapsing them made one
+direction of a mode switch invisible.** In the web chat, picking a **mode** while on a model was
+visible at once because the picked mode was rendered as the current one; picking a **model**
+while on a mode was not, because the current mode id still came from the session and the picker's
+trigger prefers a selected mode over a model name — so the reader saw the mode until the next
+message detached it. Clearing the mode id on the pick would have fixed the display and broken the
+send: choosing the very model the mode resolves to must still send `{ model }`, and the switch
+test needs to know the session was on a mode at that moment. The fix was a separate
+`detachingMode` flag (display: detached now) beside a committed mode id (send: still on a mode),
+with `oh`'s status line dropping its mode clause on the same rule and its `/` menu reading the
+override of the mode the next message will _not_ follow
+(`apps/web/src/components/chat/chat-view.tsx`,
+`apps/tui/src/chat/screen.tsx`'s `statusModeLabel`).
+
 ## Testing, CI and releasing
 
 **A suite that passes because nothing ran is worse than one that fails.** The Postgres suites take
@@ -1753,6 +1927,45 @@ uses ([`e2e/AGENTS.md`](../e2e/AGENTS.md)).
 ([#79](https://github.com/amirtuval/openharness/issues/79)) and once again through environment
 inheritance, which is the general lesson — an escape hatch meant for a test runner leaks into
 anything the test spawns.
+
+**Playwright restarts the worker after a failed test, so a `beforeAll` that cleans the account silently empties the run after the first failure.**
+`fullyParallel: false` with `workers: 1` runs a file's tests in order in one worker — but Playwright
+discards that worker when a test fails, and a fresh worker re-runs its `beforeAll`. A skills pass
+whose `beforeAll` deleted the account's imported skills therefore failed one case and then reported
+every later case against an empty account, which reads as "the settings screen stopped rendering
+skills" rather than "the fixture was cleaned" — five failures for one cause
+([#355](https://github.com/amirtuval/openharness/issues/355)). The rule the specs now follow is that
+**each scenario establishes its own state** (`ensureSkills(request, names)`) instead of inheriting
+it, so order and a failure's fallout cannot matter.
+
+**A fixture served from the test process cannot answer while that process is blocked in `execFileSync`.**
+The skills pass's git fixture listens **in the Playwright worker** and the server under test clones
+from it — so every `oh` the CLI spec ran with the synchronous runner (`execFileSync`, `stdio:
+'ignore'`) froze the worker's event loop for the length of the command, the fixture's listeners
+stopped accepting, and the clone reached the server as `fetch failed` and the reader as a 422
+`The repository could not be reached.` The same `oh skills add` worked from a shell, which is what
+made it look like a server problem. `e2e/qa/tmux.ts` gained `ohAsync` (a `spawn`, with stdin still
+ignored so a confirm question reads end-of-file) for exactly this: a scenario that serves something
+to the stack under test has to let its own loop turn ([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**`waitForIdle` passes vacuously between two sends on one session, because the idle a finished turn wrote is already the log's last status.**
+"Wait until the session is idle" is true the instant the second message is appended and the new
+turn has not started — the new turn's `session.status_running` has not been written yet — so a
+scenario that waited that way read the log before the brain had loaded the skill it was asserting
+on, and reported no `session.skill_loaded` at all. The fix is to wait for the thing that really
+changed (`waitForLoaded`: the count of `session.skill_loaded` events) rather than for a state the
+previous turn had already left behind — the same "a wait anchored on nothing returns immediately on
+an empty state" trap the e2e harness documents for `afterSeq`
+([#355](https://github.com/amirtuval/openharness/issues/355)).
+
+**The fixture's TLS certificate and the sandbox's egress proxy are two CAs, and `NODE_EXTRA_CA_CERTS` names one file.**
+A QA stack started with `NODE_EXTRA_CA_CERTS=<skills fixture ca>.pem` **replaces** whatever the
+environment already had — so a container behind an egress proxy lost the proxy's CA with it, and
+every provider call the stack made came back `fetch failed` while `curl` from the same shell worked.
+The skills pass's stack therefore starts with both `cat`-ed into one bundle (the fixture's
+`e2e/fixtures/skills-https/README.md` says so in as many words), which is the same instruction
+`e2e/AGENTS.md` already gave for a deployment with a CA of its own
+([#353](https://github.com/amirtuval/openharness/issues/353), [#355](https://github.com/amirtuval/openharness/issues/355)).
 
 **An assertion that cannot fail is worse than no assertion, because it is counted as coverage.** A
 test review of every package found them everywhere: `expect(p.partitionOf(id)).toBe(p.partitionOf(id))`,
