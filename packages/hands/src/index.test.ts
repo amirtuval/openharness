@@ -4,8 +4,11 @@ import {
   PACKAGE_NAME,
   PROTOCOL_DEPENDENCY,
   WEB_FETCH_TOOL_NAME,
+  cloneRepository,
   createWebFetchTool,
   htmlToMarkdown,
+  parseGitUrl,
+  repositoryName,
   todoWriteTool,
 } from './index'
 
@@ -29,5 +32,18 @@ describe('@openharness/hands', () => {
     expect(htmlToMarkdown('<html><body><p>hi</p></body></html>', 'https://example.com/')).toContain(
       'hi',
     )
+  })
+
+  it('exports the git reading an import needs (epic #349, K3)', () => {
+    expect(parseGitUrl('https://github.com/a/b/tree/main/skills')).toEqual({
+      url: 'https://github.com/a/b',
+      ref: 'main',
+      path: 'skills',
+    })
+    // The name a `SKILL.md` at a repository's root is checked against: the repository's own.
+    expect(repositoryName('https://github.com/a/b.git')).toBe('b')
+    // The clone is the package's own function, not a re-export of the library it is built on:
+    // what a caller gets is a repository read through the guard and into memory.
+    expect(cloneRepository).toBeTypeOf('function')
   })
 })

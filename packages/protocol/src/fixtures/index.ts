@@ -6,6 +6,7 @@ import {
   newModeId,
   newProviderCredentialId,
   newSessionId,
+  newSkillId,
   newTaskId,
 } from '../ids'
 import { SUMMARY_MODEL_SAME_AS_CHAT } from '../index'
@@ -36,6 +37,7 @@ import type {
   SessionAgent,
   SessionCompactEvent,
   SessionCompactionEvent,
+  SessionSkillLoadedEvent,
   SessionDeletedEvent,
   SessionError,
   SessionErrorEvent,
@@ -48,6 +50,7 @@ import type {
   SessionTaskStartedEvent,
   SessionTaskStatusEvent,
   SessionUsageEvent,
+  Skill,
   StoredEvent,
   StoredEventDelta,
   StoredEventStart,
@@ -333,6 +336,45 @@ export function makeMcpServer(overrides: Partial<McpServer> = {}): McpServer {
     updated_at: fixtureTimestamp(),
   }
   return { ...server, ...overrides }
+}
+
+/**
+ * An imported skill (epic #349): `release-notes`, whose snapshot is a `SKILL.md` and one
+ * reference file, taken from the commit of a public repository.
+ *
+ * The `files` are the listing the resource carries — a path and a size each, never a content —
+ * so the fixture is what a `GET /v1/me/skills` answer holds. Its frontmatter carries the
+ * `argument-hint` the format honours beside a field nothing reads, which is what a real
+ * skill's does.
+ *
+ * @param overrides fields to replace on the default skill
+ */
+export function makeSkill(overrides: Partial<Skill> = {}): Skill {
+  const skill: Skill = {
+    id: newSkillId(),
+    type: 'skill',
+    owner_id: makeUser().id,
+    name: 'release-notes',
+    description: 'Writes the release notes for a version from the commits since the last tag.',
+    frontmatter: {
+      'argument-hint': '[version]',
+      license: 'MIT',
+    },
+    source: {
+      url: 'https://github.com/example/skills',
+      ref: 'main',
+      path: 'release-notes',
+      commit_sha: '9f2c1b4e5a6d7c8b9a0f1e2d3c4b5a69788796a5',
+    },
+    files: [
+      { path: 'SKILL.md', size: 1_240 },
+      { path: 'reference/tone.md', size: 380 },
+    ],
+    enabled: true,
+    imported_at: fixtureTimestamp(),
+    refreshed_at: fixtureTimestamp(),
+  }
+  return { ...skill, ...overrides }
 }
 
 /**
@@ -958,6 +1000,34 @@ export function makeSessionCompaction(
     outcome: 'summarized',
     instructions: 'keep the API decisions in detail',
     summary_seq: 8,
+  }
+  return { ...event, ...overrides }
+}
+
+// ------------------------------------------------- skill invocation (epic #349)
+
+/**
+ * A stored `session.skill_loaded`: what a slash invocation gave the model (epic #349, K7).
+ *
+ * The default loads the `release-notes` skill of {@link makeSkill} for the message at `seq` 4 —
+ * a chat whose second turn was `/release-notes v1.2` — with the body the arguments were
+ * substituted into. Override `message_seq` to point at the message the test's own log holds.
+ *
+ * @param overrides fields to replace on the event
+ */
+export function makeSessionSkillLoaded(
+  overrides: Partial<SessionSkillLoadedEvent> = {},
+): SessionSkillLoadedEvent {
+  const event: SessionSkillLoadedEvent = {
+    id: newEventId(),
+    type: 'session.skill_loaded',
+    seq: takeSeq(),
+    processed_at: fixtureTimestamp(),
+    message_seq: 4,
+    name: 'release-notes',
+    skill_id: newSkillId(),
+    commit_sha: '9f2c1b4e5a6d7c8b9a0f1e2d3c4b5a69788796a5',
+    content: 'Write the release notes for v1.2, one paragraph per change.',
   }
   return { ...event, ...overrides }
 }

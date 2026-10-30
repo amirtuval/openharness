@@ -38,49 +38,58 @@ Everything under `API_VERSION_PREFIX` (`/v1`). Bodies and queries are validated 
 protocol's schemas, so the shapes are not repeated here — see
 [`packages/protocol/AGENTS.md`](../../packages/protocol/AGENTS.md).
 
-| method   | path                                            | body / query                                | answers                                                                                                                                                                                                                          |
-| -------- | ----------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`    | `/health`                                       | —                                           | liveness: `{ status: 'ok' }`; never needs a session                                                                                                                                                                              |
-| `GET`    | `/ready`                                        | —                                           | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                                                                                             |
-| `GET`    | `/v1/auth-config`                               | —                                           | `{ providers, dev_login }`; never needs a session                                                                                                                                                                                |
-| `GET`    | `/v1/me`                                        | —                                           | the signed-in `User`                                                                                                                                                                                                             |
-| `GET`    | `/v1/me/preferences`                            | —                                           | the caller's `UserPreferences` plus the `defaults` its `null`s mean (#282), unwrapped                                                                                                                                            |
-| `PUT`    | `/v1/me/preferences`                            | `PutPreferencesRequestSchema`               | the stored preferences, merged; 400 for a malformed id or an out-of-range number                                                                                                                                                 |
-| `GET`    | `/v1/me/tools`                                  | `ListToolSettingsQuerySchema` (`mode_id`)   | `{ data: ToolSettingEntry[] }` — the effective settings, as a chat on `mode_id` would see them: this process's tools, then the in-force MCP servers' (#307; #312)                                                                |
-| `PUT`    | `/v1/me/tools`                                  | `PutToolSettingsRequestSchema`              | the stored settings, merged per tool; 400 for a permission or shape the schema refuses                                                                                                                                           |
-| `POST`   | `/v1/me/modes`                                  | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                                                                                                   |
-| `GET`    | `/v1/me/modes`                                  | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                                                                                                    |
-| `GET`    | `/v1/me/modes/{mode_id}`                        | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                                                                                                           |
-| `POST`   | `/v1/me/modes/{mode_id}`                        | `UpdateModeRequestSchema`                   | the updated `Mode`, or 404; 409 for a rename onto a name the caller has                                                                                                                                                          |
-| `DELETE` | `/v1/me/modes/{mode_id}`                        | —                                           | 204; lands the chats that followed the mode on the model they last ran; 404 for another user's                                                                                                                                   |
-| `POST`   | `/v1/agents`                                    | `CreateAgentRequestSchema`                  | 201, the `Agent`                                                                                                                                                                                                                 |
-| `GET`    | `/v1/agents`                                    | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                            |
-| `GET`    | `/v1/agents/{agent_id}`                         | —                                           | the `Agent`, or 404                                                                                                                                                                                                              |
-| `POST`   | `/v1/agents/{agent_id}`                         | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                                                                                                      |
-| `POST`   | `/v1/sessions`                                  | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used. Takes `interactive` (epic #340, S1); the tree fields are stripped (#341)           |
-| `GET`    | `/v1/sessions`                                  | `ListSessionsQuerySchema`                   | `{ data, next_page }` — the caller's top-level chats, or `?parent_session_id=` one session's children (epic #340, S3; #341)                                                                                                      |
-| `GET`    | `/v1/sessions/{session_id}`                     | —                                           | the `Session`, or 404                                                                                                                                                                                                            |
-| `DELETE` | `/v1/sessions/{session_id}`                     | —                                           | 204; hard delete (U5) — the session **and its descendants** (epic #340, S7; #341); 404 for another owner's or an unknown session                                                                                                 |
-| `POST`   | `/v1/sessions/{session_id}/events`              | `SendEventsRequestSchema`                   | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) or for a `user.tool_confirmation` naming a call that is not waiting (#309)  |
-| `GET`    | `/v1/sessions/{session_id}/events`              | `ListEventsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                            |
-| `GET`    | `/v1/sessions/{session_id}/events/stream`       | `StreamEventsQuerySchema`                   | the SSE stream; 404 for an unknown session                                                                                                                                                                                       |
-| `POST`   | `/v1/sessions/{session_id}/compact`             | `CompactSessionRequestSchema`               | `{ data: session.compact }` — stores a manual-compaction request, or returns the one already pending; 400 for over-long `instructions`, 404 for another owner's (#283)                                                           |
-| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | the AI SDK `useChat` request (see below)    | an AI SDK UI message stream — an **extension**                                                                                                                                                                                   |
-| `GET`    | `/v1/models`                                    | `ListModelsQuerySchema` (`refresh`)         | `{ data, providers }`; 429 for a refresh inside the minute                                                                                                                                                                       |
-| `GET`    | `/v1/sessions/{session_id}/usage`               | —                                           | what one session spent: totals, cost and the per-model breakdown; 404 for another owner's                                                                                                                                        |
-| `GET`    | `/v1/me/usage`                                  | `UserUsageQuerySchema` (`from`, `to`, `tz`) | the caller's own usage: totals, cost, by model and by day; 400 for a zone or range it cannot read                                                                                                                                |
-| `PUT`    | `/v1/provider-credentials/{name}`               | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if it is refused, 400 for a name its type may not take                                                                                                                                            |
-| `GET`    | `/v1/provider-credentials`                      | —                                           | `{ data: ProviderCredential[] }`, metadata only                                                                                                                                                                                  |
-| `DELETE` | `/v1/provider-credentials/{name}`               | —                                           | 204; never an error for one that is not there                                                                                                                                                                                    |
-| `POST`   | `/v1/me/mcp_servers`                            | `CreateMcpServerRequestSchema`              | 201, the `McpServer`; the auth type is **detected** from the URL (#314); 409 for a duplicate name or the twenty-first server (#303, X10); 400 for a URL the guard refuses; 422 never (a check that fails stores `status: error`) |
-| `GET`    | `/v1/me/mcp_servers`                            | —                                           | `{ data: McpServer[] }`, metadata only; no pagination (a user holds at most 20)                                                                                                                                                  |
-| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | the `McpServer`, or 404                                                                                                                                                                                                          |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | `UpdateMcpServerRequestSchema`              | the updated `McpServer`, or 404; `headers` replaces the sealed map, omitted keeps it                                                                                                                                             |
-| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | 204; deletes the server and its pending OAuth states                                                                                                                                                                             |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | —                                           | the refreshed `McpServer` after the connection check; 400 for a refused URL, 404 for another owner's                                                                                                                             |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | `ConnectMcpServerRequestSchema` (`client`)  | `{ authorization_url }`; 422 `mcp_connection_error` for a discovery/registration failure, 400 for a non-OAuth server                                                                                                             |
-| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | —                                           | the `McpServer` with its tokens dropped, on `needs_reconnect`                                                                                                                                                                    |
-| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | `code`, `state`                             | the provider's redirect back — **no session**; 302 to the app (web) or an HTML page (CLI), 400 with a page for a bad, expired or misused state                                                                                   |
+| method   | path                                            | body / query                                | answers                                                                                                                                                                                                                                                                  |
+| -------- | ----------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET`    | `/health`                                       | —                                           | liveness: `{ status: 'ok' }`; never needs a session                                                                                                                                                                                                                      |
+| `GET`    | `/ready`                                        | —                                           | readiness (#151): `{ status: 'ok' }`, or 503 while draining or when the store does not answer; never needs a session                                                                                                                                                     |
+| `GET`    | `/v1/auth-config`                               | —                                           | `{ providers, dev_login }`; never needs a session                                                                                                                                                                                                                        |
+| `GET`    | `/v1/me`                                        | —                                           | the signed-in `User`                                                                                                                                                                                                                                                     |
+| `GET`    | `/v1/me/preferences`                            | —                                           | the caller's `UserPreferences` plus the `defaults` its `null`s mean (#282), unwrapped                                                                                                                                                                                    |
+| `PUT`    | `/v1/me/preferences`                            | `PutPreferencesRequestSchema`               | the stored preferences, merged; 400 for a malformed id or an out-of-range number                                                                                                                                                                                         |
+| `GET`    | `/v1/me/tools`                                  | `ListToolSettingsQuerySchema` (`mode_id`)   | `{ data: ToolSettingEntry[] }` — the effective settings, as a chat on `mode_id` would see them: this process's tools, then the in-force MCP servers' (#307; #312)                                                                                                        |
+| `PUT`    | `/v1/me/tools`                                  | `PutToolSettingsRequestSchema`              | the stored settings, merged per tool; 400 for a permission or shape the schema refuses                                                                                                                                                                                   |
+| `POST`   | `/v1/me/modes`                                  | `CreateModeRequestSchema`                   | 201, the `Mode`; 409 for a duplicate name (per user) or the twentieth-plus-one mode (#245, M6)                                                                                                                                                                           |
+| `GET`    | `/v1/me/modes`                                  | —                                           | `{ data: Mode[] }`, the caller's own; no pagination (a user holds at most 20)                                                                                                                                                                                            |
+| `GET`    | `/v1/me/modes/{mode_id}`                        | —                                           | the `Mode`, or 404 for another user's or an unknown id                                                                                                                                                                                                                   |
+| `POST`   | `/v1/me/modes/{mode_id}`                        | `UpdateModeRequestSchema`                   | the updated `Mode`, or 404; 409 for a rename onto a name the caller has                                                                                                                                                                                                  |
+| `DELETE` | `/v1/me/modes/{mode_id}`                        | —                                           | 204; lands the chats that followed the mode on the model they last ran; 404 for another user's                                                                                                                                                                           |
+| `POST`   | `/v1/agents`                                    | `CreateAgentRequestSchema`                  | 201, the `Agent`                                                                                                                                                                                                                                                         |
+| `GET`    | `/v1/agents`                                    | `ListAgentsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                                                                    |
+| `GET`    | `/v1/agents/{agent_id}`                         | —                                           | the `Agent`, or 404                                                                                                                                                                                                                                                      |
+| `POST`   | `/v1/agents/{agent_id}`                         | `UpdateAgentRequestSchema`                  | the updated `Agent`, or 404                                                                                                                                                                                                                                              |
+| `POST`   | `/v1/sessions`                                  | `CreateSessionRequestSchema`                | 201, the `Session`; 404 for an unknown agent or mode; 400 for none of an agent, a model or a mode; 422 for a mode whose model cannot be used. Takes `interactive` (epic #340, S1); the tree fields are stripped (#341)                                                   |
+| `GET`    | `/v1/sessions`                                  | `ListSessionsQuerySchema`                   | `{ data, next_page }` — the caller's top-level chats, or `?parent_session_id=` one session's children (epic #340, S3; #341)                                                                                                                                              |
+| `GET`    | `/v1/sessions/{session_id}`                     | —                                           | the `Session`, or 404                                                                                                                                                                                                                                                    |
+| `DELETE` | `/v1/sessions/{session_id}`                     | —                                           | 204; hard delete (U5) — the session **and its descendants** (epic #340, S7; #341); 404 for another owner's or an unknown session                                                                                                                                         |
+| `POST`   | `/v1/sessions/{session_id}/events`              | `SendEventsRequestSchema`                   | `{ data: user event[] }`; then signals, and a title; 409 for a rewind while running, 400 for a batch whose rewind is not its only first event (#238) or for a `user.tool_confirmation` naming a call that is not waiting (#309)                                          |
+| `GET`    | `/v1/sessions/{session_id}/events`              | `ListEventsQuerySchema`                     | `{ data, next_page }`                                                                                                                                                                                                                                                    |
+| `GET`    | `/v1/sessions/{session_id}/events/stream`       | `StreamEventsQuerySchema`                   | the SSE stream; 404 for an unknown session                                                                                                                                                                                                                               |
+| `POST`   | `/v1/sessions/{session_id}/compact`             | `CompactSessionRequestSchema`               | `{ data: session.compact }` — stores a manual-compaction request, or returns the one already pending; 400 for over-long `instructions`, 404 for another owner's (#283)                                                                                                   |
+| `POST`   | `/v1/sessions/{session_id}/ai-sdk/chat`         | the AI SDK `useChat` request (see below)    | an AI SDK UI message stream — an **extension**                                                                                                                                                                                                                           |
+| `GET`    | `/v1/models`                                    | `ListModelsQuerySchema` (`refresh`)         | `{ data, providers }`; 429 for a refresh inside the minute                                                                                                                                                                                                               |
+| `GET`    | `/v1/sessions/{session_id}/usage`               | —                                           | what one session spent: totals, cost and the per-model breakdown; 404 for another owner's                                                                                                                                                                                |
+| `GET`    | `/v1/me/usage`                                  | `UserUsageQuerySchema` (`from`, `to`, `tz`) | the caller's own usage: totals, cost, by model and by day; 400 for a zone or range it cannot read                                                                                                                                                                        |
+| `PUT`    | `/v1/provider-credentials/{name}`               | `PutProviderCredentialRequestSchema`        | the credential's metadata; 422 if it is refused, 400 for a name its type may not take                                                                                                                                                                                    |
+| `GET`    | `/v1/provider-credentials`                      | —                                           | `{ data: ProviderCredential[] }`, metadata only                                                                                                                                                                                                                          |
+| `DELETE` | `/v1/provider-credentials/{name}`               | —                                           | 204; never an error for one that is not there                                                                                                                                                                                                                            |
+| `POST`   | `/v1/me/mcp_servers`                            | `CreateMcpServerRequestSchema`              | 201, the `McpServer`; the auth type is **detected** from the URL (#314); 409 for a duplicate name or the twenty-first server (#303, X10); 400 for a URL the guard refuses; 422 never (a check that fails stores `status: error`)                                         |
+| `GET`    | `/v1/me/mcp_servers`                            | —                                           | `{ data: McpServer[] }`, metadata only; no pagination (a user holds at most 20)                                                                                                                                                                                          |
+| `GET`    | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | the `McpServer`, or 404                                                                                                                                                                                                                                                  |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}`            | `UpdateMcpServerRequestSchema`              | the updated `McpServer`, or 404; `headers` replaces the sealed map, omitted keeps it                                                                                                                                                                                     |
+| `DELETE` | `/v1/me/mcp_servers/{mcp_server_id}`            | —                                           | 204; deletes the server and its pending OAuth states                                                                                                                                                                                                                     |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/test`       | —                                           | the refreshed `McpServer` after the connection check; 400 for a refused URL, 404 for another owner's                                                                                                                                                                     |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/connect`    | `ConnectMcpServerRequestSchema` (`client`)  | `{ authorization_url }`; 422 `mcp_connection_error` for a discovery/registration failure, 400 for a non-OAuth server                                                                                                                                                     |
+| `POST`   | `/v1/me/mcp_servers/{mcp_server_id}/disconnect` | —                                           | the `McpServer` with its tokens dropped, on `needs_reconnect`                                                                                                                                                                                                            |
+| `GET`    | `/v1/me/mcp_servers/oauth/callback`             | `code`, `state`                             | the provider's redirect back — **no session**; 302 to the app (web) or an HTML page (CLI), 400 with a page for a bad, expired or misused state                                                                                                                           |
+| `GET`    | `/v1/me/skills`                                 | —                                           | `{ data: Skill[] }`, the caller's own, oldest first; metadata only, never a file's content (epic #349, K4)                                                                                                                                                               |
+| `GET`    | `/v1/me/skills/{skill_id}`                      | —                                           | the `Skill` with `SKILL.md`'s content, or 404 for another user's or an unknown id                                                                                                                                                                                        |
+| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | —                                           | one file's `{ path, size, content }`; 404 for a path the snapshot does not hold, and for another user's skill alike                                                                                                                                                      |
+| `POST`   | `/v1/me/skills/{skill_id}`                      | `UpdateSkillRequestSchema`                  | the updated `Skill` (`enabled`), or 404; 400 for a body that names no field                                                                                                                                                                                              |
+| `DELETE` | `/v1/me/skills/{skill_id}`                      | —                                           | 204, and the whole snapshot goes with it; 404 for another user's or an unknown id                                                                                                                                                                                        |
+| `POST`   | `/v1/me/skills/import/preview`                  | `PreviewSkillImportRequestSchema`           | the commit a clone landed on and every `SKILL.md` under the path, with its files, its whole `SKILL.md`, its problems and whether the name is taken; nothing stored; 422 `skill_import_error`, 400 for a URL or path the guard refuses (#351)                             |
+| `POST`   | `/v1/me/skills/import`                          | `SkillImportRequestSchema`                  | 201, `{ data: Skill[] }` — the picked candidates stored, after re-cloning and checking the ref still resolves to `commit_sha`; 409 for a ref that moved or a name the caller has, 422 for a candidate that cannot be imported, 400 for a name no candidate has (§ below) |
+| `POST`   | `/v1/me/skills/{skill_id}/refresh/preview`      | —                                           | the re-clone's commit and the diff against the stored snapshot: files added, removed and changed, the `SKILL.md` diff, and the new snapshot's problems; 404 for another owner's, 422 when the repository no longer holds the skill (§ below)                             |
+| `POST`   | `/v1/me/skills/{skill_id}/refresh`              | `RefreshSkillRequestSchema`                 | the skill with its snapshot replaced, `refreshed_at` moved and everything else kept; 404 for another owner's, 409 for a commit that is not the previewed one, 422 for a snapshot that cannot be stored (§ below)                                                         |
 
 Every `/v1` route except `auth-config` and the MCP OAuth callback requires a session (see
 "Authentication" and "Remote MCP servers"), and every resource is scoped to its owner. The two
@@ -157,7 +166,7 @@ itself is a `session.context_summary` with reason `manual`.
 | `PORT`                                    | `3000`                           | the port to listen on                                                                                                                                                                                                                                                                                              |
 | `OPENHARNESS_TEST_MODEL`                  | —                                | `mock` swaps in the deterministic test model                                                                                                                                                                                                                                                                       |
 | `OPENHARNESS_WEB_DIR`                     | —                                | a built web app to serve at `/`                                                                                                                                                                                                                                                                                    |
-| `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | off                              | `1` lets a **custom OpenAI-compatible** credential **or a remote MCP server** reach a private/loopback address (epic #245, M4; #249; #303, X10); never Azure; off in the deployment                                                                                                                                |
+| `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | off                              | `1` lets a **custom OpenAI-compatible** credential, a **remote MCP server** or a **skill import's clone** reach a private/loopback address (epic #245, M4; #249; #303, X10; #349, K3); never Azure; off in the deployment                                                                                          |
 | `OPENHARNESS_TRUSTED_PROXY_HOPS`          | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)                                                                                                                                                                                                                    |
 | `OPENHARNESS_CORS_ORIGINS`                | —                                | comma-separated origins to allow; unset means no CORS headers                                                                                                                                                                                                                                                      |
 | `OPENHARNESS_MAX_CONCURRENT_SESSIONS`     | `4`                              | how many sessions may be running at once                                                                                                                                                                                                                                                                           |
@@ -824,6 +833,15 @@ answer is the **effective** state of each tool:
 - **Called once per process, and read twice.** `main.ts` builds the registry once and hands the
   same instance to the turn options and to the app, so "available" and "a chat can call it" are
   one fact rather than two that could drift.
+- **The mode's override has three section defaults too** (epic #349, B8). `builtin_default`,
+  `mcp_servers_default` and `skills_default` are read by `builtinToolInForce`,
+  `mcpServerInForce` and the protocol's `skillInForce` — one rule per kind, applying an
+  explicit map entry first, then `off` (an allowlist), `on` (everything except the map's off
+  entries, even for items the user turned off) or `follow` (the user's own setting, which is
+  what an absent field means). The server's `effectiveTools`, `mcp/in-force.ts` and `skills.ts`
+  all call those functions, so the listing, the in-force servers/skills and the brain's
+  per-request answer cannot disagree. A hard rule still wins: `withoutAskUser` and the
+  structural subagent tool set are applied outside the override.
 - **The mode's override has an MCP half too** (#311). The same `Mode.tools` carries
   `mcp_servers`, an on/off patch over the user's remote MCP servers by id — a sibling of
   `builtin`, at **server** granularity and never per MCP tool. `tool-settings.ts` handles only
@@ -833,6 +851,12 @@ answer is the **effective** state of each tool:
   mode naming a server the user no longer has is ignored, not refused: the mode routes store
   the map as written (`routes/modes.ts`) and nothing re-writes a mode when a server is deleted.
   See [Remote MCP servers](#remote-mcp-servers-epic-303-x10).
+- **The mode's override has a skills half too** (epic #349, K8). The same `Mode.tools` carries
+  `skills`, an on/off patch over the user's imported skills by id — a third sibling of
+  `builtin`, read exactly as `mcp_servers` is. It is `skills.ts`'s, and it reads the same one
+  override the host resolved once, so a chat's built-in tools and its skills cannot disagree. A
+  mode naming a skill the user no longer has is ignored, not refused, for the same reason. See
+  [Skills](#skills-epic-349-k4).
 
 ### Background tasks (epic #340, S4/S5; #343)
 
@@ -1130,6 +1154,178 @@ header`, and nothing when the request did carry one. No header **value** is ever
   app is served same-origin, so the URL a browser can reach is the public URL, and `createApp`
   takes it as `McpServersAppOptions.callbackUrl` (a test passes its own).
 
+## Skills (epic #349, K4; the settings answer: K8)
+
+A **skill** is a folder of instructions in the open Agent Skills format that a user imports from
+a public git repository and reviews (K1, K3). What this server does with one is the resource
+half: the routes over `/v1/me/skills`, the four routes that read a repository (`skills-import.ts`
+and `skills-diff.ts`, #351), and the answer "which skills is this request given". The
+`skill`/`skill_read` tools, the listing and the slash-command invocation are #352's; the screens
+are #353/#354's. Everything here is wired so those land beside it rather than through it.
+
+- **The store is the resource's home** (`@openharness/session`'s `SkillStore`, K4): a skill is
+  a **snapshot** — the parsed frontmatter, the source URL/ref/path/commit and every file — and
+  the store answers metadata only, never a file's content. `createApp` takes it as
+  `AppOptions.skills` (an in-memory store when a test omits one) and `main.ts` builds the
+  durable one from the same pool the log uses, beside the credential and MCP-server stores.
+  There is no service layer: a snapshot is stored text, so nothing goes through the vault or the
+  network.
+- **The routes are owner-scoped like every other resource** (A4): the owner is always
+  `c.get('user').id`, another user's skill is a 404, and so is a file of one — the same answer
+  an unknown path gets, so a path cannot probe for a skill. A **malformed** `skl_` id in a path
+  is the 400 every bad id gets, because it could not name a skill however the database looked.
+- **`GET /v1/me/skills/{skill_id}` is the one read that carries a file's content**: a skill is
+  read by its `SKILL.md`, and a settings screen that had to fetch it separately would make two
+  requests to draw one row. Every other read is metadata — `files` is a path and a size each —
+  and any other file has a read of its own, whose `{path}` is the **rest of the URL** (Hono's
+  `:path{.+}`), because a skill's paths are relative and may hold slashes
+  (`reference/tone.md`). A skill always holds a `SKILL.md` — the store refuses a snapshot
+  without one (K1) — so a read that finds none is a broken invariant and answers the generic
+  500 rather than a 404 that would claim the skill is missing.
+- **`POST /v1/me/skills/{skill_id}` takes `enabled` and nothing else.** What a skill _is_, is
+  its snapshot, and the only field a user changes without a refresh (K5) is whether it is on
+  (K8); a new snapshot comes from re-importing (#351). `DELETE` removes the skill and its whole
+  snapshot, which is one statement: the files cascade.
+- **The two store refusals an import will meet are already mapped.** A name the caller already
+  has and the fifty-first skill are the protocol's 409 `conflict_error` in `app.ts`, beside the
+  mode and MCP-server ones — the store raises `DuplicateSkillNameError`/`SkillLimitReachedError`
+  under the per-owner lock modes and servers use, so two imports racing for the last slot cannot
+  both land.
+- **The settings answer lives in `skills.ts`**, next to `tool-settings.ts` and for the same
+  reason: it is the one place the user's own choice and a mode's override meet. `skillsInForce`
+  is the rule — **a mode that names a skill wins; a skill it does not name follows the user's
+  `enabled`** — delegating to `@openharness/protocol`'s `skillsInForce` so the `/` menus on both
+  frontends and the server's `assertInvocableSkills` read one function, and `listSkillsInForce`
+  is that rule over one store read per request, which is
+  what makes a switch flipped in the settings, or a mode edited, apply from the next request on.
+  A map entry naming a deleted skill is ignored rather than refused, exactly as an MCP server's
+  is. `createSkillSettingsResolver` is the seam the brain is handed (#352); it returns the
+  **skill resources**, so a listing has each skill's name and description without reading a
+  file.
+- **`Mode.tools.skills` is the third sibling key** (#349, K8), beside `builtin` and
+  `mcp_servers`, and it is stored by the mode routes as written — no check against the skills
+  present — which is what leaves a mode that named a deleted skill untroubled.
+  `isolation.test.ts` sweeps the routes with a second user, and `skills.test.ts` covers them
+  plus the override: the user's own `enabled` with no mode, a mode turning one off and another
+  on, and an entry naming a skill that is gone.
+
+### Import and refresh (epic #349, K3/K5; issue #351)
+
+`skills-import.ts` is the whole of the four routes that read a repository — import is two steps,
+refresh is two steps — and `skills-diff.ts` is the diff a refresh shows. The clone itself is
+`@openharness/hands`' (`cloneRepository`: `isomorphic-git` through `safeFetch`, shallow, into an
+in-memory file system, nothing on disk), so what this package holds is everything that is the
+**server's** about an import:
+
+- **The clone reaches the routes as a function.** `createSkillImportService({ skills, clone?,
+allowPrivateUrls?, maxBytes?, timeoutMs? })` — `clone` defaults to the package's real one, and
+  is the seam a test replaces with a clone pointed at `@openharness/hands/testing`'s git fixture.
+  So the routes are exercised over a real git server on loopback, while the URL in the request is
+  the `https://` one an import is allowed to be handed.
+- **`allowPrivateUrls` is `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`**, the same self-host flag a
+  remote MCP server and a custom OpenAI-compatible endpoint read: a deployment that turns it on
+  has decided a user's pasted URL may point inside its network
+  (`docs/threat-model.md` says so in as many words). `app.ts` builds the service over the app's
+  skill store with `AppOptions.skillImport`, and `main.ts` passes the config's flag.
+- **Import is two steps and holds nothing between them** (K3): the preview reads,
+  `POST …/import` reads **again** and refuses a ref that no longer resolves to the `commit_sha`
+  the preview answered — so what is stored is what was reviewed. `git.getRemoteInfo` runs first
+  for the default branch and the ref's existence, so a mistyped branch or an unreachable host is
+  answered without downloading a pack.
+- **A candidate carries its problems, and the preview never fails over one** (K3): every
+  `SKILL.md` under the path is a candidate (`invalid-frontmatter`, `name-mismatch`,
+  `reserved-name`, `duplicate-name`, `over-limit` — and `name_taken` as a separate field), so one
+  repository may offer a good skill and a broken one at once. The discovery checks the limits of
+  K4 itself (`SKILL_MD_MAX_BYTES`, `SKILL_FILE_MAX_BYTES`, `SKILL_MAX_BYTES`, `MAX_SKILL_FILES`)
+  because the store does not — those are the import's refusals, with the reason a user reads.
+- **`argument-hint` is kept as the file wrote it** (#354). The format's own spelling is a
+  bracketed placeholder — `argument-hint: [version]`, `argument-hint: [pr-number] [priority]` —
+  and neither is a YAML string: the first parses as a flow sequence and the second is not valid
+  YAML at all, so a parser that read the field as a string lost the hint and, for the second,
+  refused the whole frontmatter. `parseFrontmatterBlock` therefore takes the line's own text
+  (after the colon, trimmed) whenever YAML does not answer with a plain string, and reads a block
+  whose YAML fails **only** because of that line with the line set aside — so a skill written for
+  Claude Code imports unchanged and its hint shows exactly as typed. A quoted value is a string
+  and is left to YAML.
+- **A `SKILL.md` at the repository's own root is a candidate**, and its name is the
+  **repository's**: a skill's name is its folder's (K1) and the root is not one, so the
+  repository is read as the folder — the candidate's `folder` is `''` and its name is the URL
+  path's last segment minus a trailing `.git` (`@openharness/hands`' `repositoryName`, read off
+  the `url` `parseGitUrl` answered so a browse URL's `/tree/…` half can never become the name),
+  which is what a single-skill repository is called. A mismatch there is the usual
+  `name-mismatch`. A `SKILL.md` directly under a named `path` keeps that folder's own name. A
+  **root** skill's files are the whole tree under the root **minus** the subtree of every folder
+  below it that holds a `SKILL.md` — those are candidates of their own, and their files are
+  theirs; a nested candidate keeps the ordinary rule, its files being its parent folder's too.
+- **Nothing is stored on a refusal.** All the checks run before the first `create`: a name no
+  candidate has — or one picked twice — is a 400 (`InvalidSkillSelectionError`), a candidate
+  that cannot be imported is
+  a 422 carrying its problems, and a name the caller already has is a 409 the store's own
+  `DuplicateSkillNameError` — so a batch either lands whole or not at all. The **per-user cap**
+  is checked here too, before the first write: `existing + picked > MAX_SKILLS_PER_USER` is the
+  same 409 `SkillLimitReachedError` the store raises, but refusing the whole batch rather than
+  storing two of three and failing on the third (the store's lock still guards the race).
+- **A file that is not text is stored losslessly.** `decode()` detects it — invalid UTF-8 (a
+  fatal `TextDecoder`) or a NUL, which is valid UTF-8 but which Postgres `text` refuses
+  (`invalid byte sequence for encoding "UTF8": 0x00`) — and stores its bytes base64 with
+  `encoding: 'base64'`; everything else is `utf8`. Sizes are `skillFileSize(content, encoding)`,
+  so K4 counts the real bytes. The refresh diff compares the encoding beside the content, so a
+  binary file is changed/unchanged by its bytes.
+- **The clone reads only the folder, and only so many bytes.** `readRepository` passes the
+  resolved `path` to `cloneRepository`, so a blob outside it is never inflated, and the clone's
+  cumulative unpacked-byte cap (`SKILL_INFLATE_MAX_BYTES`) refuses a repository whose pack
+  expands past it with `over_limit`. The root-`SKILL.md` case still reads the whole tree (the
+  repository is the candidate, K3), under the same cap.
+- **A refresh compares against the stored snapshot** (K5): the skill's own `source` is cloned
+  again, the candidate is found by the skill's **name**, and the stored side is read file by file
+  through `SkillStore.getFile` (a store never hands out contents in a listing, K4). The diff is
+  paths added, removed and changed, plus a unified diff of `SKILL.md` (`skills-diff.ts`: an LCS
+  over the two files, three lines of context, one hunk per change group). A confirm of a snapshot
+  with problems is refused rather than stored — replacing a working skill with a broken one is
+  not a refresh — and a preview of a repository that no longer holds the skill is a 422.
+- **The failures are distinct, and the caller's fault is not the repository's.** A URL the guard
+  refuses (not `https`, credentials in it, no repository named) or a folder path with a `..` is
+  the 400 `invalid_request_error` (`SkillSourceRefusalError`); a repository that could not be
+  read is the 422 `skill_import_error`, whose message is the protocol's own sentence for the
+  failure code (`SKILL_IMPORT_MESSAGES`); a ref that moved between a preview and its confirm is
+  the 409 `conflict_error` (`StaleSkillCommitError`). `app.ts` maps all three.
+
+### The tools that read a skill, and the slash invocation (#352)
+
+#350 made a skill a resource and answered which ones a request has. #352 is what a request _does_
+with them, and its server half is small on purpose: the brain builds both tools, and the server
+answers the two questions only it can.
+
+- **The provider the brain is handed is the store plus one file read** (`createSkillProvider`).
+  A `SkillProvider` answers, per request, the skills in force — the same `list` the settings
+  resolver makes, with the same mode override — each paired with a closure that reads **one** file
+  of its snapshot. It answers the whole `SkillFileContent` (content, size and `encoding`), so the
+  tools can report a binary file rather than show its base64 spelling. That is why the loop can
+  list fifty skills without reading a folder: a file is read when a model asks for it, and the
+  store's own contract is what answers an unknown path (and another owner's skill) with `null`.
+- **A slash invocation is checked before anything is stored** (`assertInvocableSkills`).
+  `/name arguments` is a `user.message` carrying `skill`, and `POST /v1/sessions/{id}/events` and
+  the `initial_events` of `POST /v1/sessions` both refuse, with the protocol's 400
+  `invalid_request_error` and **nothing appended**, a name that is not among the skills in force
+  for the chat the batch leaves the session on (the user's `enabled` with the mode's override, K8)
+  and a skill whose frontmatter says `user-invocable: false`. `disable-model-invocation: true` is
+  accepted — that is the field's whole point, a command only the user runs. A refusal refuses the
+  whole batch, because a batch is one append: no log ever holds a message whose invocation the
+  brain would then have to skip.
+- **Both tools are declared in the settings, and neither is registered.** The brain builds them
+  per request from that request's skills, so `createTurnRegistry` has nothing to register and
+  `GET /v1/me/tools` would not know they exist — `SKILL_TOOL_DECLARATIONS` is what `tool-settings.ts`
+  adds to its listing, exactly as `web_search`'s declaration is added (#335): `allow` and on, a
+  name a stored choice and a mode's `builtin.skill` override are keyed by. Unlike `web_search`
+  they are **not** model-gated: whether a chat can read a skill is a question about the user's own
+  skills and not about the model, so `available` does not depend on `?model_id=`. `ask` is
+  therefore honourable on them — they are tools this build runs, so the pause really happens —
+  which is why the settings' refusal of `ask` now applies only to a model-gated declaration.
+- **What a settings screen shows and what a chat reads are one store.** `main.ts` builds the
+  durable `SkillStore` once and hands it to `createTurnTools` (the provider) and to `createApp`
+  (the routes), and the test harness does the same, so a skill seeded through either is visible to
+  both.
+
 ## Usage and cost (epic #245, A2; issue #247)
 
 `GET /v1/sessions/{session_id}/usage` and `GET /v1/me/usage` answer what was spent, and `usage.ts`
@@ -1205,19 +1401,20 @@ Every failure is the protocol's envelope — `{ type: 'error', error: { type, me
 the status `API_ERROR_STATUS_BY_TYPE` gives that type — and every response carries a
 `request-id` header the body repeats as `request_id`.
 
-| what happened                                               | type                          | status |
-| ----------------------------------------------------------- | ----------------------------- | ------ |
-| a body, query or path id that does not match a schema       | `invalid_request_error`       | 400    |
-| a store cursor that is valid but not for this endpoint      | `invalid_request_error`       | 400    |
-| no session, or an invalid, expired or revoked one           | `authentication_error`        | 401    |
-| a cookie-authenticated write from an untrusted origin       | `permission_error`            | 403    |
-| a provider key the provider refused on save (A5)            | `invalid_provider_credential` | 422    |
-| a `?refresh=true` inside the minute since the last one (C4) | `rate_limit_error`            | 429    |
-| a mode whose model cannot be used (#245, M6)                | `mode_unavailable_error`      | 422    |
-| a mode name already taken, or the twentieth mode (#245)     | `conflict_error`              | 409    |
-| an id that names no agent, session or mode                  | `not_found_error`             | 404    |
-| a route that does not exist                                 | `not_found_error`             | 404    |
-| anything else                                               | `api_error`                   | 500    |
+| what happened                                                                                           | type                          | status |
+| ------------------------------------------------------------------------------------------------------- | ----------------------------- | ------ |
+| a body, query or path id that does not match a schema                                                   | `invalid_request_error`       | 400    |
+| a store cursor that is valid but not for this endpoint                                                  | `invalid_request_error`       | 400    |
+| no session, or an invalid, expired or revoked one                                                       | `authentication_error`        | 401    |
+| a cookie-authenticated write from an untrusted origin                                                   | `permission_error`            | 403    |
+| a provider key the provider refused on save (A5)                                                        | `invalid_provider_credential` | 422    |
+| a `?refresh=true` inside the minute since the last one (C4)                                             | `rate_limit_error`            | 429    |
+| a mode whose model cannot be used (#245, M6)                                                            | `mode_unavailable_error`      | 422    |
+| a name already taken, or a per-user cap reached: a mode, an MCP server, a skill (#245; #303, X10; #349) | `conflict_error`              | 409    |
+| a skill import that could not read a repository, or cannot store a skill it found (#349, K3; #351)      | `skill_import_error`          | 422    |
+| an id that names no agent, session or mode                                                              | `not_found_error`             | 404    |
+| a route that does not exist                                                                             | `not_found_error`             | 404    |
+| anything else                                                                                           | `api_error`                   | 500    |
 
 A malformed path id is a 400 rather than a 404: it could not name a resource even if one
 existed. Anything unrecognised is logged server-side and answered with a fixed message — a
@@ -1741,6 +1938,8 @@ the only thing that constructs it, and it only does so when the variable says `m
 | `__fail_terminal__`                     | HTTP 400 (`model_request_failed_error`) on every attempt                                                                                                                                                                                                                              |
 | `__ask__`                               | calls `ask_user` with `MOCK_ASK_INPUT`, so the turn pauses for the user (#309)                                                                                                                                                                                                        |
 | `__todos__ [n]`                         | calls `todo_write` with `n` items (three when it is not said), so a chat's task list can be driven through the whole server (#305; the terminal's pinned list, #308)                                                                                                                  |
+| `__skill__ <name>`                      | calls `skill` with that name, so a chat’s skills can be read through the whole server (epic #349, K6; #352)                                                                                                                                                                           |
+| `__skill_read__ <name> <path>`          | calls `skill_read` for that file of that skill — the path is everything after the first space — so a file read and an unknown-path refusal are both drivable (epic #349, K6)                                                                                                          |
 | `__task__ [delay_ms]`                   | calls `task_start`, the test background tool (#343): the handle comes back at once, and the process's store proxy starts the task and reports back after the delay — the whole background-task path, through the real server                                                          |
 | `__wait__ [timeout_s]`                  | calls `agent_wait` (#343), so the turn ends `waiting_on_tasks` — resolved by a task's news, by its deadline (the queue's timer), or by a message                                                                                                                                      |
 | `__agent__ <type> \| <prompt>`          | calls `agent` (#344): the type is the first half and the prompt the rest, with the task's description derived from the prompt's first line (collapsed and bounded). The child then runs its own turn — a QA spec drives it by sending a message to the child session the handle names |
@@ -1984,6 +2183,11 @@ before the instance stops serving it (#151).
 | `testTaskTool`, `testTaskWaitTool`, `withTestBackgroundTasks`, `TestBackgroundTasksOptions`, `TestTaskInputSchema`, `TestTaskInput`, `TEST_TASK_TOOL_NAME`, `TEST_TASK_TOOL_DESCRIPTION`, `TEST_TASK_DELAY_MS`, `TEST_TASK_RESULT`                                                                                                                                                  | the test hooks (#343), wired only under `OPENHARNESS_TEST_MODEL=mock`: a tool that returns a handle at once, the `agent_wait` a test model pauses on, and the store proxy that starts a task on a call to it and delivers its notification after the delay the call asked for                                                                                                                              |
 | `askUserTool`, `assertConfirmations`, `rememberAlwaysApprovals`, `withAlwaysApprovals`, `isConfirmation`, `PausingDeps`, `RememberDeps`, `AlwaysApproval`                                                                                                                                                                                                                           | the pause's server half (epic #303, X6; #309; the remote pair: #312): the `ask_user` tool every deployment registers, the checks a `user.tool_confirmation` passes (a call of this session is waiting — built-in or remote — the answers fit its questions, the extensions make sense for it), and the stored policy an `always` approval writes (a built-in's `enabled`+`policy`, a remote tool's policy) |
 | `effectiveTools`, `toolSettingEntries`, `toolDecisions`, `createToolSettingsResolver`, `listToolSettings`, `ToolSettingsDeps`                                                                                                                                                                                                                                                       | the per-user tool settings (epic #303, X4; #307; the remote half: #312): the effective answer, as the wire's entries, as the brain's decisions, the resolver `runTurn` is handed, and the listing a route makes (a mode's override and the owner's in-force MCP servers included)                                                                                                                          |
+| `assertInvocableSkills`, `createSkillProvider`, `modeToolOverride`, `SkillInvocationDeps`, `SkillProviderDeps`                                                                                                                                                                                                                                                                      | the two things #352 adds on top of the settings answer: the provider the loop's `skill`/`skill_read` tools read a snapshot through (K6), and the check a slash invocation passes before it is stored — the skills in force for the mode the batch leaves the chat on, `user-invocable: false` refused, all of it a 400 that stores nothing (K7)                                                            |
+| `skillsInForce`, `listSkillsInForce`, `createSkillSettingsResolver`, `SkillSettingsDeps`, `SkillSettingsResolver`                                                                                                                                                                                                                                                                   | the skills in force for a request (epic #349, K8): the owner's own `enabled`, overridden by the mode's `skills` map — the protocol's one rule (so both frontends' `/` menus cannot drift), the read that applies it to a store's list, and the resolver the brain is handed (#352)                                                                                                                         |
+| `createSkillImportService(options)`, `SkillImportService`, `SkillImportOptions`, `CloneRepository`                                                                                                                                                                                                                                                                                  | importing a skill from a public repository and refreshing one (epic #349, K3/K5; #351): the preview, the import, the refresh preview and the refresh — the clone arriving as a function, with the deployment's self-host flag and the clone's own limits                                                                                                                                                   |
+| `SkillImportFailureError`, `SkillSourceRefusalError`, `StaleSkillCommitError`, `InvalidSkillSelectionError`, `skillImportFailureMessage()`                                                                                                                                                                                                                                          | the four ways those routes refuse: a repository that could not be read (422 `skill_import_error`), a URL or path the caller got wrong (400), a ref that moved since the preview (409), and a picked name no candidate has or one picked twice (400)                                                                                                                                                        |
+| `diffSnapshots(before, after)`, `skillMdDiff(before, after)`, `DiffableFile`, `SnapshotDiff`                                                                                                                                                                                                                                                                                        | the refresh diff (epic #349, K5): which files were added, removed and changed between two snapshots, and the unified diff of `SKILL.md` — three lines of context, one hunk per change group, the shape `git diff` prints                                                                                                                                                                                   |
 | `createSubagentTypeResolver`, `SubagentTypeDeps`                                                                                                                                                                                                                                                                                                                                    | the subagent types (epic #340, S2; #342): the resolver the parent's `agent` tool (#344) asks for the types on offer — `general-purpose` first, then every one of the owner's modes with a description — and for the configuration a chosen one starts with, as `@openharness/brain`'s `SubagentTypeResolver`                                                                                               |
 | `createMcpToolProvider`, `McpToolProviderOptions`, `DEFAULT_MCP_TOOL_CACHE_TTL_MS`, `DEFAULT_MCP_LISTING_TIMEOUT_MS`                                                                                                                                                                                                                                                                | the remote tools a request may offer (#312): the listing — the in-force servers, their tools as `createMcpTool` definitions, a short cache keyed per user and server, and a failure per server that could not be listed — as the brain's `McpToolProvider`                                                                                                                                                 |
 | `createTestToolRegistry`, `testEchoTool`, `TEST_TOOL_NAME`, `TEST_TOOL_DESCRIPTION`                                                                                                                                                                                                                                                                                                 | the test `echo` tool, and the registry that holds it alone — test-only, behind the mock model                                                                                                                                                                                                                                                                                                              |
@@ -2097,6 +2301,16 @@ src/
   tool-settings.ts      the per-user tool settings (epic #303, X4; #307): the effective answer
                         a settings screen and the brain both read, and the resolver the loop
                         is handed
+  skills.ts             the skills in force for a request (epic #349, K8): the owner's own
+                        `enabled`, overridden by the mode's `skills` map — the settings answer
+                        the brain reads (#352)
+  skills-import.ts      importing a skill from a public repository, and refreshing one (epic
+                        #349, K3/K5; #351): the URL reading, the clone through the injected
+                        seam, the candidate discovery and validation, and the four routes' service
+  skills-diff.ts        what changed between two snapshots of a skill (K5): the file sets, and
+                        the unified `SKILL.md` diff a refresh shows
+  routes/skills.ts      the skill routes: GET /v1/me/skills and its files, POST (enabled),
+                        DELETE (#349, K4)
   routes/tool-settings.ts  GET/PUT /v1/me/tools
   runner.ts             SessionRunner: one turn per session, re-run while there is work
   compaction.ts         DeltaCompactor: the periodic deletion of superseded chunks (D9)
@@ -2328,7 +2542,8 @@ parallel with each other.
   `'<omitted>'`), `hasEmail`, that an accepted sign-in writes nothing, and that no address or
   name appears anywhere in the serialized line.
 - `isolation.test.ts` — two users, every `/v1` route walked as the second one: 404 for a
-  by-id read, empty lists, no credentials of the other's, `/v1/me` answering the caller.
+  by-id read (a skill's files included, so a path cannot probe for one), empty lists, no
+  credentials of the other's, `/v1/me` answering the caller.
 - `azure-credentials.test.ts` (#245, A3a) — the named-credential route end to end: the metadata
   an azure save returns, a second credential under `azure-eu`, the 400s (a name a provider id
   owns, an `api_key` under a named one, a malformed name, a non-https endpoint, no deployments),
@@ -2520,6 +2735,62 @@ session` remembered for the chat and `remember: always` written to the user's se
   before the listing, a server turned off and a mode turning one off, the settings screen listing
   a remote tool with `mcp_server` and the `ask` default, the listing cache (one listing for a
   turn's several requests, another after the server changes), and name sanitizing and collisions.
+- `skills-import.test.ts` (epic #349, K3/K5; #351) — the import and refresh routes over HTTP,
+  against `@openharness/hands/testing`'s git fixture on loopback through the **real** clone and
+  the real guard (only the URL is the test's, because an import may only be handed an `https://`
+  one): a preview of a repository whose browse URL is split by `parseGitUrl` (the clone is
+  asserted to have been given the repository and never the `/tree/…` half), its candidates named
+  with the problems of each — no frontmatter, a name that is not the folder's, a built-in
+  command's name, a `SKILL.md` over 20 KB, and two folders of one name — the nested collection
+  found and the good skill's whole `SKILL.md`, file listing and sizes answered; `name_taken` for
+  a name the caller already has; a folder named as the `path` read as one candidate; a `SKILL.md`
+  directly under a named `path` read as that folder's candidate (its nested `SKILL.md` still a
+  candidate of its own and still a file of it); a `SKILL.md` at the repository's **root** read as
+  a candidate whose `folder` is `''` and whose name is the repository's (the `.git` spelling of
+  the same URL naming the same skill), its files the whole tree minus the subfolder that is a
+  candidate of its own, the frontmatter of a root `SKILL.md` disagreeing with the repository's
+  name a `name-mismatch`, and the root skill importing, storing and refreshing like any other; a
+  path that is not there and a path holding no `SKILL.md` refused with the protocol's own
+  sentence; an import storing the snapshot whole (frontmatter, source, files and sizes, read back
+  through the single-skill and file reads) — a skill per `argument-hint` spelling (#354):
+  `[version]`, `[pr-number] [priority]`, a quoted string, a bare word and none all import with no
+  problems, and `skillSettingsOf` answers each exactly as the file wrote it; a ref that moved
+  since the preview a 409 that stores
+  nothing; an
+  unknown name a 400 and a candidate that cannot be imported a 422 that stores **none** of the
+  batch; a name the caller already has a 409 that stores none of it; an explicit `ref`/`path`
+  beating the URL's; a table of the six clone failures each answered with its own sentence; a
+  refresh preview of an unchanged skill (`changed: false`, no diff) and of a changed one (files
+  added, removed and changed, the `SKILL.md` diff with its `+`/`-` lines) and the confirm that
+  replaces the snapshot while keeping the skill's id, name and `imported_at`; a refresh whose
+  commit is not the previewed one a 409 that leaves the snapshot alone; a refresh that would
+  replace a working skill with a broken one a 422; and another user's refresh a 404 — for both
+  verbs, before anything is cloned.
+- `skills-diff.test.ts` (epic #349, K5) — the diff on its own: the three file sets, two files of
+  one path with different content read as _changed_, `null` for an unchanged `SKILL.md`, the
+  header and hunk of a one-line change spelled out exactly, the line numbers where the change
+  really is, a whole-file hunk for a file that is only added (`@@ -0,0 +1,2 @@`) or only removed,
+  changes far apart split into two hunks and near ones kept in one, and a file with no trailing
+  newline.
+- `skills-loop.test.ts` (epic #349, K6/K7; #352) — what a request does with a skill: the provider
+  the brain is handed (the skills in force with a file read behind each, a mode's override
+  applying), the slash invocation over HTTP (stored as typed with its `skill` field, refused with
+  a 400 that stores nothing for a name that is off or unknown, for `user-invocable: false`, and —
+  through the real route — for a name the **mode** the batch leaves the chat on turns off, with
+  `initial_events` checked at creation too), and the turn itself through the mock model: the two
+  tools offered and reading the instructions and a file, a chat with no skill the model may
+  invoke offered neither, a `disable-model-invocation` skill left out of the listing and answered
+  as an unknown tool, and a slash invocation loaded once into the log with the body the model was
+  given.
+- `skills.test.ts` (epic #349, K4; the settings answer: K8) — the skill routes and the skills in
+  force: a listing that carries no file's content, the single-skill read with `SKILL.md`'s
+  content, a file read by a path that holds a slash, the 404s (an unknown skill, an unknown
+  path, a path outside the folder, a deleted skill), the 400s (a malformed id, a body that names
+  no field), the `enabled` switch, a delete that takes the snapshot, and then the resolution:
+  the user's own `enabled` with no mode, a mode (saved through the real route) turning one off
+  and another on, a map entry naming a skill that is gone ignored rather than refused, and the
+  answer carrying a skill's metadata and never a file's content. `isolation.test.ts` and
+  `auth.test.ts` walk the routes too.
 - `tool-settings.test.ts` (epic #303, X4; #307) — the per-user tool settings over HTTP, with a
   registry of the test's own: the effective list under the declared defaults, a declared `ask`
   reported rather than assumed `allow`, a stored setting for a tool the process does not

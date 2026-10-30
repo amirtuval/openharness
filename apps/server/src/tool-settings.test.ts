@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { WEB_FETCH_TOOL_NAME, createToolRegistry, textResult } from '@openharness/hands'
+import {
+  SKILL_READ_TOOL_NAME,
+  SKILL_TOOL_NAME,
+  WEB_FETCH_TOOL_NAME,
+  createToolRegistry,
+  textResult,
+} from '@openharness/hands'
 import type { ToolDefinition } from '@openharness/hands'
 import {
   AGENT_MESSAGE_TOOL_NAME,
@@ -184,6 +190,22 @@ describe('GET /v1/me/tools', () => {
         default_policy: 'allow',
         available: true,
       },
+      {
+        name: 'skill',
+        source: 'builtin',
+        enabled: true,
+        policy: 'allow',
+        default_policy: 'allow',
+        available: true,
+      },
+      {
+        name: 'skill_read',
+        source: 'builtin',
+        enabled: true,
+        policy: 'allow',
+        default_policy: 'allow',
+        available: true,
+      },
     ])
   })
 
@@ -220,7 +242,12 @@ describe('GET /v1/me/tools', () => {
     ])
     // Registered tools come first, in the registry's order, and the extras after them by name.
     const mixed = await getTools(createTestApp({ tools: REGISTRY }))
-    expect(mixed.map((entry) => entry.name)).toEqual(['web_search', 'todo_write'])
+    expect(mixed.map((entry) => entry.name)).toEqual([
+      'web_search',
+      'todo_write',
+      SKILL_TOOL_NAME,
+      SKILL_READ_TOOL_NAME,
+    ])
   })
 
   it('is the caller’s own, and nobody else sees it', async () => {
@@ -244,6 +271,8 @@ describe('PUT /v1/me/tools', () => {
     expect(first).toMatchObject([
       { name: 'web_search', enabled: false, policy: 'deny' },
       { name: 'todo_write', enabled: true, policy: 'allow' },
+      { name: SKILL_TOOL_NAME, enabled: true, policy: 'allow' },
+      { name: SKILL_READ_TOOL_NAME, enabled: true, policy: 'allow' },
     ])
 
     // The second write names one tool and leaves the other exactly as the first one left it.
@@ -253,6 +282,8 @@ describe('PUT /v1/me/tools', () => {
     expect(second).toMatchObject([
       { name: 'web_search', enabled: false, policy: 'deny' },
       { name: 'todo_write', enabled: true, policy: 'ask' },
+      { name: SKILL_TOOL_NAME, enabled: true, policy: 'allow' },
+      { name: SKILL_READ_TOOL_NAME, enabled: true, policy: 'allow' },
     ])
     expect(await getTools(test)).toEqual(second)
   })
@@ -285,6 +316,8 @@ describe('PUT /v1/me/tools', () => {
     expect(await getTools(test)).toMatchObject([
       { name: 'web_search', enabled: true, policy: 'allow' },
       { name: 'todo_write', enabled: true, policy: 'allow' },
+      { name: SKILL_TOOL_NAME, enabled: true, policy: 'allow' },
+      { name: SKILL_READ_TOOL_NAME, enabled: true, policy: 'allow' },
     ])
   })
 })
@@ -304,13 +337,68 @@ describe('a mode’s tool override (#307)', () => {
     expect(await getTools(test, `?mode_id=${mode.id}`)).toMatchObject([
       { name: 'web_search', enabled: true, policy: 'deny', available: true },
       { name: 'todo_write', enabled: false, policy: 'allow', available: true },
+      { name: SKILL_TOOL_NAME, enabled: true, policy: 'allow', available: true },
+      { name: SKILL_READ_TOOL_NAME, enabled: true, policy: 'allow', available: true },
     ])
     // The user's own settings are untouched, with and without a mode to ask about.
     expect(await getTools(test)).toMatchObject([
       { name: 'web_search', enabled: false },
       { name: 'todo_write', enabled: true },
+      { name: SKILL_TOOL_NAME, enabled: true },
+      { name: SKILL_READ_TOOL_NAME, enabled: true },
     ])
     expect(mode.tools).toEqual({ builtin: { web_search: true, todo_write: false } })
+  })
+
+  it('applies the section default to every tool the map does not name (B8)', async () => {
+    const test = createTestApp({ tools: REGISTRY })
+    await putTools(test, { builtin: { todo_write: { enabled: false, policy: 'allow' } } })
+
+    // `off` is an allowlist: only the tool the map turns on is on, and the tools the build adds
+    // later — the skill tools here — stay off in this mode.
+    const allowlist = await createMode(test, {
+      name: 'only-web',
+      model: 'anthropic/claude-sonnet-5',
+      tools: { builtin_default: 'off', builtin: { web_search: true } },
+    })
+    expect(await getTools(test, `?mode_id=${allowlist.id}`)).toMatchObject([
+      { name: 'web_search', enabled: true },
+      { name: 'todo_write', enabled: false },
+      { name: SKILL_TOOL_NAME, enabled: false },
+      { name: SKILL_READ_TOOL_NAME, enabled: false },
+    ])
+
+    // `on` turns every unlisted tool on — `todo_write` was turned off by the user — while an
+    // explicit `false` still wins.
+    const everything = await createMode(test, {
+      name: 'everything',
+      model: 'anthropic/claude-sonnet-5',
+      tools: { builtin_default: 'on', builtin: { web_search: false } },
+    })
+    expect(await getTools(test, `?mode_id=${everything.id}`)).toMatchObject([
+      { name: 'web_search', enabled: false },
+      { name: 'todo_write', enabled: true },
+      { name: SKILL_TOOL_NAME, enabled: true },
+      { name: SKILL_READ_TOOL_NAME, enabled: true },
+    ])
+
+    // A mode that carries only a default is still a mode that says something, and the round
+    // trip is the shape it was written as.
+    const follow = await createMode(test, {
+      name: 'follow',
+      model: 'anthropic/claude-sonnet-5',
+      tools: { skills_default: 'off' },
+    })
+    // `skills_default` decides which **skills** the skill tools may read, not whether the
+    // tools themselves are offered — that is `builtin_default`'s business. So both skill tools
+    // still follow the user's own settings here, while every skill stays off in this mode.
+    expect(follow.tools).toEqual({ skills_default: 'off' })
+    expect(await getTools(test, `?mode_id=${follow.id}`)).toMatchObject([
+      { name: 'web_search', enabled: true },
+      { name: 'todo_write', enabled: false },
+      { name: SKILL_TOOL_NAME, enabled: true },
+      { name: SKILL_READ_TOOL_NAME, enabled: true },
+    ])
   })
 
   it('changes nothing for a mode with no override', async () => {
@@ -504,6 +592,8 @@ describe('the built-in tools under the settings (#305 × #307; #335)', () => {
       WEB_FETCH_TOOL_NAME,
       'todo_write',
       WEB_SEARCH_TOOL_NAME,
+      SKILL_TOOL_NAME,
+      SKILL_READ_TOOL_NAME,
     ])
 
     // `gpt-5-mini` is a model whose provider has a native search tool, so the request carries it

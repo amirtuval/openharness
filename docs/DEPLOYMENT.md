@@ -643,13 +643,13 @@ exists for run in the app's namespace (issue
 
 ### Private addresses for custom provider URLs, and why they stay off
 
-A **custom OpenAI-compatible** credential, and a **remote MCP server** (epic #303, X10), are
-URLs a user typed, and every request to them goes through the SSRF guard (`safeFetch`):
-loopback, private, link-local and cloud-metadata addresses are refused, on save and on every
-model call, listing and MCP connection check afterwards. A
-**self-hosted** deployment whose users point that credential type at a server on its own
-network — an Ollama or vLLM beside the app, a gateway on a private subnet — can turn the
-refusal off for that one credential type with:
+A **custom OpenAI-compatible** credential, a **remote MCP server** (epic #303, X10) and a **skill
+import** (epic #349, K3) all take a URL a user typed, and every request to one goes through the
+SSRF guard (`safeFetch`): loopback, private, link-local and cloud-metadata addresses are
+refused, on save and on every model call, listing, MCP connection check or clone afterwards. A
+**self-hosted** deployment whose users point at a server on its own network — an Ollama or vLLM
+beside the app, a gateway on a private subnet, a git host inside the network — can turn the
+refusal off for those user-supplied URLs with:
 
 ```
 OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1
@@ -662,9 +662,12 @@ behind a public load balancer with sign-in to the open internet, where the guard
 exactly the job it exists for: a private address in a credential can only be a mistake or an
 attack. The flag is for a single-tenant, self-hosted install whose operator knows the network;
 turning it on here would let any signed-in user make the service connect anywhere it can
-reach. It applies to the `openai_compatible` credential type and to remote MCP servers — Azure OpenAI
-never reads it — and the server says so loudly at startup when it is on
-(`custom provider URLs: PRIVATE ADDRESSES ALLOWED`).
+reach. It applies to the `openai_compatible` credential type, to remote MCP servers and to a
+skill import's clone — Azure OpenAI never reads it — and the server says so loudly at startup
+when it is on (`user-supplied URLs: PRIVATE ADDRESSES ALLOWED`). With skills, the consequence is
+worth stating on its own: an import clones whatever public `https://` URL a user pastes, so with
+this flag on a user can make the server fetch a repository on its own network
+([`docs/threat-model.md`](./threat-model.md#importing-a-skill-from-a-repository)).
 
 ### Remote MCP servers and the OAuth callback (#303, X10)
 

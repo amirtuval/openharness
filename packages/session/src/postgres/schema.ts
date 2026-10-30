@@ -19,6 +19,10 @@ import type {
   SessionAgent,
   SessionId,
   SessionStatus,
+  Skill,
+  SkillFileEncoding,
+  SkillFrontmatter,
+  SkillId,
   StoredEvent,
   Timestamp,
   UserToolSettings,
@@ -403,6 +407,72 @@ export interface McpOAuthStatesTable {
 }
 
 /**
+ * `skills`: a user's imported skills (epic #349, K4).
+ *
+ * One row per skill: the parsed `SKILL.md` — its name and description beside the frontmatter's
+ * other fields — the source it was imported from, whether it is on, and the two instants of its
+ * snapshot's life. The files are rows of their own (`skill_files`), because a skill is a
+ * bundle of them (K2); this row is everything a listing needs. `name` is unique per user — it
+ * is the slash command a skill is run by (K7) — and `on delete cascade` from `"user"` takes a
+ * user's skills with the user.
+ *
+ * `imported_at` is when the snapshot was first stored and `refreshed_at` when it was last
+ * replaced (K5); the two are equal until a refresh confirms. There is no `created_at`/
+ * `updated_at` pair: these two **are** a skill's timestamps, and `imported_at` is what a list is
+ * ordered by.
+ */
+export interface SkillsTable {
+  /** An `skl_` id. */
+  id: string
+  owner_id: string
+  /** The name, unique per owner. `C`-collated, so the unique constraint is byte equality. */
+  name: string
+  description: string
+  /** The frontmatter's other fields, as parsed. Written as JSON text, read back parsed. */
+  frontmatter: ColumnType<SkillFrontmatter, string, string>
+  /** The public `https://` git URL the snapshot came from. */
+  source_url: string
+  /** The branch, tag or commit it was cloned at, or `null` for the repository's default. */
+  source_ref: string | null
+  /** The folder inside the repository it was taken from, or `null` for its root. */
+  source_path: string | null
+  /** The commit the clone landed on, or `null` for a snapshot nothing cloned. */
+  commit_sha: string | null
+  enabled: boolean
+  imported_at: Date
+  refreshed_at: Date
+}
+
+/**
+ * `skill_files`: the files of a user's skills (epic #349, K4).
+ *
+ * One row per file, keyed by `(skill_id, path)`: the primary key is what makes a path appear
+ * once in a snapshot, and it is also the index `getFile` seeks by. `content` is the file in the
+ * spelling `encoding` names — its text (`utf8`) or its bytes base64-encoded (`base64`) — and
+ * `size` is the original byte length, computed by the store on the way in so it can never
+ * disagree with what is stored. The encoding column is what makes a binary file storable at
+ * all: Postgres `text` rejects a NUL byte (`invalid byte sequence for encoding "UTF8": 0x00`),
+ * so a PNG or a font stored as text would fail the write. `on delete cascade` means a deleted
+ * skill takes its snapshot, which is the whole of "delete a skill".
+ *
+ * The content lives here rather than beside the skill because a listing must never read it
+ * (`skills` answers paths and sizes); moving these rows to object storage later changes this
+ * table alone, behind the store (K4).
+ */
+export interface SkillFilesTable {
+  /** The `skl_` id of the skill this file belongs to. */
+  skill_id: string
+  /** The file's path inside the skill folder, relative and forward-slashed. `C`-collated. */
+  path: string
+  /** The file's content, in the spelling `encoding` names. */
+  content: string
+  /** How `content` is spelled: its text (`utf8`) or its bytes base64-encoded (`base64`). */
+  encoding: SkillFileEncoding
+  /** The original file's size in bytes (`skillFileSize`). */
+  size: number
+}
+
+/**
  * `user_tool_settings`: which tools a user's chats may use, and under which permission
  * (epic #303, X4; issue #307).
  *
@@ -443,6 +513,8 @@ export interface PostgresSchema {
   user_tool_settings: UserToolSettingsTable
   mcp_servers: McpServersTable
   mcp_oauth_states: McpOAuthStatesTable
+  skills: SkillsTable
+  skill_files: SkillFilesTable
 }
 
 /** One row of `agents`. */
@@ -504,6 +576,35 @@ export type McpServerMetadataRow = Pick<
 
 /** One row of `user_tool_settings`. */
 export type UserToolSettingsRow = UserToolSettingsTable
+
+/**
+ * One row of `skills`, as a read returns it.
+ *
+ * `Selectable` because the `frontmatter` column is a `ColumnType` — its select spelling is the
+ * parsed value, not the JSON text the insert side takes — so the read type is the table's own
+ * only where every column's select and insert types agree.
+ */
+export type SkillRow = Selectable<SkillsTable>
+
+/** One row of `skill_files`, as a read returns it: a content included. */
+export type SkillFileRow = SkillFilesTable
+
+/**
+ * The file columns a **listing** reads: a path and a size, never the content.
+ *
+ * The one place "a skill's files are reported without their contents" is written for the
+ * durable store, and why a query that builds a resource never names `content`.
+ */
+export type SkillFileMetadataRow = Pick<SkillFileRow, 'skill_id' | 'path' | 'size'>
+
+/**
+ * One entry of a skill's file listing: a path and a size, which is what a resource carries.
+ *
+ * `skill_id` is deliberately not part of it — a resource's files belong to the skill it
+ * describes, and the store hands the entries of one skill at a time — which is what lets a
+ * create build the listing from the snapshot it just wrote rather than re-reading the table.
+ */
+export type SkillFileListing = Pick<SkillFileRow, 'path' | 'size'>
 
 /** The columns a metadata read selects: every `provider_credentials` column but the sealed blob. */
 export type ProviderCredentialMetadataRow = Pick<
@@ -957,5 +1058,35 @@ export function mcpServerFromRow(row: McpServerRow): McpServer & {
     ...(row.sealed_headers === null ? {} : { headers: { ...row.sealed_headers } }),
     ...(row.sealed_tokens === null ? {} : { tokens: { ...row.sealed_tokens } }),
     ...(row.sealed_oauth_client === null ? {} : { oauthClient: { ...row.sealed_oauth_client } }),
+  })
+}
+
+/**
+ * The `skill` resource a row carries, with the listing of its files (epic #349, K4).
+ *
+ * The files come in as their own rows because a skill's snapshot is a table away: the caller
+ * reads the `skills` row and the `(path, size)` rows of `skill_files` and this joins them into
+ * the protocol's resource — a path and a size each, and never a content, which is why
+ * {@link SkillFileMetadataRow} is what a listing selects. A store deep-freezes what it hands
+ * out, so this is the one place a row becomes a value.
+ */
+export function skillFromRow(row: SkillRow, files: readonly SkillFileListing[]): Skill {
+  return deepFreeze({
+    id: row.id as SkillId,
+    type: 'skill',
+    owner_id: row.owner_id,
+    name: row.name,
+    description: row.description,
+    frontmatter: { ...row.frontmatter },
+    source: {
+      url: row.source_url,
+      ref: row.source_ref,
+      path: row.source_path,
+      commit_sha: row.commit_sha,
+    },
+    files: files.map((file) => ({ path: file.path, size: file.size })),
+    enabled: row.enabled,
+    imported_at: timestampOf(row.imported_at),
+    refreshed_at: timestampOf(row.refreshed_at),
   })
 }

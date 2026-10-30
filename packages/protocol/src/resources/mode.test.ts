@@ -1,19 +1,26 @@
 import { describe, expect, it } from 'vitest'
 
-import { newMcpServerId, newModeId } from '../ids'
+import { makeSkill } from '../fixtures'
+import { newMcpServerId, newModeId, newSkillId } from '../ids'
 import {
   CreateModeRequestSchema,
   ListModesResponseSchema,
   MAX_MODES_PER_USER,
   MODE_DEFAULT_MODEL,
+  MODE_ITEM_DEFAULT,
   MODE_NAME_MAX_LENGTH,
   MODE_SUBAGENT_DESCRIPTION_MAX_LENGTH,
+  ModeItemDefaultSchema,
   ModeModelSchema,
   ModeReferenceSchema,
   ModeSchema,
   ModeToolOverrideSchema,
   UpdateModeRequestSchema,
+  builtinToolInForce,
+  mcpServerInForce,
+  modeItemInForce,
 } from './mode'
+import { skillInForce } from './skill'
 
 const mode = {
   id: newModeId(),
@@ -206,6 +213,127 @@ describe('mode request schemas', () => {
       tools: override,
     })
     expect(ModeSchema.parse({ ...mode, tools: override }).tools).toEqual(override)
+  })
+
+  it('carries the skills half of the override, a third sibling of `builtin` (#349, K8)', () => {
+    const skill = newSkillId()
+    const gone = newSkillId()
+    const override = {
+      builtin: { web_search: true },
+      skills: { [skill]: false, [gone]: true },
+    }
+    expect(ModeToolOverrideSchema.parse(override)).toEqual(override)
+    // A mode may override only the skills: a map naming a skill the user no longer has is
+    // stored as given, which is what leaves a deleted skill's modes alone.
+    expect(ModeToolOverrideSchema.parse({ builtin: {}, skills: { [gone]: true } })).toEqual({
+      builtin: {},
+      skills: { [gone]: true },
+    })
+    expect(ModeSchema.parse({ ...mode, tools: override }).tools).toEqual(override)
+  })
+
+  it('carries the three section defaults, and absent means follow (B8)', () => {
+    // A default is an optional member of the same `tools` object, so a mode that carries only
+    // one is exactly that — the other two read as `follow` and the writer's shape is kept.
+    expect(ModeItemDefaultSchema.options).toEqual(['follow', 'off', 'on'])
+    expect(MODE_ITEM_DEFAULT).toBe('follow')
+    expect(ModeToolOverrideSchema.parse({ skills_default: 'off' })).toEqual({
+      skills_default: 'off',
+    })
+    expect(ModeToolOverrideSchema.parse({ builtin_default: 'on' })).toEqual({
+      builtin_default: 'on',
+    })
+    expect(
+      ModeToolOverrideSchema.parse({
+        mcp_servers_default: 'off',
+        skills_default: 'on',
+      }),
+    ).toEqual({ mcp_servers_default: 'off', skills_default: 'on' })
+    // A value outside the three is refused, and the field does not invent a key that is absent.
+    expect(ModeToolOverrideSchema.safeParse({ skills_default: 'yes' }).success).toBe(false)
+    expect(ModeToolOverrideSchema.safeParse({ builtin_default: true }).success).toBe(false)
+    const created = CreateModeRequestSchema.parse({
+      name: 'only',
+      model: 'x/y',
+      tools: { skills_default: 'off' },
+    })
+    expect(created.tools).toEqual({ skills_default: 'off' })
+    expect(ModeSchema.parse({ ...mode, tools: { skills_default: 'off' } }).tools).toEqual({
+      skills_default: 'off',
+    })
+  })
+
+  it('resolves one item by entry × default × user setting (B8)', () => {
+    // Every combination of the three things that decide one item: the map's entry (or none),
+    // the section default (or its absence) and the user's own setting. The table is the rule
+    // every consumer reads, so it is tested as one.
+    const cases: readonly {
+      readonly entry: boolean | undefined
+      readonly follows: boolean
+      readonly fallback: 'follow' | 'off' | 'on' | undefined
+      readonly expected: boolean
+    }[] = [
+      // An explicit entry always wins, whatever the default and the user's setting.
+      { entry: true, follows: false, fallback: 'off', expected: true },
+      { entry: false, follows: true, fallback: 'on', expected: false },
+      { entry: true, follows: false, fallback: undefined, expected: true },
+      { entry: false, follows: true, fallback: undefined, expected: false },
+      // No entry, `follow` (or absent): the user's own setting.
+      { entry: undefined, follows: true, fallback: 'follow', expected: true },
+      { entry: undefined, follows: false, fallback: 'follow', expected: false },
+      { entry: undefined, follows: true, fallback: undefined, expected: true },
+      { entry: undefined, follows: false, fallback: undefined, expected: false },
+      // Off is an allowlist: an unlisted item is off, even one the user turned on.
+      { entry: undefined, follows: true, fallback: 'off', expected: false },
+      { entry: undefined, follows: false, fallback: 'off', expected: false },
+      // On turns every unlisted item on, even one the user turned off.
+      { entry: undefined, follows: true, fallback: 'on', expected: true },
+      { entry: undefined, follows: false, fallback: 'on', expected: true },
+    ]
+    for (const testCase of cases) {
+      expect(
+        modeItemInForce(testCase.entry, testCase.follows, testCase.fallback),
+        JSON.stringify(testCase),
+      ).toBe(testCase.expected)
+    }
+  })
+
+  it('resolves a built-in tool, an MCP server and a skill through the same rule (B8)', () => {
+    const server = newMcpServerId()
+    const skill = makeSkill({ id: newSkillId(), enabled: false })
+    const override = {
+      builtin: { web_search: false },
+      mcp_servers: { [server]: false },
+      skills: { [skill.id]: false },
+      builtin_default: 'on',
+      mcp_servers_default: 'on',
+      skills_default: 'on',
+    } as const
+    // An entry wins over the `on` default.
+    expect(builtinToolInForce('web_search', true, override)).toBe(false)
+    expect(mcpServerInForce(server, true, override)).toBe(false)
+    expect(skillInForce(skill, override)).toBe(false)
+    // An unlisted item is on even though the user's own setting is off.
+    expect(builtinToolInForce('todo_write', false, override)).toBe(true)
+    expect(mcpServerInForce(newMcpServerId(), false, override)).toBe(true)
+    expect(skillInForce(makeSkill({ id: newSkillId(), enabled: false }), override)).toBe(true)
+    // A mode with no override at all is the user's own settings, in all three.
+    expect(builtinToolInForce('todo_write', false, null)).toBe(false)
+    expect(mcpServerInForce(server, false, null)).toBe(false)
+    expect(skillInForce(skill, null)).toBe(false)
+    // An absent default is `follow`, not `off`: every mode stored before B8 keeps its answer.
+    expect(builtinToolInForce('todo_write', true, { builtin: {} })).toBe(true)
+    expect(mcpServerInForce(server, true, { mcp_servers: {} })).toBe(true)
+    expect(skillInForce(makeSkill({ id: newSkillId(), enabled: true }), { skills: {} })).toBe(true)
+  })
+
+  it('refuses a skill map whose key is not a skill id', () => {
+    expect(ModeToolOverrideSchema.safeParse({ builtin: {}, skills: { deep: true } }).success).toBe(
+      false,
+    )
+    expect(
+      ModeToolOverrideSchema.safeParse({ builtin: {}, skills: { [newSkillId()]: 'on' } }).success,
+    ).toBe(false)
   })
 
   it('treats a missing `mcp_servers` map as a mode that says nothing about servers', () => {

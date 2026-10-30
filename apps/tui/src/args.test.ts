@@ -403,3 +403,92 @@ describe('readVersion', () => {
     expect(readVersion()).toBe(packageVersion())
   })
 })
+
+describe('parseArgs: oh skills (#349, K3/K5/K7/K8; #354)', () => {
+  it('reads the bare listing, and `list`', () => {
+    expect(commandOf(['skills'])).toMatchObject({ kind: 'skills', action: { action: 'list' } })
+    expect(commandOf(['skills', 'list'])).toMatchObject({
+      kind: 'skills',
+      action: { action: 'list' },
+    })
+  })
+
+  it('reads add with the source and the way to choose', () => {
+    expect(commandOf(['skills', 'add', 'https://github.com/o/r'])).toMatchObject({
+      kind: 'skills',
+      action: { action: 'add', url: 'https://github.com/o/r', all: false, names: [] },
+    })
+
+    expect(
+      commandOf([
+        'skills',
+        'add',
+        'https://github.com/o/r',
+        '--ref',
+        'v2',
+        '--path',
+        'skills/release-notes',
+        '--all',
+      ]),
+    ).toMatchObject({
+      kind: 'skills',
+      action: {
+        action: 'add',
+        ref: 'v2',
+        path: 'skills/release-notes',
+        all: true,
+      },
+    })
+
+    // `--name` is repeatable: one flag per candidate the reader picked.
+    expect(
+      commandOf(['skills', 'add', 'https://github.com/o/r', '--name', 'a', '--name', 'b']),
+    ).toMatchObject({ kind: 'skills', action: { action: 'add', names: ['a', 'b'] } })
+  })
+
+  it('reads refresh, enable, disable and remove', () => {
+    expect(commandOf(['skills', 'refresh', 'release-notes'])).toMatchObject({
+      kind: 'skills',
+      action: { action: 'refresh', name: 'release-notes', yes: false },
+    })
+    expect(commandOf(['skills', 'refresh', 'release-notes', '--yes'])).toMatchObject({
+      kind: 'skills',
+      action: { action: 'refresh', yes: true },
+    })
+    expect(commandOf(['skills', 'enable', 'release-notes'])).toMatchObject({
+      kind: 'skills',
+      action: { action: 'enable', name: 'release-notes' },
+    })
+    expect(commandOf(['skills', 'disable', 'release-notes'])).toMatchObject({
+      kind: 'skills',
+      action: { action: 'disable', name: 'release-notes' },
+    })
+    expect(commandOf(['skills', 'remove', 'release-notes', '--yes'])).toMatchObject({
+      kind: 'skills',
+      action: { action: 'remove', name: 'release-notes', yes: true },
+    })
+  })
+
+  it('refuses each shape’s missing argument and wrong flags', () => {
+    expect(errorOf(['skills', 'add'])).toMatch(/needs the repository URL/u)
+    expect(errorOf(['skills', 'refresh'])).toMatch(/needs the skill name/u)
+    expect(errorOf(['skills', 'enable'])).toMatch(/needs the skill name/u)
+    expect(errorOf(['skills', 'remove'])).toMatch(/needs the skill name/u)
+    expect(errorOf(['skills', 'add', 'https://x.test', '--all', '--name', 'a'])).toMatch(
+      /either --all or --name/u,
+    )
+    expect(errorOf(['skills', 'add', 'https://x.test', '--yes'])).toMatch(/does not take --yes/u)
+    expect(errorOf(['skills', 'refresh', 'a', '--ref', 'v2'])).toMatch(/does not take --ref/u)
+    expect(errorOf(['skills', 'enable', 'a', '--all'])).toMatch(/does not take --all/u)
+    expect(errorOf(['skills', '--ref', 'v2'])).toMatch(/`oh skills` does not take --ref/u)
+    expect(errorOf(['skills', 'wat'])).toMatch(/unknown `oh skills` argument/u)
+  })
+
+  it('rejects its flags everywhere else', () => {
+    expect(errorOf(['--ref', 'v2'])).toMatch(/only makes sense with `oh skills`/u)
+    expect(errorOf(['--all'])).toMatch(/only makes sense with `oh skills`/u)
+    expect(errorOf(['--name', 'a'])).toMatch(/only makes sense with `oh skills`/u)
+    expect(errorOf(['tools', '--all'])).toMatch(/`oh tools` does not take --all/u)
+    expect(errorOf(['--yes'])).toMatch(/--yes only makes sense with/u)
+  })
+})

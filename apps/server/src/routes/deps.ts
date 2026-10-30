@@ -1,5 +1,5 @@
 import type { ToolRegistry } from '@openharness/hands'
-import type { SessionStore } from '@openharness/session'
+import type { SessionStore, SkillStore } from '@openharness/session'
 
 import type { AuthUser } from '../auth'
 import type { SocialProviderName } from '../auth-profile'
@@ -9,6 +9,7 @@ import type { DefaultModelPicker } from '../default-model'
 import type { SessionScheduler } from '../scheduler'
 import type { SessionRevocations } from '../session-watch'
 import type { McpServerService } from '../mcp/service'
+import type { SkillImportService } from '../skills-import'
 import type { ProviderCredentialDeps } from './provider-credentials'
 
 /**
@@ -34,6 +35,25 @@ export interface RouteDeps {
    * headers through.
    */
   readonly mcpServers: McpServerService
+  /**
+   * Where users' imported skills live (epic #349, K4): the routes over `/v1/me/skills`, and
+   * the read the settings resolver (`skills.ts`) applies a mode's override over.
+   *
+   * The store itself rather than a service: nothing about a skill goes through the network or
+   * the vault — a snapshot is written when it is imported (#351), and what is here is stored
+   * text.
+   */
+  readonly skills: SkillStore
+  /**
+   * Importing a skill from a public repository, and refreshing one (epic #349, K3/K5): the
+   * clone through `safeFetch`, the candidate discovery and the diff behind the four routes
+   * that read a repository.
+   *
+   * The service rather than the pieces: the clone is the one outbound path this deployment
+   * offers a user-supplied URL besides a tool's, so it belongs with the settings that decide
+   * where it may reach (`skills-import.ts`).
+   */
+  readonly skillImport: SkillImportService
   /**
    * The model catalogue (epic #92): `GET /v1/models`, and the hook a saved or deleted
    * credential drops that provider's cached answer with (C4).

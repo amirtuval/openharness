@@ -1,10 +1,12 @@
+import { filterSlashCommands, slashCommandQuery, slashEnterAction } from '@openharness/client'
+import type { SlashCommand } from '@openharness/client'
 import { Pencil, SendHorizontal, Square } from 'lucide-react'
-import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 
-import { commandHint } from '../../lib/commands'
 import { cn } from '../../lib/utils'
 import { Button } from '../ui/button'
 import { Label } from '../ui/label'
+import { Badge } from '../ui/badge'
 import { Textarea } from '../ui/textarea'
 
 /**
@@ -24,6 +26,14 @@ const MAX_INPUT_HEIGHT = 200
  * all three. Exported so the shell and the screen never spell it twice.
  */
 export const COMPOSER_INPUT_ID = 'composer-input'
+
+/**
+ * The `/` menu's id, which the box names as the list it controls (K7).
+ *
+ * The other half of the combobox relationship {@link COMPOSER_INPUT_ID} is one side of, so a
+ * screen reader — and a test — reads "which list is this box filtering".
+ */
+export const COMMAND_MENU_ID = 'composer-commands'
 
 /**
  * Put the cursor in the message box, on whatever screen is showing one (#212).
@@ -99,6 +109,7 @@ export function Composer({
   value,
   onValueChange,
   edit,
+  commands,
 }: {
   /** Whether the agent is working, which is when Stop makes sense. */
   running: boolean
@@ -124,6 +135,18 @@ export function Composer({
    * mode, and a send is withheld while {@link ComposerEdit.blocked}.
    */
   edit?: ComposerEdit | undefined
+  /**
+   * The `/` menu (epic #349, K7; #353): the built-in commands, then the reader's own skills.
+   *
+   * Typing `/` opens it, the arrows move the highlight, Enter takes the highlighted row and
+   * Escape closes it. What Enter does is the shared rule (`slashEnterAction`, K7; #354): a
+   * built-in the box names **in full** runs now (`/compact`), and everything else fills the box
+   * with `/name ` — which is what makes that command's {@link SlashCommand.argumentHint} the
+   * box's placeholder — and the send then parses the line: a skill becomes a message carrying
+   * `skill`, and a built-in runs its action. The list comes from `@openharness/client`'s
+   * `slashCommands`, so `oh` offers the same rows.
+   */
+  commands: readonly SlashCommand[]
 }) {
   const [ownText, setOwnText] = useState('')
   const controlled = value !== undefined
@@ -135,6 +158,25 @@ export function Composer({
       setOwnText(next)
     }
   }
+
+  // The `/` menu's own state: which row is highlighted, and whether the reader closed the menu
+  // with Escape. The open rows are derived from the text, so they cannot go stale; the
+  // highlight is reset whenever the query changes, and the dismissal is dropped as soon as the
+  // reader types again (Escape closes the menu, it does not turn the feature off).
+  const query = slashCommandQuery(text)
+  const matches = query === null ? [] : filterSlashCommands(commands, query)
+  const [highlight, setHighlight] = useState(0)
+  const [dismissed, setDismissed] = useState(false)
+  useEffect(() => {
+    setHighlight(0)
+    setDismissed(false)
+  }, [text])
+  const menu = dismissed || matches.length === 0 ? null : matches
+  const highlighted = menu === null ? undefined : (menu[highlight] ?? menu[0])
+  const open = menu !== null
+
+  /** The argument hint of the command the box names, as its placeholder. */
+  const hint = argumentHintFor(text, commands)
 
   // The textarea, whether or not the caller wanted a handle on it: the growth rule below needs
   // one either way, and the caller's ref is kept in step rather than handed around.
@@ -178,6 +220,13 @@ export function Composer({
     }
   }
 
+  /** Take a row: the box becomes `/name `, so the command's arguments can be typed next. */
+  const complete = (name: string): void => {
+    setText(`/${name} `)
+    setDismissed(true)
+    ownRef.current?.focus()
+  }
+
   return (
     <form
       // One surface, not a box and a row of controls: the border, the focus ring and the
@@ -194,7 +243,14 @@ export function Composer({
       }}
     >
       {edit === undefined ? null : <EditBanner edit={edit} />}
-      <CommandHint text={text} />
+      {open ? (
+        <CommandMenu
+          commands={menu}
+          highlighted={highlight}
+          onHighlight={setHighlight}
+          onPick={(command) => complete(command.name)}
+        />
+      ) : null}
       <Label htmlFor={COMPOSER_INPUT_ID} className="sr-only">
         Message
       </Label>
@@ -204,12 +260,53 @@ export function Composer({
         rows={1}
         value={text}
         disabled={disabled}
-        placeholder="Send a message…  (Enter to send, Shift+Enter for a new line)"
+        // A command the box already names says what its arguments are for, in the command's own
+        // `argument-hint` (K7); anything else keeps the box's own words.
+        placeholder={hint ?? 'Send a message…  (Enter to send, Shift+Enter for a new line)'}
         // The primitives' own border and ring are switched off: the form above draws them, so
         // there is one focus indicator on screen rather than two, one of them doubled.
         className="max-h-[200px] min-h-9 resize-none border-0 bg-transparent px-3 pt-3 pb-1 text-sm shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent"
+        // `aria-expanded` on the combobox is what says a list is open under the box — the same
+        // relationship the model picker draws.
+        aria-expanded={open}
+        aria-controls={open ? COMMAND_MENU_ID : undefined}
+        aria-autocomplete="list"
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
+          // The menu is in front of every other key while it is open (K7): the arrows move the
+          // highlight, Enter takes the highlighted row (rather than sending a half-typed
+          // command), and Escape closes the menu — it does not also stop a running turn, which
+          // is what Escape means everywhere else in this box.
+          if (open && highlighted !== undefined) {
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault()
+              const count = menu.length
+              const next = (highlight + (event.key === 'ArrowDown' ? 1 : -1) + count) % count
+              setHighlight(next)
+              return
+            }
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              // What Enter means is the shared rule (K7; #354): a built-in the box names in
+              // full runs now, a skill (or a name still being typed) completes to `/name `, and
+              // anything with arguments is sent by the fall-through below.
+              const action = slashEnterAction(text, commands, highlighted)
+              if (action.kind === 'run') {
+                event.preventDefault()
+                void submit()
+                return
+              }
+              if (action.kind === 'complete') {
+                event.preventDefault()
+                complete(action.name)
+                return
+              }
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              setDismissed(true)
+              return
+            }
+          }
           if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault()
             void submit()
@@ -264,27 +361,95 @@ export function Composer({
 }
 
 /**
- * The slash-command hint (#283): what the command being typed does, above the box.
+ * The `/` menu (epic #349, K7; #353): what the box can run, above it.
  *
- * Shown while the draft opens with a prefix of a command ({@link commandHint}), so a reader who
- * types `/comp` is told what `/compact` is before they finish it. It is presentational and
- * never blocks a send: a line that names no command is an ordinary message, and the hint simply
- * does not appear for one. `data-slot` is the handle its tests read, like the edit row's.
+ * One row per command the reader's typing matches — the built-in commands first, then their own
+ * skills, from `@openharness/client`'s `slashCommands` — each drawn as the line it would run
+ * (`/compact [instructions]`, `/release-notes <[version]>`) with what it does beside it. It is a
+ * listbox the box itself is the combobox for: the arrows move the highlight, Enter takes the
+ * highlighted row ({@link Composer}'s `complete` for a skill, `submit` for a fully-typed
+ * built-in), Escape closes it, and a click takes one too — `onMouseDown` and not `onClick`,
+ * because the box has to keep the focus a click would take.
+ *
+ * It is presentation and one callback: which rows there are comes from the draft, and what a
+ * click *does* (fill the box with `/name `, so the arguments can be typed next) belongs to the
+ * box. A click adds the space a full name would not have — the honest thing, since a row the
+ * reader clicked is a row they meant.
  */
-function CommandHint({ text }: { text: string }) {
-  const command = commandHint(text)
-  if (command === null) {
+function CommandMenu({
+  commands,
+  highlighted,
+  onHighlight,
+  onPick,
+}: {
+  commands: readonly SlashCommand[]
+  /** The index in `commands` the highlight is on — the arrows move it, and it wraps. */
+  highlighted: number
+  onHighlight: (index: number) => void
+  onPick: (command: SlashCommand) => void
+}) {
+  return (
+    <ul
+      id={COMMAND_MENU_ID}
+      role="listbox"
+      aria-label="Slash commands"
+      data-slot="composer-commands"
+      className="max-h-56 overflow-y-auto border-b py-1"
+    >
+      {commands.map((command, index) => (
+        <li key={`${command.kind}:${command.name}`}>
+          <button
+            type="button"
+            role="option"
+            aria-selected={index === highlighted}
+            data-command={command.name}
+            data-kind={command.kind}
+            // The highlight follows the pointer as well as the arrows, so a click can never
+            // take a row other than the one under the cursor.
+            onMouseEnter={() => onHighlight(index)}
+            onMouseDown={(event) => {
+              // Keep the cursor in the box: a click that blurred it would close the menu before
+              // the pick landed, and the reader is mid-sentence.
+              event.preventDefault()
+              onPick(command)
+            }}
+            className={cn(
+              'flex w-full items-baseline gap-control px-3 py-1.5 text-left text-xs',
+              index === highlighted ? 'bg-muted text-foreground' : 'text-muted-foreground',
+            )}
+          >
+            <code className="shrink-0 font-mono">{command.usage}</code>
+            <span className="min-w-0 truncate">{command.description}</span>
+            {command.kind === 'skill' ? (
+              <Badge variant="outline" className="ml-auto shrink-0 text-2xs">
+                skill
+              </Badge>
+            ) : null}
+          </button>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * The `argument-hint` of the command a draft names, as the box's placeholder — or `null`.
+ *
+ * The line has to be the command and nothing else: `/release-notes` or `/release-notes ` (the
+ * state {@link CommandMenu}'s pick leaves, which is exactly when the hint is worth showing),
+ * and never `/release-notes v1.2` — the arguments have been typed by then, and a hint about
+ * them would be a lie. A built-in carries no hint; a skill without one answers `null`.
+ *
+ * @param text the composer's current text
+ * @param commands the whole menu
+ */
+function argumentHintFor(text: string, commands: readonly SlashCommand[]): string | null {
+  const trimmed = text.trimEnd()
+  if (!trimmed.startsWith('/')) {
     return null
   }
-  return (
-    <div
-      data-slot="composer-hint"
-      className="flex items-baseline gap-control border-b px-3 py-1.5 text-xs text-muted-foreground"
-    >
-      <code className="shrink-0 font-mono text-foreground">{command.usage}</code>
-      <span className="min-w-0 truncate">{command.description}</span>
-    </div>
-  )
+  const command = commands.find((candidate) => `/${candidate.name}` === trimmed)
+  return command?.argumentHint ?? null
 }
 
 /**

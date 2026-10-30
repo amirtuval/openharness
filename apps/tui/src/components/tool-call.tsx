@@ -1,6 +1,7 @@
 import {
   formatToolInput,
   mcpServerMarker,
+  skillToolCallLabel,
   toolCallSummary,
   toolStatusLabel,
 } from '@openharness/client'
@@ -26,7 +27,10 @@ import { useTerminalTheme } from './theme'
  *
  * The short result line is derived by {@link callResultLine}, from the same log both frontends
  * read. A provider-executed search keeps its pages as well: one line per source under the
- * summary (#335), because the URL *is* the source a terminal can show.
+ * summary (#335), because the URL *is* the source a terminal can show. The two tools a skill is
+ * read with are the one place the tool's name is not what the line leads with (#349, K6): the
+ * client's `skillToolCallLabel` says what the call did — `Loaded skill release-notes`,
+ * `Read reference.md` — so a reader sees the skill rather than `skill`/`skill_read`.
  *
  * It draws like the transcript draws structure (X4): named ANSI colours, `chrome` for the
  * ordinary parts, and the palette's warning colour for a call that is waiting on the reader or
@@ -136,20 +140,25 @@ export function toolCallLines(
   const status = toolStatusLabel(call.status)
   const summary = toolCallSummary(call)
   const accent = statusColor(call.status)
+  // The two tools a skill is read with say what they did, not what they are called (#349, K6):
+  // `Loaded skill release-notes`, `Read reference.md`. The words are the client's
+  // (`skillToolCallLabel`), and `null` is every other tool — which keeps the ordinary line the
+  // tool's own name and summary.
+  const skillLabel = skillToolCallLabel(call)
 
   const head: Span[] = [
     { text: `${STATUS_MARKS[call.status]} `, color: paint(theme, accent) },
     // The tool's name is the foreground's own colour, as a message's text is: it is the one
     // part of the line a reader is meant to read first.
-    { text: call.name, bold: true },
+    { text: skillLabel ?? call.name, bold: true },
   ]
-  if (call.source === 'mcp') {
+  if (skillLabel === null && call.source === 'mcp') {
     // Which server a remote tool came from, after the marker — a terminal has no hover to hide
     // it behind, and two servers' `search` are told apart by exactly this (#312). The words are
     // the client's (`mcpServerMarker`), so the page's badge and this line agree.
     head.push({ text: ` (${mcpServerMarker(call.server)})`, ...dimChrome(theme) })
   }
-  if (summary !== null) {
+  if (skillLabel === null && summary !== null) {
     head.push({ text: ' ', ...dimChrome(theme) })
     head.push({ text: summary, ...dimChrome(theme) })
   }
