@@ -1,6 +1,7 @@
 import type { TaskCard } from '@openharness/client'
-import type { TodoList } from '@openharness/protocol'
-import { render, screen } from '@testing-library/react'
+import type { Mode, TodoList } from '@openharness/protocol'
+import { makeMode, makeSkill } from '@openharness/protocol/fixtures'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { ModesView } from '../../hooks/use-modes'
@@ -29,6 +30,8 @@ const hookState = vi.hoisted(() => ({
   // The tasks the session hook answers with — one card per background task (#340). A case sets
   // this to the list it is about.
   tasks: [] as TaskCard[],
+  // The mode the session resource follows — `null` for a chat on a model (#245, M6).
+  mode: null as string | null,
 }))
 
 vi.mock('../client-provider', () => ({ useClient: () => ({}) }))
@@ -53,7 +56,16 @@ vi.mock('../../hooks/use-provider-credentials', () => ({
 vi.mock('../../hooks/use-session', () => ({
   useSession: () =>
     ({
-      session: null,
+      session:
+        hookState.mode === null
+          ? null
+          : {
+              id: 'ses_1',
+              mode: hookState.mode,
+              model: { id: 'anthropic/claude-sonnet-5' },
+              parent_session_id: null,
+              title: null,
+            },
       messages: [],
       summaries: [],
       summarizing: null,
@@ -119,11 +131,13 @@ const TODOS: TodoList = [{ content: 'Write the tests', status: 'in_progress' }]
 /** Render the chat screen with whatever task list the case is about. */
 function renderChat(todos: TodoList | null): { readonly container: HTMLElement } {
   hookState.todos = todos
+  hookState.mode = null
   const { container } = render(
     <ChatView
       sessionId="ses_1"
       catalog={CATALOG}
       modes={MODES}
+      skills={[]}
       onDelete={() => Promise.resolve({ ok: true })}
       onDeleted={() => undefined}
     />,
@@ -215,6 +229,7 @@ describe("the shell hears that a chat's tasks moved (epic #340; #348)", () => {
         sessionId="ses_1"
         catalog={CATALOG}
         modes={MODES}
+        skills={[]}
         onDelete={() => Promise.resolve({ ok: true })}
         onDeleted={() => undefined}
         onTasksChanged={onTasksChanged}
@@ -237,5 +252,41 @@ describe("the shell hears that a chat's tasks moved (epic #340; #348)", () => {
     // the render.
     rerender(view())
     expect(onTasksChanged).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('the / menu follows the chat’s mode (epic #349, K8)', () => {
+  it('offers the effective skills, not just the stored switches', () => {
+    // Two stored-on skills, named by a mode that turns one off and one stored-off skill the
+    // mode turns on: the menu must be the **effective** set, which is what the server accepts.
+    const offered = makeSkill({ name: 'offered-now' })
+    const refused = makeSkill({ name: 'turned-off-here' })
+    const rescued = makeSkill({ name: 'turned-on-here', enabled: false })
+    const mode: Mode = makeMode({
+      id: 'mode_1' as Mode['id'],
+      name: 'quiet',
+      tools: { builtin: {}, skills: { [refused.id]: false, [rescued.id]: true } },
+    })
+    hookState.mode = mode.id
+    hookState.todos = null
+
+    render(
+      <ChatView
+        sessionId="ses_1"
+        catalog={CATALOG}
+        modes={{ ...MODES, modes: [mode] }}
+        skills={[offered, refused, rescued]}
+        onDelete={() => Promise.resolve({ ok: true })}
+        onDeleted={() => undefined}
+      />,
+    )
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '/' } })
+    const rows = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="composer-commands"] [data-command]'),
+    ].map((row) => row.dataset.command)
+    expect(rows).toContain('offered-now')
+    expect(rows).toContain('turned-on-here')
+    expect(rows).not.toContain('turned-off-here')
   })
 })

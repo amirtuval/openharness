@@ -290,3 +290,37 @@ describe('ToolCallView (#308)', () => {
     expect(text).toContain('done · Allowed for this chat')
   })
 })
+
+describe('the skill tools, in the transcript (#349, K6; #354)', () => {
+  it('draws a `skill` call as the skill it loaded', () => {
+    const lines = toolCallLines(
+      call({
+        name: 'skill',
+        input: { name: 'release-notes' },
+        result: { content: 'a\nb\nc', isError: false },
+      }),
+      80,
+      DARK,
+    )
+
+    // The whole head line is the client's own label (`skillToolCallLabel`): `Loaded skill
+    // release-notes` — not `skill release-notes`.
+    // The whole head line is the label: `Loaded skill release-notes`, not `skill release-notes`.
+    expect(textOf(lines.slice(0, 1))).toMatch(/^● Loaded skill release-notes · done$/u)
+    expect(textOf(lines.slice(0, 1))).toContain('done')
+  })
+
+  it('draws a `skill_read` call as the file it read', () => {
+    const lines = toolCallLines(
+      call({ name: 'skill_read', input: { name: 'release-notes', path: 'reference/tone.md' } }),
+      80,
+      DARK,
+    )
+    expect(textOf(lines.slice(0, 1))).toContain('Read reference/tone.md')
+  })
+
+  it('falls back to the tool’s own words when the skill tools say nothing', () => {
+    const lines = toolCallLines(call({ name: 'skill', input: {} }), 80, DARK)
+    expect(textOf(lines.slice(0, 1))).toContain('Loaded skill')
+  })
+})

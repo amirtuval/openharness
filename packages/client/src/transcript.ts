@@ -269,6 +269,23 @@ export interface TranscriptMessage {
    * change either. Absent on every other message.
    */
   readonly modelChangedTo?: string
+  /**
+   * The skill this message invoked, when it was a slash command (epic #349, K7; issue #353).
+   *
+   * `/release-notes v1.2` stores the command as the text the reader typed, with the skill it
+   * named beside it, so a transcript can draw the message as the command it was rather than as
+   * words that happen to start with a slash — live and after a reload alike, since the field is
+   * the stored event's own. Absent on every message that is not an invocation.
+   */
+  readonly skill?: TranscriptMessageSkill
+}
+
+/** The skill a message invoked, as {@link TranscriptMessage.skill} keeps it (epic #349, K7). */
+export interface TranscriptMessageSkill {
+  /** The skill's name, without its slash. */
+  readonly name: string
+  /** What the reader typed after the name, or `null` when they typed nothing else. */
+  readonly arguments: string | null
 }
 
 /** The latest `session.error`, as the UI shows it. */
@@ -1544,6 +1561,7 @@ function sameJson(current: unknown, next: unknown): boolean {
 function fromUserMessage(state: TranscriptState, event: UserMessageEvent): TranscriptState {
   const model = event.model?.id
   const parts = textParts(event.content.map((block) => block.text))
+  const skill = event.skill
   const message: TranscriptMessage = {
     id: event.id,
     role: 'user',
@@ -1555,6 +1573,12 @@ function fromUserMessage(state: TranscriptState, event: UserMessageEvent): Trans
     ...(model !== undefined && state.model !== null && model !== state.model
       ? { modelChangedTo: model }
       : {}),
+    // The slash invocation the message carries, so a UI draws the chip from the log rather than
+    // by parsing the text back (epic #349, K7; #353): a message whose words merely start with a
+    // slash is not an invocation, and this field is the only thing that says so.
+    ...(skill === undefined
+      ? {}
+      : { skill: { name: skill.name, arguments: skill.arguments ?? null } }),
   }
   return { ...upsertMessage(state, message), model: model ?? state.model }
 }
@@ -1951,7 +1975,22 @@ function isSameMessage(current: TranscriptMessage | undefined, next: TranscriptM
     current.streaming === next.streaming &&
     current.position === next.position &&
     current.role === next.role &&
-    sameMeta(current.meta, next.meta)
+    sameMeta(current.meta, next.meta) &&
+    sameSkill(current.skill, next.skill)
+  )
+}
+
+/** Whether two messages invoke the same skill the same way. */
+function sameSkill(
+  current: TranscriptMessageSkill | undefined,
+  next: TranscriptMessageSkill | undefined,
+): boolean {
+  return (
+    current === next ||
+    (current !== undefined &&
+      next !== undefined &&
+      current.name === next.name &&
+      current.arguments === next.arguments)
   )
 }
 

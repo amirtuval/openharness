@@ -101,6 +101,29 @@ describe('switching a chat to a mode', () => {
     expect(await fake.sessions.get(session.id)).toMatchObject({ mode: MODE.id })
   })
 
+  it('shows a switch from a mode back to a model before anything is sent (B8)', async () => {
+    const fake = makeFake({
+      models: [ANTHROPIC, OPENAI],
+      providers: [providerStatus('anthropic'), providerStatus('openai')],
+      credentials: [credential('anthropic'), credential('openai')],
+      modes: [MODE],
+    })
+    const session = await fake.sessions.create({ mode: MODE.id })
+    renderApp(fake, { hash: `#/s/${session.id}` })
+    await waitFor(() => expect(modeSlot()).toHaveTextContent('deep'))
+
+    // Pick a plain model. The chat still follows the mode until a message is sent, but the
+    // screen must show the switch **now** — the header stops naming the mode and the picker
+    // names the model. This is the reported bug: it used to wait for the next message.
+    await user.click(await screen.findByRole('button', { name: /Model:/ }))
+    await user.click(await screen.findByRole('option', { name: /GPT-4.1 mini/ }))
+
+    expect(modeSlot()).toBeNull()
+    expect(screen.getByRole('button', { name: /Model:/ })).toHaveTextContent('GPT-4.1 mini')
+    // Nothing was sent: the session still follows the mode until the next message.
+    expect(await fake.sessions.get(session.id)).toMatchObject({ mode: MODE.id })
+  })
+
   it('shows the mode a chat opened on follows', async () => {
     const fake = makeFake({
       models: [ANTHROPIC],

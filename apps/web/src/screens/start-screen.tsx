@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { useClient } from '../components/client-provider'
 import type { CreateChatOptions, CreateChatResult } from '../hooks/use-sessions'
+import type { Skill } from '@openharness/protocol'
 import type { ModesView } from '../hooks/use-modes'
 import type { ModelsView } from '../hooks/use-models'
 import { useProviderCredentials } from '../hooks/use-provider-credentials'
@@ -26,12 +27,15 @@ export function StartScreen({
   createSession,
   catalog,
   modes,
+  skills,
 }: {
   /** Create the session for New chat — from a model or a mode (#245, M6) — and return it. */
   createSession: (options: CreateChatOptions) => Promise<CreateChatResult>
   catalog: ModelsView
   /** The shell's modes: the presets New chat's picker offers. */
   modes: ModesView
+  /** The shell's skills (#349, K7; #353): the reader's own rows of the composer's `/` menu. */
+  skills: readonly Skill[]
 }) {
   const client = useClient()
   const { credentials, loading, error } = useProviderCredentials(client)
@@ -61,5 +65,7 @@ export function StartScreen({
     return <FirstRunScreen catalog={catalog} onLeave={() => setFirstRun(false)} />
   }
 
-  return <NewChatScreen createSession={createSession} catalog={catalog} modes={modes} />
+  return (
+    <NewChatScreen createSession={createSession} catalog={catalog} modes={modes} skills={skills} />
+  )
 }

@@ -7,7 +7,9 @@ import type {
   CreateModeRequest,
   McpServer,
   Mode,
+  ModeItemDefault,
   ModeToolOverride,
+  Skill,
   ToolSettingEntry,
 } from '@openharness/protocol'
 import { useEffect, useState } from 'react'
@@ -16,9 +18,14 @@ import type { ModesView } from '../../hooks/use-modes'
 import type { ModelsView } from '../../hooks/use-models'
 import {
   modeMcpServerChoice,
+  modeSectionDefault,
+  modeSkillChoice,
   modeToolChoice,
   withModeMcpServerChoice,
+  withModeSectionDefault,
+  withModeSkillChoice,
   withModeToolChoice,
+  type ModeSection,
   type ModeToolChoice,
 } from '../../lib/tools'
 import { ModelPicker } from '../models/model-picker'
@@ -86,12 +93,88 @@ function formOf(mode: Mode | null): FormState {
   }
 }
 
-/** The three choices the tools section offers one built-in tool, and what each means. */
+/**
+ * The three choices a section offers one item, and what each means.
+ *
+ * `follow` is now "Default" rather than "Follow my settings" (epic #349, B8): with a section
+ * default in place, an unnamed item follows **that** — which is the user's own setting only
+ * while the section default is `follow`.
+ */
 const TOOL_CHOICES: readonly { readonly value: ModeToolChoice; readonly label: string }[] = [
-  { value: 'follow', label: 'Follow my settings' },
+  { value: 'follow', label: 'Default' },
   { value: 'on', label: 'Always on' },
   { value: 'off', label: 'Always off' },
 ]
+
+/** The three values a section's "not listed below" default can take (epic #349, B8). */
+const DEFAULT_CHOICES: readonly { readonly value: ModeItemDefault; readonly label: string }[] = [
+  { value: 'follow', label: 'Follow my settings' },
+  { value: 'off', label: 'Off' },
+  { value: 'on', label: 'On' },
+]
+
+/** What a section's default means, in one line under the select (epic #349, B8). */
+function defaultHelp(section: ModeSection, value: ModeItemDefault): string {
+  const items =
+    section === 'builtin' ? 'tools' : section === 'mcp_servers' ? 'MCP servers' : 'skills'
+  switch (value) {
+    case 'off':
+      return section === 'builtin'
+        ? 'Only the tools you turn on here. Tools added later stay off in this mode.'
+        : section === 'mcp_servers'
+          ? 'Only the MCP servers you turn on here. Servers you add later stay off in this mode.'
+          : 'Only the skills you turn on here. Skills you import later stay off in this mode.'
+    case 'on':
+      return `Every one of your ${items} is on except the ones you turn off here — even ones you turned off in your own settings.`
+    default:
+      return `Each one follows your own settings.`
+  }
+}
+
+/**
+ * The selector at the top of one section: what an item the map does not name does
+ * (epic #349, B8).
+ *
+ * It is the one control that cannot be expressed as a per-item choice, which is why it is a
+ * section-level select rather than a fourth value in each row: `off` is an allowlist ("only
+ * these"), `on` overrides the user's own off switches, and `follow` is today's behaviour.
+ */
+function SectionDefaultSelect({
+  section,
+  label,
+  value,
+  onChange,
+}: {
+  section: ModeSection
+  label: string
+  value: ModeItemDefault
+  onChange: (value: ModeItemDefault) => void
+}) {
+  const id = `mode-${section}-default`
+  return (
+    <div className="space-y-1 rounded-md border bg-muted/30 px-2 py-1.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <label htmlFor={id} className="text-xs font-medium">
+          {label}
+        </label>
+        <select
+          id={id}
+          data-slot={`mode-${section}-default`}
+          className="h-8 rounded-md border bg-transparent px-2 text-xs"
+          value={value}
+          onChange={(event) => onChange(event.target.value as ModeItemDefault)}
+        >
+          {DEFAULT_CHOICES.map((choice) => (
+            <option key={choice.value} value={choice.value}>
+              {choice.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <p className="text-xs text-muted-foreground">{defaultHelp(section, value)}</p>
+    </div>
+  )
+}
 
 /**
  * Create or edit one mode (#245, M6): its name, the model it runs (or "my default model"), the
@@ -109,6 +192,7 @@ export function ModeFormDialog({
   catalog,
   tools,
   mcpServers,
+  skills,
   onSaved,
   onClose,
 }: {
@@ -138,6 +222,16 @@ export function ModeFormDialog({
    * from the list is not a change to the mode.
    */
   mcpServers: readonly McpServer[]
+  /**
+   * The reader's imported skills, for the skills section (epic #349, K8; #353): a mode may turn
+   * a whole skill on or off for the chats that follow it, by id — the sibling of the servers
+   * above, and the thing that gives a subagent type its own set of skills (epic #340, S2).
+   *
+   * A skill the reader has deleted is not offered, exactly as a deleted server is not: the mode
+   * routes store the map as written and ignore an id that matches nothing, so an old entry is
+   * untroubled and this form simply does not show it.
+   */
+  skills: readonly Skill[]
   /** Called after a successful write, with what was saved. */
   onSaved: (mode: Mode) => void
   onClose: () => void
@@ -306,13 +400,25 @@ export function ModeFormDialog({
             </p>
           </div>
 
-          {builtinTools.length === 0 ? null : (
-            <div className="space-y-2">
-              <Label>Tools</Label>
+          <div className="space-y-2">
+            <Label>Tools</Label>
+            <p className="text-xs text-muted-foreground">
+              Which of your tools a chat on this mode has. A mode turns a tool on or off — it never
+              changes what a call may do.
+            </p>
+            <SectionDefaultSelect
+              section="builtin"
+              label="Tools not listed below"
+              value={modeSectionDefault(form.tools, 'builtin')}
+              onChange={(value) =>
+                patch({ tools: withModeSectionDefault(form.tools, 'builtin', value) })
+              }
+            />
+            {builtinTools.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                Which of your tools a chat on this mode has, or leave each one following your own
-                settings. A mode turns a tool on or off — it never changes what a call may do.
+                This deployment offers no built-in tools.
               </p>
+            ) : (
               <ul className="space-y-1.5">
                 {builtinTools.map((entry) => (
                   <li key={entry.name} className="flex items-center gap-2 text-sm">
@@ -342,17 +448,26 @@ export function ModeFormDialog({
                   </li>
                 ))}
               </ul>
-            </div>
-          )}
+            )}
+          </div>
 
-          {mcpServers.length === 0 ? null : (
-            <div className="space-y-2">
-              <Label>MCP servers</Label>
-              <p className="text-xs text-muted-foreground">
-                Which of your remote MCP servers a chat on this mode uses, or leave each one
-                following your own settings. A server is on or off as a whole — its tools cannot be
-                switched one by one.
-              </p>
+          <div className="space-y-2">
+            <Label>MCP servers</Label>
+            <p className="text-xs text-muted-foreground">
+              Which of your remote MCP servers a chat on this mode uses. A server is on or off as a
+              whole — its tools cannot be switched one by one.
+            </p>
+            <SectionDefaultSelect
+              section="mcp_servers"
+              label="MCP servers not listed below"
+              value={modeSectionDefault(form.tools, 'mcp_servers')}
+              onChange={(value) =>
+                patch({ tools: withModeSectionDefault(form.tools, 'mcp_servers', value) })
+              }
+            />
+            {mcpServers.length === 0 ? (
+              <p className="text-xs text-muted-foreground">You have no remote MCP servers yet.</p>
+            ) : (
               <ul className="space-y-1.5">
                 {mcpServers.map((server) => (
                   <li key={server.id} className="flex items-center gap-2 text-sm">
@@ -382,8 +497,57 @@ export function ModeFormDialog({
                   </li>
                 ))}
               </ul>
-            </div>
-          )}
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label>Skills</Label>
+            <p className="text-xs text-muted-foreground">
+              Which of your imported skills a chat on this mode has. A skill is on or off as a whole
+              — the mode cannot change what a skill does.
+            </p>
+            <SectionDefaultSelect
+              section="skills"
+              label="Skills not listed below"
+              value={modeSectionDefault(form.tools, 'skills')}
+              onChange={(value) =>
+                patch({ tools: withModeSectionDefault(form.tools, 'skills', value) })
+              }
+            />
+            {skills.length === 0 ? (
+              <p className="text-xs text-muted-foreground">You have no imported skills yet.</p>
+            ) : (
+              <ul className="space-y-1.5">
+                {skills.map((skill) => (
+                  <li key={skill.id} className="flex items-center gap-2 text-sm">
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs">{skill.name}</span>
+                    <select
+                      data-slot="mode-skill-choice"
+                      data-skill={skill.name}
+                      aria-label={`${skill.name} in this mode`}
+                      className="h-8 rounded-md border bg-transparent px-2 text-xs"
+                      value={modeSkillChoice(form.tools, skill.id)}
+                      onChange={(event) =>
+                        patch({
+                          tools: withModeSkillChoice(
+                            form.tools,
+                            skill.id,
+                            event.target.value as ModeToolChoice,
+                          ),
+                        })
+                      }
+                    >
+                      {TOOL_CHOICES.map((choice) => (
+                        <option key={choice.value} value={choice.value}>
+                          {choice.label}
+                        </option>
+                      ))}
+                    </select>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
 
           {failure === null ? null : (
             <p role="alert" className="text-sm text-destructive">

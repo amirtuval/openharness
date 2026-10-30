@@ -163,12 +163,19 @@ export class PostgresSkillStore implements SkillStore {
     const row = await this.#db
       .selectFrom('skill_files')
       .innerJoin('skills', 'skills.id', 'skill_files.skill_id')
-      .select(['skill_files.path', 'skill_files.size', 'skill_files.content'])
+      .select([
+        'skill_files.path',
+        'skill_files.size',
+        'skill_files.encoding',
+        'skill_files.content',
+      ])
       .where('skill_files.skill_id', '=', skillId)
       .where('skill_files.path', '=', path)
       .where('skills.owner_id', '=', options.ownerId)
       .executeTakeFirst()
-    return row === undefined ? null : { path: row.path, size: row.size, content: row.content }
+    return row === undefined
+      ? null
+      : { path: row.path, size: row.size, encoding: row.encoding, content: row.content }
   }
 
   async replaceSnapshot(
@@ -352,7 +359,8 @@ async function insertFiles(
         skill_id: skillId,
         path: file.path,
         content: file.content,
-        size: skillFileSize(file.content),
+        encoding: file.encoding ?? 'utf8',
+        size: skillFileSize(file.content, file.encoding),
       })),
     )
     .execute()
@@ -365,7 +373,7 @@ async function insertFiles(
  */
 function filesOf(input: SkillSnapshotInput): SkillFileListing[] {
   return input.files
-    .map((file) => ({ path: file.path, size: skillFileSize(file.content) }))
+    .map((file) => ({ path: file.path, size: skillFileSize(file.content, file.encoding) }))
     .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
 }
 

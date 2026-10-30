@@ -346,6 +346,10 @@ export class FakeBrain {
             ...(input.model === undefined ? {} : { model: input.model }),
             // The mode a message carried rides it too (#245, M6), stored exactly as sent.
             ...(input.mode === undefined ? {} : { mode: input.mode }),
+            // A slash invocation rides it as well (epic #349, K7; #353): the text is what the
+            // reader typed, and the skill beside it is the one it named. A transcript draws its
+            // chip from this field, and a real server's log holds it too.
+            ...(input.skill === undefined ? {} : { skill: input.skill }),
           }
         : {
             id: newEventId(),

@@ -140,7 +140,7 @@ the only way an event is ever removed together with its session.
 | `GET`    | `/v1/me/mcp_servers/oauth/callback`             | the provider's redirect back; completes the flow and answers a browser page — **no session**                                                                                                                                                     |
 | `GET`    | `/v1/me/skills`                                 | list the caller's imported skills, oldest first (no cursor: at most 50)                                                                                                                                                                          |
 | `GET`    | `/v1/me/skills/{skill_id}`                      | read one skill, with its `SKILL.md`'s content                                                                                                                                                                                                    |
-| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill, with its content and size                                                                                                                                                                                              |
+| `GET`    | `/v1/me/skills/{skill_id}/files/{path}`         | read one file of a skill: its content, size and `encoding` (`utf8`, or `base64` for a binary file)                                                                                                                                               |
 | `POST`   | `/v1/me/skills/{skill_id}`                      | switch a skill on or off (`enabled`); the snapshot itself is not editable                                                                                                                                                                        |
 | `DELETE` | `/v1/me/skills/{skill_id}`                      | delete a skill and its whole snapshot; `204`                                                                                                                                                                                                     |
 | `POST`   | `/v1/me/skills/import/preview`                  | read a public repository and answer the candidate skills; stores nothing                                                                                                                                                                         |
@@ -1250,29 +1250,39 @@ stored. A mode is stored even when its model is not usable yet: the key may come
 
 **A mode may also carry a tool override.** `Mode.tools` is
 `{ "builtin": { "<tool>": true }, "mcp_servers": { "<mcps_…>": false }, "skills": { "<skl_…>":
-true } }` or `null`: an on/off patch applied over the user's own choices, so a `deep` mode can
-insist on `web_search`, do without `todo_write`, leave `notes` (a remote MCP server) out of
-every chat that follows it, and bring its own `release-notes` skill with it. It decides **which**
-tools, **which MCP servers** and **which skills** a chat has, never what a call to one may do —
-permissions are the user's (see
+true } }` (each map optional) or `null`: an on/off patch applied over the user's own choices, so
+a `deep` mode can insist on `web_search`, do without `todo_write`, leave `notes` (a remote MCP
+server) out of every chat that follows it, and bring its own `release-notes` skill with it. It
+decides **which** tools, **which MCP servers** and **which skills** a chat has, never what a
+call to one may do — permissions are the user's (see
 [Per-user tool settings](#per-user-tool-settings-epic-303-x4-issue-307)) — and never what a
 skill is.
 
 - **`builtin`** is keyed by tool name and patches the user's `/v1/me/tools` choices.
 - **`mcp_servers`** (epic #303, X10; #311) is a sibling key, keyed by a remote MCP server's
-  `mcps_` id, and patches the server's own `enabled` field — the user's default. A server the map
-  does not name follows the user; a mode that names one turns it on or off for the chats that
-  follow it, live, from the next request on. It is **server granularity, never per MCP tool**:
-  which of a server's tools a request offers, and under which permission, is the server's own
-  listing and the user's settings, not a mode's.
+  `mcps_` id, and patches the server's own `enabled` field — the user's default. It is **server
+  granularity, never per MCP tool**: which of a server's tools a request offers, and under which
+  permission, is the server's own listing and the user's settings, not a mode's.
 - **`skills`** (epic #349, K8) is the third sibling key, keyed by a skill's `skl_` id, and
   patches the skill's own `enabled` field. A subagent type (epic #340) is a mode, so this is
   what gives one its own skills.
+- **`builtin_default`, `mcp_servers_default` and `skills_default`** (epic #349, B8) say what an
+  item the corresponding map does **not** name does. Each is `"follow"`, `"off"` or `"on"`,
+  optional, and **absent means `"follow"`** — the behaviour every existing mode and every newly
+  created one has. `"follow"` uses the user's own setting (a built-in tool's `/v1/me/tools`
+  choice, a server's `enabled`, a skill's `enabled`); `"off"` makes the map an **allowlist**
+  (only the items it turns on are on, so an item added later stays off in that mode); `"on"`
+  turns every item on except the ones the map turns off, **even items the user turned off
+  globally**. An explicit map entry always wins. A default is never a permission, and it cannot
+  undo a hard rule: `ask_user` is still absent from a non-interactive child, the subagent tools a
+  depth does not offer are still absent, and a `disable-model-invocation` skill still stays out
+  of the model's listing.
 - **A mode naming a server or a skill the caller no longer has is simply ignored.** The mode
   routes store the maps as written and do not check the ids against what is present, so deleting
   an MCP server or a skill neither fails nor rewrites the modes that named it — the entry just
   matches nothing. The servers and skills in force for a request are resolved as _the user's
-  `enabled`, overridden by the mode_, per request.
+  `enabled`, overridden by the mode_, per request; the one shared rule per kind is
+  `builtinToolInForce`, `mcpServerInForce` and the protocol's `skillInForce`.
 
 **A mode with a description is a subagent type.** `Mode.subagent_description` (epic #340, S2;
 #342) is one short sentence — at most 500 characters — saying what the mode is **good for**, or
@@ -1539,7 +1549,11 @@ curl localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN"
 
 # Any other file, by its path — which may hold slashes.
 curl localhost:3000/v1/me/skills/skl_01J…/files/reference/tone.md -H "Authorization: Bearer $TOKEN"
-# → 200 {"path":"reference/tone.md","size":380,"content":"Be terse.\n"}
+# → 200 {"path":"reference/tone.md","size":380,"encoding":"utf8","content":"Be terse.\n"}
+
+# A file that is not text: the bytes, base64-encoded, and the original size in bytes.
+curl localhost:3000/v1/me/skills/skl_01J…/files/assets/icon.png -H "Authorization: Bearer $TOKEN"
+# → 200 {"path":"assets/icon.png","size":33,"encoding":"base64","content":"iVBORw0KGgo…"}
 
 # On or off. The snapshot is not editable: a new one comes from a refresh.
 curl -X POST localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer $TOKEN" \
@@ -1554,6 +1568,14 @@ curl -X DELETE localhost:3000/v1/me/skills/skl_01J… -H "Authorization: Bearer 
 comes with the single-skill read and any other file with its own. That keeps a listing of fifty
 skills one small answer whatever the snapshots hold, and it keeps the contents free to move to
 object storage later (K4) without a resource changing shape.
+
+**A file that is not text is stored losslessly, and says so.** A skill folder may ship an icon,
+a font or a `.docx`, and some of those bytes are not valid UTF-8 — or contain a NUL, which
+Postgres `text` refuses outright. The import detects such a file and stores its bytes
+base64-encoded; `encoding` is `utf8` or `base64`, and `size` is always the **original** byte
+length, so the K4 limits count the file rather than its base64 spelling. The `skill_read` tool
+answers a binary file with a marker naming its path and size instead of its content; `utf8` and
+`base64` are the only two spellings.
 
 **The format's three optional fields are honoured**, and the rest are stored and shown and
 otherwise ignored: `disable-model-invocation: true` is a command only the user runs,
@@ -1578,7 +1600,9 @@ offered two tools (K6): `skill { "name": "release-notes" }` answers the skill's 
 skill's scripts are files to read and never to execute, and the tool's own description says so.
 `skill`'s description **is** the listing: the names and descriptions of every skill the model
 may invoke, so a chat with none offers neither tool. A `disable-model-invocation: true` skill is
-left out of that listing and refused by both tools — only the user runs it, with `/name`. An
+left out of that listing and refused by both tools — only the user runs it, with `/name` — until
+the user **has** run it in the chat: the flag stops the model picking the skill on its own, and
+once `/name` has loaded its instructions the files those instructions name are readable. An
 unknown name answers the names there are, and an unknown path the files the skill holds.
 
 **A skill is the user's own instructions, not third-party data** (K10). Its text is framed to

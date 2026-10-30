@@ -72,6 +72,35 @@ export interface LoginOptions extends GlobalOptions {
 }
 
 /**
+ * What `oh skills` was asked to do (epic #349, K3/K5/K7/K8; #354).
+ *
+ * One action per shape of the command, and each carries only the flags it takes: `add` the
+ * source and how to choose from the preview, `refresh` and `remove` the `--yes` that skips
+ * their question, `enable`/`disable` nothing but the name. What is *not* here is a mode's
+ * override of a skill's on/off (K8) — `oh` does not edit modes, so `oh modes` shows one
+ * read-only and this command never writes one.
+ */
+export type SkillsAction =
+  | { readonly action: 'list' }
+  | {
+      readonly action: 'add'
+      /** The public git URL (or a GitHub/GitLab browse URL) to read. */
+      readonly url: string
+      /** `--ref <ref>`: the branch, tag or commit, or `undefined` for the repository's own. */
+      readonly ref?: string | undefined
+      /** `--path <path>`: the folder inside the repository, or `undefined` for its root. */
+      readonly path?: string | undefined
+      /** `--all`: import every candidate the preview can. */
+      readonly all: boolean
+      /** `--name <n>`, repeatable: import these candidates. */
+      readonly names: readonly string[]
+    }
+  | { readonly action: 'refresh'; readonly name: string; readonly yes: boolean }
+  | { readonly action: 'enable'; readonly name: string }
+  | { readonly action: 'disable'; readonly name: string }
+  | { readonly action: 'remove'; readonly name: string; readonly yes: boolean }
+
+/**
  * What the command line asked for.
  *
  * Only the commands the v1 CLI has: a chat, the two listings (plus `sessions delete`), the
@@ -123,6 +152,12 @@ export type CliCommand =
       /** The reader's remote MCP servers, as a screen in a terminal and a listing without one. */
       readonly options: GlobalOptions
     }
+  | {
+      readonly kind: 'skills'
+      /** The reader's imported skills: list, import, refresh, switch or remove (#349; #354). */
+      readonly action: SkillsAction
+      readonly options: GlobalOptions
+    }
   | { readonly kind: 'login'; readonly options: LoginOptions }
   | { readonly kind: 'logout'; readonly options: GlobalOptions }
   | { readonly kind: 'whoami'; readonly options: GlobalOptions }
@@ -150,6 +185,7 @@ const SUBCOMMANDS = [
   'settings',
   'tools',
   'mcp',
+  'skills',
   'login',
   'logout',
   'whoami',
@@ -168,6 +204,8 @@ const SUBCOMMAND_BLURBS: Record<Subcommand, string> = {
   settings: 'it prints the context settings, and sets them with its flags',
   tools: 'it prints which tools your chats may use, and sets one with --on/--off/--policy',
   mcp: 'it opens your remote MCP servers: add, edit, connect, test and delete them',
+  skills:
+    'it lists your skills, or manages them with `add <url>`, `refresh <name>`, `enable|disable <name>` and `remove <name>`',
   login: 'it signs you in through the browser',
   logout: 'it ends the session and forgets the token',
   whoami: 'it prints the signed-in user',
@@ -196,6 +234,13 @@ const OPTIONS = {
   on: { type: 'boolean' },
   off: { type: 'boolean' },
   policy: { type: 'string' },
+  // `oh skills` (#354). `--name` is `multiple` because the reader picks more than one candidate
+  // in one go, and `--all` is the other way of naming every importable one. `--ref`/`--path` are
+  // the two optional fields of the import's source (K3).
+  ref: { type: 'string' },
+  path: { type: 'string' },
+  all: { type: 'boolean' },
+  name: { type: 'string', multiple: true },
 } as const satisfies ParseArgsConfig['options']
 
 /**
@@ -261,6 +306,10 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
       return parseTools(extra, values, global)
     }
 
+    if (subcommand === 'skills') {
+      return parseSkills(extra, values, global)
+    }
+
     if (extra.length > 0) {
       return {
         ok: false,
@@ -299,6 +348,11 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
     return { ok: false, error: `${toolsFlag} only makes sense with \`oh tools\`.` }
   }
 
+  const skillsFlag = skillsFlagIn(values)
+  if (skillsFlag !== undefined) {
+    return { ok: false, error: `${skillsFlag} only makes sense with \`oh skills\`.` }
+  }
+
   if (values['no-browser'] === true) {
     return { ok: false, error: '--no-browser only makes sense with `oh login`.' }
   }
@@ -307,7 +361,7 @@ export function parseArgs(argv: readonly string[]): ParseOutcome {
     return {
       ok: false,
       error:
-        '--yes only makes sense with `oh sessions delete <id>` or `oh providers remove <provider>`.',
+        '--yes only makes sense with `oh sessions delete <id>`, `oh providers remove <provider>`, `oh skills refresh <name>` or `oh skills remove <name>`.',
     }
   }
 
@@ -724,6 +778,185 @@ function parseTools(
 /** The permission words `--policy` accepts — the protocol's own three, spelled out. */
 const TOOL_PERMISSION_WORDS: readonly ToolPermission[] = ['allow', 'ask', 'deny']
 
+/**
+ * `oh skills` in all its shapes (epic #349, K3/K5/K7/K8; #354).
+ *
+ * A bare `oh skills` (or `list`) is the listing, the way a bare `oh sessions` is. `add` takes the
+ * URL and, optionally, `--ref`/`--path` for the source and `--all`/`--name <n>` for what to pick;
+ * `refresh <name>` and `remove <name>` take `--yes`; `enable`/`disable <name>` take nothing else.
+ * Each shape says which flags it does not take rather than ignoring them, because a flag that was
+ * silently dropped would be a choice the reader thought they had made.
+ */
+function parseSkills(
+  extra: readonly string[],
+  values: ReturnType<typeof parseOptions>['values'],
+  global: GlobalOptions,
+): ParseOutcome {
+  const [action, ...rest] = extra
+
+  // The flags no `oh skills` shape takes at all: the chat's, `oh settings`', `oh tools`' and
+  // `--no-browser`. Checked once here, since they are wrong whatever the action is.
+  const shared = wrongFlagFor('skills', values)
+  if (shared !== undefined) {
+    return {
+      ok: false,
+      error: `\`oh skills\` does not take ${shared}; ${SUBCOMMAND_BLURBS.skills}.`,
+    }
+  }
+
+  if (action === undefined || action === 'list') {
+    if (action === 'list' && rest.length > 0) {
+      return {
+        ok: false,
+        error: `\`oh skills list\` takes no arguments, got '${rest.join(' ')}'.`,
+      }
+    }
+    const flag = disallowedSkillsFlag(values, [])
+    if (flag !== undefined) {
+      return {
+        ok: false,
+        error: `\`oh skills\` does not take ${flag}; ${SUBCOMMAND_BLURBS.skills}.`,
+      }
+    }
+    return { ok: true, command: { kind: 'skills', action: { action: 'list' }, options: global } }
+  }
+
+  if (action === 'add') {
+    const [url, ...overflow] = rest
+    if (url === undefined) {
+      return { ok: false, error: '`oh skills add` needs the repository URL: oh skills add <url>.' }
+    }
+    if (overflow.length > 0) {
+      return {
+        ok: false,
+        error: `\`oh skills add\` takes one URL, got '${rest.join(' ')}'.`,
+      }
+    }
+    if (url.trim() === '') {
+      return {
+        ok: false,
+        error: '`oh skills add` needs a URL, like https://github.com/owner/skills.',
+      }
+    }
+    const flag = disallowedSkillsFlag(values, ['ref', 'path', 'all', 'name'])
+    if (flag !== undefined) {
+      return { ok: false, error: `\`oh skills add\` does not take ${flag}.` }
+    }
+    const names = values.name ?? []
+    if (values.all === true && names.length > 0) {
+      return { ok: false, error: 'use either --all or --name <n>, not both.' }
+    }
+    return {
+      ok: true,
+      command: {
+        kind: 'skills',
+        action: {
+          action: 'add',
+          url: url.trim(),
+          ref: nonEmpty(values.ref),
+          path: nonEmpty(values.path),
+          all: values.all === true,
+          names,
+        },
+        options: global,
+      },
+    }
+  }
+
+  if (action === 'refresh' || action === 'remove') {
+    const [name, ...overflow] = rest
+    if (name === undefined) {
+      return {
+        ok: false,
+        error: `\`oh skills ${action}\` needs the skill name: oh skills ${action} <name>.`,
+      }
+    }
+    if (overflow.length > 0) {
+      return {
+        ok: false,
+        error: `\`oh skills ${action}\` takes one name, got '${rest.join(' ')}'.`,
+      }
+    }
+    const flag = disallowedSkillsFlag(values, ['yes'])
+    if (flag !== undefined) {
+      return { ok: false, error: `\`oh skills ${action}\` does not take ${flag}.` }
+    }
+    return {
+      ok: true,
+      command: {
+        kind: 'skills',
+        action: { action, name, yes: values.yes === true },
+        options: global,
+      },
+    }
+  }
+
+  if (action === 'enable' || action === 'disable') {
+    const [name, ...overflow] = rest
+    if (name === undefined) {
+      return {
+        ok: false,
+        error: `\`oh skills ${action}\` needs the skill name: oh skills ${action} <name>.`,
+      }
+    }
+    if (overflow.length > 0) {
+      return {
+        ok: false,
+        error: `\`oh skills ${action}\` takes one name, got '${rest.join(' ')}'.`,
+      }
+    }
+    const flag = disallowedSkillsFlag(values, [])
+    if (flag !== undefined) {
+      return { ok: false, error: `\`oh skills ${action}\` does not take ${flag}.` }
+    }
+    return {
+      ok: true,
+      command: { kind: 'skills', action: { action, name }, options: global },
+    }
+  }
+
+  return {
+    ok: false,
+    error: `unknown \`oh skills\` argument '${action}'. \`oh skills\` lists them; \`oh skills add <url>\` imports; \`oh skills refresh <name>\`, \`enable|disable <name>\` and \`remove <name>\` change one.`,
+  }
+}
+
+/** The `oh skills` flags, each as the message a shape that does not take it names it. */
+const SKILLS_FLAG_WORDS = {
+  ref: '--ref <ref>',
+  path: '--path <path>',
+  all: '--all',
+  name: '--name <n>',
+  yes: '--yes',
+} as const
+
+type SkillsFlag = keyof typeof SKILLS_FLAG_WORDS
+
+/** The first `oh skills` flag `values` carries that is not among `allowed`, or `undefined`. */
+function disallowedSkillsFlag(
+  values: ReturnType<typeof parseOptions>['values'],
+  allowed: readonly SkillsFlag[],
+): string | undefined {
+  for (const flag of ['ref', 'path', 'all', 'name', 'yes'] as const) {
+    if (allowed.includes(flag)) continue
+    const given =
+      flag === 'all'
+        ? values.all === true
+        : flag === 'yes'
+          ? values.yes === true
+          : values[flag] !== undefined
+    if (given) return SKILLS_FLAG_WORDS[flag]
+  }
+  return undefined
+}
+
+/** A flag value that is present and not just whitespace, trimmed; otherwise `undefined`. */
+function nonEmpty(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}
+
 /** The word a nullable setting takes to mean "follow the default" (K2/K5). */
 const CLEAR_WORD = 'default'
 
@@ -740,6 +973,15 @@ function toolsFlagIn(values: ReturnType<typeof parseOptions>['values']): string 
   if (values.on === true) return '--on'
   if (values.off === true) return '--off'
   if (values.policy !== undefined) return '--policy <allow|ask|deny>'
+  return undefined
+}
+
+/** The `oh skills` flags, in the order their messages name them. */
+function skillsFlagIn(values: ReturnType<typeof parseOptions>['values']): string | undefined {
+  if (values.ref !== undefined) return '--ref <ref>'
+  if (values.path !== undefined) return '--path <path>'
+  if (values.all === true) return '--all'
+  if (values.name !== undefined) return '--name <n>'
   return undefined
 }
 
@@ -778,12 +1020,19 @@ function wrongFlagFor(
     const tool = toolsFlagIn(values)
     if (tool !== undefined) return tool
   }
+  // `oh skills`' own flags (#354), rejected everywhere else. Within `oh skills` each shape
+  // checks the subset it takes, in `parseSkills`.
+  if (subcommand !== 'skills') {
+    const skill = skillsFlagIn(values)
+    if (skill !== undefined) return skill
+  }
   if (
     values.yes === true &&
     subcommand !== 'sessions' &&
-    // `oh providers remove` is the other command that asks a question to skip; the bare
-    // listing and `oh providers add` reject it themselves, in `parseProviders`.
-    subcommand !== 'providers'
+    // `oh providers remove` and `oh skills refresh|remove` are the other commands that ask a
+    // question to skip; the shapes that do not are rejected by their own parsers.
+    subcommand !== 'providers' &&
+    subcommand !== 'skills'
   ) {
     return '--yes'
   }

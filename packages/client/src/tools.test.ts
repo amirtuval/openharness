@@ -9,6 +9,7 @@ import {
   formatToolInput,
   mcpServerMarker,
   modelSupportsTools,
+  skillToolCallLabel,
   stepLimitNotice,
   stuckNotice,
   toolCallStatus,
@@ -101,6 +102,38 @@ describe('toolCallSummary', () => {
 
   it('says nothing when the input holds no string and no known shape', () => {
     expect(toolCallSummary({ name: 'count', input: { n: 3 } })).toBeNull()
+  })
+
+  it('reads a skill call as the skill it loaded, and a read as the file (K6, #352)', () => {
+    expect(toolCallSummary({ name: 'skill', input: { name: 'release-notes' } })).toBe(
+      'release-notes',
+    )
+    expect(
+      toolCallSummary({
+        name: 'skill_read',
+        input: { name: 'release-notes', path: 'reference/tone.md' },
+      }),
+    ).toBe('reference/tone.md')
+  })
+})
+
+describe('skillToolCallLabel (#353)', () => {
+  it('draws the whole compact line for the two skill tools', () => {
+    expect(skillToolCallLabel({ name: 'skill', input: { name: 'release-notes' } })).toBe(
+      'Loaded skill release-notes',
+    )
+    expect(
+      skillToolCallLabel({
+        name: 'skill_read',
+        input: { name: 'release-notes', path: 'reference.md' },
+      }),
+    ).toBe('Read reference.md')
+  })
+
+  it('answers null for every other tool, and for input that says nothing', () => {
+    expect(skillToolCallLabel({ name: 'web_fetch', input: { url: 'https://x.test' } })).toBeNull()
+    expect(skillToolCallLabel({ name: 'skill', input: {} })).toBe('Loaded skill')
+    expect(skillToolCallLabel({ name: 'skill_read', input: {} })).toBe('Read a file')
   })
 })
 

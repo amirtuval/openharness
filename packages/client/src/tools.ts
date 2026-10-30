@@ -222,10 +222,21 @@ function statusFromResult(result: ToolCallResult): ToolCallStatus {
 const WEB_FETCH_TOOL = 'web_fetch'
 const WEB_SEARCH_TOOL = 'web_search'
 
+/**
+ * The two tools a skill is read with (epic #349, K6; #352; the line is #353).
+ *
+ * Spelled here for the same reason the two above are: `@openharness/hands` owns them and this
+ * package may not depend on it, while the names are part of the wire the log records.
+ */
+const SKILL_TOOL = 'skill'
+const SKILL_READ_TOOL = 'skill_read'
+
 /** The input fields a short summary of a call is drawn from, keyed by the built-in tools. */
 const SUMMARY_FIELDS: Readonly<Record<string, readonly string[]>> = {
   [WEB_FETCH_TOOL]: ['url'],
   [WEB_SEARCH_TOOL]: ['query'],
+  [SKILL_TOOL]: ['name'],
+  [SKILL_READ_TOOL]: ['path'],
 }
 
 /**
@@ -266,6 +277,38 @@ export function toolCallSummary(call: {
     }
   }
   return firstString(call.input)
+}
+
+/**
+ * A skill call's whole compact line, or `null` for every other tool (epic #349, K6; #352).
+ *
+ * A `skill` call reads one of the reader's imported skills and a `skill_read` call reads one
+ * file of it, and `skill release-notes` is not what either of those is: the tool's own name says
+ * nothing a reader wants, and the two calls differ by which of them was made. So this answers
+ * the sentence instead — `Loaded skill release-notes`, `Read reference.md` — for a caller that
+ * draws the call as one line, which is what makes the two calls tell the reader what happened
+ * rather than which tool ran. The built-in tool's own name is the fallback when the input does
+ * not carry what the sentence needs.
+ *
+ * It is `null` for every other call, so a caller draws its compact line its own way and only
+ * these two are special — the same one-place rule `toolCallSummary` follows for the per-tool
+ * words, and the same one `oh` reads, so both frontends say it identically.
+ *
+ * @param call the call's name and input
+ */
+export function skillToolCallLabel(call: {
+  readonly name: string
+  readonly input: ToolCallInput
+}): string | null {
+  if (call.name === SKILL_TOOL) {
+    const name = call.input.name
+    return typeof name === 'string' && name.length > 0 ? `Loaded skill ${name}` : 'Loaded skill'
+  }
+  if (call.name === SKILL_READ_TOOL) {
+    const path = call.input.path
+    return typeof path === 'string' && path.length > 0 ? `Read ${path}` : 'Read a file'
+  }
+  return null
 }
 
 /** The first string value of an object, in insertion order, or `null`. */

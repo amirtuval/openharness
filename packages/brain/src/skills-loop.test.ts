@@ -1,16 +1,24 @@
 import type {
+  ModeToolOverride,
   SessionSkillLoadedEvent,
   Skill,
   StoredEvent,
   UserEventInput,
 } from '@openharness/protocol'
-import { EVENT_TYPES, newSkillId } from '@openharness/protocol'
+import { EVENT_TYPES, newModeId, newSkillId, skillsInForce } from '@openharness/protocol'
 import type { OfferedSkill } from '@openharness/hands'
 import { SKILL_READ_TOOL_NAME, SKILL_TOOL_NAME } from '@openharness/hands'
 import { describe, expect, it } from 'vitest'
 
 import type { SkillProvider } from './skills'
-import { NATIVE_SEARCH_TOOL, eventTypes, logOf, newSession } from './testing/harness'
+import {
+  NATIVE_SEARCH_TOOL,
+  TEST_MODEL_ID,
+  eventTypes,
+  logOf,
+  message,
+  newSession,
+} from './testing/harness'
 import { mockModel, readPrompt, TEST_CREDENTIAL } from './testing/mock-model'
 import { runTurn } from './turn'
 
@@ -78,14 +86,20 @@ function provider(contents: {
   readonly extra?: string
 }): SkillProvider {
   return () => {
+    const file = (path: string, content: string) => ({
+      path,
+      size: new TextEncoder().encode(content).length,
+      encoding: 'utf8' as const,
+      content,
+    })
     const offered: OfferedSkill = {
       skill: skill(contents.name ?? 'release-notes'),
       readFile: (path) =>
         Promise.resolve(
           path === 'SKILL.md'
-            ? contents.current
-            : path === 'reference/tone.md'
-              ? (contents.extra ?? null)
+            ? file(path, contents.current)
+            : path === 'reference/tone.md' && contents.extra !== undefined
+              ? file(path, contents.extra)
               : null,
         ),
     }
@@ -302,5 +316,150 @@ describe('a slash invocation in the turn loop (K7)', () => {
     // The request offers no tools at all: with no registry to attach it to, the native search
     // tool is not offered either (#335) — a chat with no skills is a chat with no tools.
     expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toBeUndefined()
+  })
+
+  it('lets the model read a user-run skill whose flag forbids model invocation (K1)', async () => {
+    // The user ran `/secret-notes`; its body is in the request, and an instruction in it that
+    // says "read reference/tone.md" is exactly what `skill_read` is for. The flag keeps the
+    // model from *picking* the skill, not from following the user's own instructions.
+    const chat = mockModel(
+      {
+        toolCalls: [
+          {
+            name: SKILL_READ_TOOL_NAME,
+            input: { name: 'secret-notes', path: 'reference/tone.md' },
+          },
+        ],
+      },
+      { text: ['done'] },
+    )
+    const session = await newSession([invocation('secret-notes')])
+    const file = (path: string, content: string) => ({
+      path,
+      size: new TextEncoder().encode(content).length,
+      encoding: 'utf8' as const,
+      content,
+    })
+
+    await runTurn(session.sessionId, {
+      store: session.store,
+      model: chat.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      skills: () =>
+        Promise.resolve([
+          {
+            skill: skill('secret-notes', {
+              frontmatter: { 'disable-model-invocation': true },
+            }),
+            readFile: (path) =>
+              Promise.resolve(
+                path === 'SKILL.md'
+                  ? file(path, '---\nname: secret-notes\n---\n\nRead reference/tone.md.')
+                  : path === 'reference/tone.md'
+                    ? file(path, 'Be terse.')
+                    : null,
+              ),
+          },
+        ]),
+    })
+
+    const events = await logOf(session.store, session.sessionId)
+    const span = events.find((event) => event.type === EVENT_TYPES.modelRequestStart)
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toEqual([
+      { name: SKILL_TOOL_NAME, source: 'builtin' },
+      { name: SKILL_READ_TOOL_NAME, source: 'builtin' },
+      NATIVE_SEARCH_TOOL,
+    ])
+    const results = events
+      .filter((event) => event.type === EVENT_TYPES.agentToolResult)
+      .map(resultText)
+    expect(results[0]).toBe('Be terse.')
+  })
+
+  it('still offers neither tool when the user has not run the user-only skill', async () => {
+    const chat = mockModel({ text: ['ok'] })
+    const session = await newSession([
+      { type: 'user.message', content: [{ type: 'text', text: 'hello' }] },
+    ])
+
+    await runTurn(session.sessionId, {
+      store: session.store,
+      model: chat.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      skills: () =>
+        Promise.resolve([
+          {
+            skill: skill('secret-notes', {
+              frontmatter: { 'disable-model-invocation': true },
+            }),
+            readFile: () => Promise.resolve(null),
+          },
+        ]),
+    })
+
+    const events = await logOf(session.store, session.sessionId)
+    const span = events.find((event) => event.type === EVENT_TYPES.modelRequestStart)
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toBeUndefined()
+  })
+
+  it('asks the provider with the mode override, so a child gets only its allowlist (B8)', async () => {
+    // A child session on a subagent type is a real session on a mode (epic #340), so the loop
+    // asks its skill provider with that mode's override exactly as it does for a chat. The
+    // provider applies the protocol's one rule — off is an allowlist — and the request is built
+    // from its answer; a skill the mode does not name is not offered.
+    const keep = skill('keep', { id: newSkillId(1_700_000_000_100) })
+    const later = skill('later', { id: newSkillId(1_700_000_000_200) })
+    const override: ModeToolOverride = {
+      skills_default: 'off',
+      skills: { [keep.id]: true },
+    }
+    const seen: (ModeToolOverride | null)[] = []
+    const provide: SkillProvider = (_owner, modeOverride) => {
+      seen.push(modeOverride)
+      return Promise.resolve(
+        skillsInForce([keep, later], modeOverride).map((entry) => ({
+          skill: entry,
+          readFile: () => Promise.resolve(null),
+        })),
+      )
+    }
+    const modeId = newModeId()
+    const session = await newSession([message('hello')], {
+      mode: modeId,
+      interactive: false,
+    })
+    const chat = mockModel({ text: ['ok'] })
+
+    await runTurn(session.sessionId, {
+      store: session.store,
+      model: chat.factory,
+      resolveCredential: () => Promise.resolve(TEST_CREDENTIAL),
+      resolveMode: () =>
+        Promise.resolve({
+          id: modeId,
+          name: 'allowlist',
+          model: TEST_MODEL_ID,
+          reasoningEffort: null,
+          systemPromptAddition: null,
+          toolOverride: override,
+        }),
+      skills: provide,
+    })
+
+    expect(seen).toEqual([override])
+    const events = await logOf(session.store, session.sessionId)
+    const span = events.find((event) => event.type === EVENT_TYPES.modelRequestStart)
+    // The one allowlisted skill is what makes both tools exist; the later skill contributes
+    // nothing, and the native search tool rides beside them as it does for any offer.
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : undefined).toEqual([
+      { name: SKILL_TOOL_NAME, source: 'builtin' },
+      { name: SKILL_READ_TOOL_NAME, source: 'builtin' },
+      NATIVE_SEARCH_TOOL,
+    ])
+    // A non-interactive child is offered no `ask_user`, and the mode default cannot bring it
+    // back: the hard rule is applied outside the override.
+    expect(span?.type === EVENT_TYPES.modelRequestStart ? span.tools : []).not.toContainEqual(
+      expect.objectContaining({ name: 'ask_user' }),
+    )
   })
 })
