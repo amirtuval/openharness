@@ -33,7 +33,11 @@ await store.close() // ends the listening connection
 - `createPostgresSessionStore({ connectionString } | { pool }, { now?, partitionCount?, onError? })`
   builds the store. With `connectionString` it opens its own pool and ends it on `close()`;
   with `pool` it borrows one and leaves it alone.
-- `migrate(db, { migrationsDir? })` applies the SQL migrations and returns the files it ran.
+- `migrate(db, { migrationsDir?, lockTimeoutMs?, maxAttempts?, retryBackoffMs? })` applies the
+  SQL migrations and returns the files **this call** applied — `[]` when the ledger says the
+  database is up to date. The first three options exist for the tests and for an unusual
+  deployment; the defaults (a 3-second lock timeout, 3 attempts, 500 ms backoff) are what a
+  server uses.
 - `PostgresSessionStore` is the same thing as a class, if you would rather construct it
   directly. It takes the same options as a single object.
 - `store.close()` drops the listening connection and, only if the store opened it, the pool.
@@ -63,6 +67,10 @@ Auth itself (epic #65, decision A1): `user`, `session`, `account`, `verification
 `deviceCode`. They are the generator's schema, not this package's design — camelCase columns
 and all — because the server mounts Better Auth against them with its own migrator disabled.
 See [Better Auth's tables](#better-auths-tables) below.
+
+The runner also creates one table of its own, `schema_migrations` (`file` primary key,
+`applied_at`). It is the ledger described under [Migrations](#migrations), not a store's
+table; no store reads or writes it.
 
 Details that matter:
 
@@ -156,20 +164,51 @@ to_seq)` are the range rules in the schema's own words (see
 ## Migrations
 
 Plain SQL files in `migrations/`, applied in file-name order by `migrate(db)`. They are
-**idempotent** — every statement is `if not exists` — so a run over an up-to-date database
-changes nothing and a run over a fresh one creates everything.
+**idempotent** — every statement is `if not exists` — so a run over a fresh database creates
+everything, and the one-time bootstrap below can safely re-run them all.
 
-The whole run is one transaction under `pg_advisory_xact_lock(hashtext('@openharness/session
-migrations'))`:
+A `schema_migrations` table (the file name is the primary key, `applied_at` the commit time) is
+the ledger of what has run. `migrate()` behaves in three steps:
 
-- a failure half way leaves the schema as it was, because Postgres DDL is transactional;
-- two server instances starting together cannot interleave their DDL — the second waits for
-  the lock, then finds everything already there.
+1. **The fast path.** It reads the ledger (no transaction, no advisory lock). If every file in
+   `migrations/` is named there, it returns `[]` without executing a statement against any
+   application table. This is the common case for a server boot — every rollout, scale-up and
+   crash restart — and it is why idempotent DDL's locks no longer matter on a normal boot:
+   `alter table … add column if not exists` takes `ACCESS EXCLUSIVE` even when the column
+   exists, and `create index if not exists` takes a `SHARE` lock, and either can stall or
+   deadlock a live `insert into events`.
+2. **The locked run.** Otherwise it takes
+   `pg_advisory_xact_lock(hashtext('@openharness/session migrations'))`, re-reads the ledger
+   (another instance may have applied files while this one waited), and runs only the files it
+   does not name. Each file's statements and its ledger row are written in **one transaction**,
+   so a failure half-way leaves the schema and the ledger as they were.
+3. **Bootstrap.** A database migrated before the ledger existed has every table and no ledger
+   (or an empty one). The first new boot runs every file once more under the lock and records
+   them. That is the one boot that still takes the application tables' locks — once per
+   database. Recording the files without running them, on a guess from the objects present, was
+   rejected: a wrong positive leaves a ledged-but-unmigrated schema that no future boot
+   repairs, while the idempotent re-run is bounded and correct.
 
-There is no ledger table: "already applied" is decided by the statements themselves. The
-consequence is that **a migration file must never be edited once it has been applied
-anywhere** — the runner will not re-run it, so an edit is silently ignored on existing
-databases while applying to new ones. Add a new file instead.
+Each statement runs with `lock_timeout` (3 seconds by default), and a transaction that cannot
+get a lock is retried with exponential backoff (3 attempts, 500 ms first delay) before the boot
+fails with an error naming the file, the attempt and the SQLSTATE. So a migration that really
+does need a strong lock cannot block a live append indefinitely, and a lock held for a moment
+does not fail a deploy.
+
+The rules for a new file, which also live in `migrate.ts`'s header:
+
+- **Expand, then contract.** Old and new pods overlap in a rolling update, so add first; stop
+  using a column before a later release drops it; never rename or rewrite while old pods run.
+- **Prefer non-blocking forms.** A nullable `add column` (or a constant default) is cheap;
+  `set not null` on a big hot table, a table rewrite and a plain `create index` are not. Use a
+  `check … not valid` and validate later.
+- **`create index concurrently` cannot run inside a transaction**, and each file runs inside
+  one. A migration that needs it must be a runner change (a file-level directive that runs it
+  outside the transaction) or a maintenance-window step; it is not built yet because no file
+  needs it.
+- **Never edit a file once it has been applied anywhere.** The ledger decides by name, so an
+  edit changes nothing on an existing database and everything on a fresh one. Add a new file
+  instead.
 
 | file                                   | what it creates                                                                                                                                                              |
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -249,8 +288,9 @@ is ever edited).
 backfill — and then adds `owner_id text not null references "user" (id) on delete cascade` to
 `agents` and `sessions`, with an `(owner_id, created_at, id)` index for each owner-scoped
 list. The delete is wrapped in a `do $$ … $$` guard on the absence of the `owner_id` column:
-this migrator re-runs every file on every `migrate()` call, and without the guard a server
-restart months from now would empty every log in the database. Once the column exists the
+the bootstrap boot re-runs every file once on a database that predates the ledger (and the
+files stay idempotent for that), and without the guard that boot would empty every log in the
+database. Once the column exists the
 guard skips the deletes forever, so data created after the migration is safe.
 
 `0013_provider_credentials.sql` (decision A5) creates the credential table: one sealed key per
@@ -274,9 +314,9 @@ Unlike `0012`, this migration **backfills** rather than deletes, because session
 the auth epic exist in real databases: every row gets `model = jsonb_build_object('id',
 agent_model_id)` and `system = agent_system` from its stored snapshot, so a pre-#93 session
 reads exactly as it did. The backfill is `update … where model is null` — guarded by the
-condition rather than by an `if not exists`, because this migrator re-runs every file on every
-`migrate()` call: a session created after the change always writes its own `model`, so a
-re-run matches nothing. The `not null` on `model` is set only after the backfill, so existing
+condition rather than by an `if not exists`, because the bootstrap boot re-runs every file
+once on a database that predates the ledger: a session created after the change always writes
+its own `model`, so a re-run matches nothing. The `not null` on `model` is set only after the backfill, so existing
 rows pass it. `postgres.test.ts` writes a legacy-shaped row, re-runs the migrations, and reads
 the session back to prove exactly that.
 
@@ -302,8 +342,8 @@ never key material, and it is what lets the vault refuse a secret under a provid
 not wrap it with a clear error instead of a decryption failure. The column is **nullable on
 purpose**: NULL is what every row written before the migration holds, when `local` was the
 only provider, and the vault reads an absent provider as `local` — there is nothing to
-backfill, and a re-run of the migrator (which happens on every `migrate()`) leaves every row
-and every sealed blob exactly as it was. One `add column if not exists`, idempotent like the
+backfill, and the one-time bootstrap re-run leaves every row and every sealed blob exactly as
+it was. One `add column if not exists`, idempotent like the
 rest; `credential-conformance` pins both the round trip of the field and that an absent one
 stays absent.
 

@@ -54,9 +54,15 @@ calls a tool — the call, the execution and the result are all events — steer
 flight, interrupting it,
 automatic retries of a failed model request, and sessions that survive the process that was
 running them — a turn a dead server left open is closed as `brain_lost` and run again by the
-next one. Several servers can share one database (`SCHEDULER=postgres`): they split the session
-space into leased partitions, and when one dies another takes its partitions over and finishes
-its turns (see `apps/server/docs/scheduling.md`). [`docs/ROADMAP.md`](./ROADMAP.md) has the
+next one, and the client shows a quiet "Waiting for the server…" while it waits instead of a
+frozen reply. Recovery is capped: a turn taken over repeatedly without completing a step ends
+with a terminal `recovery_exhausted_error`, so a poison input fails visibly rather than looping
+through processes. Several servers can share one database (`SCHEDULER=postgres`): they split the
+session space into leased partitions, and when one dies another takes its partitions over and
+finishes its turns (see `apps/server/docs/scheduling.md`). A graceful shutdown — a rolling restart — does
+the same on purpose: the scheduler aborts its turns with a handoff reason, the brain leaves them
+open, and the partition's next owner finishes the requests, so a deploy does not end a reply
+(#378). [`docs/ROADMAP.md`](./ROADMAP.md) has the
 phases and what comes next.
 
 ## How it runs

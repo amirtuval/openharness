@@ -114,6 +114,7 @@ import type {
   AuthSessionRevocationListener,
   SessionEventListener,
   SessionStore,
+  SessionTaskWait,
   TurnState,
   Unsubscribe,
   UpdateSessionRequest,
@@ -1612,6 +1613,45 @@ export class PostgresSessionStore implements SessionStore {
        order by s.created_at asc, s.id asc
     `.execute(this.#db)
     return found.rows.map((row) => row.id as SessionId)
+  }
+
+  async findSessionsWaiting(partitions: readonly number[]): Promise<SessionTaskWait[]> {
+    if (partitions.length === 0) {
+      return []
+    }
+    // The future half of the task-wait case above (#378, P1): the same newest-status test, with
+    // no deadline comparison, answering the instant the log recorded so a new owner can arm the
+    // timer the old process lost. A wait something has answered has a later status event, so
+    // reading only the newest one is what tells it from one still open.
+    const found = await sql<{ id: string; deadline: string | null }>`
+      select s.id, st.payload -> 'stop_reason' ->> 'deadline' as deadline
+        from sessions s
+        join events st on st.session_id = s.id
+       where s.partition = any(${[...partitions]}::int[])
+         and st.type = ${EVENT_TYPES.sessionStatusIdle}
+         and st.seq = (
+           select max(e3.seq)
+             from events e3
+            where e3.session_id = s.id
+              and e3.type in (
+                ${EVENT_TYPES.sessionStatusRunning},
+                ${EVENT_TYPES.sessionStatusIdle},
+                ${EVENT_TYPES.sessionStatusRescheduled}
+              )
+         )
+         and st.payload -> 'stop_reason' ->> 'type' = 'waiting_on_tasks'
+         and not exists (
+           select 1
+             from event_supersessions x
+            where x.session_id = st.session_id
+              and x.kind = ${REWIND_KIND}
+              and st.seq between x.from_seq and x.to_seq
+         )
+       order by s.created_at asc, s.id asc
+    `.execute(this.#db)
+    return found.rows.flatMap((row) =>
+      row.deadline === null ? [] : [{ sessionId: row.id as SessionId, deadline: row.deadline }],
+    )
   }
 
   // ------------------------------------------------------------ partition leases

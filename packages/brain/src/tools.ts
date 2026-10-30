@@ -24,6 +24,7 @@ import type { ToolSet } from 'ai'
 import { jsonSchema, zodSchema } from 'ai'
 
 import { agentMcpToolUse, agentToolUse, toolResultForCall } from './events'
+import { isHandoffAbort } from './handoff'
 import type { McpToolRef } from './mcp'
 import type { ModelToolCall } from './model'
 import {
@@ -408,6 +409,15 @@ export async function runToolStep(options: ToolStepOptions): Promise<void> {
       return errorResult(refusal(call.name))
     }),
   )
+  // A handoff that landed while the calls ran is not the user's interrupt (#378, P1): the
+  // calls are in the log, and the answers are the next owner's to write as `execution lost`
+  // (X3) — never this process's "Interrupted by the user.", which would be a sentence about a
+  // person who did nothing. A call that was already waiting on the user stays waiting. The
+  // calls themselves are still stored above: they are part of the step the model really made,
+  // and leaving them out would let a handoff erase a tool call nobody saw fail.
+  if (isHandoffAbort(options.signal)) {
+    return
+  }
   await append(
     stored.flatMap((event, index) => {
       const result = results[index]

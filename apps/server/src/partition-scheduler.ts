@@ -1,10 +1,11 @@
-import type {
-  ContextCompactionOption,
-  ContextStrategy,
-  ModeResolver,
-  ModelFactory,
-  ReasoningSupportFor,
-  RetryPolicy,
+import {
+  TurnHandoff,
+  type ContextCompactionOption,
+  type ContextStrategy,
+  type ModeResolver,
+  type ModelFactory,
+  type ReasoningSupportFor,
+  type RetryPolicy,
 } from '@openharness/brain'
 import { DEFAULT_PARTITION_COUNT, partitionOf, type SessionId } from '@openharness/protocol'
 import {
@@ -19,7 +20,7 @@ import {
 import type { ResolveSessionCredential } from './credentials'
 import type { TurnToolOptions } from './tools'
 import { PassQueue, type PassContext } from './pass-queue'
-import { DEFAULT_DRAIN_TIMEOUT_MS, SessionRunner } from './runner'
+import { DEFAULT_DRAIN_TIMEOUT_MS, DEFAULT_HANDOFF_SETTLE_MS, SessionRunner } from './runner'
 import type { SessionScheduler, StopSchedulerOptions, StopSessionOptions } from './scheduler'
 
 /**
@@ -63,6 +64,12 @@ import type { SessionScheduler, StopSchedulerOptions, StopSessionOptions } from 
  *   in it first, then releasing, so the peer that takes it over starts from a closed turn
  *   rather than a half-written one. Released partitions are left alone by this instance for a
  *   heartbeat, so the peer has a chance to take them instead of watching them bounce back.
+ * - Surplus is given up only after the membership has been **stable for a window** (#378, P3,
+ *   `balanceStabilityMs`, 30 s by default). A rolling update is a join followed a moment later
+ *   by a leave: the surge pod's join shrinks every share and the replaced pod's leave grows it
+ *   back, so releasing on the join moves partitions the leave would have left in place — twice
+ *   for nothing. A newcomer still takes free and expired partitions immediately; a scale-up
+ *   with nobody leaving converges when the window passes and the holders release.
  * - The membership ages out on its own: an instance that stops heartbeating is dropped from
  *   the count at the instant its leases stop being renewed — both windows are one lease TTL —
  *   so the survivors' shares grow and their scans take over what the dead instance held. An
@@ -101,6 +108,22 @@ export const DEFAULT_HEARTBEAT_MS = 10_000
 /** How often owned partitions are re-scanned for missed work; 60 seconds by default. */
 export const DEFAULT_SWEEP_MS = 60_000
 
+/**
+ * How long the live membership must be unchanged before a surplus is given up; 30 seconds by
+ * default — three heartbeats at the default 10 s.
+ *
+ * A rolling update (`maxSurge: 1`, `maxUnavailable: 0`) is a join followed a moment later by a
+ * leave: the surge pod starting shrinks every old member's share, and the pod it replaces being
+ * terminated grows it back. Releasing on the join moves partitions the leave would have left
+ * where they were, so the partition moves twice for nothing (#378, P3). The scheduler therefore
+ * waits for the membership to be stable before giving surplus up. The window has to cover the
+ * Kubernetes gap between the replacement becoming ready (which is when the join is visible) and
+ * the old pod receiving `SIGTERM`; 30 s is comfortable for the chart's probes and can be raised
+ * for a deployment whose readiness takes longer. A newcomer still takes free and expired
+ * partitions immediately, so a scale-up with nobody leaving converges once the window passes.
+ */
+export const DEFAULT_BALANCE_STABILITY_MS = 30_000
+
 /** What {@link PostgresPartitionScheduler} is built from. */
 export interface PostgresPartitionSchedulerOptions {
   /** The store the leases live in, and the log every turn reads and writes. */
@@ -126,6 +149,13 @@ export interface PostgresPartitionSchedulerOptions {
   /** How often owned partitions are re-scanned for missed work; 60 seconds by default. */
   readonly sweepMs?: number
   /**
+   * How long the membership must go unchanged before surplus is given up (#378, P3); defaults
+   * to {@link DEFAULT_BALANCE_STABILITY_MS}. `0` gives surplus up on the first heartbeat after
+   * a join, which is the pre-P3 behaviour and what the balancing tests that are not about the
+   * window ask for.
+   */
+  readonly balanceStabilityMs?: number
+  /**
    * The runner to run passes with. Omitted, one is built from `store`, `model` and
    * `resolveCredential`; a host that runs several schedulers against the same store passes its
    * own.
@@ -134,8 +164,8 @@ export interface PostgresPartitionSchedulerOptions {
   /** How many sessions may have a turn in flight at once; defaults to 32. */
   readonly maxConcurrentSessions?: number
   /**
-   * How long `stop()` — and giving up a partition — waits for the turns in flight; defaults to
-   * 5000 ms.
+   * How long `stop()` — and giving up a partition — lets the step in flight finish before the
+   * hard handoff; defaults to 40000 ms (#378, P2).
    */
   readonly drainTimeoutMs?: number
   /** How model failures are retried, passed to every turn. */
@@ -155,6 +185,8 @@ export interface PostgresPartitionSchedulerOptions {
   /** The clearing threshold and the todo nudge (#331), passed to every turn. */
   readonly clearThreshold?: number
   readonly todoNudge?: boolean
+  /** How many takeovers one turn may survive before recovery gives up (#378, P4). */
+  readonly maxRecoveryAttempts?: number
   /**
    * Called when a pass rejects, and when a background tick fails. Never throws.
    *
@@ -166,8 +198,20 @@ export interface PostgresPartitionSchedulerOptions {
   readonly onNotice?: (message: string) => void
 }
 
-/** What a pass runs under, resolved from the lease this instance holds for its partition. */
-const STOPPED_CONTEXT = { signal: AbortSignal.abort() }
+/**
+ * What a pass runs under when its partition is not this instance's any more.
+ *
+ * The signal is already aborted, so {@link SessionRunner} starts no turn at all; the reason is
+ * a handoff anyway, so if a pass is ever reached in that window it leaves the log untouched
+ * rather than writing an interrupt for work that is simply somebody else's (#378, P1).
+ */
+const STOPPED_CONTEXT = { signal: AbortSignal.abort(new TurnHandoff('lease_lost')) }
+
+/**
+ * The drain signal a pass *starting* in a partition this instance is giving up receives
+ * (#378, P2). Already aborted, so `runTurn` writes nothing: the work is the peer's now.
+ */
+const DRAINING_CONTEXT = { drain: AbortSignal.abort() }
 
 /**
  * The multi-instance {@link SessionScheduler}: partitions, leases, epochs and recovery.
@@ -187,6 +231,8 @@ export class PostgresPartitionScheduler implements SessionScheduler {
   readonly #heartbeatMs: number
 
   readonly #sweepMs: number
+
+  readonly #balanceStabilityMs: number
 
   readonly #drainTimeoutMs: number
 
@@ -212,11 +258,35 @@ export class PostgresPartitionScheduler implements SessionScheduler {
   readonly #releasedAt = new Map<number, number>()
 
   /**
+   * The partitions this instance has stopped keeping but still owns (#378, P2).
+   *
+   * They are renewed like every other lease — giving one up does not mean losing it — but no
+   * new pass starts in them, no signal is served from them, and the steal scan does not count
+   * them toward the share. They leave the set when `releasePartition` returns.
+   */
+  readonly #draining = new Set<number>()
+
+  /** The release in flight for a partition, so two paths cannot release it twice. */
+  readonly #releasing = new Map<number, Promise<void>>()
+
+  /**
    * How many instances the last membership read saw — this one included — and so what the
    * share divides the space by; see "Balancing" (issue #122). One until the first read, which
    * is the truth for an instance that has just started announcing itself.
    */
   #liveMembers = 1
+
+  /**
+   * The membership last seen, as a stable key, and when it last changed (#378, P3).
+   *
+   * A rolling update makes the membership change twice in quick succession — the surge pod's
+   * join and the replaced pod's leave — and the first change alone is not a reason to move
+   * partitions. `#releaseSurplus` holds the surplus until this pair says the membership has
+   * been unchanged for `#balanceStabilityMs`.
+   */
+  #memberKey: string | null = null
+
+  #membersStableSince = 0
 
   /** Where a scan starts, so instances do not all walk the space in the same order. */
   #cursor: number
@@ -243,6 +313,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     this.#ttlMs = options.ttlMs ?? DEFAULT_LEASE_TTL_MS
     this.#heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
     this.#sweepMs = options.sweepMs ?? DEFAULT_SWEEP_MS
+    this.#balanceStabilityMs = options.balanceStabilityMs ?? DEFAULT_BALANCE_STABILITY_MS
     this.#drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS
     this.#onError = options.onError
     this.#onNotice = options.onNotice
@@ -254,6 +325,11 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     }
     if (!Number.isFinite(this.#heartbeatMs) || this.#heartbeatMs <= 0) {
       throw new RangeError(`heartbeatMs must be a positive number, got ${this.#heartbeatMs}`)
+    }
+    if (!Number.isFinite(this.#balanceStabilityMs) || this.#balanceStabilityMs < 0) {
+      throw new RangeError(
+        `balanceStabilityMs must be a non-negative number, got ${this.#balanceStabilityMs}`,
+      )
     }
     if (this.#heartbeatMs >= this.#ttlMs) {
       // A heartbeat slower than the lease means the lease lapses between two renewals, which
@@ -284,6 +360,9 @@ export class PostgresPartitionScheduler implements SessionScheduler {
             ? {}
             : { clearThreshold: options.clearThreshold }),
           ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+          ...(options.maxRecoveryAttempts === undefined
+            ? {}
+            : { maxRecoveryAttempts: options.maxRecoveryAttempts }),
         }),
       ...(options.maxConcurrentSessions === undefined
         ? {}
@@ -447,7 +526,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     if (this.#stopped || this.#paused) {
       return
     }
-    await this.#releaseSurplus()
+    this.#releaseSurplus()
     if (this.#stopped || this.#paused) {
       return
     }
@@ -480,6 +559,16 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     // has just announced itself, so the list contains it, and the share divides by at least
     // the one member there always is.
     this.#liveMembers = Math.max(1, members.length)
+    // A join or a leave restarts the stability window (#378, P3). Comparing the whole list —
+    // `listLiveInstances` answers it in instance-id order — is what makes "same members" mean
+    // the same *set*, not merely a count: one pod replacing another with the same count is
+    // still a change. The clock is the same wall clock the release cooling uses; a timestamp is
+    // enough here, because a window is what is being measured, not an instant anybody reads.
+    const memberKey = members.join('\u0000')
+    if (memberKey !== this.#memberKey) {
+      this.#memberKey = memberKey
+      this.#membersStableSince = Date.now()
+    }
   }
 
   /** Extend every lease; one that cannot be extended is not ours any more. */
@@ -516,7 +605,10 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       if (this.#stopped || this.#paused) {
         return
       }
-      if (this.#held.size >= this.#share()) {
+      // Partitions already being given up are not part of what this instance keeps, so they
+      // do not count toward the share (#378, P2); otherwise a draining instance would never
+      // pick up the replacement partitions it is entitled to.
+      if (this.#kept() >= this.#share()) {
         break
       }
       const partition = (this.#cursor + step) % this.#partitions
@@ -557,7 +649,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       // nobody is running. A lease that is no longer ours — it expired and somebody else
       // took it — makes the release a no-op.
       unsubscribe()
-      this.#forget(partition)
+      this.#forget(partition)?.abort(new TurnHandoff('lease_lost'))
       try {
         await this.#store.releasePartition(partition, this.#instanceId, lease.epoch)
       } catch (error: unknown) {
@@ -573,6 +665,11 @@ export class PostgresPartitionScheduler implements SessionScheduler {
 
   /** Queue every session of a partition that the log says needs work. */
   async #recover(partition: number): Promise<void> {
+    // A partition on its way to a peer takes no new work here (#378, P2). Its sessions are in
+    // the log, so the peer's acquire scan finds every one of them.
+    if (this.#draining.has(partition)) {
+      return
+    }
     const sessions = await this.#store.findSessionsNeedingWork([partition])
     for (const sessionId of sessions) {
       if (!this.#held.has(partition)) {
@@ -580,28 +677,57 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       }
       this.#queue.request(sessionId)
     }
+    // The waits ahead of their deadlines (#378, P1): a session whose last turn ended
+    // `waiting_on_tasks` is not work yet, but the timer that would wake it at the deadline was
+    // the previous owner's. Arm the instant the log records, here — on acquisition and on every
+    // sweep — so a partition that just changed hands wakes its waits on time instead of at the
+    // next sweep after they were due. A session the scan just queued needs no timer: the turn
+    // it runs re-reads the wait and re-arms one from its outcome if it goes back to waiting.
+    const working = new Set(sessions)
+    const waits = await this.#store.findSessionsWaiting([partition])
+    for (const wait of waits) {
+      if (!this.#held.has(partition)) {
+        return
+      }
+      if (!working.has(wait.sessionId)) {
+        this.#queue.armWait(wait.sessionId, wait.deadline)
+      }
+    }
   }
 
   /**
    * Give up the leases this instance holds beyond its share, newest tenure first.
    *
-   * "Gracefully" is the point: the turns running in the partition are allowed to finish
-   * writing (up to the drain timeout) before the lease is released, so the instance that takes
-   * it over inherits a closed turn rather than a half-written one. A turn that is still
-   * running when the timeout passes is aborted first — a released lease fences its writes
-   * anyway, and an abort is the version that leaves the log closed.
+   * The give-up is **started**, not waited on (#378, P2). A release drains its partition's
+   * turns — soft first, then a hard handoff at the deadline — and the heartbeat must not sit
+   * through that: renewal of the leases this instance keeps would be late, and the old design
+   * therefore needed the lease TTL to outlast the drain timeout. Now a draining partition is
+   * renewed like any other, leaves the share's count immediately, and is released the moment
+   * its own passes are done. That is what lets a deployment run a 30 s TTL against a 40 s
+   * drain without the partition ever lapsing.
    */
-  async #releaseSurplus(): Promise<void> {
-    let surplus = this.#held.size - this.#share()
+  #releaseSurplus(): void {
+    let surplus = this.#kept() - this.#share()
     if (surplus <= 0) {
+      return
+    }
+    // A join is not yet a reason to move partitions (#378, P3). In a rolling update the surge
+    // pod's join shrinks every old member's share and the replaced pod's leave a moment later
+    // grows it back; releasing on the join would move those partitions twice, the first time
+    // for nothing. Wait until the membership has been unchanged for the stability window. A
+    // newcomer still takes free and expired partitions at once, so the leave's released
+    // partitions go to it without waiting for this.
+    if (!this.#membershipStable()) {
       return
     }
     // Newest first: the partitions this instance took last are the ones it needs least.
     const giving: PartitionLease[] = []
-    const stoppers: AbortController[] = []
     for (const partition of [...this.#order].reverse()) {
       if (surplus <= 0 || this.#stopped) {
         break
+      }
+      if (this.#draining.has(partition)) {
+        continue
       }
       const lease = this.#held.get(partition)
       if (lease === undefined) {
@@ -609,33 +735,93 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       }
       surplus -= 1
       giving.push(lease)
-      const stopper = this.#forget(partition)
-      if (stopper !== undefined) {
-        stoppers.push(stopper)
-      }
-      this.#releasedAt.set(partition, Date.now())
+      this.#draining.add(partition)
     }
     if (giving.length === 0) {
       return
     }
-    // Gracefully, and once for the whole batch: the turns running in the partitions being
-    // given up are allowed to finish writing (up to the drain timeout) rather than being cut
-    // off — so whoever takes the partitions over inherits closed turns.
-    await this.#queue.drain(
-      giving.flatMap((lease) => this.#sessionsOf(lease.partition)),
-      this.#drainTimeoutMs,
-    )
-    // Whatever is still running is aborted first: a released lease fences its writes anyway,
-    // and an abort is the version that leaves the log closed.
-    for (const stopper of stoppers) {
-      stopper.abort()
+    // One background release per partition: each is released as soon as its own passes are
+    // done, and the heartbeat is free to renew everything else meanwhile.
+    for (const lease of giving) {
+      void this.#startRelease(lease, 'partition_released')
     }
-    await Promise.all(
-      giving.map((lease) =>
-        this.#store.releasePartition(lease.partition, this.#instanceId, lease.epoch),
-      ),
-    )
-    this.#notice(`gave up ${giving.length} partition(s) (above this instance's share)`)
+    this.#notice(`giving up ${giving.length} partition(s) (above this instance's share)`)
+  }
+
+  /**
+   * Start (or join) the release of a partition: soft-drain its passes, hard-handoff what is
+   * left at the deadline, settle, and release the lease (#378, P2).
+   *
+   * The same helper serves shutdown and rebalancing, so the two cannot disagree about what
+   * "drained" means. It is idempotent per partition: the first caller's release is the one
+   * everyone waits on.
+   */
+  #startRelease(
+    lease: PartitionLease,
+    cause: 'shutdown' | 'partition_released',
+    deadline = Date.now() + this.#drainTimeoutMs,
+  ): Promise<void> {
+    const partition = lease.partition
+    const existing = this.#releasing.get(partition)
+    if (existing !== undefined) {
+      return existing
+    }
+    this.#draining.add(partition)
+    const job = this.#releaseAfterDrain(lease, cause, deadline)
+      .catch((error: unknown) => {
+        this.#report(error, undefined)
+      })
+      .finally(() => {
+        if (this.#releasing.get(partition) === job) {
+          this.#releasing.delete(partition)
+        }
+      })
+    this.#releasing.set(partition, job)
+    return job
+  }
+
+  async #releaseAfterDrain(
+    lease: PartitionLease,
+    cause: 'shutdown' | 'partition_released',
+    deadline: number,
+  ): Promise<void> {
+    const partition = lease.partition
+    const sessions = this.#sessionsOf(partition)
+    // Soft drain first: the steps in flight finish and store their results, and no new pass
+    // starts in the partition (#contextFor refuses one while it is draining).
+    for (const sessionId of sessions) {
+      this.#queue.runner.drain(sessionId)
+    }
+    await this.#queue.drain(sessions, Math.max(0, deadline - Date.now()))
+    // The deadline is the ceiling (#378, P1/P2): a step that did not finish is handed off —
+    // never interrupted — so the peer that takes the partition finishes it.
+    for (const sessionId of sessions) {
+      this.#queue.runner.handOff(sessionId, cause)
+    }
+    const still = sessions.filter((sessionId) => this.#queue.isActive(sessionId))
+    // An abort is cooperative: a delta already in the stream may still be awaiting its append.
+    // Let the passes settle before the release, or `releasePartition`'s own fence would refuse
+    // that append and log a `FencedError` for a partition this instance gave up on purpose.
+    await this.#queue.drain(still, DEFAULT_HANDOFF_SETTLE_MS)
+    this.#forget(partition)?.abort(new TurnHandoff(cause))
+    try {
+      await this.#store.releasePartition(partition, this.#instanceId, lease.epoch)
+    } catch (error: unknown) {
+      // A lease that cannot be released expires; the TTL is what makes that safe.
+      this.#report(error, undefined)
+    }
+    this.#releasedAt.set(partition, Date.now())
+    this.#notice(`released partition ${partition} (${cause})`)
+  }
+
+  /**
+   * How many partitions this instance still intends to keep: everything it holds except the
+   * ones being given up (#378, P2). The share and the scan are computed from this, so a
+   * draining instance can take the partitions its new member entitles it to while the old ones
+   * are still in their drain.
+   */
+  #kept(): number {
+    return this.#held.size - this.#draining.size
   }
 
   /**
@@ -648,7 +834,11 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     if (!this.#held.has(partition)) {
       return
     }
-    this.#forget(partition)?.abort()
+    // A lease that is somebody else's is a handoff, not a user's interrupt (#378, P1): the
+    // peer that took it over owns the open turn and finishes it. The write this instance might
+    // still attempt is fenced regardless, but leaving the turn open is what makes the
+    // takeover a continuation rather than an interruption.
+    this.#forget(partition)?.abort(new TurnHandoff('lease_lost'))
     this.#notice(`lost partition ${partition}: ${reason}`)
   }
 
@@ -661,6 +851,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
    */
   #forget(partition: number): AbortController | undefined {
     this.#held.delete(partition)
+    this.#draining.delete(partition)
     this.#order = this.#order.filter((held) => held !== partition)
     const unsubscribe = this.#subscriptions.get(partition)
     this.#subscriptions.delete(partition)
@@ -695,6 +886,15 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     return Math.max(1, Math.ceil(this.#partitions / this.#liveMembers))
   }
 
+  /**
+   * Whether the membership has gone unchanged long enough to trust a surplus (#378, P3).
+   *
+   * `0` disables the debounce: the first heartbeat after a join releases, exactly as P2 did.
+   */
+  #membershipStable(): boolean {
+    return Date.now() - this.#membersStableSince >= this.#balanceStabilityMs
+  }
+
   /** The fence and stop signal a pass for `sessionId` runs under — right now, not at request. */
   #contextFor(sessionId: SessionId): PassContext {
     const partition = this.partitionOf(sessionId)
@@ -707,12 +907,22 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     return {
       fence: { partition, epoch: lease.epoch },
       ...(stopper === undefined ? {} : { signal: stopper.signal }),
+      // A partition being given up takes no new work (#378, P2): a session queued before the
+      // drain began starts a pass that finds the drain already set and writes nothing. The
+      // message is in the log, so the peer's acquire scan finds it.
+      ...(this.#draining.has(partition) ? DRAINING_CONTEXT : {}),
     }
   }
 
   /** A signal from the store: wake the session's pass, or abort it — if the partition is ours. */
   #handleSignal(signal: PartitionSignal): void {
-    if (this.#stopped || !this.#held.has(signal.partition)) {
+    if (
+      this.#stopped ||
+      !this.#held.has(signal.partition) ||
+      // A draining partition starts nothing (#378, P2). The signal is a hint, not the record:
+      // the event it announced is in the log, and the next owner's acquire scan finds it.
+      this.#draining.has(signal.partition)
+    ) {
       return
     }
     if (signal.kind === 'interrupt') {
@@ -736,7 +946,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       return
     }
     for (const partition of [...this.#order]) {
-      if (this.#stopped || !this.#held.has(partition)) {
+      if (this.#stopped || !this.#held.has(partition) || this.#draining.has(partition)) {
         continue
       }
       try {
@@ -763,35 +973,55 @@ export class PostgresPartitionScheduler implements SessionScheduler {
   async #stop(options: StopSchedulerOptions): Promise<void> {
     this.#stopped = true
     this.#clearTimers()
-    // The membership row goes first: peers stop counting this instance the moment it is
-    // stopping, so the share they divide grows and the partitions released below are taken
-    // over at their next heartbeat instead of after the row ages out (issue #122). A delete
-    // that fails is reported and dropped — the row then ages out after one TTL, exactly as a
-    // crash's would — and it never keeps the shutdown from finishing.
+    // Stop starting passes and soft-drain the ones in flight (#378, P2), before anything is
+    // awaited: "no new work" must be true the instant the stop begins. From here on each
+    // partition is released **by itself** as soon as its own last pass has finished or handed
+    // off: an idle partition goes back immediately, so a peer can serve a user message to one
+    // of its sessions before this drain is over.
+    const deadline = Date.now() + (options.drainTimeoutMs ?? this.#drainTimeoutMs)
+    this.#queue.beginDrain()
+    // **Keep renewing what is still held while it drains.** The heartbeat timers are gone (no
+    // scan, no announce, no give-up), but a partition is ours until `releasePartition` and the
+    // drain may be longer than the TTL: without this a slow turn's lease would lapse mid-drain,
+    // a peer would take the partition, and the very handoff this change is meant to make
+    // invisible would become a second brain re-running the request. It is a separate, unref'd
+    // timer, so it can never delay a release (#378, P2).
+    const renew = setInterval(() => {
+      void this.#renewHeld().catch((error: unknown) => {
+        this.#report(error, undefined)
+      })
+    }, this.#heartbeatMs)
+    renew.unref?.()
+    // A heartbeat's scan may already be in flight, with an `acquirePartition` or a recovery
+    // round trip still to land. `#adopt` releases anything a stopping instance acquired, but
+    // only once it gets control — and `stop()`'s caller closes the store (or, in a test,
+    // empties the tables) as soon as it answers. Let the scan finish first, so "stopped" means
+    // no scheduler statement is still running.
+    await this.#refreshing?.catch(() => {})
+    const held = [...this.#held.values()]
     try {
-      await this.#store.removeInstance(this.#instanceId)
-    } catch (error: unknown) {
-      this.#report(error, undefined)
-    }
-    // The turns in flight are aborted and given the drain timeout to write their last events,
-    // exactly like a single-process shutdown.
-    await this.#queue.stop({
-      drainTimeoutMs: options.drainTimeoutMs ?? this.#drainTimeoutMs,
-    })
-    // Then the leases go, so whoever is waiting takes over at its next heartbeat instead of
-    // sitting out the whole TTL.
-    const released = [...this.#held.values()]
-    for (const lease of released) {
-      this.#forget(lease.partition)?.abort()
+      // The membership row goes first: peers stop counting this instance the moment it is
+      // stopping, so the share they divide grows and the partitions released below are taken
+      // over at their next heartbeat instead of after the row ages out (issue #122). A delete
+      // that fails is reported and dropped — the row then ages out after one TTL, exactly as a
+      // crash's would — and it never keeps the shutdown from finishing.
       try {
-        await this.#store.releasePartition(lease.partition, this.#instanceId, lease.epoch)
+        await this.#store.removeInstance(this.#instanceId)
       } catch (error: unknown) {
-        // A lease that cannot be released expires; the TTL is what makes that safe.
         this.#report(error, undefined)
       }
+      const releasing = held.map(
+        (lease) =>
+          // A partition already being given up has its own release in flight; await that one
+          // rather than starting a second for the same epoch.
+          this.#releasing.get(lease.partition) ?? this.#startRelease(lease, 'shutdown', deadline),
+      )
+      await Promise.allSettled(releasing)
+    } finally {
+      clearInterval(renew)
     }
-    if (released.length > 0) {
-      this.#notice(`released ${released.length} partition lease(s) on shutdown`)
+    if (held.length > 0) {
+      this.#notice(`released ${held.length} partition lease(s) on shutdown`)
     }
   }
 

@@ -147,10 +147,14 @@ describe('startServer', () => {
     expect(await readHistory(store, session.id)).toHaveLength(3)
   })
 
-  it('drains a turn in flight on shutdown', async () => {
+  it('hands a turn in flight off on shutdown, rather than ending it', async () => {
+    // A shutdown is a deploy (#378, P1): a step that outlives the drain is left **open** for
+    // the next process, not ended with a partial reply and an idle. The reply below (about
+    // 60 ms) outlives the 20 ms drain, so the soft phase cannot finish it and the hard handoff
+    // is what this test sees; `scheduler.test.ts` covers the drain that lets it finish.
     const store = new InMemorySessionStore()
     const server = await startServer({
-      config: testConfig({ drainTimeoutMs: 3000 }),
+      config: testConfig({ drainTimeoutMs: 20 }),
       store,
       model: createScriptedModel({ text: ['one ', 'two ', 'three'], delayMs: 20 }).factory,
       resolveCredential: resolveTestSessionCredential,
@@ -172,8 +176,11 @@ describe('startServer', () => {
 
     await server.shutdown()
 
-    expect((await store.getTurnState(session.id)).state).toBe('idle')
-    expect((await readHistory(store, session.id)).at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+    const history = await readHistory(store, session.id)
+    expect((await store.getTurnState(session.id)).state).not.toBe('idle')
+    expect(history.some((event) => event.type === EVENT_TYPES.sessionStatusIdle)).toBe(false)
+    expect(history.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(false)
+    expect(history.some((event) => event.type === EVENT_TYPES.modelRequestEnd)).toBe(false)
   })
 
   it('runs the partitioned scheduler when SCHEDULER=postgres, and hands its leases back', async () => {

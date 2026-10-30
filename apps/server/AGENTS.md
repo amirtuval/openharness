@@ -161,18 +161,21 @@ itself is a `session.context_summary` with reason `manual`.
 | `OPENHARNESS_TRUSTED_PROXY_HOPS`          | `0`                              | how many proxies append to `x-forwarded-for`; `0` trusts no forwarding header (#151, see below)                                                                                                                                                                                                                    |
 | `OPENHARNESS_CORS_ORIGINS`                | —                                | comma-separated origins to allow; unset means no CORS headers                                                                                                                                                                                                                                                      |
 | `OPENHARNESS_MAX_CONCURRENT_SESSIONS`     | `32`                             | how many sessions may be running at once                                                                                                                                                                                                                                                                           |
-| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `5000`                           | how long shutdown waits for a turn in flight                                                                                                                                                                                                                                                                       |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`            | `40000`                          | how long a shutdown or a partition give-up lets the step in flight finish (soft drain) before the hard `TurnHandoff` abort; must fit inside the pod's grace period and the chart's `backend.drainingTimeoutSec` (#378, P2)                                                                                         |
 | `OPENHARNESS_INSTANCE_ID`                 | hostname + pid + random suffix   | this instance's id in the lease table                                                                                                                                                                                                                                                                              |
 | `OPENHARNESS_PARTITIONS`                  | `64` (the protocol's)            | how many partitions the session space has                                                                                                                                                                                                                                                                          |
 | `OPENHARNESS_LEASE_TTL_MS`                | `30000`                          | how long a partition lease lasts before it must be renewed                                                                                                                                                                                                                                                         |
 | `OPENHARNESS_HEARTBEAT_MS`                | `10000`                          | how often leases are renewed and free partitions taken                                                                                                                                                                                                                                                             |
 | `OPENHARNESS_SWEEP_MS`                    | `60000`                          | how often owned partitions are re-scanned for missed work                                                                                                                                                                                                                                                          |
+| `OPENHARNESS_BALANCE_STABILITY_MS`        | `30000`                          | how long the live membership must be unchanged before surplus partitions are released (#378, P3); `0` releases on the next heartbeat                                                                                                                                                                               |
 | `OPENHARNESS_DELTA_RETENTION_MS`          | `3600000`                        | how long superseded chunks are kept before compaction deletes them                                                                                                                                                                                                                                                 |
 | `OPENHARNESS_COMPACT_INTERVAL_MS`         | `300000`                         | how often the compaction job runs; `0` disables it                                                                                                                                                                                                                                                                 |
 | `OPENHARNESS_COMPACTION_THRESHOLD`        | `0.7`                            | the share of the chat model's context budget at which older history is summarized (epic #277, K2; #279), and the default a user who has not chosen one follows (C3, #282); a fraction in `0..1`                                                                                                                    |
 | `OPENHARNESS_CLEAR_THRESHOLD`             | `0.5`                            | the soft share of the chat model's budget at which old tool results are cleared before anything is summarized (#331), below `OPENHARNESS_COMPACTION_THRESHOLD`; a fraction in `0..1`, and the default needs no setting                                                                                             |
 | `OPENHARNESS_TODO_NUDGE`                  | off                              | `1` nudges the model to write a todo list before its first tool call (#331); off by default, because the benefit is small and a line on every session's first request is not free                                                                                                                                  |
 | `OPENHARNESS_MAX_TOOL_STEPS`              | `50` (the brain's)               | the most model requests one turn may make (epic #303, X2); past it the turn ends with a `tool_steps_exhausted_error` notice and goes idle, and a value below `1` fails the boot                                                                                                                                    |
+| `OPENHARNESS_MAX_RECOVERY_ATTEMPTS`       | `3` (the brain's)                | how many times one turn may be taken over (a crash or a deploy) without completing a step before it ends with a terminal `recovery_exhausted_error` (#378, P4); a value below `1` fails the boot                                                                                                                   |
+| `OPENHARNESS_TEST_TOOL_EXECUTION_LOG`     | —                                | **test hook only**, under `OPENHARNESS_TEST_MODEL=mock`: setting it **registers** the slow test tool `echo_slow`, and names a file the tool appends one line to per execution, so e2e can prove a recovered tool call is not run twice (#378, P4); unset, no mock server offers the tool                           |
 | `OPENHARNESS_MAX_AGENT_DEPTH`             | `3` (the protocol's)             | how deep a tree of helpers may get (epic #340, S6; #344): a session at this depth is not offered the tools that start another one, so a top-level chat (depth 0) may nest two levels below it; a value below `1`, or above `MAX_DESCENDANT_DEPTH` (64, the ceiling every tree walk stops at, #361), fails the boot |
 | `OPENHARNESS_MAX_LIVE_TASKS`              | `10` (the protocol's)            | how many of one root chat's live descendants there may be (S6; #344) before an `agent` call is answered with an `is_error` the model acts on; a value below `1` fails the boot                                                                                                                                     |
 | `OPENHARNESS_LOG_FORMAT`                  | `text`                           | `text` (readable) or `json` (Cloud Logging): what stdout carries (#158)                                                                                                                                                                                                                                            |
@@ -228,8 +231,11 @@ boot also needs **a way to sign in**: with no `*_CLIENT_ID`/`*_SECRET` pair conf
 `OPENHARNESS_DEV_LOGIN` off, `readServerConfig` refuses to start — every route is behind a
 session nobody could create — and says which variables to set.
 
-**The store.** With `DATABASE_URL`, `main.ts` builds a pool, runs `migrate()` (idempotent, so
-two instances starting together are safe) and hands the pool to `createPostgresSessionStore`.
+**The store.** With `DATABASE_URL`, `main.ts` builds a pool, runs `migrate()` and hands the
+pool to `createPostgresSessionStore`. The migration ledger makes the boot cheap and safe under
+a rollout: a pod whose database is up to date runs no migration statement and takes no lock on
+an application table, and the advisory lock keeps two instances from interleaving the rare run
+that has work to do (#378, PR 3/6 — see `packages/session/AGENTS.md`).
 Without it, the server runs on `InMemorySessionStore` and says so loudly at startup: that mode
 is for local development and quick trials, and nothing survives a restart.
 
@@ -709,7 +715,11 @@ every deployment gets and the checks a `user.tool_confirmation` passes before it
   (§305: the newest successful call is the list a client draws, and the terminal's is pinned
   above the prompt, #308). The mock answers a prompt with what a tool said only while the
   **last** message of the prompt is that tool's result, so a later message in the same chat is a
-  message like any other.
+  message like any other. The one **conditionally** registered test tool is `echo_slow`
+  (#378, P4): the crash suite's `__delayed_tool__` fixture is offered only when
+  `OPENHARNESS_TEST_TOOL_EXECUTION_LOG` is set, because every other e2e suite asserts a mock
+  server's exact offer and the tool must not appear there. That variable both registers it and
+  names the file it appends one line to per execution.
 - **Which models may call tools comes from the same registry** as the context budget and the
   reasoning gate, through one more resolver: `catalog/tool-support.ts` answers models.dev's
   `tool_call` for the id a request runs, `false` meaning the request is offered nothing. The
@@ -765,8 +775,9 @@ daily allowance — is gone. What is left is one settings row and a per-model av
   honoured: the tool is left out of the request entirely, which is the only meaning left when
   there is nothing of ours to refuse.
 
-The tools are wired in `main.ts` — `createTurnRegistry({ kind })` builds the one registry (the
-built-ins, and the test `echo` tool under the mock model), and `createTurnTools({ config, kind,
+The tools are wired in `main.ts` — `createTurnRegistry({ kind, executionLog })` builds the one
+registry (the built-ins, the test `echo` tool under the mock model, and `echo_slow` only when
+`executionLog` is set), and `createTurnTools({ config, kind,
 registry, tools: turnRegistry, store, mcp })` turns it into the turn's options (`registry` is
 the model registry that answers which models can call tools; `createTurnTools` builds the
 registry itself when no `tools` override is passed) — and reach a turn through the scheduler and
@@ -859,7 +870,12 @@ append path, and the **wake**, so a chat reacts on its own instead of waiting fo
   handed out (`TurnOutcome.waiting`), and that timer asks the queue for one more pass. A wait
   that outlives the process is recovered by `findSessionsNeedingWork`, which reports a
   `waiting_on_tasks` session whose deadline has passed (#343) — the two paths are the same turn
-  as far as the brain is concerned.
+  as far as the brain is concerned. Since #378, a wait whose partition **moves** before its
+  deadline is armed by the new owner too: `SessionStore.findSessionsWaiting` reports the waits
+  still ahead of their time (the future half of that scan), and both `LocalScheduler.start()`
+  and the partition scheduler's acquire/sweep arm each through `PassQueue.armWait`. Without it
+  the timer was the old process's and the wait would resume only at the sweep after it was due
+  — up to a minute late.
 - **A deployment that wired no subagent runtime offers the five to nobody** (#365). The loop
   takes them out of the offer whatever its registry carries: four of them could only answer
   `HARNESS_ANSWERED`, and an offered `agent_wait` would park a turn for its whole deadline with no
@@ -1433,8 +1449,10 @@ the pass already running for it; `interrupt`
 aborts that pass's turn, and _starts a turn if none was running_, because a queued
 `user.interrupt` still has to be claimed (the turn's idle event carries the claim, P4). At
 most `OPENHARNESS_MAX_CONCURRENT_SESSIONS` sessions run at once; the rest wait their turn.
-`stop()` accepts nothing more, aborts the turns in flight and gives them the drain timeout to
-write their last events.
+`stop()` accepts nothing more and gives the step in flight the drain timeout to **finish**
+(#378, P2 — a request that completes stores its reply, so the next process has nothing to
+re-issue); whatever is still running at the deadline is **handed off** with a `TurnHandoff`
+(#378, P1 — it leaves the turn open for the next process).
 
 #### Named credentials, Azure OpenAI, custom endpoints, Amazon Bedrock and Google Vertex (epic #245, A3a/A3b/A3c/A3d)
 
@@ -1622,8 +1640,9 @@ new PostgresPartitionScheduler({
   ttlMs = 30000, // how long a lease lasts before it must be renewed
   heartbeatMs = 10000, // renew held leases, take free ones, give up surplus
   sweepMs = 60000, // re-scan owned partitions for work no signal mentioned
+  balanceStabilityMs = 30000, // wait for a stable membership before giving surplus up (#378, P3)
   maxConcurrentSessions = 32,
-  drainTimeoutMs = 5000,
+  drainTimeoutMs = 40000, // soft drain first; the hard handoff follows at this deadline
   retry,
   contextStrategy,
   compaction, // one configuration, or the per-owner resolver (#279; C3, #282)
@@ -1648,27 +1667,47 @@ only while it holds that partition's lease, writing every turn under `fence: {pa
   row in `scheduler_instances` (`heartbeatInstance`) and reads the members seen within one
   lease TTL back (`listLiveInstances`), so **share = `ceil(partitions / live members)`** and a
   scan takes free or expired partitions — never a live one — up to that share. An instance
-  holding more than its share gives the surplus up, finishing the turns in it first and then
-  releasing. There is **no periodic idle release**: an instance whose membership is only
+  holding more than its share **starts** a give-up per partition (#378, P2): the step in
+  flight finishes, whatever remains at the drain deadline is **handed off** (a
+  `TurnHandoff('partition_released')` abort), and the lease is released **as soon as that
+  partition's passes are done** — an idle partition goes back at once. The give-up runs in the
+  background, never inside the heartbeat: a draining partition is renewed like every other
+  lease, so the TTL does not have to outlast the drain. A give-up waits until the membership
+  has been **unchanged for `OPENHARNESS_BALANCE_STABILITY_MS`** (#378, P3): a rolling update is
+  a join followed a moment later by a leave, so releasing on the join would move partitions
+  the leave is about to make unnecessary — each move a drain, and for a long step a re-run. A
+  newcomer still takes free and expired partitions at once, so a leaving pod's released
+  partitions reach it without waiting, an HPA scale-up converges when the window passes, and
+  crash takeover (an expired lease taken on the next scan) is unchanged. There is **no
+  periodic idle release**: an instance whose membership is only
   itself has the whole space as its share and keeps it; a newcomer is visible the moment it
-  heartbeats, so the holder's next heartbeat releases the surplus for it — a release, not a
-  steal, and never more than the share.
+  heartbeats, so the holder's next heartbeat starts the surplus release for it — a release,
+  not a steal, and never more than the share. A draining partition starts no new pass and
+  serves no signal (the next owner's acquire scan reads the log); it is not counted in the
+  share's kept set, so the instance can take what its new membership entitles it to.
 - **The membership ages out with the leases** — both windows are one lease TTL: a crashed
   instance stops heartbeating, so after a TTL it is out of every peer's count at the instant
   its leases stop being renewed, and the survivors' shares grow back to the whole space.
-- **Losing a lease** — a refused renewal, or a `FencedError` out of a turn — aborts that
-  partition's turns, ends its subscription and stops it running work for it. It never crashes
-  the process. A refusal means the partition is **somebody else's** now: a lease that merely
+- **Losing a lease** — a refused renewal, or a `FencedError` out of a turn — **hands that
+  partition's turns off** (a `TurnHandoff('lease_lost')` abort leaves them open for whoever
+  owns it now), ends its subscription and stops it running work for it. It never crashes the
+  process. A refusal means the partition is **somebody else's** now: a lease that merely
   lapsed, with nobody taking it over, is renewable and kept (a lapse is stealable, not lost —
   see `@openharness/session`), so a refresh cycle that runs past the TTL because the process
   stalled or a round trip was slow costs an instance nothing. Without that rule an instance
-  would drop every partition it held on one late cycle — aborting and re-running the turns in
-  them — for no reason, since no peer ever wanted them.
-- **`stop()`** drains the turns in flight, deletes the membership row (so peers stop counting
-  the instance at once) and then releases every lease, so the next instance takes over at its
-  next heartbeat instead of waiting out the TTL. A lease whose acquire was in flight when the
-  stop began is released too, as soon as the scan sees the instance stopped — a stop never
-  leaves a live lease (and so a stranded, unserved partition) behind.
+  would drop every partition it held on one late cycle — handing the turns in them off — for
+  no reason, since no peer ever wanted them.
+- **`stop()`** stops starting passes, deletes the membership row (so peers stop counting the
+  instance at once) and then releases each partition **on its own** (#378, P2): an idle one at
+  once, a busy one the moment its last pass has finished or **handed off**
+  (`TurnHandoff('shutdown')`) — so a user message to an idle session in a released partition
+  is served by a peer while the rest of the drain runs. A step that finishes inside
+  `OPENHARNESS_DRAIN_TIMEOUT_MS` is kept, not re-issued; only what the deadline catches is
+  aborted, and the release waits for those passes to settle so a deliberate handoff is not also
+  a fenced write (#378, P1). The next instance takes over at its next heartbeat instead of
+  waiting out the TTL. A lease whose acquire was in flight when the stop began is released
+  too, as soon as the scan sees the instance stopped — a stop never leaves a live lease (and
+  so a stranded, unserved partition) behind.
 - **`pause()`/`resume()`** stop and restart the timers without giving anything up: what a
   wedged process looks like from the outside, and what the zombie tests use.
 - **`heldPartitions()`** is what an instance owns right now.
@@ -1680,11 +1719,17 @@ signals, balancing, crashes and shutdown.
 class SessionRunner {
   run(
     sessionId: SessionId,
-    options?: { fence?: PartitionFence; signal?: AbortSignal },
+    options?: { fence?: PartitionFence; signal?: AbortSignal; drain?: AbortSignal },
   ): Promise<TurnOutcome>
   isRunning(sessionId: SessionId): boolean
   wake(sessionId: SessionId): boolean
   abort(sessionId: SessionId): boolean
+  /** Soft stop: finish the step in flight, then start no more turns (#378, P2). */
+  drain(sessionId: SessionId): boolean
+  drainAll(): SessionId[]
+  /** Hard stop: abort the turn with a `TurnHandoff` reason, leaving it open (#378, P1). */
+  handOff(sessionId: SessionId, cause?: TurnHandoffCause): boolean
+  waitFor(sessionIds: readonly SessionId[], timeoutMs: number): Promise<void>
   runningSessions(): SessionId[]
   stop(options?: { drainTimeoutMs?: number }): Promise<void>
 }
@@ -1699,6 +1744,13 @@ decides and a signal for an event appended in that window would otherwise be los
 `run()` while a pass is in flight does not start a second one: it wakes the pass and answers
 with its outcome.
 
+`drain()` is the soft half and `handOff()` the hard one (#378, P2). A drain aborts a **second**
+signal, not the turn's — `runTurn` receives it as `drain` and finishes the request or tool step
+in flight, then writes nothing at the next boundary and answers `handed_off`. `handOff()` is
+what the deadline reaches for: it aborts the turn's own signal with a `TurnHandoff` reason, the
+write-nothing path of #378 P1. `stop()` runs both, soft then hard, which is how a single-process
+shutdown gets P2's behaviour.
+
 A pending task notification is work — the parent reacts on its own — **except** while the
 session's last turn ended `requires_action` (#363): a notification answers no question, so another
 turn would find the same `ask_user`/`ask` call waiting, pause again with the news still pending,
@@ -1712,10 +1764,13 @@ partition leases, listens with `onPartitionSignal`, and calls the same
 scheduler above decides _which_ sessions are owned; the runner decides _how_ they are run.
 
 `run`'s optional `signal` is the other half of that: "this process should not be running this
-session any more" — a shutdown, or a lease given up. A pass whose signal is already aborted
-writes nothing and answers `noop`; one aborted mid-turn lets the turn end the way an interrupt
-does and then stops instead of looking for more work. Nothing is lost either way: the work is in
-the log, and the next owner finds it with `findSessionsNeedingWork`.
+session any more" — a shutdown, or a lease given up. The schedulers abort it with a
+`TurnHandoff` reason (#378, P1), so an abort mid-turn **hands the turn off**: the brain writes
+nothing more and leaves it open, the pass stops instead of looking for more work, and the
+partition's next owner finishes the turn with the inherited-turn machinery a crash uses. (The
+runner's `stopSession` and `abort` carry no such reason — a delete, a rewind and a user's
+interrupt are still interruptions.) Nothing is lost either way: the work is in the log, and the
+next owner finds it with `findSessionsNeedingWork`.
 
 **A session that vanishes is not a failure** (U5). A hard delete removes the session while a
 pass may still be running for it, so the runner treats `SessionNotFoundError` as an answer
@@ -1736,6 +1791,9 @@ the only thing that constructs it, and it only does so when the variable says `m
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | anything else                           | echoed back in 4 chunks, 25 ms apart                                                                                                                                                                                                                                                  |
 | `__slow__`                              | 40 chunks, 250 ms apart — about 10 seconds, for interrupt and restart tests                                                                                                                                                                                                           |
+| `__slow_tool__ <text>`                  | the same slow reply, then a call to the test `echo` tool — one turn long enough to span a rolling restart and with a tool step in it (#378)                                                                                                                                           |
+| `__delayed_tool__ <delay_ms> <text>`    | calls `echo_slow`, which appends a line to `OPENHARNESS_TEST_TOOL_EXECUTION_LOG` (when set) and then waits the delay: the call a crash test kills its owner against (#378, P4)                                                                                                        |
+| `__crash_owner__`                       | streams one chunk and then `SIGKILL`s the process: the deterministic poison input a recovery-cap test drives (#378, P4)                                                                                                                                                               |
 | `__hold__`                              | one chunk, then nothing: the request stays open until it is aborted                                                                                                                                                                                                                   |
 | `__fail_retryable__`                    | HTTP 503 (`model_overloaded_error`) on the **first** attempt, then the echo                                                                                                                                                                                                           |
 | `__fail_terminal__`                     | HTTP 400 (`model_request_failed_error`) on every attempt                                                                                                                                                                                                                              |
@@ -1935,13 +1993,19 @@ cannot trace is still a server. `shutdown` flushes the tracer last of all, after
 
 ## Shutdown
 
-`SIGTERM` / `SIGINT` shut down in a fixed order: stop accepting requests, drain the scheduler
-(abort the turns in flight, give them `OPENHARNESS_DRAIN_TIMEOUT_MS` to write their last
-events), drop the connections still open — including SSE streams, which would otherwise never
-end — and close the store. A second signal is ignored rather than allowed to interrupt the
-drain. The drain starts the instant `shutdown()` is called — before the listener closes —
-and `GET /ready` answers 503 from that moment, so a load balancer stops sending traffic
-before the instance stops serving it (#151).
+`SIGTERM` / `SIGINT` shut down in a fixed order: stop accepting requests, drain the scheduler,
+drop the connections still open — including SSE streams, which would otherwise never end — and
+close the store. The drain is **soft, then hard** (#378, P2): the scheduler stops starting
+passes, deletes its membership row, and releases each partition as its own passes finish; a
+turn in flight finishes its model request or tool step and stores the result, and only a step
+that outlives `OPENHARNESS_DRAIN_TIMEOUT_MS` is **handed off** — aborted with a `TurnHandoff`
+reason, so it is left open for the next owner instead of ending as interrupted (#378, P1). An
+idle partition is released at once, so a peer can take over a user message while the rest of
+the drain runs. The default drain is 40 s: inside the pod's 60 s grace period and under the
+chart's 45 s `backend.drainingTimeoutSec`. A second signal is ignored rather than allowed to
+interrupt the drain. The drain starts the instant `shutdown()` is called — before the listener
+closes — and `GET /ready` answers 503 from that moment, so a load balancer stops sending
+traffic before the instance stops serving it (#151).
 
 ## Public API
 
@@ -1979,7 +2043,7 @@ before the instance stops serving it (#151).
 | `contextTokenBudget`, `createTokenBudgetResolver`, `OUTPUT_RESERVE_RATIO`                                                                                                                                                                                                                                                                                                           | the per-model context budget: `contextWindow − min(maxOutput, 25%)`, per request (#246)                                                                                                                                                                                                                                                                                                                    |
 | `createContextCompactionResolver`, `ContextCompactionDeps`                                                                                                                                                                                                                                                                                                                          | the per-owner compaction resolver (epic #277 C3; #282): the session owner's stored threshold, summary model and pass limit, resolved per request over `OPENHARNESS_COMPACTION_THRESHOLD` and the registry's budgets                                                                                                                                                                                        |
 | `createReasoningSupportResolver`                                                                                                                                                                                                                                                                                                                                                    | the per-model reasoning gate: the `low \| medium \| high` a model takes, per request (#252)                                                                                                                                                                                                                                                                                                                |
-| `createTurnRegistry`, `createTurnTools`, `TurnRegistryOptions`, `TurnToolsOptions`, `TurnToolOptions`                                                                                                                                                                                                                                                                               | the registry a process runs with — `ask_user` and the built-ins of #305 for every process, and the test `echo` tool under `OPENHARNESS_TEST_MODEL=mock` (the provider-native `web_search` is no tool of ours, so nothing is registered for it, #335) — and the tools a turn is handed: that registry, the settings resolver (#307), the support gate and the step budget                                   |
+| `createTurnRegistry`, `createTurnTools`, `TurnRegistryOptions`, `TurnToolsOptions`, `TurnToolOptions`                                                                                                                                                                                                                                                                               | the registry a process runs with — `ask_user` and the built-ins of #305 for every process, the test `echo` tool under `OPENHARNESS_TEST_MODEL=mock`, plus `echo_slow` only when `OPENHARNESS_TEST_TOOL_EXECUTION_LOG` opts the crash suite in (`web_search` is provider-native, #335) — and the tools a turn is handed: that registry, the settings resolver (#307), the support gate and the step budget  |
 | `createTaskNotifier`, `TaskNotifier`, `TaskNotifierDeps`, `StartTaskInput`, `NotifyTaskInput`, `taskDescription`                                                                                                                                                                                                                                                                    | the inbox (epic #340, S4; #343): `startTask` (the task, the call that started it — `toolUseId`, written as `tool_use_id`, #345 — and its `running` status in the parent's log), `setStatus`, and `notify` — a task's news written through the store's idempotent append and the parent woken (`work`)                                                                                                      |
 | `testTaskTool`, `testTaskWaitTool`, `withTestBackgroundTasks`, `TestBackgroundTasksOptions`, `TestTaskInputSchema`, `TestTaskInput`, `TEST_TASK_TOOL_NAME`, `TEST_TASK_TOOL_DESCRIPTION`, `TEST_TASK_DELAY_MS`, `TEST_TASK_RESULT`                                                                                                                                                  | the test hooks (#343), wired only under `OPENHARNESS_TEST_MODEL=mock`: a tool that returns a handle at once, the `agent_wait` a test model pauses on, and the store proxy that starts a task on a call to it and delivers its notification after the delay the call asked for                                                                                                                              |
 | `askUserTool`, `assertConfirmations`, `rememberAlwaysApprovals`, `withAlwaysApprovals`, `isConfirmation`, `PausingDeps`, `RememberDeps`, `AlwaysApproval`                                                                                                                                                                                                                           | the pause's server half (epic #303, X6; #309; the remote pair: #312): the `ask_user` tool every deployment registers, the checks a `user.tool_confirmation` passes (a call of this session is waiting — built-in or remote — the answers fit its questions, the extensions make sense for it), and the stored policy an `always` approval writes (a built-in's `enabled`+`policy`, a remote tool's policy) |

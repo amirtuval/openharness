@@ -962,6 +962,27 @@ export interface SessionStore {
    */
   findSessionsNeedingWork(partitions: readonly number[]): Promise<SessionId[]>
 
+  /**
+   * The sessions in `partitions` whose last turn ended `waiting_on_tasks` and whose deadline
+   * is **still ahead** — the future half of the task-wait case above (#378, P1).
+   *
+   * `findSessionsNeedingWork` answers a wait only once its deadline has passed, because a wait
+   * ahead of its time needs no turn now. But the **timer** that would wake it at the deadline
+   * lived in the process that ran the turn, and a partition that changes hands loses it: the
+   * new owner's scan would otherwise wait for the sweep (`OPENHARNESS_SWEEP_MS`) to notice the
+   * deadline had gone by, up to a minute late. This is what a scheduler asks when it acquires a
+   * partition, so it can arm the same deadline the log records (the `deadline` of the newest
+   * `session.status_idle` with `stop_reason: { type: 'waiting_on_tasks' }`) and come back on
+   * time.
+   *
+   * A wait a notification or a message has since resolved is not one of these: resolving it
+   * ends the turn, so the log's newest status event is a later one and only that event is read.
+   * A wait a `session.rewind` covered is not one either.
+   *
+   * The result is ordered by `(created_at, id)` ascending, like the scan beside it.
+   */
+  findSessionsWaiting(partitions: readonly number[]): Promise<SessionTaskWait[]>
+
   // ------------------------------------------------- auth-session revocation
 
   /**
@@ -1435,6 +1456,21 @@ export interface TurnState {
    * there is none. It is not `null` exactly when `state` is `running`.
    */
   readonly openSpan: ModelRequestStartEvent | null
+}
+
+/**
+ * A session sitting on a task wait, as {@link SessionStore.findSessionsWaiting} answers it
+ * (#378, P1).
+ *
+ * The deadline is the one the `session.status_idle` that ended the turn recorded — the same
+ * instant the brain would have carried out in `TurnOutcome.waiting` — so a scheduler that has
+ * just taken the partition over can arm the timer the old owner's process lost.
+ */
+export interface SessionTaskWait {
+  /** The session whose last turn ended `waiting_on_tasks`. */
+  readonly sessionId: SessionId
+  /** When that wait expires, as the log recorded it. */
+  readonly deadline: Timestamp
 }
 
 /** Query of {@link SessionStore.listModelRequests} (epic #245, A2; issue #247). */

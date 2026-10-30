@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   EVENT_TYPES,
+  TASK_WAIT_TOOL_NAME,
   newEventId,
   type AgentMessageEvent,
   type ModelRequestEndEvent,
@@ -8,7 +9,7 @@ import {
   type StoredEvent,
   partitionOf,
 } from '@openharness/protocol'
-import { FencedError, InMemorySessionStore } from '@openharness/session'
+import { FencedError, InMemorySessionStore, timestampAt } from '@openharness/session'
 
 import { SessionRunner } from './runner'
 import { TEST_OWNER_ID } from './test-support'
@@ -104,6 +105,101 @@ describe('running a session', () => {
     await waitForIdle(test.store, sessionId)
     expect(test.model.requests).toBe(0)
     expect(await readHistory(test.store, sessionId)).toEqual([])
+  })
+})
+
+/** The `error.type` of every span end in a log, `null` where there is none. */
+function spanErrors(events: readonly StoredEvent[]): (string | null)[] {
+  return events.flatMap((event) =>
+    event.type === EVENT_TYPES.modelRequestEnd ? [event.error?.type ?? null] : [],
+  )
+}
+
+describe('a LocalScheduler that stops mid-turn', () => {
+  it('hands the turn off, and the next process finishes it with no interrupt', async () => {
+    // A restart of a single server looks like a new process against the same store. The turn
+    // must be left open by the old process (#378, P1) so recovery — `findSessionsNeedingWork`
+    // — finishes the request instead of storing a partial reply and an idle.
+    const slow = Array.from({ length: 30 }, (_, index) => `part ${index + 1} `)
+    const { context: test, sessionId } = await fixture({
+      // The reply (about 1.5 s) outlives the drain (200 ms), so the stop reaches the hard
+      // handoff this test is about. A drain that lets the step finish is #378 P2's other
+      // half — `scheduler.test.ts`'s "stopping softly" block covers that.
+      drainTimeoutMs: 200,
+      replies: [{ text: slow, delayMs: 50 }],
+    })
+    await test.scheduler.start()
+    await send(test, sessionId, 'a long one')
+    await test.model.waitForRequests(1)
+
+    await test.scheduler.stop()
+
+    // Nothing ended the turn: no span end, no message, no idle — and the turn is still open.
+    const stopped = await readHistory(test.store, sessionId)
+    expect(stopped.some((event) => event.type === EVENT_TYPES.modelRequestEnd)).toBe(false)
+    expect(stopped.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(false)
+    expect(stopped.some((event) => event.type === EVENT_TYPES.sessionStatusIdle)).toBe(false)
+    expect((await test.store.getTurnState(sessionId)).state).not.toBe('idle')
+
+    // The next process's scheduler recovers the open turn and runs the request again.
+    const restartedModel = createScriptedModel({ text: ['finished after the restart'] })
+    const restarted = new LocalScheduler({
+      store: test.store,
+      model: restartedModel.factory,
+      resolveCredential: resolveTestSessionCredential,
+    })
+    try {
+      await restarted.start()
+      await waitForIdle(test.store, sessionId)
+    } finally {
+      await restarted.stop()
+    }
+
+    const history = await readHistory(test.store, sessionId)
+    expect(spanErrors(history)).toEqual(['brain_lost', null])
+    expect(repliesOf(history)).toEqual(['finished after the restart'])
+    expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+  })
+
+  it('arms the deadline of a task wait it recovers at start', async () => {
+    // A wait holds no timer in the process that ran it once that process is gone (#378, P1).
+    // Recovery reads the instant the log recorded and arms it, so the wait resumes at its
+    // deadline rather than at the next sweep — which this test turns off by never starting
+    // one (a LocalScheduler has no sweep at all).
+    const { context: test, sessionId } = await fixture()
+    const deadlineMs = Date.now() + 300
+    await test.store.appendEvents(sessionId, [{ type: EVENT_TYPES.sessionStatusRunning }])
+    await test.store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.agentToolUse,
+        name: TASK_WAIT_TOOL_NAME,
+        input: { timeout_s: 1 },
+        evaluated_permission: 'ask',
+      },
+    ])
+    await test.store.appendEvents(sessionId, [
+      {
+        type: EVENT_TYPES.sessionStatusIdle,
+        stop_reason: { type: 'waiting_on_tasks', task_ids: [], deadline: timestampAt(deadlineMs) },
+      },
+    ])
+
+    await test.scheduler.start()
+
+    await waitFor(
+      async () =>
+        (await readHistory(test.store, sessionId)).some(
+          (event) => event.type === EVENT_TYPES.agentToolResult,
+        ),
+      { timeoutMs: 5_000, message: 'the recovered task wait never reached its deadline' },
+    )
+    await waitForIdle(test.store, sessionId)
+    const history = await readHistory(test.store, sessionId)
+    const result = history.find((event) => event.type === EVENT_TYPES.agentToolResult)
+    expect(result !== undefined ? JSON.stringify(result.content) : '').toContain('timed out')
+    expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
+    // It woke around the deadline it recorded, not minutes later.
+    expect(Date.now() - deadlineMs).toBeLessThan(4_000)
   })
 })
 
@@ -468,8 +564,14 @@ describe('concurrency', () => {
 })
 
 describe('stopping', () => {
-  it('aborts the turns in flight and drains them', async () => {
-    const test = createTestApp({ drainTimeoutMs: 2000 })
+  it('hands the turns in flight off and drains them', async () => {
+    // `stop()` is a shutdown (#378, P1): the turn is **not** ended — it is left open for the
+    // next process — so what the drain waits for is the pass reaching its safe point, not an
+    // idle event. The old behaviour (a partial reply, an `interrupted` span, an idle) is what
+    // turned every deploy into a cut-off reply.
+    // The reply (about 160 ms) outlives the drain (40 ms), so the shutdown reaches the hard
+    // handoff: the step that could not finish inside the deadline is left open.
+    const test = createTestApp({ drainTimeoutMs: 40 })
     context = test
     test.model.push({ text: ['one ', 'two ', 'three', ' four'], delayMs: 40 })
     const agent = await test.store.createAgent(
@@ -484,8 +586,12 @@ describe('stopping', () => {
     await test.scheduler.stop()
 
     const history = await readHistory(test.store, session.id)
-    expect(history.at(-1)?.type).toBe(EVENT_TYPES.sessionStatusIdle)
-    expect((await test.store.getTurnState(session.id)).state).toBe('idle')
+    expect(history.some((event) => event.type === EVENT_TYPES.sessionStatusIdle)).toBe(false)
+    expect(history.some((event) => event.type === EVENT_TYPES.agentMessage)).toBe(false)
+    expect(history.some((event) => event.type === EVENT_TYPES.modelRequestEnd)).toBe(false)
+    // The turn is still open, and nothing is left running in this process.
+    expect((await test.store.getTurnState(session.id)).state).not.toBe('idle')
+    expect((test.scheduler as LocalScheduler).activeSessions()).toEqual([])
   })
 
   it('refuses new work once it is stopped', async () => {
