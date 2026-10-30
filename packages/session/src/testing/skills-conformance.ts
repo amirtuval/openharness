@@ -277,11 +277,42 @@ export function runSkillStoreConformance(
         expect(await store.getFile(skill.id, { ownerId: OWNER_A }, 'reference/tone.md')).toEqual({
           path: 'reference/tone.md',
           size: skillFileSize('Be terse.\n'),
+          encoding: 'utf8',
           content: 'Be terse.\n',
         })
         expect(
           await store.getFile(skill.id, { ownerId: OWNER_A }, SKILL_MD_FILENAME),
-        ).toMatchObject({ content: DEFAULT_FILES[0]?.content })
+        ).toMatchObject({ encoding: 'utf8', content: DEFAULT_FILES[0]?.content })
+      })
+
+      it('hands a binary file back losslessly, with its original byte size', async () => {
+        const { store } = await setup()
+        // A tiny PNG: its bytes are not UTF-8 and hold a NUL, so a store that forced them
+        // through `text` would either corrupt them or — on Postgres — refuse the write.
+        const bytes = Uint8Array.from([
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+          0x52,
+        ])
+        const content = Buffer.from(bytes).toString('base64')
+        const skill = await store.create(
+          draft({
+            files: files([
+              { path: SKILL_MD_FILENAME, content: SKILL_MD },
+              { path: 'assets/icon.png', content, encoding: 'base64' },
+            ]),
+          }),
+        )
+        // The listing counts the bytes the file really is, not the base64 spelling.
+        expect(skill.files).toEqual([
+          { path: SKILL_MD_FILENAME, size: FILE_SIZE },
+          { path: 'assets/icon.png', size: bytes.length },
+        ])
+        expect(await store.getFile(skill.id, { ownerId: OWNER_A }, 'assets/icon.png')).toEqual({
+          path: 'assets/icon.png',
+          size: bytes.length,
+          encoding: 'base64',
+          content,
+        })
       })
 
       it('answers null for a path the snapshot does not hold, and for a skill nobody has', async () => {
@@ -370,6 +401,7 @@ export function runSkillStoreConformance(
         expect(await store.getFile(created.id, { ownerId: OWNER_A }, SKILL_MD_FILENAME)).toEqual({
           path: SKILL_MD_FILENAME,
           size: FILE_SIZE,
+          encoding: 'utf8',
           content: DEFAULT_FILES[0]?.content,
         })
       })

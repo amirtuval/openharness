@@ -350,6 +350,57 @@ describe('a mode’s tool override (#307)', () => {
     expect(mode.tools).toEqual({ builtin: { web_search: true, todo_write: false } })
   })
 
+  it('applies the section default to every tool the map does not name (B8)', async () => {
+    const test = createTestApp({ tools: REGISTRY })
+    await putTools(test, { builtin: { todo_write: { enabled: false, policy: 'allow' } } })
+
+    // `off` is an allowlist: only the tool the map turns on is on, and the tools the build adds
+    // later — the skill tools here — stay off in this mode.
+    const allowlist = await createMode(test, {
+      name: 'only-web',
+      model: 'anthropic/claude-sonnet-5',
+      tools: { builtin_default: 'off', builtin: { web_search: true } },
+    })
+    expect(await getTools(test, `?mode_id=${allowlist.id}`)).toMatchObject([
+      { name: 'web_search', enabled: true },
+      { name: 'todo_write', enabled: false },
+      { name: SKILL_TOOL_NAME, enabled: false },
+      { name: SKILL_READ_TOOL_NAME, enabled: false },
+    ])
+
+    // `on` turns every unlisted tool on — `todo_write` was turned off by the user — while an
+    // explicit `false` still wins.
+    const everything = await createMode(test, {
+      name: 'everything',
+      model: 'anthropic/claude-sonnet-5',
+      tools: { builtin_default: 'on', builtin: { web_search: false } },
+    })
+    expect(await getTools(test, `?mode_id=${everything.id}`)).toMatchObject([
+      { name: 'web_search', enabled: false },
+      { name: 'todo_write', enabled: true },
+      { name: SKILL_TOOL_NAME, enabled: true },
+      { name: SKILL_READ_TOOL_NAME, enabled: true },
+    ])
+
+    // A mode that carries only a default is still a mode that says something, and the round
+    // trip is the shape it was written as.
+    const follow = await createMode(test, {
+      name: 'follow',
+      model: 'anthropic/claude-sonnet-5',
+      tools: { skills_default: 'off' },
+    })
+    // `skills_default` decides which **skills** the skill tools may read, not whether the
+    // tools themselves are offered — that is `builtin_default`'s business. So both skill tools
+    // still follow the user's own settings here, while every skill stays off in this mode.
+    expect(follow.tools).toEqual({ skills_default: 'off' })
+    expect(await getTools(test, `?mode_id=${follow.id}`)).toMatchObject([
+      { name: 'web_search', enabled: true },
+      { name: 'todo_write', enabled: false },
+      { name: SKILL_TOOL_NAME, enabled: true },
+      { name: SKILL_READ_TOOL_NAME, enabled: true },
+    ])
+  })
+
   it('changes nothing for a mode with no override', async () => {
     const test = createTestApp({ tools: REGISTRY })
     const mode = await createMode(test, { name: 'plain', model: 'anthropic/claude-sonnet-5' })

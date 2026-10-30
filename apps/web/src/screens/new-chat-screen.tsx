@@ -96,9 +96,15 @@ export function NewChatScreen({
   const [addingProvider, setAddingProvider] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // The `/` menu (#349, K7; #353), built the way the chat builds it: the same client reading,
-  // so the box's rows and the send's parse cannot disagree. A first message may be a slash
-  // invocation like any other — the session is created and the message carries its `skill`.
-  const commands = useMemo(() => slashCommands(skills), [skills])
+  // so the box's rows and the send's parse cannot disagree. The mode picked for the new chat is
+  // applied over the user's switches (K8), so the menu is the effective set the server will
+  // accept — a mode can turn a skill on or off before the chat even exists. A first message may
+  // be a slash invocation like any other — the session is created on the picked mode and the
+  // message carries its `skill`.
+  const commands = useMemo(
+    () => slashCommands(skills, chosenMode?.tools ?? null),
+    [skills, chosenMode],
+  )
 
   const defaultModel = preferences?.default_model ?? null
   // No default, but the catalog has exactly one model (#146): it is the only thing a chat

@@ -8,6 +8,7 @@ import { SUBAGENT_TOOLS_WITHOUT_ASK, cannotAskForApproval } from '@openharness/h
 import type { ToolDefinition, ToolRegistry } from '@openharness/hands'
 import {
   DEFAULT_MCP_TOOL_PERMISSION,
+  builtinToolInForce,
   mcpToolOfferedName,
   type McpServer,
   type ModeId,
@@ -144,7 +145,7 @@ export function effectiveTools(
     return {
       name: tool.name,
       source: 'builtin',
-      enabled: override?.builtin[tool.name] ?? setting?.enabled ?? true,
+      enabled: builtinToolInForce(tool.name, setting?.enabled ?? true, override),
       // A stored `ask` on a tool whose call is never shown to the user reads as `allow` (#363):
       // the listing and the loop must give one answer, and the switch could never ask.
       policy: policy === 'ask' && cannotAskForApproval(tool.name) ? 'allow' : policy,
@@ -162,7 +163,7 @@ export function effectiveTools(
         return {
           name: native.name,
           source: 'builtin' as const,
-          enabled: override?.builtin[native.name] ?? setting?.enabled ?? true,
+          enabled: builtinToolInForce(native.name, setting?.enabled ?? true, override),
           policy:
             (setting?.policy ?? native.permission) === 'ask'
               ? 'allow'
@@ -198,7 +199,7 @@ export function effectiveTools(
       .map((name) => ({
         name,
         source: 'builtin' as const,
-        enabled: override?.builtin[name] ?? stored.builtin[name]?.enabled ?? true,
+        enabled: builtinToolInForce(name, stored.builtin[name]?.enabled ?? true, override),
         policy:
           (stored.builtin[name]?.policy ?? 'deny') === 'ask' && cannotAskForApproval(name)
             ? 'allow'

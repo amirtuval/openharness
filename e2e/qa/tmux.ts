@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -57,6 +57,43 @@ export function oh(
       status: failure.status ?? -1,
     }
   }
+}
+
+/**
+ * Run `oh` the way a shell would, **without blocking this process's event loop**.
+ *
+ * {@link oh} is `execFileSync`, which is right for the one-shot commands a spec reads straight
+ * off a pipe — but wrong for a spec that serves something to the stack under test from this
+ * very process. The skills pass (#355) is one: its git fixture listens in the test worker, the
+ * server under test clones from it while `oh` runs, and a blocked loop is a fixture that cannot
+ * accept a connection — which reaches the server as `unreachable` and the reader as a 422. So
+ * a scenario that runs `oh` against the fixture awaits this instead.
+ */
+export function ohAsync(
+  args: readonly string[],
+  options: { readonly configHome?: string } = {},
+): Promise<{ stdout: string; status: number }> {
+  return new Promise((resolve) => {
+    // `spawn`, not `execFile`: an async `execFile` always pipes stdin, and a command that asks
+    // a confirm question would then wait on a line nobody will type. With no stdin it reads an
+    // end-of-file, exactly as the synchronous runner does.
+    const child = spawn('node', ['apps/tui/dist/index.js', ...args], {
+      cwd: CLI_CWD,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: options.configHome ?? CLI_CONFIG_HOME,
+        OPENHARNESS_URL: CLI_SERVER,
+      },
+    })
+    const chunks: string[] = []
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => chunks.push(chunk))
+    child.stderr.on('data', (chunk: string) => chunks.push(chunk))
+    child.on('error', () => resolve({ stdout: chunks.join(''), status: -1 }))
+    child.on('close', (code) => resolve({ stdout: chunks.join(''), status: code ?? -1 }))
+  })
 }
 
 /**

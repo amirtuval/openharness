@@ -33,7 +33,7 @@
  */
 
 import { SKILL_MD_FILENAME, skillBody, skillSettingsOf } from '@openharness/protocol'
-import type { Skill } from '@openharness/protocol'
+import type { Skill, SkillFileContent } from '@openharness/protocol'
 import { z } from 'zod'
 
 import { errorResult, textResult } from './tool'
@@ -132,18 +132,35 @@ export interface OfferedSkill {
   /**
    * Read one file of this skill's snapshot, or `null` when it holds no file at that path.
    *
+   * The answer carries the content **and its encoding** (K4): a binary file is base64, and
+   * `skill_read` must report that rather than show its base64 text as if it were the file.
+   *
    * Called with a path a **model** produced, so an implementation must answer `null` rather than
    * raise for one its snapshot does not hold — and `null` for another owner's skill too, which
    * is the store's own rule (`@openharness/session`'s `SkillStore.getFile`).
    */
-  readonly readFile: (path: string) => Promise<string | null>
+  readonly readFile: (path: string) => Promise<SkillFileContent | null>
 }
 
 /** What {@link createSkillTools} is handed: the skills a request has. */
 export interface SkillToolOptions {
   /** The skills in force for the request, oldest first — `disable-model-invocation` ones included. */
   readonly skills: readonly OfferedSkill[]
+  /**
+   * The names whose skill the **user** has already run in this chat (K7).
+   *
+   * A `disable-model-invocation` skill is the user's command, and its body is in the request
+   * once they run `/name`; from then on the model may read it — an instruction like "read
+   * `references/style.md`" is part of the instructions the user just loaded, and refusing it
+   * would make a user-run skill unusable. It is still **not in the listing** (K6): the flag
+   * keeps the model from picking it on its own, and only what the log says the user loaded
+   * opens the tools to it.
+   */
+  readonly userLoadedSkills?: ReadonlySet<string>
 }
+
+/** A request with no user-loaded skills — the shape every caller that predates the field has. */
+const NO_USER_LOADED_SKILLS: ReadonlySet<string> = new Set()
 
 /**
  * The `skill` and `skill_read` definitions a request offers, or an empty list for a request that
@@ -158,9 +175,17 @@ export function createSkillTools(options: SkillToolOptions): ToolDefinition[] {
   return [createSkillTool(options), createSkillReadTool(options)]
 }
 
-/** Whether a request with these skills offers the two tools at all (K6). */
-export function skillToolsOffered(skills: readonly OfferedSkill[]): boolean {
-  return modelInvocable(skills).length > 0
+/**
+ * Whether a request with these skills offers the two tools at all (K6).
+ *
+ * A skill the user has already run counts even when it is model-invocable's opposite: the
+ * tools have to exist for the model to read the files its instructions mention.
+ */
+export function skillToolsOffered(
+  skills: readonly OfferedSkill[],
+  userLoadedSkills: ReadonlySet<string> = NO_USER_LOADED_SKILLS,
+): boolean {
+  return skills.some((offered) => readableByModel(offered, userLoadedSkills))
 }
 
 /**
@@ -174,7 +199,7 @@ export function skillToolsOffered(skills: readonly OfferedSkill[]): boolean {
  * says.
  */
 export function createSkillTool(options: SkillToolOptions): ToolDefinition<SkillInput> {
-  const { skills } = options
+  const { skills, userLoadedSkills = NO_USER_LOADED_SKILLS } = options
   return {
     name: SKILL_TOOL_NAME,
     description: skillListingDescription(skills),
@@ -182,7 +207,7 @@ export function createSkillTool(options: SkillToolOptions): ToolDefinition<Skill
     permission: 'allow',
     maxResultTokens: SKILL_TOOL_MAX_RESULT_TOKENS,
     run: async (input) => {
-      const refusal = skillRefusal(skills, input.name)
+      const refusal = skillRefusal(skills, input.name, userLoadedSkills)
       if (refusal !== null) {
         return errorResult(refusal)
       }
@@ -190,8 +215,8 @@ export function createSkillTool(options: SkillToolOptions): ToolDefinition<Skill
       if (offered === undefined) {
         return errorResult(unknownSkill(skills, input.name))
       }
-      const content = await offered.readFile(SKILL_MD_FILENAME)
-      if (content === null) {
+      const file = await offered.readFile(SKILL_MD_FILENAME)
+      if (file === null) {
         // A skill always holds a `SKILL.md` — the store refuses a snapshot without one (K1) —
         // so this is a broken invariant rather than a name the model got wrong, and the answer
         // says what is missing instead of pretending the skill does not exist.
@@ -200,7 +225,15 @@ export function createSkillTool(options: SkillToolOptions): ToolDefinition<Skill
             'The skill’s snapshot holds none, which should not happen.',
         )
       }
-      return textResult(renderSkill(input.name, skillBody(content), offered.skill))
+      if (file.encoding !== 'utf8') {
+        // The format's `SKILL.md` is YAML frontmatter and Markdown, so a binary one is not a
+        // skill any importer would store; say so rather than handing the model base64.
+        return errorResult(
+          `The ${SKILL_MD_FILENAME} file of ${JSON.stringify(input.name)} is not text, so the ` +
+            'skill has no instructions to read.',
+        )
+      }
+      return textResult(renderSkill(input.name, skillBody(file.content), offered.skill))
     },
   }
 }
@@ -215,7 +248,7 @@ export function createSkillTool(options: SkillToolOptions): ToolDefinition<Skill
  * model that guessed a name needs.
  */
 export function createSkillReadTool(options: SkillToolOptions): ToolDefinition<SkillReadInput> {
-  const { skills } = options
+  const { skills, userLoadedSkills = NO_USER_LOADED_SKILLS } = options
   return {
     name: SKILL_READ_TOOL_NAME,
     description:
@@ -226,7 +259,7 @@ export function createSkillReadTool(options: SkillToolOptions): ToolDefinition<S
     permission: 'allow',
     maxResultTokens: SKILL_READ_MAX_RESULT_TOKENS,
     run: async (input) => {
-      const refusal = skillRefusal(skills, input.name)
+      const refusal = skillRefusal(skills, input.name, userLoadedSkills)
       if (refusal !== null) {
         return errorResult(refusal)
       }
@@ -234,21 +267,23 @@ export function createSkillReadTool(options: SkillToolOptions): ToolDefinition<S
       if (offered === undefined) {
         return errorResult(unknownSkill(skills, input.name))
       }
-      const content = await offered.readFile(input.path)
-      if (content === null) {
+      const file = await offered.readFile(input.path)
+      if (file === null) {
         return errorResult(
           `${JSON.stringify(input.path)} is not a file of ${JSON.stringify(input.name)}. ` +
             `${fileList(offered.skill)}`,
         )
       }
-      const size = sizeOf(offered.skill, input.path, content)
-      if (looksBinary(content)) {
+      // The stored encoding is the authority: the import writes `base64` for exactly the files
+      // it could not decode as text. `looksBinary` stays as the second reading for a snapshot
+      // written before the encoding was stored (a NUL that a store accepted as text).
+      if (file.encoding !== 'utf8' || looksBinary(file.content)) {
         return textResult(
-          `${input.path} is a binary file of ${size} bytes, so its contents are not shown ` +
+          `${input.path} is a binary file of ${file.size} bytes, so its contents are not shown ` +
             'here. A skill is instructions and files to read; nothing runs one.',
         )
       }
-      return textResult(content)
+      return textResult(file.content)
     },
   }
 }
@@ -291,13 +326,24 @@ export function skillListingDescription(skills: readonly OfferedSkill[]): string
 /**
  * Why a skill the model named may not be used, or `null` when it may.
  *
- * One reason, and one wording for it: a skill marked `disable-model-invocation: true` (K6) is
- * the user's command, and both tools refuse it — reading its instructions is the same thing as
- * invoking it, from the model's side.
+ * A skill marked `disable-model-invocation: true` (K6) is the user's command, and the model
+ * may not pick it on its own. But once the **user has run it in this chat** — the log holds a
+ * `session.skill_loaded` for it — its body is in the request, and the files the instructions
+ * name are exactly what the model is being told to read. So the flag still keeps the skill out
+ * of the listing and still refuses a name the user never ran; it stops refusing one they did,
+ * for `skill` (re-reading the body) and `skill_read` alike (K1, K7).
  */
-function skillRefusal(skills: readonly OfferedSkill[], name: string): string | null {
+function skillRefusal(
+  skills: readonly OfferedSkill[],
+  name: string,
+  userLoadedSkills: ReadonlySet<string>,
+): string | null {
   const offered = skillNamed(skills, name)
-  if (offered === undefined || !skillSettingsOf(offered.skill).disableModelInvocation) {
+  if (
+    offered === undefined ||
+    !skillSettingsOf(offered.skill).disableModelInvocation ||
+    userLoadedSkills.has(name)
+  ) {
     return null
   }
   return (
@@ -323,6 +369,17 @@ function modelInvocable(skills: readonly OfferedSkill[]): OfferedSkill[] {
   return skills.filter((offered) => !skillSettingsOf(offered.skill).disableModelInvocation)
 }
 
+/**
+ * Whether the model may read one skill: every model-invocable one, plus a user-only skill the
+ * user has already run in this chat (see {@link skillRefusal}).
+ */
+function readableByModel(offered: OfferedSkill, userLoadedSkills: ReadonlySet<string>): boolean {
+  return (
+    !skillSettingsOf(offered.skill).disableModelInvocation ||
+    userLoadedSkills.has(offered.skill.name)
+  )
+}
+
 /** The offered skill of that name, or `undefined`. */
 function skillNamed(skills: readonly OfferedSkill[], name: string): OfferedSkill | undefined {
   return skills.find((offered) => offered.skill.name === name)
@@ -341,13 +398,6 @@ function fileList(skill: Skill): string {
   }
   const lines = skill.files.map((file) => `- ${file.path} (${file.size} bytes)`)
   return `Files (read one with ${SKILL_READ_TOOL_NAME}):\n${lines.join('\n')}`
-}
-
-/** The size a listing reports for a path, falling back to what the content really is. */
-function sizeOf(skill: Skill, path: string, content: string): number {
-  return (
-    skill.files.find((file) => file.path === path)?.size ?? new TextEncoder().encode(content).length
-  )
 }
 
 /** `text` cut to `max` characters, with an ellipsis where the rest went. */

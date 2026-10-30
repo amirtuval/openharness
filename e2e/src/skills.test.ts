@@ -303,7 +303,7 @@ describe('skills through the real server (epic #349; #352)', () => {
     expect(textOfEvent(results(log)[0]!)).toContain('No tool named')
   })
 
-  it('leaves a user-only skill out of the listing, and out of a request', async () => {
+  it('offers a user-only skill to the model once the user has run it, and never lists it', async () => {
     const server = await harness.server()
     const database = await harness.database()
     const { client, id } = await person(server, 'user-only')
@@ -313,15 +313,26 @@ describe('skills through the real server (epic #349; #352)', () => {
     })
 
     const sessionId = await newChat(client)
-    // The user runs it themselves, which is what the field is for.
+    // Before the user has run it the model may not pick it: neither tool is on the offer, and
+    // it is not in the listing the `skill` tool carries.
+    await say(client, sessionId, 'hello')
+    const before = await readLog(client, sessionId)
+    const beforeNames = (spans(before)[0]?.tools ?? []).map((tool) => tool.name)
+    expect(beforeNames).not.toContain(SKILL_TOOL_NAME)
+    expect(beforeNames).not.toContain(SKILL_READ_TOOL_NAME)
+
+    // The user runs it themselves, which is what the field is for. From this request on the
+    // tools are offered — the instructions are in the request, and the files they name are
+    // what `skill_read` is for — while the skill stays out of the listing (the hands/brain
+    // suites pin the listing half; the span only carries the names).
     await run(client, sessionId, 'manual-check')
 
     const log = await readLog(client, sessionId)
     expect(log.filter((event) => event.type === EVENT_TYPES.sessionSkillLoaded)).toHaveLength(1)
-    // The model was not told it exists: neither tool is on the request's offer.
-    const names = (spans(log)[0]?.tools ?? []).map((tool) => tool.name)
-    expect(names).not.toContain(SKILL_TOOL_NAME)
-    expect(names).not.toContain(SKILL_READ_TOOL_NAME)
+    const after = spans(log).at(-1)?.tools ?? []
+    const names = after.map((tool) => tool.name)
+    expect(names).toContain(SKILL_TOOL_NAME)
+    expect(names).toContain(SKILL_READ_TOOL_NAME)
   })
 
   it('answers another person’s skill as if it did not exist', async () => {

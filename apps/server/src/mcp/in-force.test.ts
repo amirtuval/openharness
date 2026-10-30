@@ -27,8 +27,11 @@ function unknownServerId(): string {
 }
 
 /** The override a mode carries: the MCP map, or `null` for a mode that says nothing about tools. */
-function modeOverride(mcp: Record<string, boolean>): ModeToolOverride {
-  return { builtin: {}, mcp_servers: mcp }
+function modeOverride(
+  mcp: Record<string, boolean>,
+  mcp_servers_default?: ModeToolOverride['mcp_servers_default'],
+): ModeToolOverride {
+  return { mcp_servers: mcp, ...(mcp_servers_default === undefined ? {} : { mcp_servers_default }) }
 }
 
 /** A `McpServerService` whose `list` answers exactly these servers, for the async half. */
@@ -99,6 +102,27 @@ describe('mcpServersInForce', () => {
     const on = server(true)
     const off = server(false)
     expect(mcpServersInForce([on, off], modeOverride({}))).toEqual([on])
+  })
+
+  it('applies the section default to every server the map does not name (B8)', () => {
+    const on = server(true)
+    const off = server(false)
+    const namedOn = server(false)
+    const namedOff = server(true)
+    // `off` is an allowlist: only the servers the map turns on are in force.
+    expect(
+      mcpServersInForce([on, off, namedOn], modeOverride({ [namedOn.id]: true }, 'off')),
+    ).toEqual([namedOn])
+    // `on` turns every server on except the ones the map turns off.
+    expect(
+      mcpServersInForce([on, off, namedOff], modeOverride({ [namedOff.id]: false }, 'on')),
+    ).toEqual([on, off])
+    // An explicit entry still wins in both directions.
+    expect(mcpServersInForce([on, namedOn], modeOverride({ [on.id]: false }, 'on'))).toEqual([
+      namedOn,
+    ])
+    // `follow` is the absent case and the explicit case alike.
+    expect(mcpServersInForce([on, off], modeOverride({}, 'follow'))).toEqual([on])
   })
 })
 

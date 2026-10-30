@@ -1,7 +1,13 @@
 import { GitCloneError, cloneRepository, type CloneRepositoryOptions } from '@openharness/hands'
-import { createGitFixture, gitAvailable, type GitFixture } from '@openharness/hands/testing'
+import {
+  createGitFixture,
+  gitAvailable,
+  type GitFileMap,
+  type GitFixture,
+} from '@openharness/hands/testing'
 import {
   API_VERSION_PREFIX,
+  MAX_SKILLS_PER_USER,
   SKILL_MD_FILENAME,
   SKILL_MD_MAX_BYTES,
   SkillSchema,
@@ -95,7 +101,7 @@ afterEach(async () => {
 })
 
 /** A repository fixture this suite closes, whatever the test does. */
-async function fixture(files: Record<string, string> = REPOSITORY): Promise<GitFixture> {
+async function fixture(files: GitFileMap = REPOSITORY): Promise<GitFixture> {
   const created = await createGitFixture({ files })
   fixtures.push(created)
   return created
@@ -468,6 +474,65 @@ describe.skipIf(!GIT)('skill import (epic #349, K3)', () => {
     expect((await tone.json()) as unknown).toMatchObject({ path: 'reference/tone.md', size: 10 })
   })
 
+  it('imports a binary file losslessly, and diffs it by its bytes on refresh (K4)', async () => {
+    // Not valid UTF-8, and it holds a NUL: the two shapes a `text` column cannot keep (and
+    // Postgres refuses outright). Stored base64, it round-trips exactly.
+    const icon = Uint8Array.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+      0x52,
+    ])
+    const repo = await fixture({
+      ...REPOSITORY,
+      'skills/release-notes/assets/icon.png': icon,
+    })
+    const test = appWith(repo.url)
+    const { body } = await preview(test)
+    expect(candidate(body, 'release-notes').problems).toEqual([])
+    expect(candidate(body, 'release-notes').files).toContainEqual({
+      path: 'assets/icon.png',
+      size: icon.length,
+    })
+
+    const stored = await importSkills(test, {
+      ...SOURCE,
+      commit_sha: body.commit_sha,
+      names: ['release-notes'],
+    })
+    expect(stored.status).toBe(201)
+    const skill = SkillSchema.parse((stored.body.data ?? [])[0])
+    expect(skill.files).toContainEqual({ path: 'assets/icon.png', size: icon.length })
+
+    const read = await test.request(`${SKILLS}/${skill.id}/files/assets/icon.png`)
+    expect(read.status).toBe(200)
+    expect(await read.json()).toMatchObject({
+      path: 'assets/icon.png',
+      size: icon.length,
+      encoding: 'base64',
+      content: Buffer.from(icon).toString('base64'),
+    })
+
+    // An unchanged binary file is unchanged…
+    const unchanged = (await (
+      await postJson(test, `${SKILLS}/${skill.id}/refresh/preview`, {})
+    ).json()) as RefreshSkillPreviewResponse
+    expect(unchanged.changed).toBe(false)
+
+    // …and one byte changed is a changed file, compared as the bytes it is rather than as the
+    // base64 spelling (which differs too, but only because the bytes do).
+    const changed = Uint8Array.from([...icon.slice(0, -1), 0x00])
+    await repo.commit(
+      { ...REPOSITORY, 'skills/release-notes/assets/icon.png': changed },
+      'a new icon',
+    )
+    const previewed = (await (
+      await postJson(test, `${SKILLS}/${skill.id}/refresh/preview`, {})
+    ).json()) as RefreshSkillPreviewResponse
+    expect(previewed.changed).toBe(true)
+    expect(previewed.files_changed).toEqual(['assets/icon.png'])
+    expect(previewed.files_added).toEqual([])
+    expect(previewed.files_removed).toEqual([])
+  })
+
   it('keeps an argument-hint exactly as the file wrote it, in every spelling (#354)', async () => {
     // The Agent Skills format and Claude Code both write a bracketed placeholder. `[version]`
     // is a YAML flow sequence, and `[pr-number] [priority]` is not valid YAML at all — a skill
@@ -586,6 +651,50 @@ describe.skipIf(!GIT)('skill import (epic #349, K3)', () => {
     expect(answer.status).toBe(409)
     expect(answer.body.error?.type).toBe('conflict_error')
     expect((await test.skills.list({ ownerId })).map((skill) => skill.name)).toEqual(['collection'])
+  })
+
+  it('refuses a batch that would cross the per-user cap, storing none of it', async () => {
+    const repo = await fixture()
+    const test = appWith(repo.url)
+    const { body } = await preview(test)
+    const ownerId = (await test.currentUser()).id
+
+    // One slot left, two skills picked: creating them one by one would store the first,
+    // fail on the second, and leave a retry reporting the first as a name already taken.
+    for (let index = 0; index < MAX_SKILLS_PER_USER - 1; index += 1) {
+      await test.skills.create({
+        ownerId,
+        name: `seeded-${String(index)}`,
+        description: 'One of the skills the caller already has.',
+        frontmatter: {},
+        source: {
+          url: 'https://github.com/example/skills',
+          ref: null,
+          path: null,
+          commit_sha: null,
+        },
+        enabled: true,
+        files: [
+          {
+            path: SKILL_MD_FILENAME,
+            content: `---\nname: seeded-${String(index)}\n---\n\nmine.\n`,
+          },
+        ],
+      })
+    }
+
+    const answer = await importSkills(test, {
+      ...SOURCE,
+      commit_sha: body.commit_sha,
+      names: ['release-notes', 'collection'],
+    })
+    expect(answer.status).toBe(409)
+    expect(answer.body.error?.type).toBe('conflict_error')
+    // Nothing of the batch was stored: the count is exactly what it was before the request.
+    expect(await test.skills.list({ ownerId })).toHaveLength(MAX_SKILLS_PER_USER - 1)
+    expect((await test.skills.list({ ownerId })).map((skill) => skill.name)).not.toContain(
+      'release-notes',
+    )
   })
 
   it('takes an explicit ref and path over what the URL implies', async () => {
