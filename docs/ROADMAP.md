@@ -68,16 +68,9 @@ _Last updated: 2026-10-17._
 5. Model selection and provider keys ([epic #245](https://github.com/amirtuval/openharness/issues/245)) — done,
    followed by context compaction ([epic #277](https://github.com/amirtuval/openharness/issues/277)) — done
 6. Tools: the loop, pausing for the user and remote MCP ([epic #303](https://github.com/amirtuval/openharness/issues/303)) — done
-   <<<<<<< HEAD
-7. Extensibility and multiple agents: subagents ([epic #340](https://github.com/amirtuval/openharness/issues/340)) and
-   skills ([epic #349](https://github.com/amirtuval/openharness/issues/349) — done, and it replaces
+7. Multiple agents: subagents and background tasks ([epic #340](https://github.com/amirtuval/openharness/issues/340)) — done,
+   then extensibility: skills ([epic #349](https://github.com/amirtuval/openharness/issues/349) — done, and it replaces
    the custom slash commands this list used to carry), then sandboxed tools
-   \=======
-8. Multiple agents: subagents and background tasks ([epic #340](https://github.com/amirtuval/openharness/issues/340)) — done,
-   then extensibility: skills ([epic #349](https://github.com/amirtuval/openharness/issues/349), which also replace
-   custom slash commands), and sandboxed tools
-
-> > > > > > > skills/b6-fixes
 
 **Why this order:** identity and a running deployment are the foundations. Every later feature
 needs to know who owns what. The features that cost money or can act on the world (paid model

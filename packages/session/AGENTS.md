@@ -846,8 +846,8 @@ Both implementations pass `runSkillStoreConformance`: `InMemorySkillStore` (in `
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Eighteen tables created by `migrations/`, plus the runner's own `schema_migrations`
-ledger (below). Thirteen are this package's: `agents`,
+**Schema.** Twenty tables created by `migrations/`, plus the runner's own `schema_migrations`
+ledger (below). Fifteen are this package's: `agents`,
 `sessions` (each with the `owner_id` an agent or session belongs to, `sessions` also with the
 `partitionOf` partition, the `status` the log's last status event implies, the effective
 `model jsonb`/`system` the session runs, the `mode` a chat follows (#245, M6), and the nullable
