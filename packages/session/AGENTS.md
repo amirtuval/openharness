@@ -74,7 +74,8 @@ src/
     skills.ts           PostgresSkillStore and createPostgresSkillStore (#349, K4)
     schema.ts           the Kysely table types, row → protocol mapping, channel names
     listen.ts           the dedicated LISTEN connection, and its reconnection
-    migrate.ts          migrate(): the SQL-file runner
+    migrate.ts          migrate(): the SQL-file runner, the `schema_migrations` ledger it
+                          keeps and the `lock_timeout`/retry rule (#378, PR 3/6)
     cli.ts              the `openharness-session-migrate` bin
     postgres.test.ts    the conformance suites against Postgres, plus extra tests
     no-updates.test.ts  the source scan proving no SQL path writes back to the log
@@ -160,19 +161,19 @@ docs/postgres.md        the Postgres stores: schema, migrations, delivery, local
 
 ### `@openharness/session/postgres`
 
-| export                                                                                                                                                                                                                                                                                                        | what it is                                                                                                                                               |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                                                                                                                                                                        | the durable implementation; `{ connectionString }` or `{ pool }`, plus options                                                                           |
-| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                                                                                                                                                                   | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB                                                                          |
-| `PostgresCredentialStore`, `createPostgresCredentialStore(config, options?)`                                                                                                                                                                                                                                  | the durable credential store; `{ connectionString }` or `{ pool }`, plus `now`                                                                           |
-| `PostgresMcpServerStore`, `createPostgresMcpServerStore(config, options?)`                                                                                                                                                                                                                                    | the durable MCP server store; `{ connectionString }` or `{ pool }`, plus `now` (#303, X10)                                                               |
-| `PostgresSkillStore`, `createPostgresSkillStore(config, options?)`                                                                                                                                                                                                                                            | the durable skill store; `{ connectionString }` or `{ pool }`, plus `now` (#349, K4)                                                                     |
-| `PostgresSkillStoreOptions`, `PostgresSkillStoreConfig`                                                                                                                                                                                                                                                       | its options, and the two ways to reach a DB                                                                                                              |
-| `PostgresCredentialStoreOptions`, `PostgresCredentialStoreConfig`                                                                                                                                                                                                                                             | its options, and the two ways to reach a DB                                                                                                              |
-| `migrate(db, options?)`                                                                                                                                                                                                                                                                                       | applies `migrations/` — the log, Better Auth and `provider_credentials` — idempotently, in one locked transaction; returns the files                     |
-| `MigrateOptions`                                                                                                                                                                                                                                                                                              | `{ migrationsDir? }`, for a migrations directory that is not this package's                                                                              |
-| `PostgresSchema`, `AgentsTable`, `ModesTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable`, `ProviderCredentialsTable`, `UserPreferencesTable`, `UserToolSettingsTable`, `McpServersTable`, `McpOAuthStatesTable`, `SkillsTable`, `SkillFilesTable` | the Kysely table types, for a caller that wants to query alongside the stores                                                                            |
-| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`, `ModeRow`, `McpServerRow`, `McpServerMetadataRow`, `McpOAuthStateRow`, `SkillRow`, `SkillFileRow`, `SkillFileMetadataRow`, `SkillFileListing`                                                                                                       | the shapes a credential read has — with the sealed blob, and without — one row of `modes`, the MCP server rows (#303, X10) and the skill rows (#349, K4) |
+| export                                                                                                                                                                                                                                                                                                        | what it is                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PostgresSessionStore`, `createPostgresSessionStore(config, options?)`                                                                                                                                                                                                                                        | the durable implementation; `{ connectionString }` or `{ pool }`, plus options                                                                                                                                                                                                                               |
+| `PostgresSessionStoreOptions`, `PostgresSessionStoreConfig`                                                                                                                                                                                                                                                   | its options (`now`, `partitionCount`, `onError`) and the two ways to reach a DB                                                                                                                                                                                                                              |
+| `PostgresCredentialStore`, `createPostgresCredentialStore(config, options?)`                                                                                                                                                                                                                                  | the durable credential store; `{ connectionString }` or `{ pool }`, plus `now`                                                                                                                                                                                                                               |
+| `PostgresMcpServerStore`, `createPostgresMcpServerStore(config, options?)`                                                                                                                                                                                                                                    | the durable MCP server store; `{ connectionString }` or `{ pool }`, plus `now` (#303, X10)                                                                                                                                                                                                                   |
+| `PostgresSkillStore`, `createPostgresSkillStore(config, options?)`                                                                                                                                                                                                                                            | the durable skill store; `{ connectionString }` or `{ pool }`, plus `now` (#349, K4)                                                                                                                                                                                                                         |
+| `PostgresSkillStoreOptions`, `PostgresSkillStoreConfig`                                                                                                                                                                                                                                                       | its options, and the two ways to reach a DB                                                                                                                                                                                                                                                                  |
+| `PostgresCredentialStoreOptions`, `PostgresCredentialStoreConfig`                                                                                                                                                                                                                                             | its options, and the two ways to reach a DB                                                                                                                                                                                                                                                                  |
+| `migrate(db, options?)`                                                                                                                                                                                                                                                                                       | applies `migrations/` — the log, Better Auth, `provider_credentials`, remote MCP servers and skills — one file per transaction, recording each in the `schema_migrations` ledger; a boot with nothing to apply runs no statement and takes no application-table lock; returns the files applied by this call |
+| `MigrateOptions`                                                                                                                                                                                                                                                                                              | `{ migrationsDir? }`, for a migrations directory that is not this package's                                                                                                                                                                                                                                  |
+| `PostgresSchema`, `AgentsTable`, `ModesTable`, `SessionsTable`, `EventsTable`, `EventClaimsTable`, `EventSupersessionsTable`, `PartitionLeasesTable`, `ProviderCredentialsTable`, `UserPreferencesTable`, `UserToolSettingsTable`, `McpServersTable`, `McpOAuthStatesTable`, `SkillsTable`, `SkillFilesTable` | the Kysely table types, for a caller that wants to query alongside the stores                                                                                                                                                                                                                                |
+| `ProviderCredentialRow`, `ProviderCredentialMetadataRow`, `ModeRow`, `McpServerRow`, `McpServerMetadataRow`, `McpOAuthStateRow`, `SkillRow`, `SkillFileRow`, `SkillFileMetadataRow`, `SkillFileListing`                                                                                                       | the shapes a credential read has — with the sealed blob, and without — one row of `modes`, the MCP server rows (#303, X10) and the skill rows (#349, K4)                                                                                                                                                     |
 
 This entry point is a separate subpath on purpose: it is the only module that depends on `pg`
 and `kysely`, and a consumer that only needs the contract, the fake or the suite must not load
@@ -480,6 +481,15 @@ session acts on anything other than `idle`: it closes `openSpan` if there is one
 turn again. `findSessionsNeedingWork` treats both open states as work — and, beside pending
 user events, a third case: a session whose last turn ended `requires_action` and which holds a
 `user.tool_confirmation` answering one of the calls it waits on (epic #303, X6; #309).
+
+**`findSessionsWaiting(partitions)`** is the future half of the task-wait case (#378, P1). A
+session whose last turn ended `waiting_on_tasks` is not work until its deadline passes, so the
+work scan leaves it alone; but the timer that would wake it at the deadline lived in the
+process that ran the turn. This read answers `SessionTaskWait[]` — the session and the instant
+the log recorded — for the waits still ahead of their time, so a scheduler that has just
+acquired the partition can arm the same timer. It reads only the newest status event and skips
+a wait a rewind covered, exactly as the passed-deadline case does. The conformance suite asks
+both stores for the future and the answered case.
 
 **Usage reads** (#247) are the one place the contract asks a question of many sessions at
 once, and the reason it is a method rather than a caller's loop. `listModelRequests({ ownerId,
@@ -836,7 +846,8 @@ Both implementations pass `runSkillStoreConformance`: `InMemorySkillStore` (in `
 the whole suite against a real database. [docs/postgres.md](./docs/postgres.md) is the long
 version; this is the shape of it.
 
-**Schema.** Eighteen tables, all created by `migrations/`. Thirteen are this package's: `agents`,
+**Schema.** Eighteen tables created by `migrations/`, plus the runner's own `schema_migrations`
+ledger (below). Thirteen are this package's: `agents`,
 `sessions` (each with the `owner_id` an agent or session belongs to, `sessions` also with the
 `partitionOf` partition, the `status` the log's last status event implies, the effective
 `model jsonb`/`system` the session runs, the `mode` a chat follows (#245, M6), and the nullable
@@ -917,10 +928,31 @@ cannot come back in a later change unnoticed. The patterns are themselves pinned
 spellings that must be caught and near-misses that must not, and the same file asserts the
 compaction delete's `WHERE` clause by clause.
 
-**Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)` — one
-transaction under an advisory lock, every statement idempotent (`if not exists`, or a guard),
-so it is safe to run from two instances at once. There is no ledger: a file that has been
-applied anywhere must never be edited. `yarn migrate` runs the built bin. D9 added
+**Migrations.** Plain SQL files in `migrations/`, applied in name order by `migrate(db)`. A
+`schema_migrations` ledger (the file name is the primary key, `applied_at` the commit time)
+records each file that has been applied, written in the same transaction as the file's
+statements — so a failure half-way leaves the schema and the ledger exactly as they were, and
+a retry runs the same set again. A boot whose ledger names every file returns without running
+a statement and **takes no lock on any application table**. That is what makes a pod booting
+during a rolling update harmless (#378, PR 3/6): idempotent DDL still takes its locks —
+`alter table … add column if not exists` is `ACCESS EXCLUSIVE` even when the column exists,
+and `create index if not exists` takes a `SHARE` lock — and held by every boot they stall or
+deadlock with the live servers' appends. Otherwise the runner takes the advisory lock, re-reads
+the ledger (another instance may have applied files while it waited), and runs only the
+missing files. A database migrated by the old runner has every table and an empty ledger; its
+first new boot runs every idempotent file once more under the lock and records them — the one
+boot that still takes the locks, once per database. Guessing from "the newest objects exist"
+that the files need not run was rejected: a wrong positive writes a ledger no later boot
+repairs, while the re-run is bounded and correct. That is why new files must stay idempotent.
+
+Every statement runs with a `lock_timeout` (3 s by default) and the whole migration transaction
+is retried with exponential backoff (3 attempts) before the boot fails with an error naming the
+file and the lock wait, so a migration that genuinely needs a strong lock cannot block a live
+append indefinitely, and a temporary conflict does not fail a deploy. `yarn migrate` runs the
+built bin. The rules for writing a migration — expand then contract, prefer non-blocking forms,
+`create index concurrently` cannot run inside the runner's transaction (out of scope until a
+file needs it), never edit an applied file — are in `migrate.ts`'s header, where the next
+author will read them. D9 added
 `0007_event_claims`, `0008_event_claims_backfill` (one-time: the pre-D9 `events.processed_at`
 of user events is copied into claim rows, so a log written before the change reads exactly as
 it did) and `0009_event_supersessions`.
@@ -944,8 +976,9 @@ and `0013_provider_credentials`:
   `event_supersessions`, `sessions` and `agents` are deleted, and `agents` and `sessions` gain
   `owner_id text not null references "user"(id) on delete cascade` plus an
   `(owner_id, created_at, id)` index for each list. The delete is guarded by the absence of
-  the column it introduces, because the runner re-runs every file on every `migrate()` call:
-  without the guard a later server boot would wipe every log in the database.
+  the column it introduces, because the bootstrap boot re-runs every file once on a database
+  that predates the ledger (and the files stay idempotent for exactly that reason): without
+  the guard that boot would wipe every log in the database.
 - **`0013_provider_credentials.sql` — the sealed credential table** (decision A5): id
   (`pcred_`), user, provider, type, the four sealed fields, `last4`, the timestamps and
   `validated_at`, unique on `(user_id, provider)` and `on delete cascade` from `"user"`. There
@@ -1035,8 +1068,8 @@ The named credentials of epic #245 (A3a) added one:
   credential takes — so there is nothing to backfill and no value changes. The sealed blobs are
   untouched, and their associated data is unaffected: the server seals with `userId|name`, which
   for a pre-existing row is the same string it sealed with before. `alter table … rename` has no
-  `if exists`, so each rename is guarded by a catalogue check (the runner re-runs every file on
-  every `migrate()`).
+  `if exists`, so each rename is guarded by a catalogue check (the bootstrap boot re-runs
+  every file once on a database that predates the ledger).
 
 The per-type credential details (epic #245, A3b/A3c/A3d) added one:
 
@@ -1195,7 +1228,9 @@ database's `now()`.
   `user_preferences` and `scheduler_instances` included — before every test, so point
   `DATABASE_URL` at a scratch
   database. Better Auth's tables are not truncated; the two `"user"` rows the suites seed are
-  re-inserted as needed.
+  re-inserted as needed. `schema_migrations` is not truncated either: it records the schema,
+  not data (see the ledger below), and the migration tests that mean to simulate an old-runner
+  database empty it themselves.
 
 ## Running the conformance suite against a new implementation
 
@@ -1326,7 +1361,14 @@ dependency table.
   really gone from `events`, `event_claims` and `event_supersessions` while another session's
   are untouched, its `session.deleted` announced to a different store's subscriber,
   idempotent migrations (`0016`, `0017`, `0018`, `0026`, `0027` and `0028` included — the
-  tables, indexes and columns they add are exercised after a re-run),
+  tables, indexes and columns they add are exercised after a re-run) and the migration ledger
+  (#378, PR 3/6), each on a schema of its own: a fresh database applies and records every
+  file; a second call applies nothing and returns promptly while another connection holds
+  `ACCESS EXCLUSIVE` on `events` (the fast path takes no application-table lock); an
+  empty-ledger database is bootstrapped by running every file once more; a file the ledger does
+  not name is the only one that runs; and a migration blocked by a held lock times out, retries,
+  and either succeeds once the lock clears or fails the boot with a clear error — leaving no
+  ledger row and no half-applied column,
   the #93 backfill over a session row written the pre-#93 way (the agent's model and system
   copied into the new columns, the row read back as the protocol's session), `close()` leaving
   a borrowed pool alone, the raw `events.processed_at` column staying `NULL`
@@ -1338,7 +1380,9 @@ dependency table.
   alone. Since `owner_id` is a foreign key into `"user"`, the factory seeds the suite's owners
   (`ensureUsers`) on empty tables. The harness truncates every table this package owns,
   `user_preferences` and `user_tool_settings` included, so neither preferences nor tool choices
-  can leak between tests.
+  can leak between tests. It deliberately does **not** truncate `schema_migrations`: that
+  records the schema, not data, and an empty ledger would make the next `migrate()` take the
+  bootstrap path. A test that means to simulate the old runner empties it explicitly.
 - `postgres/no-updates.test.ts` scans this package's source (tests excluded) for the spellings
   a write back to `events` would use and fails on any of them; the patterns carry self-tests
   for what they must catch and must not, and the compaction delete's `WHERE` is asserted

@@ -167,9 +167,10 @@ src/
                                with its Cancel sits above it (#238)
       status-indicator.tsx     running / idle / retrying — the header's dot
       working-row.tsx          the row at the foot of the transcript: Working… with a clock,
-                               Retrying… with the reason, Summarizing… N of M, Compacting…, or
-                               Interrupted (#211, #280, #283); workingState() is the rule, the
-                               component is the clock
+                               Retrying… with the reason, Summarizing… N of M, Compacting…,
+                               Waiting for the server… / Reconnecting… when nothing has
+                               arrived for 15 s, or Interrupted (#211, #280, #283, #378 P4);
+                               workingState() is the rule, the component is the clock
       summary-divider.tsx      "Conversation summarized", expandable to the summary (#280)
       context-meter.tsx        how full the context is, in the header: a bar, the threshold
                                mark and `62% of context used` (#280)
@@ -582,7 +583,18 @@ going to appear. Two rules are worth remembering:
   only have come from here and drops it on the next send. It belongs to the turn it stopped.
 
 `workingState()` is a pure function over (status, retrying, reason, interrupted, has-reply,
-summarizing) and is tested as one; the component's own test is the clock, under fake timers.
+summarizing, compacting, stalled, reconnecting) and is tested as one; the component's own test is
+the clock, under fake timers.
+
+**A stalled turn says so (#378, P4).** `useSession` keeps when the last streamed event arrived
+(and resets it when the client's stream loop reports a fresh connection) and ticks a clock once
+a second while a turn runs; `stallState` from `@openharness/client` turns those into
+`stalled`/`reconnecting`. The row then reads **Waiting for the server…** after 15 s with no
+event, or **Reconnecting…** as soon as the client knows the connection dropped. Both disappear
+when an event arrives or the turn ends, and both are drawn even when a reply had started — a
+stream that stops mid-answer is exactly the silence the row exists for. A specific compaction or
+retry state outranks the stall clock (it is the server saying what it is doing); a reconnect
+outranks everything while the turn is running.
 
 ### The compaction, on screen (epic #277, K10; #280)
 

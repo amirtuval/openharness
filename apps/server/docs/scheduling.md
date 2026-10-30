@@ -97,7 +97,11 @@ acquiring partition p
 heartbeat
   announce this instance        → upsert scheduler_instances, read the live members
   renew every held lease        → a refusal means the lease is somebody else's: drop it at once
-  give up the surplus           → finish the turns in it first, then release
+  give up the surplus           → only once the membership has been unchanged for
+                                  OPENHARNESS_BALANCE_STABILITY_MS (#378, P3); then start one
+                                  release per partition: soft-drain its passes, hand off what
+                                  the deadline catches, release as it empties (the heartbeat
+                                  never waits on a drain)
   scan for free/expired leases  → take them up to the share, never a live one;
                                   recover each as above
 
@@ -110,8 +114,9 @@ are hints with no durability: one that arrives between the acquire and the subsc
 forever. So listening starts first, and whatever was in the log before that is found by the
 scan — which is also exactly how a partition whose owner died is recovered. A `FencedError` out
 of a turn means the same thing as a refused renewal, arriving the other way round: the lease is
-not this instance's any more, so the partition is dropped, its turns are aborted, its
-subscription is ended, and nothing more is started for it.
+not this instance's any more, so the partition is dropped, its turns are **handed off** (the
+abort carries a `TurnHandoff('lease_lost')` reason, so the brain leaves the turn open for the
+new owner — #378, P1), its subscription is ended, and nothing more is started for it.
 
 ## Balancing
 
@@ -127,11 +132,42 @@ follows from that share:
   whole and rebalanced. (An instance whose first read of the membership raced its peers' —
   it booted a moment before them — may claim more first; its next heartbeat counts the truth
   and gives the surplus back.)
-- **An instance over its share gives the surplus up**, newest tenure first: the turns running
-  in those partitions are allowed to finish writing (up to the drain timeout) and only then is
-  the lease released, so the peer that takes them over inherits closed turns. Released
-  partitions are left alone by this instance for a heartbeat, so the peer gets the chance to
-  take them instead of watching them bounce back.
+- **Surplus is given up only after the membership has been stable for a window**
+  (`OPENHARNESS_BALANCE_STABILITY_MS`, 30 s by default; #378, P3). A rolling update
+  (`maxSurge: 1`, `maxUnavailable: 0`) is a **join followed a moment later by a leave**: the
+  surge pod starting shrinks every old member's share, and the pod it replaces being
+  terminated grows the share back. Releasing on the join moves partitions the leave would have
+  left in place — twice for nothing, each move costing a drain and briefly delaying the
+  partition's work. So an instance records when the membership last changed (a join **or** a
+  leave, compared as a set — one pod replacing another with the same count is still a change)
+  and withholds the surplus until that instant is at least the window old. The window must
+  cover the Kubernetes gap between the replacement becoming ready (when the join appears) and
+  the old pod receiving `SIGTERM`; 30 s is comfortable for the chart's probes, and a
+  deployment whose readiness takes longer can raise it. `0` restores releasing on the next
+  heartbeat. A newcomer still **takes free and expired partitions immediately** — the window
+  delays a give-up, not a scan — so the partitions a leaving pod releases reach it at once,
+  and an HPA scale-up with nobody leaving converges when the window passes and the holders
+  release. Crash takeover is unchanged: an expired lease is taken on the next scan, and the
+  membership aging out is what grows the survivors' shares, never a give-up.
+- **An instance over its share gives the surplus up**, newest tenure first. The give-up is
+  **started, not waited on inside the heartbeat** (#378, P2): each partition gets its own
+  drain — the step in flight (a model request or a tool step) finishes and stores its result,
+  no new pass starts in it — and whatever is still running at `OPENHARNESS_DRAIN_TIMEOUT_MS`
+  is **handed off** with a `TurnHandoff('partition_released')` abort, so the peer finishes it
+  (#378, P1). Each partition is released **the moment its own passes are done**, so an idle
+  one goes back at once instead of waiting behind a busy sibling. The abort is cooperative, so
+  a delta already in flight may still be awaiting its append: the release waits for the
+  aborted passes to settle before it calls `releasePartition`, or the release's own fence
+  would refuse that append and log a `FencedError` for a partition this instance gave up on
+  purpose. Released partitions are left alone by this instance for a heartbeat, so the peer
+  gets the chance to take them instead of watching them bounce back.
+- **A draining partition is still ours.** It is renewed with every other lease until it is
+  released, it is not counted in the share's "kept" set (so the instance can take the
+  partitions its new membership entitles it to), it starts no new pass, and a signal for it is
+  not served locally — the event is in the log, so the peer's `findSessionsNeedingWork` on
+  acquire finds it. Because renewal no longer waits on a drain, the lease TTL does **not**
+  have to outlast `OPENHARNESS_DRAIN_TIMEOUT_MS`: the deployment's 30 s TTL against a 40 s
+  drain is fine, and a test may use a TTL shorter than the drain.
 - **The membership ages out with the leases.** Both windows are one lease TTL: a crash stops
   the heartbeats, so the row is out of every peer's count at the instant the dead instance's
   leases stop being renewed and start being stealable — the survivors' shares grow back to the
@@ -175,14 +211,26 @@ has just changed hands gets the same answer as one that has been running all alo
 
 ## Shutdown and crashes
 
-`stop()` stops the timers, drains the turns in flight (they are aborted, so a brain cuts its
-model request short and writes the partial reply, the closed span and `session.status_idle`
-before it stops), **deletes its membership row** — peers stop counting the instance at once, so
-their shares grow immediately — and then **releases every lease it still holds**. The next
-instance takes the partitions over at its next heartbeat rather than waiting out the TTL. An
-acquire that was already in flight when the stop began is included: it cannot be cancelled, so
-the scan that holds it releases it the moment it sees the instance stopped — a stopping
-instance never leaves a live lease behind.
+`stop()` stops the timers and accepts no new pass, **deletes its membership row** — peers stop
+counting the instance at once, so their shares grow immediately — and then releases each
+partition **by itself**, as soon as that partition's passes are done (#378, P2). An idle
+partition goes back at once; the peer takes it at its next heartbeat, so a user message to an
+idle session in it is not stuck behind the rest of the drain. A partition with a turn in
+flight is **drained softly**: the model request or tool step finishes and stores its result.
+Only a step still running at `OPENHARNESS_DRAIN_TIMEOUT_MS` is **handed off** — the abort
+carries a `TurnHandoff('shutdown')` reason, the brain writes nothing more and leaves the turn
+open, and the partition's next owner finishes it with the same inherited-turn machinery a
+crash uses (#378, P1). The release waits for the aborted passes to settle before
+`releasePartition`, so a deliberate handoff is not also a fenced write. The next instance
+takes the partitions over at its next heartbeat rather than waiting out the TTL. An acquire
+that was already in flight when the stop began is included: it cannot be cancelled, so the
+scan that holds it releases it the moment it sees the instance stopped — a stopping instance
+never leaves a live lease behind.
+
+The default drain is 40 s: it fits inside the pod's 60 s grace period and below the load
+balancer's 45 s connection draining (see the chart README). `/ready` answers 503 from the
+instant `shutdown()` is called, so the load balancer stops sending new requests while the
+drain runs.
 
 A crash is the other half of that: nothing is released and nothing keeps the membership row
 fresh, so both age out together — after `OPENHARNESS_LEASE_TTL_MS` the row is out of every
@@ -192,17 +240,50 @@ expired and take them. What they find in the log is the turn the dead instance h
 `brain_lost` and runs the turn again. Nothing is lost, because nothing was ever held in
 memory.
 
+### What a crash looks like to the user
+
+A crash is rare and may be visible, but it must not freeze for ever. With the deployment
+defaults — `OPENHARNESS_LEASE_TTL_MS` 30 s and `OPENHARNESS_HEARTBEAT_MS` 10 s — the partial
+reply stops, the client's stall indicator appears after 15 s (`Waiting for the server…`) or as
+soon as its own connection drops (`Reconnecting…`), and roughly 30–40 s after the kill a peer
+takes the partition over. The peer closes the orphaned span `brain_lost`, which **supersedes
+the partial reply** — the client drops what it had streamed, because nothing will ever store the
+message those chunks previewed — and re-runs the request. The user sees the reply restart and
+finish with one complete answer, without sending anything. A tool call that was in flight is
+answered `execution lost` with a sentence telling the model the server stopped, the outcome is
+unknown, and it may retry if that is safe; it is never re-run automatically.
+
+**Recovery is capped** (`OPENHARNESS_MAX_RECOVERY_ATTEMPTS`, 3 by default). A turn that takes
+every owner down with it — a poison input that crashes the process whenever the request runs —
+would otherwise be recovered for ever, one process death per lease TTL. Before taking an
+inherited turn over, the brain counts the consecutive `brain_lost` closures for that turn with
+no completed model request between them; the rule is cause-agnostic, because a graceful handoff
+leaves the same closure as a crash, and a turn that keeps moving without finishing a step is
+just as stuck. At the cap it closes the open span, writes a terminal
+`session.error { type: recovery_exhausted_error }` and `session.status_idle`, and the user can
+send a new message — which starts a fresh turn and a fresh count. The message says how many
+takeovers happened.
+
+The two lease timings are the knob that bounds the stall: shrinking them (say 20 s / 5 s)
+shortens crash recovery but raises the chance that a loaded instance's renewal LAPSES while a
+peer is scanning. A lapse nobody takes over is still renewable (see "Leases and epochs"), so the
+risk is a false takeover only when the peer really scans during the lapse; the deployment
+defaults favour stability.
+
 ## Configuration
 
-| variable                   | default                        | what it does                                     |
-| -------------------------- | ------------------------------ | ------------------------------------------------ |
-| `SCHEDULER`                | `local`                        | `local`, or `postgres` for partition leases      |
-| `DATABASE_URL`             | —                              | required by `SCHEDULER=postgres`                 |
-| `OPENHARNESS_INSTANCE_ID`  | hostname + pid + random suffix | this instance's id in the lease table            |
-| `OPENHARNESS_PARTITIONS`   | `64` (the protocol's)          | how many partitions the session space has        |
-| `OPENHARNESS_LEASE_TTL_MS` | `30000`                        | how long a lease lasts before it must be renewed |
-| `OPENHARNESS_HEARTBEAT_MS` | `10000`                        | how often leases are renewed and free ones taken |
-| `OPENHARNESS_SWEEP_MS`     | `60000`                        | how often owned partitions are re-scanned        |
+| variable                            | default                        | what it does                                                                                                        |
+| ----------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `SCHEDULER`                         | `local`                        | `local`, or `postgres` for partition leases                                                                         |
+| `DATABASE_URL`                      | —                              | required by `SCHEDULER=postgres`                                                                                    |
+| `OPENHARNESS_INSTANCE_ID`           | hostname + pid + random suffix | this instance's id in the lease table                                                                               |
+| `OPENHARNESS_PARTITIONS`            | `64` (the protocol's)          | how many partitions the session space has                                                                           |
+| `OPENHARNESS_LEASE_TTL_MS`          | `30000`                        | how long a lease lasts before it must be renewed                                                                    |
+| `OPENHARNESS_HEARTBEAT_MS`          | `10000`                        | how often leases are renewed and free ones taken                                                                    |
+| `OPENHARNESS_SWEEP_MS`              | `60000`                        | how often owned partitions are re-scanned                                                                           |
+| `OPENHARNESS_BALANCE_STABILITY_MS`  | `30000`                        | how long the membership must be unchanged before surplus is released (#378, P3); `0` releases at the next heartbeat |
+| `OPENHARNESS_DRAIN_TIMEOUT_MS`      | `40000`                        | how long a shutdown/release lets the step in flight finish before the hard handoff                                  |
+| `OPENHARNESS_MAX_RECOVERY_ATTEMPTS` | `3`                            | how many takeovers one turn may survive before it ends with `recovery_exhausted_error` (#378, P4)                   |
 
 The instance id has to be unique among the instances sharing a database: two live instances
 leasing under one id would fence each other's writes.
@@ -211,6 +292,12 @@ leasing under one id would fence each other's writes.
 table and the in-memory store has no database to put them in. A heartbeat at or above the TTL
 fails it too: that is a lease that lapses between two renewals, which is a partition handing
 itself over every cycle rather than a configuration.
+
+Any deployment that can run more than one instance must use `postgres`. `local` owns every
+partition in the process and writes unfenced, so a second copy would recover and re-run turns
+the first is still running and could not deliver an interrupt to the owner. The Helm chart
+(`charts/openharness`) therefore defaults `SCHEDULER` to `postgres`, and refuses to render
+`local` when `replicaCount` or the HPA allows more than one pod (issue #378).
 
 Two instances sharing a database is all it takes to run the partitioned scheduler — nothing
 else coordinates them:
@@ -237,6 +324,10 @@ that stalls a cycle past the TTL cannot make a healthy instance look dead.
 | spread over instances that boot together          | half each, no overlap, and nothing changes hands afterwards                                              |
 | a first scan that loses the race                  | the membership gives the loser its share (it takes, or the winner releases)                              |
 | three instances boot together                     | each at most `ceil(8/3)`, together the whole space, then stable                                          |
+| three instances boot behind a stability window    | the same division (and nothing changing hands after it), with no release before the window passes        |
+| a join with no leave                              | the holder keeps everything while the window is open; the shares converge after it                       |
+| a free partition during the window                | a newcomer takes it at once: the window delays a give-up, not the scan                                   |
+| a join and a leave inside the window              | the join moves nothing; a survivor keeps every tenure it had, and the leaver's partitions move once      |
 | an idle instance that is alone                    | no release over five TTLs: the held set and every epoch stay put, a lease that lapsed untouched included |
 | a cycle that outlives the lease                   | the lapse is renewed, not lost: same held set, same epochs, no "lost partition"                          |
 | a member that stops heartbeating                  | dropped after about a TTL, its share taken over                                                          |
@@ -250,5 +341,9 @@ that stalls a cycle past the TTL cannot make a healthy instance look dead.
 | the sweep finds work no signal mentioned          | the safety net, with the heartbeat slowed down                                                           |
 | died mid-turn → taken over → turn finished        | `brain_lost`, re-run, correct order, every span closed                                                   |
 | the zombie that wakes up cannot write             | a `FencedError`, nothing stored, the process still alive                                                 |
-| a lease that cannot be renewed is dropped         | the turn is aborted and the partition stops being this work                                              |
-| interrupts routed across instances                | partial reply, closed span, idle, nothing left queued                                                    |
+| a lease that cannot be renewed is dropped         | the turn is handed off and the partition stops being this work                                           |
+| shutdown mid-turn                                 | handed off, the peer finishes it: `brain_lost`, then a complete reply, no `interrupted`                  |
+| a surplus partition released mid-turn             | the taker finishes the turn the same way                                                                 |
+| a lost lease mid-turn                             | the taker finishes the turn the same way; the old owner's abort writes nothing                           |
+| a recovered task wait                             | the acquire scan arms the deadline the log recorded, not the next sweep                                  |
+| interrupts routed across instances                | partial reply, closed span, idle, nothing left queued — a user's abort is still an interrupt             |

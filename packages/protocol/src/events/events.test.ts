@@ -669,6 +669,41 @@ describe('session.error', () => {
     }
   })
 
+  it('carries recovery_exhausted_error, terminal and never retried (#378, P4)', () => {
+    // A turn that takes every owner down with it is stopped rather than recovered for ever:
+    // the brain writes this notice and the session goes idle, so the user can send a new
+    // message. `terminal` is the only retry status it may carry — recovery was already tried.
+    const event = {
+      ...storedSamples['session.error'],
+      error: {
+        type: 'recovery_exhausted_error',
+        message:
+          'The turn was taken over 3 times without completing a step, so it was stopped. ' +
+          'Send a new message to try again.',
+        retry_status: { type: 'terminal' },
+      },
+    }
+    expect(SessionErrorTypeSchema.safeParse('recovery_exhausted_error').success).toBe(true)
+    expect(SessionErrorEventSchema.safeParse(event).success).toBe(true)
+    expect(SessionErrorSchema.parse(event.error).type).toBe('recovery_exhausted_error')
+  })
+
+  it('refuses to retry recovery_exhausted_error', () => {
+    for (const retryStatus of ['retrying', 'exhausted']) {
+      expect(
+        SessionErrorEventSchema.safeParse({
+          ...storedSamples['session.error'],
+          error: {
+            type: 'recovery_exhausted_error',
+            message: 'The turn kept being taken over, so it was stopped.',
+            retry_status: { type: retryStatus },
+          },
+        }).success,
+        retryStatus,
+      ).toBe(false)
+    }
+  })
+
   it('rejects an unknown error type or retry status', () => {
     expect(
       SessionErrorEventSchema.safeParse({

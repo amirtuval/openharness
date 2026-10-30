@@ -16,9 +16,11 @@
  *
  * `migrate` applies this package's migrations — the log's tables, Better Auth's tables (the
  * server sub-issue #61 runs Better Auth against them with its own migrator disabled) and
- * `provider_credentials` — in one locked transaction. See `packages/session/docs/postgres.md`
- * for the schema, the delivery model and how to run the conformance suites against a real
- * database.
+ * `provider_credentials` — one file at a time, recording each in the `schema_migrations`
+ * ledger in the same transaction. A database whose ledger names every file takes no lock on
+ * any application table, which is what makes a pod booting during a rollout harmless to the
+ * servers still appending (issue #378, PR 3/6). See `packages/session/docs/postgres.md` for the
+ * schema, the delivery model and how to run the conformance suites against a real database.
  */
 
 export { PostgresSessionStore, createPostgresSessionStore } from './store'
@@ -48,6 +50,7 @@ export type {
   ProviderCredentialMetadataRow,
   ProviderCredentialRow,
   ProviderCredentialsTable,
+  SchemaMigrationsTable,
   SchedulerInstancesTable,
   SessionsTable,
   SkillFileRow,

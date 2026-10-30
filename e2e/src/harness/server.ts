@@ -54,7 +54,15 @@ const PORT_ATTEMPTS = 5
 const OUTPUT_DRAIN_TIMEOUT_MS = 1_000
 
 /** How long a killed process is given to be reaped. */
-const KILL_TIMEOUT_MS = 10_000
+/**
+ * How long a killed process is given to exit.
+ *
+ * A `SIGTERM` is a graceful shutdown, and since #378 P2 that includes a soft drain: a rolling
+ * restart's test lets the step in flight finish, up to its `OPENHARNESS_DRAIN_TIMEOUT_MS`
+ * (the e2e scenarios use 2–20 s, a deployment 40 s). The old ten seconds was sized for the
+ * hard-abort shutdown; it now has to outlast the drain and its settle.
+ */
+const KILL_TIMEOUT_MS = 45_000
 
 /** How often `waitForOutput` looks again. */
 const OUTPUT_POLL_MS = 20

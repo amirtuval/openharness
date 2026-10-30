@@ -193,7 +193,7 @@ empty. Everything the Ingress stack did is preserved, one object at a time:
 | `networking.gke.io/managed-certificates`          | `networking.gke.io/certmap` on the Gateway                                                                                                    |
 | `FrontendConfig` `redirectToHttps`                | an `HTTPRoute` on the `http` listener with a `RequestRedirect` filter, 301                                                                    |
 | `BackendConfig` `healthCheck`                     | `HealthCheckPolicy`, HTTP port 3000 `/ready`                                                                                                  |
-| `BackendConfig` `timeoutSec`/`connectionDraining` | `GCPBackendPolicy`, `timeoutSec: 3600`, `drainingTimeoutSec: 30`                                                                              |
+| `BackendConfig` `timeoutSec`/`connectionDraining` | `GCPBackendPolicy`, `timeoutSec: 3600`, `drainingTimeoutSec: 45` (above the 40 s drain, below the 60 s grace)                                 |
 | `BackendConfig` `cdn` (`USE_ORIGIN_HEADERS`)      | `GCPHTTPFilter` with `cacheMode: USE_ORIGIN_HEADERS`, attached by `ExtensionRef` on the HTTPS route                                           |
 | Service `cloud.google.com/neg`                    | nothing — a Gateway creates **standalone NEGs** itself, and GKE documents that the annotation must not be modified on a Service it references |
 | Service `cloud.google.com/backend-config`         | nothing — the policies above replace it                                                                                                       |
@@ -261,6 +261,47 @@ server build", and fix forward if the change was a migration.
 
 That is the rollback you _choose_. A rollout that never becomes ready rolls itself back
 automatically — see [When a deploy fails](#when-a-deploy-fails).
+
+### Migrations on boot
+
+Every pod runs `@openharness/session`'s `migrate()` before it starts serving. Since #378
+(PR 3/6) a `schema_migrations` ledger records the files already applied, so a surge pod booting
+during a rollout runs no migration statement at all and takes no lock on the application
+tables — the servers still appending are not stalled or deadlocked. A database migrated by an
+older build has every table and an empty ledger: its **first** new boot re-runs the idempotent
+files once under the advisory lock and records them. That is one boot per database; if you can,
+avoid overlapping it with a heavy write burst. A migration that genuinely needs a strong lock
+runs with a `lock_timeout` and retries with backoff, so it cannot wait behind a live append
+forever; if the lock never clears the new pod fails to boot and, with `maxUnavailable: 0`, the
+rollout keeps the old replicas serving. Files are applied in name order and follow the
+expand/contract rules in `packages/session/src/postgres/migrate.ts`; a file that has been
+applied anywhere is never edited — add a new one.
+
+### Recommended operational follow-ups (not built here)
+
+Two things the #378 stack found, written down as recommendations rather than code. Neither is
+required for the current rollout to work; both make a deployment's worst moments more
+predictable.
+
+- **Run the migration CLI as a pre-rollout Job.** The ledger makes every boot after the first a
+  fast read, but the one-time bootstrap of an old-runner database (an empty ledger over existing
+  tables) still re-runs the idempotent files under the advisory lock, and a migration that
+  genuinely needs a table lock still takes it on a serving pod. A Job that runs
+  `yarn workspace @openharness/session migrate` against the release's `DATABASE_URL` **before**
+  the Deployment rolls keeps that work off a serving pod entirely; the image already contains
+  the built CLI (`packages/session`'s `migrate` bin). The server still migrates on boot as a
+  safety net — a pod that starts against an un-migrated database must not serve — but with the
+  Job in front of it, the normal boot is the ledger's happy path (#392; see
+  [`packages/session/docs/postgres.md`](../packages/session/docs/postgres.md)).
+- **Tune the lease timings if crash-recovery latency matters more than rebalance stability.**
+  `OPENHARNESS_LEASE_TTL_MS` (30 s) and `OPENHARNESS_HEARTBEAT_MS` (10 s) bound how long a
+  crashed owner's turn stalls: the partition becomes stealable after the TTL, and a peer's next
+  heartbeat takes it, so the user waits roughly the TTL plus a heartbeat before the reply
+  restarts. Shorter values (e.g. 20 s / 5 s) recover sooner but make a loaded instance's renewal
+  more likely to lapse while a peer scans; a lapse nobody takes over is still renewable, so the
+  cost is a false takeover only when a scan lands in the window. The defaults favour stability.
+  The recovery cap itself is `OPENHARNESS_MAX_RECOVERY_ATTEMPTS` (3): a poison turn ends after
+  that many takeovers rather than looping through pods (#378, P4).
 
 ### When a deploy fails
 
@@ -786,9 +827,10 @@ means a turn open, a prompt queued, or a child parked waiting for its own helper
 
 The one thing to size against the deployment is the live-task cap: a helper's turn is a session
 turn like any other — the brain signals the scheduler, which runs it as its own pass — so it takes
-one of the `OPENHARNESS_MAX_CONCURRENT_SESSIONS` slots. The default live cap (10) is above that
-limit's default (4), so a chat that starts ten helpers queues them for slots rather than running
-them all at once. A value below `1` on either variable fails the boot.
+one of the `OPENHARNESS_MAX_CONCURRENT_SESSIONS` slots. The default live cap (10) is below the
+slot cap (32), so a chat that starts ten helpers has every one of them running as soon as a pod
+has slots free rather than queuing half of them behind the limit. A value below `1` on either
+variable fails the boot.
 
 ### What is deliberately off
 

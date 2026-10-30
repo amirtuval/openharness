@@ -4,6 +4,7 @@ import {
   createContextStrategy,
   DEFAULT_CLEAR_THRESHOLD,
   DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_RECOVERY_ATTEMPTS,
   DEFAULT_MAX_TOOL_STEPS,
   type ModelFactory,
 } from '@openharness/brain'
@@ -75,13 +76,18 @@ import {
 import type { Tracer, TracingMode } from '../observability/tracing'
 import { startServer } from '../main'
 import {
+  DEFAULT_BALANCE_STABILITY_MS,
   DEFAULT_HEARTBEAT_MS,
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_SWEEP_MS,
 } from '../partition-scheduler'
 import type { ResolveSessionCredential } from '../credentials'
 import type { ProviderCredentialValidator } from '../provider-validation'
-import { LocalScheduler, type SessionScheduler } from '../scheduler'
+import {
+  DEFAULT_MAX_CONCURRENT_SESSIONS,
+  LocalScheduler,
+  type SessionScheduler,
+} from '../scheduler'
 import { type AppEnv, type Logger, silentLogger } from '../types'
 import {
   type ScriptedModel,
@@ -287,6 +293,8 @@ export interface TestOptions {
    * The production default unless a test wants a turn cut short early.
    */
   readonly maxToolSteps?: number
+  /** How many takeovers one turn may survive before recovery gives up (#378, P4). */
+  readonly maxRecoveryAttempts?: number
   /** The subagent limits a test runs with (epic #340, S6; #344); the deployment's defaults. */
   readonly maxAgentDepth?: number
   readonly maxLiveTasks?: number
@@ -350,6 +358,8 @@ export interface TestOptions {
   readonly heartbeatMs?: number
   /** How often owned partitions are re-scanned. */
   readonly sweepMs?: number
+  /** How long the membership must be unchanged before surplus is released (#378, P3). */
+  readonly balanceStabilityMs?: number
   /** How long superseded chunks are kept before compaction deletes them. */
   readonly deltaRetentionMs?: number
   /** How often the compaction job runs; `0` disables it. */
@@ -834,17 +844,21 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
             tenantId: options.providers.microsoft.tenantId ?? 'common',
           },
     testModel: undefined,
+    testToolExecutionLog: undefined,
     webDir: options.webDir,
     allowPrivateProviderUrls: options.allowPrivateProviderUrls ?? false,
     trustedProxyHops: options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS,
     corsOrigins: [...(options.corsOrigins ?? [])],
-    maxConcurrentSessions: options.maxConcurrentSessions ?? 4,
+    maxConcurrentSessions: options.maxConcurrentSessions ?? DEFAULT_MAX_CONCURRENT_SESSIONS,
     drainTimeoutMs: options.drainTimeoutMs ?? 5000,
     instanceId: options.instanceId ?? 'test-instance',
     partitions: options.partitions ?? DEFAULT_PARTITION_COUNT,
     leaseTtlMs: options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
     heartbeatMs: options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
     sweepMs: options.sweepMs ?? DEFAULT_SWEEP_MS,
+    // The default is the deployment's; a test that runs the partition scheduler with several
+    // instances and expects an immediate rebalance sets 0 or a window it can wait out.
+    balanceStabilityMs: options.balanceStabilityMs ?? DEFAULT_BALANCE_STABILITY_MS,
     deltaRetentionMs: options.deltaRetentionMs ?? DEFAULT_DELTA_RETENTION_MS,
     // Off unless a test asks: a compaction timer running under every test's feet would make
     // "the chunks are still there" assertions a race. The job's own suite turns it on.
@@ -853,6 +867,7 @@ export function testConfig(options: TestOptions = {}): ServerConfig {
     clearThreshold: options.clearThreshold ?? DEFAULT_CLEAR_THRESHOLD,
     todoNudge: options.todoNudge ?? false,
     maxToolSteps: options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS,
+    maxRecoveryAttempts: options.maxRecoveryAttempts ?? DEFAULT_MAX_RECOVERY_ATTEMPTS,
     maxAgentDepth: options.maxAgentDepth ?? DEFAULT_MAX_AGENT_DEPTH,
     maxLiveTasks: options.maxLiveTasks ?? DEFAULT_MAX_LIVE_TASKS,
     // Observability (#158) is off in a test by default: the readable log format, and no

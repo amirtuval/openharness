@@ -152,6 +152,8 @@ export function ChatView({
     searches,
     usage,
     status,
+    stalled,
+    reconnecting,
     lastError,
     mcpFailure: storedMcpFailure,
     loadingHistory,
@@ -527,8 +529,23 @@ export function ChatView({
         // reader is waiting for — unless the engine has already reported a pass, which is a more
         // precise statement about the same wait.
         compacting,
+        // A crash (#378, P4): the turn is running but the stream has said nothing for 15 s, or
+        // the client knows the connection is reconnecting. The row is where a stalled reply is
+        // visible instead of silent.
+        stalled,
+        reconnecting,
       }),
-    [status, retrying, retryReason, interrupted, hasReplyText, summarizing, compacting],
+    [
+      status,
+      retrying,
+      retryReason,
+      interrupted,
+      hasReplyText,
+      summarizing,
+      compacting,
+      stalled,
+      reconnecting,
+    ],
   )
 
   const confirmDelete = async (): Promise<void> => {

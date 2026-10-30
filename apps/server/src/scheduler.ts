@@ -48,8 +48,9 @@ export interface SessionScheduler {
   start(): Promise<void>
 
   /**
-   * Stop: accept no new work, abort the turns in flight, and let them finish writing (up to a
-   * drain timeout) before returning.
+   * Stop: accept no new work, **drain** the turns in flight (finish the step in flight and
+   * store its result), and re-hand only what does not finish inside the drain timeout off to
+   * the next owner before returning (#378, P2).
    */
   stop(options?: StopSchedulerOptions): Promise<void>
 
@@ -83,7 +84,11 @@ export interface StopSessionOptions {
 
 /** Options of {@link SessionScheduler.stop}. */
 export interface StopSchedulerOptions {
-  /** How long a turn in flight is given to write its last events; defaults to 5000 ms. */
+  /**
+   * How long a step in flight is given to finish before it is hard-handed off; defaults to
+   * 40000 ms (`DEFAULT_DRAIN_TIMEOUT_MS`). A step that finishes inside it is kept — the whole
+   * point of #378, P2.
+   */
   readonly drainTimeoutMs?: number
 }
 
@@ -103,9 +108,10 @@ export interface LocalSchedulerOptions {
    * `resolveCredential`; #11 passes a runner it shares with its own partition logic.
    */
   readonly runner?: SessionRunner
-  /** How many sessions may have a turn in flight at once; defaults to 4. */
+  /** How many sessions may have a turn in flight at once; defaults to
+   * {@link DEFAULT_MAX_CONCURRENT_SESSIONS}. */
   readonly maxConcurrentSessions?: number
-  /** How long `stop()` waits for a turn in flight by default; defaults to 5000 ms. */
+  /** How long `stop()` lets the step in flight finish by default; defaults to 40000 ms. */
   readonly drainTimeoutMs?: number
   /** How model failures are retried, passed to every turn. */
   readonly retry?: RetryPolicy
@@ -124,6 +130,8 @@ export interface LocalSchedulerOptions {
   /** The clearing threshold and the todo nudge (#331), passed to every turn. */
   readonly clearThreshold?: number
   readonly todoNudge?: boolean
+  /** How many takeovers one turn may survive before recovery gives up (#378, P4). */
+  readonly maxRecoveryAttempts?: number
   /**
    * How many partitions the server's sessions are spread over; the protocol's 64 by default.
    *
@@ -143,7 +151,7 @@ export const DEFAULT_MAX_CONCURRENT_SESSIONS = DEFAULT_MAX_CONCURRENT_PASSES
  * The scheduler for a server that owns every partition: a session needs work, so this process
  * runs it.
  *
- * It is a small queue. `H` sessions run at once (`maxConcurrentSessions`, 4 by default) and
+ * It is one queue. `H` sessions run at once (`maxConcurrentSessions`, 32 by default) and
  * the rest wait their turn; a session that is already running is not queued but *woken*, so
  * the running pass looks at the log again before it finishes. `signal` never blocks and never
  * throws: it is called from a request handler that has already answered the user, and a
@@ -187,6 +195,9 @@ export class LocalScheduler implements SessionScheduler {
         ...(options.tools === undefined ? {} : { tools: options.tools }),
         ...(options.clearThreshold === undefined ? {} : { clearThreshold: options.clearThreshold }),
         ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+        ...(options.maxRecoveryAttempts === undefined
+          ? {}
+          : { maxRecoveryAttempts: options.maxRecoveryAttempts }),
       })
     this.#queue = new PassQueue({
       runner,
@@ -204,9 +215,21 @@ export class LocalScheduler implements SessionScheduler {
   }
 
   async start(): Promise<void> {
-    const sessions = await this.#store.findSessionsNeedingWork(partitions(this.#partitionCount))
+    const all = partitions(this.#partitionCount)
+    const sessions = await this.#store.findSessionsNeedingWork(all)
     for (const sessionId of sessions) {
       this.#queue.request(sessionId)
+    }
+    // A session that was waiting on background tasks when the last process stopped holds no
+    // slot and no timer this process knows about (#378, P1). The log records the deadline, so
+    // recovery arms it here — otherwise the wait would not even reach the sweep's past-deadline
+    // scan until a minute after it was due. A session the work scan just queued needs no timer:
+    // the turn it runs re-reads the wait (and arms one from its outcome if it goes back to it).
+    const working = new Set(sessions)
+    for (const wait of await this.#store.findSessionsWaiting(all)) {
+      if (!working.has(wait.sessionId)) {
+        this.#queue.armWait(wait.sessionId, wait.deadline)
+      }
     }
   }
 

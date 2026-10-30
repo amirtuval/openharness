@@ -19,6 +19,7 @@ import {
   createTestToolRegistry,
   createTurnRegistry,
   createTurnTools,
+  TEST_SLOW_TOOL_NAME,
   TEST_TOOL_NAME,
   testEchoTool,
 } from './tools'
@@ -117,6 +118,22 @@ describe('createTurnRegistry and createTurnTools', () => {
       WEB_FETCH_TOOL_NAME,
       'todo_write',
     ])
+  })
+
+  it('adds the slow test tool only when the execution log opts into it (#378, P4)', () => {
+    // A mock server that names no execution log offers the ordinary test tools alone: every
+    // e2e suite but the crash one asserts the offer exactly, and a fixture-specific tool in it
+    // is the extra entry that broke them.
+    const namesOf = (registry: ToolRegistry): string[] => registry.tools.map((tool) => tool.name)
+
+    expect(namesOf(createTurnRegistry({ kind: 'mock' }))).not.toContain(TEST_SLOW_TOOL_NAME)
+    expect(
+      namesOf(createTurnRegistry({ kind: 'mock', executionLog: '/tmp/executions.log' })),
+    ).toContain(TEST_SLOW_TOOL_NAME)
+    // The log is the mock model's hook too: a provider-backed process registers none of it.
+    expect(
+      namesOf(createTurnRegistry({ kind: 'provider', executionLog: '/tmp/executions.log' })),
+    ).not.toContain(TEST_SLOW_TOOL_NAME)
   })
 
   it('reads the owner’s stored choices through the resolver it wires (#307)', async () => {

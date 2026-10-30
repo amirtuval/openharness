@@ -1,5 +1,6 @@
 import {
   AgentSchema,
+  DEFAULT_PARTITION_COUNT,
   EVENT_TYPES,
   MAX_MODES_PER_USER,
   MAX_PAGE_LIMIT,
@@ -3884,6 +3885,45 @@ export function runSessionStoreConformance(
         // status event is a later idle — the deadline is only read while it is the newest one.
         await append(store, session.id, [toolResult(call, false), statusIdle()])
         expect(await store.findSessionsNeedingWork([partitionOf(session.id)])).toEqual([])
+      })
+
+      it('reports a task wait still ahead of its deadline, so a new owner can arm it (#378)', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const deadlineMs = clock.currentMs + 5 * SECOND
+        await append(store, session.id, [statusRunning()])
+        await append(store, session.id, [statusWaitingFor([newTaskId()], deadlineMs)])
+        const partition = partitionOf(session.id)
+
+        // The work scan does not call a wait ahead of its time work — but the timer that would
+        // wake it lived in the process that ran the turn, so the partition's new owner asks
+        // this instead and arms exactly the instant the log recorded.
+        expect(await store.findSessionsNeedingWork([partition])).toEqual([])
+        expect(await store.findSessionsWaiting([partition])).toEqual([
+          { sessionId: session.id, deadline: timestampAt(deadlineMs) },
+        ])
+        // A partition this session is not in has nothing to arm.
+        expect(
+          await store.findSessionsWaiting([(partition + 1) % DEFAULT_PARTITION_COUNT]),
+        ).toEqual([])
+        // It stays reported once the deadline passes: the work scan is what answers the wait,
+        // and this read is about the instant, not about whether the instant is now.
+        clock.advance(5 * SECOND)
+        expect(await store.findSessionsWaiting([partition])).toEqual([
+          { sessionId: session.id, deadline: timestampAt(deadlineMs) },
+        ])
+      })
+
+      it('leaves an answered task wait out of the waits a new owner arms (#378)', async () => {
+        const { store, clock } = await setup()
+        const { session } = await seed(store)
+        const call = newEventId()
+        await append(store, session.id, [statusRunning(), toolUse(call, 'agent_wait')])
+        await append(store, session.id, [statusWaitingFor([newTaskId()], clock.currentMs + SECOND)])
+        // Answering the wait writes its result and carries the turn on, so the newest status
+        // event is a later idle and there is nothing left to arm.
+        await append(store, session.id, [toolResult(call, false), statusIdle()])
+        expect(await store.findSessionsWaiting([partitionOf(session.id)])).toEqual([])
       })
 
       it('leaves a session paused on the user waiting when a task reports (#363)', async () => {

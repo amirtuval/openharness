@@ -1042,6 +1042,8 @@ export function ChatScreen({
         banner={banner}
         runningSince={view.runningSince}
         lastTextAt={view.lastTextAt}
+        lastEventAt={view.lastEventAt}
+        reconnecting={view.reconnecting}
         retrying={retrying}
         summarizing={view.transcript.summarizing}
         compacting={compaction?.pending === true}

@@ -56,9 +56,11 @@ import {
   toolResultForCall,
 } from './events'
 import { classifyModelError } from './errors'
+import { isHandoffAbort } from './handoff'
 import { assertValidEvents, EventValidationError } from './validate'
 import {
   chunkRangeAfter,
+  consecutiveRecoveryClosures,
   contextView,
   isUserInterrupt,
   isUserMessage,
@@ -172,6 +174,8 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  *
  * LOOP (per model request)
  *   1. an aborted signal, or a queued user.interrupt ....... INTERRUPT
+ *   1a. the `drain` signal, and no request in flight ...... DRAIN (below): the turn is left
+ *       open for the next owner unless the step it just finished ended it naturally
  *   1b. a call the user has answered (#309) ................ answer it — run it, deny it, or
  *      write the answers — then carry on from 1 with its result
  *   2. the turn has made OPENHARNESS_MAX_TOOL_STEPS requests . STEPS EXHAUSTED (below)
@@ -285,6 +289,32 @@ import { resolveContextCompaction, summarizeContext } from './summarize'
  * request's span end, or the turn's idle event when nothing was running. No span is opened
  * for an interrupt, so no span exists without a real model request behind it.
  *
+ * DRAIN (the `drain` signal aborted — #378, P2)
+ *   a request or a tool step in flight ...... finishes, and its reply/results are stored
+ *   the next step boundary .................. nothing more is written: the turn stays OPEN
+ *   the step ended the turn naturally ....... session.status_idle, return idle — the best case
+ *
+ *   A drain is the soft half of the HANDOFF below: the scheduler wants this process to stop
+ *   owning the turn, but the pod has time to let the step in flight finish, so a model request
+ *   is not thrown away and re-issued. The boundary tests are the same ones a hard handoff uses
+ *   — between appends only — and the check sits *after* "nothing left to answer", which is why
+ *   a turn whose last step finishes naturally closes here instead of being left open.
+ *
+ * HANDOFF (the signal aborted with a `TurnHandoff` reason — #378, P1)
+ *   ..................................... nothing is written: the turn stays OPEN
+ *
+ *   The scheduler said "this process should not be running this session any more" — a
+ *   shutdown, a surplus partition given back, or a lease somebody else took over — and the
+ *   turn is not the user's to lose. Whatever the turn had already written stays exactly as it
+ *   is: the cut-off request's chunks are superseded by the next owner's `brain_lost` span end,
+ *   the same way a crash's are. No `agent.message`, no span end, no `session.status_idle`, no
+ *   child-to-parent delivery, and no answer to a call that was still waiting. The next owner
+ *   finds the open turn with `findSessionsNeedingWork` and finishes it with the inherited-turn
+ *   START above. The abort is observed only at a boundary between appends, so the handoff never
+ *   splits a step's writes: a tool step that was cut off still has its calls stored (the next
+ *   owner answers them `execution lost`), and a reply that was fully streamed may be re-issued
+ *   once more rather than closed from here.
+ *
  * MODEL FAILURE (a retryable error, attempts left)
  *    ............ span.model_request_end { error: model_error, supersedes: the chunks }
  *    ................................... session.error { retry_status: retrying }
@@ -329,6 +359,15 @@ export type TurnOutcomeKind =
    * scheduler arms a timer from {@link TurnOutcome.waiting} rather than polling for it.
    */
   | 'waiting'
+  /**
+   * The turn was **handed off** rather than ended (#378, P1): the scheduler aborted it because
+   * this process is shutting down, gave the partition up as surplus, or lost its lease. The
+   * turn wrote nothing after the abort and left itself **open** — no partial message, no span
+   * end, no `session.status_idle` — so the partition's next owner finds it with
+   * `findSessionsNeedingWork`, closes the inherited span as `brain_lost` and runs the request
+   * again. The scheduler must stop the pass and must not look for more local work.
+   */
+  | 'handed_off'
   /** The turn was cut short by an interrupt, by `signal` or by a queued `user.interrupt`. */
   | 'interrupted'
   /**
@@ -353,6 +392,19 @@ export interface TurnOutcome {
    */
   readonly waiting?: TaskWaitState
 }
+
+/**
+ * How many recoveries one turn may have before it is stopped (#378, P4).
+ *
+ * A crashed turn is normally re-run by the next owner, and a graceful hand-off of a deployment
+ * reaches the same path. A turn that takes its owner down every time it runs — a poison input —
+ * would otherwise be recovered for ever, one process death at a time. Three is enough to ride
+ * out a crash or two of unrelated bad luck (a node lost mid-turn while another is being
+ * replaced), and short enough that a poison turn is over in a few lease TTLs rather than
+ * leaving the user watching a reply that never comes. A deployment configures it with
+ * `OPENHARNESS_MAX_RECOVERY_ATTEMPTS`.
+ */
+export const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3
 
 /** What a turn waiting on tasks waits for, and until when. */
 export interface TaskWaitState {
@@ -392,6 +444,25 @@ export interface RunTurnOptions {
   readonly now?: Clock
   /** Aborting this ends the turn at the next safe point; see the lifecycle above. */
   readonly signal?: AbortSignal
+  /**
+   * A **soft** stop: finish the step in flight, then hand off at the next step boundary
+   * (#378, P2).
+   *
+   * The scheduler asks for a drain before it reaches for the hard stop. A request or a tool
+   * step that is already running is allowed to finish and store its result — so most handoffs
+   * do not throw away a model call — and the turn waits for nothing more: at the boundary
+   * before the next request it writes nothing and answers `handed_off`, exactly as an abort
+   * carrying a `TurnHandoff` reason does. A turn whose step ends it naturally (`the log has
+   * nothing left to answer`) still writes its `session.status_idle`: that is the best case,
+   * and it is why the drain is applied *after* the "nothing to answer" test.
+   *
+   * This is deliberately a second signal rather than an abort reason: a drain is not an
+   * ending, and the process may want to keep reading and writing the log (a `session.compact`
+   * answered two steps ago, a task wait settled) until the next request. The hard `signal`
+   * still ends the turn at the drain deadline, with its `TurnHandoff` reason, for work a step
+   * cannot finish in time.
+   */
+  readonly drain?: AbortSignal
   /**
    * The partition lease this turn writes under.
    *
@@ -495,6 +566,19 @@ export interface RunTurnOptions {
    * goes idle rather than retrying.
    */
   readonly maxToolSteps?: number
+  /**
+   * How many times one turn may be taken over and re-run before recovery gives up (#378, P4);
+   * {@link DEFAULT_MAX_RECOVERY_ATTEMPTS} (3) when absent.
+   *
+   * The count is the run of `brain_lost` span closures for the open turn with no completed
+   * request between them — the log's record of "this turn was recovered, died again, and was
+   * recovered". Past the limit the brain closes the orphaned span, writes
+   * `session.error { type: 'recovery_exhausted_error', retry_status: 'terminal' }` and goes
+   * idle, so a poison input fails visibly instead of looping through processes for ever. A
+   * value below `1` refuses recovery outright: the next owner ends the inherited turn instead
+   * of taking it over.
+   */
+  readonly maxRecoveryAttempts?: number
   /**
    * // extension: the share of the chat model's budget at which old tool results are cleared
    * (#331); {@link DEFAULT_CLEAR_THRESHOLD} when absent.
@@ -673,15 +757,25 @@ async function deliverTurnToParent(
 const ENDED_TURNS: ReadonlySet<TurnOutcomeKind> = new Set(['idle', 'interrupted', 'error'])
 
 async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Promise<TurnOutcome> {
-  const { store, model, resolveCredential, signal, fence } = options
+  const { store, model, resolveCredential, signal, drain, fence } = options
   const strategy = options.contextStrategy ?? DEFAULT_CONTEXT_STRATEGY
   const retry = resolveRetryPolicy(options.retry)
   const maxSteps = options.maxToolSteps ?? DEFAULT_MAX_TOOL_STEPS
+  const maxRecoveries = options.maxRecoveryAttempts ?? DEFAULT_MAX_RECOVERY_ATTEMPTS
   const writeOptions = fence === undefined ? undefined : { fence }
 
   // Read through a function: `signal.aborted` is a property TypeScript would otherwise treat
   // as frozen for the rest of the loop, and it is not — a signal aborts when the user says so.
   const isAborted = (): boolean => signal?.aborted === true
+  // The scheduler's abort, as opposed to the user's (#378, P1): a shutdown, a partition given
+  // up, or a lease lost. It leaves the turn open instead of ending it — see HANDOFF above.
+  const handedOff = (): boolean => isHandoffAbort(signal)
+  // The scheduler's **soft** stop (#378, P2): finish the step in flight, then hand off at the
+  // next boundary. It is read where a request would otherwise start, never where one is
+  // running — the stream's own `signal` is the hard stop, and this deliberately does not abort
+  // it. A drain and a hard handoff are both "not this process's turn any more", so the places
+  // that write nothing for one write nothing for the other.
+  const draining = (): boolean => drain?.aborted === true
 
   // The turn's time source, for the one thing it does with time: a task wait's deadline.
   const clock = options.now ?? systemClock
@@ -700,6 +794,13 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
   const session = await store.getSessionUnscoped(sessionId)
   if (session === null) {
     throw new SessionNotFoundError(sessionId)
+  }
+  // Already handed off — or drained — before this turn began: the scheduler does not want this
+  // process to run the session at all, so nothing is opened and nothing is written. The work is
+  // in the log, and whoever owns the partition next finds it (a shutdown's drain may still land
+  // here when a pass was queued just before the signal arrived).
+  if (handedOff() || draining()) {
+    return { outcome: 'handed_off' }
   }
   const queued = await store.getPendingUserEvents(sessionId)
   const turnState = await store.getTurnState(sessionId)
@@ -835,10 +936,16 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
     await append([statusRunning()])
   } else {
     const inherited = await readLog(store, sessionId)
+    // How many times this turn has already been taken over without completing a step (#378,
+    // P4). Both a crash and a graceful hand-off leave the same `brain_lost` closure, so this
+    // counts recoveries rather than "crashes": a turn that keeps moving between pods without
+    // ever getting a step done is just as stuck as one that crashes on every owner.
+    const recoveries = consecutiveRecoveryClosures(inherited)
     if (turnState.openSpan !== null) {
       // The span the dead brain left open. Its request will not report usage — nobody saw it
       // end — and the chunks it streamed are orphaned: nothing will ever store the message
-      // they previewed, so this span end supersedes them and replay skips them.
+      // they previewed, so this span end supersedes them and replay skips them. It closes on
+      // the exhausted path too: every span a turn finishes is closed.
       const range = chunkRangeAfter(inherited, turnState.openSpan.seq)
       await append([
         spanEnd(turnState.openSpan.id, ZERO_MODEL_USAGE, {
@@ -849,6 +956,24 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
           supersedes: range ?? undefined,
         }),
       ])
+    }
+    if (recoveries >= maxRecoveries) {
+      // Recovery has been tried often enough. Taking the turn over again would only feed the
+      // same poison to another process, so end it visibly instead: the user sees a failure and
+      // can send a new message, which starts a fresh turn with a fresh count. The idle event
+      // claims whatever user input is still queued, or the scheduler would find that input and
+      // run this same turn again.
+      await append([
+        sessionError({
+          type: 'recovery_exhausted_error',
+          message:
+            `This turn was recovered ${String(recoveries)} times without completing a step, ` +
+            'so it was stopped. Send a new message to try again.',
+          retry_status: { type: 'terminal' },
+        }),
+        statusIdle({ consumes: queued.map((event) => event.id) }),
+      ])
+      return { outcome: 'error' }
     }
     if (lastStatusEventType(inherited) === EVENT_TYPES.sessionStatusRescheduled) {
       // The inherited turn was waiting to be resumed; resuming it is what a status_running says.
@@ -1013,6 +1138,13 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
   // because a resolver has to be asked with the owner, which the request boundary reads.
   const compactionOption = options.compaction
   for (;;) {
+    // A handoff that arrived before this request started writes nothing at all and leaves the
+    // turn as it is; the next owner carries on from the log. It is checked before the user's
+    // interrupt so a shutdown never claims an interrupt that was queued behind it — that
+    // event stays pending, and the next owner answers it.
+    if (handedOff()) {
+      return { outcome: 'handed_off' }
+    }
     // An interrupt that arrived before this request started — a queued user.interrupt covers
     // the one the user sent while no brain was running to abort.
     if (isAborted()) {
@@ -1337,41 +1469,46 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
     // `session.compaction` written here is what makes it no longer pending. An idle session
     // reaches this too: the no-op guard above lets a session with a pending request open a turn
     // that answers it and nothing else.
-    if (compaction !== null) {
-      const manual = pendingManualCompaction(read)
-      if (manual !== null) {
-        const sized = sizeOf(read)
-        const manualResult = await summarizeContext({
-          chatModel: requestModel.id,
-          reason: 'manual',
-          events: read,
-          system: requestSystem,
-          estimatedTokens: sized,
-          ...(available === undefined ? {} : { tools: available }),
-          config: compaction,
-          guidance: manual.instructions,
-          model,
-          resolveCredential,
-          append,
-          ...(signal === undefined ? {} : { signal }),
-        })
-        // The outcome is written whatever came of the run — that is what "not a silent no-op"
-        // means, and it is also what stops the same request being answered twice.
-        const written = manualCompactionOutcome(manualResult)
-        await append([
-          compactionOutcome(written.outcome, {
-            ...(manual.instructions === null ? {} : { instructions: manual.instructions }),
-            ...(manualResult.summarySeq === undefined
-              ? {}
-              : { summarySeq: manualResult.summarySeq }),
-            ...(written.message === undefined ? {} : { message: written.message }),
-          }),
-        ])
-        if (isAborted()) {
-          return await endInterrupted()
-        }
-        read = await readLog(store, sessionId)
+    const manual = compaction === null ? null : pendingManualCompaction(read)
+    // A drain observed at this boundary stops the turn before another **request**, and a manual
+    // compaction is one (a summarizer call). It is handed to the next owner rather than run:
+    // the log still holds the `session.compact`, so its turn finds it.
+    if (draining() && manual !== null) {
+      return { outcome: 'handed_off' }
+    }
+    if (compaction !== null && manual !== null) {
+      const sized = sizeOf(read)
+      const manualResult = await summarizeContext({
+        chatModel: requestModel.id,
+        reason: 'manual',
+        events: read,
+        system: requestSystem,
+        estimatedTokens: sized,
+        ...(available === undefined ? {} : { tools: available }),
+        config: compaction,
+        guidance: manual.instructions,
+        model,
+        resolveCredential,
+        append,
+        ...(signal === undefined ? {} : { signal }),
+      })
+      // The outcome is written whatever came of the run — that is what "not a silent no-op"
+      // means, and it is also what stops the same request being answered twice.
+      const written = manualCompactionOutcome(manualResult)
+      await append([
+        compactionOutcome(written.outcome, {
+          ...(manual.instructions === null ? {} : { instructions: manual.instructions }),
+          ...(manualResult.summarySeq === undefined ? {} : { summarySeq: manualResult.summarySeq }),
+          ...(written.message === undefined ? {} : { message: written.message }),
+        }),
+      ])
+      if (handedOff()) {
+        return { outcome: 'handed_off' }
       }
+      if (isAborted()) {
+        return await endInterrupted()
+      }
+      read = await readLog(store, sessionId)
     }
     if (claims.length === 0) {
       const answered = contextView(read)
@@ -1379,9 +1516,20 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         // Recovery, with the reply already in the log: the request that produced it was answered
         // before the brain died, and asking again would store a second reply. An idle turn that
         // ran only a manual compaction lands here too: it has nothing to answer, so it closes.
+        // A **drain** is deliberately checked after this: a step that ended the turn naturally
+        // writes its idle here, which is the best case for a deploy — nothing is left open for
+        // the next owner.
         await append([statusIdle()])
         return { outcome: 'idle' }
       }
+    }
+    // A drain at a step boundary with a request due (#378, P2): the previous request and its
+    // tool step are fully stored, and the next request is not started. Nothing more is
+    // written — the turn stays open, exactly as a hard handoff leaves it. Every point past
+    // this line opens a model request (including the automatic compaction below), which is
+    // what the drain is waiting to avoid.
+    if (draining()) {
+      return { outcome: 'handed_off' }
     }
     // A model repeating one failing call is a loop the step limit would only catch at fifty
     // (epic #303, X2; #331). A run of the newest calls in the turn with the same name and the
@@ -1633,6 +1781,15 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
     })
     const range: Supersedes = { from_seq: chunkOpen.seq, to_seq: lastChunkSeq }
 
+    // A handoff that stopped the stream is not an interrupt (#378, P1). The request's chunks
+    // stay exactly where they are — nothing supersedes them here — and the next owner closes
+    // this span as `brain_lost` with that range, which is the crash shape every reader already
+    // understands. The check is here, before the first write of the step's ending, so a step is
+    // never left with a stored reply and no span end or the other way round.
+    if (handedOff()) {
+      return { outcome: 'handed_off' }
+    }
+
     if (result.aborted) {
       return await endInterrupted({
         id: eventId,
@@ -1676,6 +1833,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
           }),
           statusRescheduled(),
         ])
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1724,6 +1884,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
           append,
           ...(signal === undefined ? {} : { signal }),
         })
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1763,6 +1926,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         // The backoff is where an interrupt lands next: nothing is in flight, so honoring the
         // signal here closes the turn the same way an abort mid-stream does.
         await retry.sleep(backoffDelay(retriesUsed, retry), signal)
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1803,11 +1969,16 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
           ? undefined
           : agentOpaqueContent(opaque.provider, opaque.model, opaque.parts, opaque.dropped)
       if (result.text.length > 0) {
+        // The reply, its opaque content, the span end and the totals are **one** append: a
+        // handoff (or a crash) can then never leave a stored reply whose span is still open,
+        // or a closed span whose usage totals never landed. The order inside the append is
+        // the lifecycle's — message, opaque content, span end, usage — exactly as before.
         await append([
           agentMessage(eventId, result.text, range),
           ...(stored === undefined ? [] : [stored]),
+          spanEnd(start.id, result.usage, searchSpan(result)),
+          totals,
         ])
-        await append([spanEnd(start.id, result.usage, searchSpan(result)), totals])
       } else {
         await append([
           ...(stored === undefined ? [] : [stored]),
@@ -1830,6 +2001,9 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         // strategy rebuilds it from the opaque content it stored. The step counts against the
         // turn's budget like any other, so a provider that kept pausing ends the turn rather
         // than looping.
+        if (handedOff()) {
+          return { outcome: 'handed_off' }
+        }
         if (isAborted()) {
           return await endInterrupted()
         }
@@ -1877,12 +2051,24 @@ async function runTurnInner(sessionId: SessionId, options: RunTurnOptions): Prom
         ...(signal === undefined ? {} : { signal }),
         append,
       })
+      if (handedOff()) {
+        // The calls are in the log with no answers. They are left that way on purpose: a tool
+        // may already have had an effect nobody recorded, so the next owner answers them
+        // `execution lost` (X3) rather than this turn inventing an answer or a re-run.
+        return { outcome: 'handed_off' }
+      }
       if (isAborted()) {
         return await endInterrupted()
       }
       continue
     }
 
+    // A handoff that landed after the last step but before the turn's idle event leaves the
+    // turn open rather than closing it here: the next owner reads the same log, finds the
+    // reply already stored, and writes the idle itself. Nothing is decided twice.
+    if (handedOff()) {
+      return { outcome: 'handed_off' }
+    }
     const arrived = await store.getPendingUserEvents(sessionId)
     if (arrived.length > 0) {
       continue

@@ -142,6 +142,7 @@ import type {
   PartitionSignalListener,
   SessionEventListener,
   SessionStore,
+  SessionTaskWait,
   TurnState,
   TurnStateKind,
   Unsubscribe,
@@ -951,6 +952,25 @@ export class InMemorySessionStore implements SessionStore {
       .filter((record) => wanted.has(partitionOf(record.session.id, this.#partitionCount)))
       .filter((record) => this.#needsWork(record))
       .map((record) => record.session.id)
+    return resolved(found)
+  }
+
+  findSessionsWaiting(partitions: readonly number[]): Promise<SessionTaskWait[]> {
+    const wanted = new Set(partitions)
+    const found: SessionTaskWait[] = []
+    for (const record of [...this.#sessions.values()].sort((left, right) =>
+      compareKeys(left.session, right.session),
+    )) {
+      if (!wanted.has(partitionOf(record.session.id, this.#partitionCount))) {
+        continue
+      }
+      const events = record.events.map((entry) => entry.event)
+      const pause = taskWaitPause(events)
+      if (pause === null || isSuperseded(pause.event, this.#supersessions.get(record.session.id))) {
+        continue
+      }
+      found.push({ sessionId: record.session.id, deadline: pause.deadline })
+    }
     return resolved(found)
   }
 

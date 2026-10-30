@@ -79,6 +79,22 @@ export interface ChatViewState {
    */
   readonly lastTextAt: number | null
   /**
+   * When the last streamed event arrived, in epoch milliseconds (#378, P4).
+   *
+   * Beside the transcript rather than in it, like {@link lastTextAt}: the reducer is pure and
+   * the log has no arrival clock. It is the baseline the stall indicator measures against —
+   * a running turn that has heard nothing for the client's stall window is shown as "Waiting
+   * for the server…" rather than as a reply that is being written.
+   */
+  readonly lastEventAt: number
+  /**
+   * Whether the event stream is reconnecting (#378, P4).
+   *
+   * The client's stream loop reconnects silently and resumes by `seq`; this is the one fact it
+   * reports, so the status line can say "Reconnecting…" instead of leaving the screen frozen.
+   */
+  readonly reconnecting: boolean
+  /**
    * The reply whose `span.model_request_end` is still outstanding, or `null` (#208).
    *
    * The transcript keeps a model request until its span end folds that request's tokens and
@@ -227,6 +243,8 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
     modeId: session.mode,
     runningSince: null,
     lastTextAt: null,
+    lastEventAt: now(),
+    reconnecting: false,
     awaitingMetaId: null,
     interrupted: false,
     answering: [],
@@ -250,6 +268,8 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
       transcript: next,
       runningSince,
       lastTextAt,
+      lastEventAt,
+      reconnecting,
       awaitingMetaId: awaitingMeta(next),
       interrupted,
     })
@@ -270,10 +290,16 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
   // these are facts about the session's *time*, which the reducers have no business in.
   let runningSince: number | null = null
   let lastTextAt: number | null = null
+  let lastEventAt = now()
+  let reconnecting = false
   let interrupted = false
 
   /** Fold an event into the transcript, noting what it says about the clock first. */
   function apply(event: StreamEvent): void {
+    // Every event this client folds in resets the quiet window (#378, P4). It is the arrival
+    // time, not the event's `processed_at`: a resumed backlog is old, and the question is
+    // whether the screen has heard anything lately.
+    lastEventAt = now()
     noteTiming(event)
     transcript.apply(event)
   }
@@ -508,6 +534,14 @@ export function createChatSession(options: ChatSessionOptions): ChatSession {
         deltas: true,
         afterSeq: transcript.getState().lastSeq,
         signal: controller.signal,
+        onConnection: (connection) => {
+          if (controller.signal.aborted) return
+          // A fresh connection starts a fresh quiet window; a dropped one is reported before
+          // the backoff, so the status line can say "Reconnecting…" at once.
+          lastEventAt = now()
+          reconnecting = connection.state === 'reconnecting'
+          setState({ lastEventAt, reconnecting })
+        },
       })
 
       for await (const event of events) {
