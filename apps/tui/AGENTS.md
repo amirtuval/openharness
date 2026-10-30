@@ -248,7 +248,10 @@ A mode whose model cannot be used is refused with the server's own sentence in t
 never silently swapped. A plain model pick and a mode pick are one choice: each clears the
 other, because a chat follows a mode or a model, never both. The status line names the mode
 first — `smart · claude-sonnet-5` — so what the chat follows and what it resolved to are on one
-line (`(next message)` while the pick is pending).
+line (`(next message)` while the pick is pending). **A plain model pick drops the mode clause
+immediately** (`statusModeLabel`): the session still follows its mode until that message is
+sent, but the reader must see the switch the moment it is made — keeping the mode named until
+send was the reported web bug's terminal twin.
 
 ### Switching the model in a chat
 
@@ -370,9 +373,11 @@ with the Ctrl+L mechanism and keeps the session, `/help` prints the commands and
 the prompt, and `/exit` (alias `/quit`) leaves — the same leave as the second idle Ctrl+C.
 
 **The reader's skills are rows in that menu** (`menuCommands`, #349, K7). The rows come from the
-client's own `slashCommands(skills)` — which already knows that a skill is offered when it is
-**on** (K8) and **user-invocable**, spells its usage `/name <argument-hint>`, and keeps the
-API's order — re-wrapped as registry entries so a skill is filtered, completed and corrected
+client's own `slashCommands(skills, override)` — the **effective** on/off set of K8 (the
+protocol's `skillsInForce` applied to the chat's current or pending mode, so a row the server
+would refuse is not offered and one it would accept is), **user-invocable** only, with the usage
+`/name <argument-hint>` and the API's order — re-wrapped as registry entries so a skill is
+filtered, completed and corrected
 exactly as `/compact` is, and a typo near a skill name is suggested by name rather than sent to
 the model. The screen reads `client.skills.list()` once in the background (a failed read leaves
 the menu with the chat's own commands) and re-reads it when `/skills` closes, because a skill
@@ -999,6 +1004,10 @@ the web app does, in the transcript, where the `agent` call that started it was.
   second column, plus one line saying a type is a helper's mode and that this CLI only shows it.
   `oh` does not create or edit modes, and a description is what the parent model chooses a type
   by — so it is read here and written in the web app's Settings → Modes.
+- **`oh modes` shows each section default a mode carries** (epic #349, B8): a mode with a
+  `tools` override adds `not listed: tools follow · mcp on · skills off`, naming all three
+  values (`follow` included) so two modes can be compared without remembering which absence
+  means what. The override is read-only here, like the skill map beside it.
 
 ### Remote MCP servers in the terminal (#303, X10; #313)
 

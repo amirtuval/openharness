@@ -692,15 +692,27 @@ toolCalls)`, the client's one merge, so a call draws where its event sits. **It 
   together.
 
 **A mode may turn a tool on or off** (#307). `mode-form-dialog.tsx` grew a Tools section whose
-choice per tool is tri-state — _Follow my settings_ (the absence of a name in the patch), _Always
-on_, _Always off_ — which `lib/tools.ts`'s `modeToolChoice` / `withModeToolChoice` translate to
-and from the wire's `{ builtin: { name: boolean } }`. A patch that ends up empty is sent as
-`null`, the one value that reads as "follow my settings" on both sides; a mode never changes a
-permission, and the Modes list shows what a mode overrides under its name. Only this build's own
-tools get a switch (#312): a remote MCP tool's presence is its server's, which a mode patches by
-id — a half of the editor that is #313 — while `withModeToolChoice` carries a mode's existing
-`mcp_servers` patch through a save untouched, and the row counts the servers a mode names rather
-than reading them as "follow your settings".
+choice per tool is tri-state — _Default_ (the absence of a name in the patch; it follows the
+section's setting), _Always on_, _Always off_ — which `lib/tools.ts`'s `modeToolChoice` /
+`withModeToolChoice` translate to and from the wire's `{ builtin: { name: boolean } }`. A patch
+that ends up empty is sent as `null`, the one value that reads as "follow my settings" on both
+sides; a mode never changes a permission, and the Modes list shows what a mode overrides under
+its name. Only this build's own tools get a switch (#312): a remote MCP tool's presence is its
+server's, which a mode patches by id — a half of the editor that is #313 — while
+`withModeToolChoice` carries a mode's existing `mcp_servers` patch through a save untouched, and
+the row counts the servers a mode names rather than reading them as "follow your settings".
+
+**Each section has a "not listed below" default** (epic #349, B8). Above the per-item rows in
+Tools, MCP servers and Skills, a select says what an item the mode does not name does — _Follow
+my settings_, _Off_ (an allowlist: only what is turned on here, so anything added later stays
+off in this mode) or _On_ (everything except what is turned off here, even items the reader
+turned off in their own settings) — with a one-line explanation under it. Every section is
+rendered even when its list is empty, because a default is a choice a mode can make before it
+has any item to name. `lib/tools.ts`'s `modeSectionDefault` / `withModeSectionDefault` read and
+write `builtin_default` / `mcp_servers_default` / `skills_default`; `follow` is stored as the
+absence of the key, an override with only a default is not `null`, and the Modes list summary
+names each non-`follow` default (`tools: skills not listed off`). The editor's create and edit
+paths both round-trip them.
 
 ### The pause, on screen (epic #303, X6; issues #309, #310)
 
@@ -1295,8 +1307,13 @@ Four things about the UI are worth knowing:
 ### The `/` menu, and the slash invocation (epic #349, K7; issue #353)
 
 Typing `/` in the composer opens the command menu, and the box is its combobox: the rows come
-from `@openharness/client`'s `slashCommands(skills)` — the built-in commands first, then the
-reader's **enabled**, **user-invocable** skills, each with its `argument-hint` — so the web and
+from `@openharness/client`'s `slashCommands(skills, mode?.tools ?? null)` — the built-in
+commands first, then the reader's **effective**, **user-invocable** skills, each with its
+`argument-hint` — where the mode's `tools.skills` patch is applied over `enabled` by the
+protocol's `skillsInForce`, the same rule the server checks (K8). `ChatView` passes the mode the
+chat follows (including a switch this tab has just sent), and `NewChatScreen` the mode picked for
+the new chat, so the menu follows the mode and cannot offer a row the server would refuse. So the
+web and
 `oh` offer the same commands and send the same event for the same line. The shell loads the
 skills once (`useSkills`, beside the catalog and the modes) and hands them to the chat, New chat
 and Settings, so a menu is never a fetch behind the reader's typing.

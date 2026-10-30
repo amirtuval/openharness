@@ -1,4 +1,5 @@
-import type { Skill } from '@openharness/protocol'
+import { skillFileSize } from '@openharness/protocol'
+import type { Skill, SkillFileContent, SkillFileEncoding } from '@openharness/protocol'
 import { SKILL_LISTING_MAX_CHARS } from './skill'
 import { describe, expect, it } from 'vitest'
 
@@ -47,7 +48,11 @@ function offered(
   options: {
     readonly description?: string
     readonly frontmatter?: Record<string, unknown>
-    readonly files?: readonly { readonly path: string; readonly content: string }[]
+    readonly files?: readonly {
+      readonly path: string
+      readonly content: string
+      readonly encoding?: SkillFileEncoding
+    }[]
   } = {},
 ): OfferedSkill {
   const files = options.files ?? [{ path: 'SKILL.md', content: RELEASE_NOTES_MD }]
@@ -66,13 +71,23 @@ function offered(
     },
     files: files.map((file) => ({
       path: file.path,
-      size: new TextEncoder().encode(file.content).length,
+      size: skillFileSize(file.content, file.encoding),
     })),
     enabled: true,
     imported_at: '2026-03-15T10:00:00Z',
     refreshed_at: '2026-03-15T10:00:00Z',
   }
-  const contents = new Map(files.map((file) => [file.path, file.content]))
+  const contents = new Map<string, SkillFileContent>(
+    files.map((file) => [
+      file.path,
+      {
+        path: file.path,
+        size: skillFileSize(file.content, file.encoding),
+        encoding: file.encoding ?? 'utf8',
+        content: file.content,
+      },
+    ]),
+  )
   return {
     skill,
     readFile: (path) => Promise.resolve(contents.get(path) ?? null),
@@ -84,8 +99,9 @@ async function call(
   skills: readonly OfferedSkill[],
   name: string,
   input: unknown,
+  userLoadedSkills?: ReadonlySet<string>,
 ): Promise<{ readonly text: string; readonly isError: boolean }> {
-  const registry = createToolRegistry(createSkillTools({ skills }))
+  const registry = createToolRegistry(createSkillTools({ skills, userLoadedSkills }))
   const result = await registry.execute(name, input)
   return {
     text: result.content.map((block) => block.text).join(''),
@@ -153,6 +169,37 @@ describe('the listing', () => {
     })
     expect(read.isError).toBe(true)
     expect(read.text).toContain('disable-model-invocation')
+  })
+
+  it('lets a user-run disable-model-invocation skill be read, still without listing it', async () => {
+    const skills = [offered('secret-notes', { frontmatter: { 'disable-model-invocation': true } })]
+    const userLoaded = new Set(['secret-notes'])
+
+    // The tools exist for the model to read the files the user's own instructions name...
+    expect(skillToolsOffered(skills, userLoaded)).toBe(true)
+    // ...but the flag keeps the skill out of the listing the model chooses from (K6).
+    expect(skillListingDescription(skills)).not.toContain('secret-notes')
+
+    const instructions = await call(skills, SKILL_TOOL_NAME, { name: 'secret-notes' }, userLoaded)
+    expect(instructions.isError).toBe(false)
+    expect(instructions.text).toContain('# Release notes')
+
+    const file = await call(
+      skills,
+      SKILL_READ_TOOL_NAME,
+      { name: 'secret-notes', path: 'SKILL.md' },
+      userLoaded,
+    )
+    expect(file.isError).toBe(false)
+    expect(file.text).toContain('# Release notes')
+
+    // With nothing loaded, the unchanged refusal still stands.
+    const refused = await call(skills, SKILL_READ_TOOL_NAME, {
+      name: 'secret-notes',
+      path: 'SKILL.md',
+    })
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain('only the user can run it')
   })
 
   it('cuts descriptions to a budget, and never a name', () => {
@@ -279,6 +326,26 @@ describe('skill_read', () => {
     expect(result.isError).toBe(true)
     expect(result.text).toContain('is not a file of "release-notes"')
     expect(result.text).toContain('- reference/tone.md (')
+  })
+
+  it('answers the binary marker for a file stored as base64', async () => {
+    // The import stores a non-text file as base64, so the content itself is printable text;
+    // the stored encoding is what says the file is binary, not what the string looks like.
+    const result = await call(
+      [
+        offered('release-notes', {
+          files: [
+            { path: 'SKILL.md', content: RELEASE_NOTES_MD },
+            { path: 'assets/logo.png', content: 'iVBORw0KGgo=', encoding: 'base64' },
+          ],
+        }),
+      ],
+      SKILL_READ_TOOL_NAME,
+      { name: 'release-notes', path: 'assets/logo.png' },
+    )
+    expect(result.isError).toBe(false)
+    expect(result.text).toContain('binary file of 8 bytes')
+    expect(result.text).not.toContain('iVBORw0KGgo')
   })
 
   it('answers a marker for a file that is not text', async () => {

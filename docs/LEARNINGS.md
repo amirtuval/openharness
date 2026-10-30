@@ -865,6 +865,24 @@ database and, unless they ask otherwise, **one** dev account: a skill seeded for
 force for every later test in the file, so per-test accounts are not politeness but the fixture
 ([#352](https://github.com/amirtuval/openharness/issues/352)).
 
+**A boolean patch over "the user's setting" cannot say "only these", and the missing statement is
+the whole difference between a preset and a policy.** `Mode.tools` was a map of exceptions: a name
+absent from it followed the user's own switch, so a server or skill added after the mode was
+written was silently on in it, and no mode could be the allowlist a reviewed helper needs. The
+fix is one tri-state per kind — `builtin_default`, `mcp_servers_default`, `skills_default`, each
+`follow | off | on` with absent meaning `follow` — and the trap is that the three kinds were
+already resolved in three places (`tool-settings.ts`'s `effectiveTools`, `mcp/in-force.ts`,
+`skill.ts`'s `skillInForce`). Adding the default at each site would have been three chances to
+disagree with the brain, the frontends' `/` menus and a child session; instead one
+`modeItemInForce(entry, follows, fallback)` in the protocol is applied by one helper per kind,
+and every consumer calls it. `off` is an allowlist (an item added later stays off), `on` turns
+every unlisted item on even where the user turned it off globally, and **an explicit entry still
+wins**; a default is never a permission, and it cannot undo a hard rule — `withoutAskUser`, the
+subagent tools a depth withholds and `disable-model-invocation` are applied outside it. Storage
+needed no migration because all of it rides inside the existing `tools jsonb`
+([#349](https://github.com/amirtuval/openharness/issues/349) B8,
+`packages/protocol/src/resources/mode.ts`).
+
 ## Pausing for the user
 
 **A pause is written down, not held in memory.** A call evaluated as `ask` (or any `ask_user` call)
@@ -1329,6 +1347,24 @@ a person uses, but the reload drops whatever state the view was showing (an open
 refresh diff), so each capture re-establishes the view with a real interaction. Two screenshots of
 the same screen in two themes are otherwise two different screens
 ([#353](https://github.com/amirtuval/openharness/issues/353)).
+
+**A NUL byte is valid UTF-8 and Postgres `text` still refuses it, so a binary file has to be detected at the import and stored as base64.** `TextDecoder` happily decodes a PNG's `0x00` into `\u0000`, and the in-memory store accepts the string — which is why every test passed while a Postgres import of a skill with an image failed with `invalid byte sequence for encoding "UTF8": 0x00`. The import now decodes **fatally** and treats a NUL as non-text: `skill_files.encoding` is `'utf8' | 'base64'`, `content` is the file's bytes base64-encoded when it is `base64`, and `size` is always the original byte length, so K4's limits count the file rather than its spelling. Two places downstream depend on the column rather than on guessing from the string: `skill_read` reports a binary file by its path and size instead of returning base64 text, and the refresh diff compares encoding beside content. The general lesson is the one `looksBinary` had backwards: a heuristic over decoded text cannot be the storage contract, because the storage is what the heuristic was standing in for
+([#364](https://github.com/amirtuval/openharness/pull/364), `packages/session/migrations/0036_skills.sql`, `apps/server/src/skills-import.ts`).
+
+**A download cap bounds the pack, not what the pack inflates to, and `git.walk` can tell you paths without reading blobs.** `SKILL_CLONE_MAX_BYTES` counted downloaded bytes while `readTree` then read **every** blob of the commit — including folders the import never looks at — with no bound on the total, so 20 MB of highly compressible content could expand to gigabytes in the shared server process. The clone now takes the caller's `path` and reads only the blobs under it (a root `SKILL.md` still reads the whole tree, because the repository is the candidate), and a cumulative `SKILL_INFLATE_MAX_BYTES` refuses `over_limit` past it. A tree entry carries no size, so an individual oversized blob cannot be skipped from the tree; discovery still reports the file's own K4 problem when it fits
+([#364](https://github.com/amirtuval/openharness/pull/364), `packages/hands/src/git-clone.ts`).
+
+**`isomorphic-git` inflates every object of a pack to index it, so a cap on what the clone _reads_ does not bound its memory.** The cumulative check in `readTree` ran after `git.readBlob`, but a shallow clone is one pack, and `GitPackIndex.fromPack` computes each object's id by reading it — so a 20 GB zero-blob was inflated while the index was being built, before `readTree` was reached at all, and a small injected `maxInflatedBytes` did not help. The pack's own index and entry headers carry the sizes a tree entry does not: the clone now buffers the (≤20 MB) upload-pack response, demultiplexes its side-band stream, and refuses `over_limit` before `isomorphic-git` sees a pack with any object past `SKILL_INFLATE_MAX_BYTES`; a delta's result size comes from the first varints of its (small) instruction stream, and ordinary blobs are inflated with zlib's `maxOutputLength` set to what is left of the read cap. The indexing ceiling is deliberately the protocol cap rather than the caller's read cap, because an import naming one folder may still sit in a repository with a large unrelated file — refusing that would undo the path filter. Regression test: a sparse 101 MiB file, refused with the process never allocating it
+([#390](https://github.com/amirtuval/openharness/pull/390), `packages/hands/src/git-pack.ts`, `packages/hands/src/git-clone.ts`).
+
+**`disable-model-invocation` stops the model _choosing_ a skill, not following the instructions the user loaded.** Both skill tools refused such a skill unconditionally, which made a perfectly ordinary user-run command fail the moment its body said "read `references/style.md`": the user had run `/name`, its instructions were in the request, and the file they named was unreadable. The turn now reads the log before resolving the skills and passes the names of the `session.skill_loaded` events (plus the ones this batch is about to load) into `resolveSkills`; a name in that set is readable by both tools while staying out of the listing, so the model still cannot pick the command on its own. A child session applies its own log's answer the same way
+([#366](https://github.com/amirtuval/openharness/pull/366), `packages/hands/src/skill.ts`, `packages/brain/src/turn.ts`).
+
+**A batch that stores one row per picked item must count the cap before the first write, because the store's per-owner lock only protects one create.** `importSkills` created the picked candidates in a loop, so a user at 48 who picked three got two stored and then `SkillLimitReachedError`: the response was an error, the UI showed neither of the two that landed, and a retry reported their names as taken. The import now refuses the whole request (`existing + picked > MAX_SKILLS_PER_USER`) before anything is created; the store's lock still guards the race between that count and the writes
+([#364](https://github.com/amirtuval/openharness/pull/364), `apps/server/src/skills-import.ts`).
+
+**The `/` menu and the server each re-derived "which skills are on", and the two answers drifted in both directions.** A menu built from `skill.enabled` alone offers a skill the chat's mode turned off — choosing it gets a 400 from `assertInvocableSkills` — and hides one the mode turned on, which the server would accept. The rule (a mode that names a skill wins, one it does not name follows `enabled`) is now `skillInForce`/`skillsInForce` in `@openharness/protocol`; the server's in-force read and both frontends' `slashCommands` call it, so there is one answer. The menu takes the chat's mode override — the web chat's current (or just-switched) mode, New chat's picked mode, `oh`'s current or pending mode — which is also what makes it follow a mode switch
+([#375](https://github.com/amirtuval/openharness/pull/375), [#372](https://github.com/amirtuval/openharness/pull/372), `packages/protocol/src/resources/skill.ts`, `packages/client/src/skills.ts`).
 
 ## The HTTP layer
 
@@ -1858,6 +1894,20 @@ read said `idle` and the card said `done` (found by the #348 pass). The fix is o
 `tasks.length`; [#374](https://github.com/amirtuval/openharness/issues/374)) and the lesson is
 about what an effect is keyed on: the thing the reader sees is the status, and a count is only
 ever a proxy for it that happens to be wrong exactly when work stops.
+
+**"Pending switch" and "the mode in effect" are two states, and collapsing them made one
+direction of a mode switch invisible.** In the web chat, picking a **mode** while on a model was
+visible at once because the picked mode was rendered as the current one; picking a **model**
+while on a mode was not, because the current mode id still came from the session and the picker's
+trigger prefers a selected mode over a model name — so the reader saw the mode until the next
+message detached it. Clearing the mode id on the pick would have fixed the display and broken the
+send: choosing the very model the mode resolves to must still send `{ model }`, and the switch
+test needs to know the session was on a mode at that moment. The fix was a separate
+`detachingMode` flag (display: detached now) beside a committed mode id (send: still on a mode),
+with `oh`'s status line dropping its mode clause on the same rule and its `/` menu reading the
+override of the mode the next message will _not_ follow
+(`apps/web/src/components/chat/chat-view.tsx`,
+`apps/tui/src/chat/screen.tsx`'s `statusModeLabel`).
 
 ## Testing, CI and releasing
 

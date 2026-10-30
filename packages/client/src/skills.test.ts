@@ -102,6 +102,48 @@ describe('the / menu (K7)', () => {
     })
   })
 
+  it('applies the chat mode’s override over the stored switches (K8)', () => {
+    // The two directions the review found: a mode that turns a stored-on skill **off** must
+    // hide the row (the server would answer 400), and one that turns a stored-off skill **on**
+    // must offer it (the server would accept it). A skill the mode does not name follows the
+    // user's own switch.
+    const turnedOff = makeSkill({ name: 'off-here' })
+    const turnedOn = makeSkill({ name: 'on-here', enabled: false })
+    const untouched = makeSkill({ name: 'untouched' })
+    const commands = slashCommands([turnedOff, turnedOn, untouched], {
+      builtin: {},
+      skills: { [turnedOff.id]: false, [turnedOn.id]: true },
+    })
+    expect(commands.map((command) => command.name)).toEqual(['compact', 'on-here', 'untouched'])
+  })
+
+  it('applies the skills default to every skill the mode does not name (B8)', () => {
+    const named = makeSkill({ name: 'named' })
+    const disabled = makeSkill({ name: 'disabled', enabled: false })
+    // `off` is an allowlist: a skill the map does not turn on is not a row, even though the
+    // reader's own switch is on — and one imported later would stay off in this mode.
+    expect(
+      slashCommands([named, disabled], {
+        skills_default: 'off',
+        skills: { [named.id]: true },
+      }).map((command) => command.name),
+    ).toEqual(['compact', 'named'])
+    // `on` turns every skill on, including one the reader disabled, except a named `false`.
+    expect(
+      slashCommands([named, disabled], { skills_default: 'on' }).map((command) => command.name),
+    ).toEqual(['compact', 'named', 'disabled'])
+    expect(
+      slashCommands([named, disabled], {
+        skills_default: 'on',
+        skills: { [named.id]: false },
+      }).map((command) => command.name),
+    ).toEqual(['compact', 'disabled'])
+    // `follow` (or an absent field) is the user's own switch, as before.
+    expect(
+      slashCommands([named, disabled], { skills_default: 'follow' }).map((command) => command.name),
+    ).toEqual(['compact', 'named'])
+  })
+
   it('leaves a user-invocable: false skill out and keeps a command-only one in', () => {
     const commands = slashCommands([
       makeSkill({ name: 'model-only', frontmatter: { 'user-invocable': false } }),

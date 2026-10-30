@@ -114,6 +114,17 @@ describe('formatModes, and a mode’s skills (#349, K8; #354)', () => {
     expect(lines[0]).toContain('skills: release-notes off, helper on')
   })
 
+  it('shows the three section defaults a mode carries (B8)', () => {
+    const lines = formatModes([
+      makeMode({
+        name: 'allowlist',
+        tools: { skills_default: 'off', mcp_servers_default: 'on' },
+      }),
+    ])
+    // Every default is named, `follow` included, so a reader comparing modes sees all three.
+    expect(lines[0]).toContain('not listed: tools follow · mcp on · skills off')
+  })
+
   it('names an id it cannot resolve as the id, and says nothing for a mode that overrides none', () => {
     const gone = newSkillId()
     const lines = formatModes(
