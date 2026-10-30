@@ -24,7 +24,7 @@ One variable is a **self-hosting** switch, not a development one:
 `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS=1` lets a **custom OpenAI-compatible** credential (a
 base URL a user typed) reach a private, loopback or link-local address — a local Ollama or
 vLLM, say — which the SSRF guard refuses by default. It applies to that credential type alone,
-never to Azure OpenAI, and staging and production leave it off; see
+never to Azure OpenAI, and the deployment leaves it off; see
 [DEPLOYMENT.md](./DEPLOYMENT.md#private-addresses-for-custom-provider-urls-and-why-they-stay-off).
 `docker-compose.yml` does not set it.
 
@@ -54,14 +54,13 @@ Run from the repo root; they all delegate to turbo:
 | `yarn format:check:repo` | Prettier `--check` over the whole repo (includes root docs) |
 | `yarn dev`               | watch mode for every package that has a `dev` script        |
 | `yarn oh`                | builds the CLI and runs it against `http://localhost:3000`  |
-| `yarn oh:staging`        | the same, against `https://staging.oharness.dev`            |
 | `yarn oh:prod`           | the same, against `https://app.oharness.dev`                |
 | `yarn check:deps`        | enforces the `@openharness/*` dependency table              |
 
-`yarn oh` and its two siblings are the checkout's `oh` (`node apps/tui/dist/index.js`, built
-first). Arguments pass through — `yarn oh:staging login` — and the build's output is held
+`yarn oh` and `yarn oh:prod` are the checkout's `oh` (`node apps/tui/dist/index.js`, built
+first). Arguments pass through — `yarn oh:prod login` — and the build's output is held
 back so the CLI's own is what you read; the server each name points at is one
-`OPENHARNESS_URL` on the child (`scripts/oh.mjs`), because the CLI's default is production
+`OPENHARNESS_URL` on the child (`scripts/oh.mjs`), because the CLI's default is the deployment
 (#192).
 
 `typecheck`, `lint` and `test` depend on `^build`: turbo builds a package's dependencies

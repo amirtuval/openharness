@@ -1,7 +1,11 @@
 # A voluntary disruption — a node drain, autoscaler scale-down, or upgrade — must never take
-# every pod at once: with two replicas, one is always available to serve. minAvailable: 1 is
-# the chart's floor in every environment, and with maxUnavailable: 0 on the rollout the only
-# way a pod goes is after its replacement is ready.
+# every pod at once: with two replicas, one is always available to serve. With maxUnavailable: 0
+# on the rollout the only way a pod goes is after its replacement is ready.
+#
+# Off for a single-replica deployment (`podDisruptionBudget.enabled: false`): minAvailable: 1
+# over one pod forbids every voluntary eviction, so a node drain stalls until GKE gives up on
+# the budget (an hour, during an upgrade) instead of moving the pod.
+{{- if .Values.podDisruptionBudget.enabled }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -13,3 +17,4 @@ spec:
   selector:
     matchLabels:
       {{- include "openharness.selectorLabels" . | nindent 6 }}
+{{- end }}

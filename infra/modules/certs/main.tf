@@ -24,9 +24,8 @@
 #                       a map needs at least one entry, and one entry is one host
 #
 # The CNAME is *not* written here: this module only hands the record out, and the
-# `dns` module writes it into the environment's zone (staging's own, production's
-# adopted oharness.dev). That split is what keeps the graph acyclic — see the
-# comment on `module.certs` in each environment root.
+# `dns` module writes it into the environment's zone. That split is what keeps
+# the graph acyclic — see the comment on `module.certs` in the environment root.
 
 resource "google_certificate_manager_dns_authorization" "host" {
   project     = var.project_id

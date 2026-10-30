@@ -4,7 +4,7 @@ variable "project_id" {
 }
 
 variable "host" {
-  description = "Public hostname the uptime check probes, e.g. staging.oharness.dev. The check is HTTPS on this host."
+  description = "Public hostname the uptime check probes, e.g. app.oharness.dev. The check is HTTPS on this host."
   type        = string
 }
 

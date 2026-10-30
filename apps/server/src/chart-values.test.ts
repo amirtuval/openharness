@@ -112,7 +112,7 @@ describe('the chart values staging boots with (#159)', () => {
 
       // The values took effect, and the dev login is off because nothing set it.
       expect(config.devLogin).toBe(false)
-      expect(config.betterAuthUrl).toBe('https://staging.oharness.dev')
+      expect(config.betterAuthUrl).toBe('https://app.oharness.dev')
       expect(config.keyProvider).toBe('gcp-kms')
       expect(config.databaseUrl).toBe('database-url-placeholder')
       expect(config.betterAuthSecret).toBe('better-auth-secret-placeholder')

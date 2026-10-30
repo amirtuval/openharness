@@ -191,7 +191,7 @@ resource "google_monitoring_alert_policy" "cloudsql_cpu" {
 
   documentation {
     mime_type = "text/markdown"
-    content   = "Cloud SQL CPU stayed above ${var.db_cpu_threshold * 100}% of its capacity for five minutes. A shared-core tier in staging is the usual cause; in production the query behind a busy turn is. `gcloud sql instances describe` and Cloud SQL's own query insights are the place to look."
+    content   = "Cloud SQL CPU stayed above ${var.db_cpu_threshold * 100}% of its capacity for five minutes. The shared-core tier is the usual cause, or the query behind a busy turn. `gcloud sql instances describe` and Cloud SQL's own query insights are the place to look."
   }
 }
 

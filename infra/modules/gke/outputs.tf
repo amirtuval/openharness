@@ -29,6 +29,6 @@ output "workload_pool" {
 }
 
 output "node_service_account_email" {
-  description = "Email of the custom node service account — what production's registry read is granted to from staging."
+  description = "Email of the custom node service account — what the registry's read is granted to."
   value       = google_service_account.nodes.email
 }

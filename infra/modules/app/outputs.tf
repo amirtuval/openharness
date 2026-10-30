@@ -4,7 +4,7 @@ output "static_ip_name" {
 }
 
 output "static_ip_address" {
-  description = "The reserved global IPv4 address. Staging's and production's A records point at it."
+  description = "The reserved global IPv4 address. The environment's A record points at it."
   value       = google_compute_global_address.static_ip.address
 }
 

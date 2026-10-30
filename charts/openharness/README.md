@@ -62,7 +62,7 @@ a `tls.certificateRefs` on one Gateway is an error GKE rejects.
 
 Release name `openharness`, namespace `openharness`. Terraform's `helm_release` uses
 `create_namespace = true`, points at `charts/openharness`, and sets every key marked **(TF)**
-below per environment (staging `openharness-dev`, production `openharness-510710`). The
+below — openharness runs one environment, `infra/envs/staging` in `openharness-dev`. The
 Kubernetes service account is named `openharness`.
 
 ### Values
@@ -77,8 +77,9 @@ Kubernetes service account is named `openharness`.
 | `autoscaling.minReplicas`                    |      | `2`            | the floor                                                                                    |
 | `autoscaling.maxReplicas`                    |  ✔   | `4`            | the ceiling                                                                                  |
 | `autoscaling.targetCPUUtilizationPercentage` |      | `70`           | scale on CPU, as a percentage of the **request** below                                       |
-| `resources.requests.cpu`                     |      | `250m`         | Autopilot schedules and bills on requests; 250m is Autopilot's floor for a container         |
-| `resources.requests.memory`                  |      | `512Mi`        | the other half of Autopilot's floor                                                          |
+| `podDisruptionBudget.enabled`                |      | `true`         | render the PDB (`minAvailable: 1`); off for a single replica, where it would block drains    |
+| `resources.requests.cpu`                     |      | `250m`         | Autopilot schedules and bills on requests; with bursting its floor is 50m/52Mi per pod       |
+| `resources.requests.memory`                  |      | `512Mi`        | the memory request                                                                           |
 | `resources.limits.memory`                    |      | `512Mi`        | equal to the request: a steady footprint, so a higher limit buys nothing                     |
 | `serviceAccount.name`                        |      | `openharness`  | the KSA the pods run as — and the name the Workload Identity binding uses                    |
 | `serviceAccount.gcpServiceAccount`           |  ✔   | `""`           | the app GSA's email → the `iam.gke.io/gcp-service-account` annotation                        |
@@ -88,7 +89,7 @@ Kubernetes service account is named `openharness`.
 | `cloudSqlProxy.image.tag`                    |      | `2.26.0`       | pinned to a release, never `latest`                                                          |
 | `cloudSqlProxy.port`                         |      | `5432`         | the loopback port the proxy listens on, and the port in `database_url`                       |
 | `cloudSqlProxy.privateIp`                    |      | `true`         | pass `--private-ip`: the instance has no public address                                      |
-| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi` | requests for the forwarder; Autopilot rounds them up to its container floor                  |
+| `cloudSqlProxy.resources`                    |      | `100m`/`128Mi` | requests for the forwarder                                                                   |
 | `gateway.host`                               |  ✔   | `""`           | the serving host. Empty ⇒ none of the Gateway objects is rendered                            |
 | `gateway.staticIpName`                       |  ✔   | `""`           | the `google_compute_global_address` name → the Gateway's `spec.addresses` (`NamedAddress`)   |
 | `gateway.certificateMapName`                 |  ✔   | `""`           | the Certificate Manager map → `networking.gke.io/certmap` on the Gateway                     |

@@ -69,6 +69,19 @@ locals {
       repository = var.image_repository
       tag        = var.image_tag
     }
+    replicaCount = var.replicas.min
+    autoscaling = {
+      minReplicas = var.replicas.min
+      maxReplicas = var.replicas.max
+    }
+    # A budget of minAvailable: 1 over a single pod would block every node drain.
+    podDisruptionBudget = {
+      enabled = var.replicas.min > 1
+    }
+    resources = {
+      requests = { cpu = var.resources.cpu, memory = var.resources.memory }
+      limits   = { memory = var.resources.memory }
+    }
     gcpProject = var.project_id
     serviceAccount = {
       gcpServiceAccount = var.app_service_account_email
@@ -81,6 +94,10 @@ locals {
     cloudSqlProxy = {
       enabled                = true
       instanceConnectionName = var.cloudsql_instance_connection_name
+      resources = {
+        requests = { cpu = var.proxy_resources.cpu, memory = var.proxy_resources.memory }
+        limits   = { memory = var.proxy_resources.memory_limit }
+      }
     }
     # The GKE Gateway (#159), not an Ingress: the chart renders a Gateway, two
     # HTTPRoutes, a HealthCheckPolicy, a GCPBackendPolicy and — while the CDN is on

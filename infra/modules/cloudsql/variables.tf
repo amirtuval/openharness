@@ -32,12 +32,12 @@ variable "private_services_connection" {
 }
 
 variable "tier" {
-  description = "Machine tier. Staging uses a shared-core tier (db-g1-small), production a small dedicated one (db-custom-1-3840)."
+  description = "Machine tier, e.g. db-f1-micro (shared core, what the environment runs) or db-custom-1-3840 (one dedicated vCPU)."
   type        = string
 }
 
 variable "availability_type" {
-  description = "ZONAL or REGIONAL. Staging is single-zone; production runs a regional (HA) instance."
+  description = "ZONAL or REGIONAL (HA, roughly double the cost)."
   type        = string
   default     = "ZONAL"
 
@@ -54,19 +54,19 @@ variable "disk_size_gb" {
 }
 
 variable "backup_enabled" {
-  description = "Automated daily backups. On in production, off in staging."
+  description = "Automated daily backups."
   type        = bool
   default     = false
 }
 
 variable "point_in_time_recovery_enabled" {
-  description = "Point-in-time recovery (requires backups). On in production, off in staging."
+  description = "Point-in-time recovery (requires backups)."
   type        = bool
   default     = false
 }
 
 variable "deletion_protection" {
-  description = "Block Terraform from destroying the instance. false in staging, true in production."
+  description = "Block Terraform from destroying the instance."
   type        = bool
   default     = true
 }

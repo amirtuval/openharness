@@ -1,6 +1,6 @@
-# Artifact Registry (issue #153, epic #148 D2). Instantiated in staging only:
-# the one registry lives in the staging project, production pulls from it and
-# never rebuilds (us-central1-docker.pkg.dev/openharness-dev/openharness/server).
+# Artifact Registry (issue #153, epic #148 D2): the one registry the deploy
+# pushes the image to and the nodes pull it from
+# (us-central1-docker.pkg.dev/openharness-dev/openharness/server).
 
 resource "google_artifact_registry_repository" "repo" {
   project       = var.project_id

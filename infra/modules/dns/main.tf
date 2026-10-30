@@ -1,13 +1,10 @@
-# Cloud DNS: one zone per environment, its A record, the CNAME that proves
-# ownership of the host to Certificate Manager, and — in production — the NS
-# records that delegate staging (issue #153, epic #148 D7; the CNAME, #159).
+# Cloud DNS: the environment's zone (app.oharness.dev), its A record, the CNAME
+# that proves ownership of the host to Certificate Manager, and any NS records
+# that delegate a child name (issue #153, epic #148 D7; the CNAME, #159).
 #
-# Staging creates its own zone (staging.oharness.dev). Production adopts the
-# zone that already exists, oharness.dev: the resource name is not knowable
-# ahead of time, so it is the required root variable `existing_zone_name`, found
-# with `gcloud dns managed-zones list --project openharness-510710`, and the
-# adoption itself is an `import` block in the production root — Terraform only
-# allows import blocks in a root module, not here.
+# The parent zone, oharness.dev, is not here: it lives in openharness-510710
+# with the domain's Cloud Domains registration, and delegates the host to this
+# zone with one NS record set by hand (docs/DEPLOYMENT.md, "DNS").
 
 resource "google_dns_managed_zone" "zone" {
   project     = var.project_id
