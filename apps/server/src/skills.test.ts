@@ -239,8 +239,10 @@ describe('the skills in force for a request (epic #349, K8)', () => {
 
   it('applies the skills default: off is an allowlist, on turns every skill on (B8)', async () => {
     const test = createTestApp()
-    const on = await seedSkill(test)
-    const off = await seedSkill(test, { name: 'pdf-tools', enabled: false })
+    // Pinned ids, as in the listing test above: these skills are created in the same
+    // millisecond, so a fresh ULID's random half would decide their `(imported_at, id)` order.
+    const on = await seedSkill(test, { id: newSkillId(1) })
+    const off = await seedSkill(test, { id: newSkillId(2), name: 'pdf-tools', enabled: false })
     const me = await test.currentUser()
     const resolve = createSkillSettingsResolver({ skills: test.skills })
 
@@ -251,7 +253,7 @@ describe('the skills in force for a request (epic #349, K8)', () => {
         (skill) => skill.id,
       ),
     ).toEqual([on.id])
-    const later = await seedSkill(test, { name: 'later' })
+    const later = await seedSkill(test, { id: newSkillId(3), name: 'later' })
     expect(
       (await resolve(me.id, { skills_default: 'off', skills: { [on.id]: true } })).map(
         (skill) => skill.id,
