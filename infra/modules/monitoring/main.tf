@@ -82,6 +82,15 @@ resource "google_monitoring_uptime_check_config" "health" {
   # Three regions: one probe region failing is a probe problem, three is a
   # deployment problem, and the check's own alert reads the per-region results.
   selected_regions = ["USA", "EUROPE", "ASIA_PACIFIC"]
+
+  # A change of host replaces the check, and GCP refuses to delete a check an
+  # alert policy still names ("please ensure all associated Alert Policies are
+  # deleted"). Creating the new one first lets the policy move to it before the
+  # old one goes — the default order failed the deploy that moved the host to
+  # app.oharness.dev (#397).
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # --- the alerts -------------------------------------------------------------------
