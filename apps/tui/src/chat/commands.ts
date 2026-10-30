@@ -1,4 +1,6 @@
-import type { TranscriptState } from '@openharness/client'
+import { parseSlashCommand, slashCommands } from '@openharness/client'
+import type { SlashCommand, SlashInvocation, TranscriptState } from '@openharness/client'
+import type { ModeToolOverride, Skill } from '@openharness/protocol'
 
 import type { ChatSession, Notice } from './session'
 
@@ -59,6 +61,12 @@ export interface CommandContext {
    */
   readonly openToolSettings: () => void
   /**
+   * Open the skills screen in the prompt slot — `/skills` (epic #349, K3/K7; #354). The one
+   * `oh skills` prints: the reader's imported skills with their badge and source, switch each
+   * one on or off, remove one, and import another from a public git URL (preview, then pick).
+   */
+  readonly openSkills: () => void
+  /**
    * Open the chat's background tasks in the prompt slot — `/agents` (epic #340, S9; #347). The
    * list switches into a task's own chat, back to the chat above, and stops a task.
    */
@@ -86,10 +94,17 @@ export interface ChatCommand {
    */
   readonly args?: string | undefined
   /**
-   * Do it. `args` is what followed the name on the line, trimmed — the empty string when
-   * the command was run from the menu.
+   * The skill this row stands for, when it is one of the reader's own (#349, K7), or
+   * `undefined` for one of the chat's commands. A skill row is not *run*: `/name arguments`
+   * is an ordinary `user.message` carrying `skill`, which the screen sends rather than
+   * dispatching here — so a row with this set has no {@link ChatCommand.run}.
    */
-  readonly run: (context: CommandContext, args: string) => void | Promise<void>
+  readonly skill?: SlashCommand | undefined
+  /**
+   * Do it. `args` is what followed the name on the line, trimmed — the empty string when
+   * the command was run from the menu. Absent on a skill row (see {@link ChatCommand.skill}).
+   */
+  readonly run?: ((context: CommandContext, args: string) => void | Promise<void>) | undefined
 }
 
 /**
@@ -143,6 +158,13 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     },
   },
   {
+    name: 'skills',
+    description: 'your skills: list, switch, remove or import one',
+    run: (context) => {
+      context.openSkills()
+    },
+  },
+  {
     name: 'agents',
     description: "this chat's tasks: switch into one, or stop it",
     run: (context) => {
@@ -172,6 +194,53 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
     },
   },
 ]
+
+/**
+ * The reader's skills as `/` menu rows (#349, K7) — `/release-notes [version]` and the rest.
+ *
+ * The rows are the client's own menu (`slashCommands`), filtered to the skills and re-wrapped
+ * as {@link ChatCommand}s so the menu, the completion, the filter and the "did you mean" work
+ * on them exactly as they do on the chat's commands: `slashCommands` already knows which skills
+ * are offered (one that is **on** — K8 — and **user-invocable**), keeps the API's order, and
+ * spells the usage `/name <argument-hint>`; this only gives each row the shape the menu draws.
+ * `disable-model-invocation` is not a filter: a command only the reader runs is what the menu is
+ * for.
+ *
+ * A skill row carries its `SlashCommand` in `skill` and no `run`, because the line is not run —
+ * the screen sends it as a message (see {@link parseChatInput}).
+ *
+ * @param skills the reader's skills, as `GET /v1/me/skills` answered
+ */
+export function skillCommands(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null = null,
+): readonly ChatCommand[] {
+  return slashCommands(skills, override)
+    .filter((command) => command.kind === 'skill')
+    .map((command) => ({
+      name: command.name,
+      description: command.description,
+      // The same hint the client's usage spells, so the menu's usage column and the completion
+      // agree with what `slashCommands` says the command looks like.
+      args: command.argumentHint === null ? undefined : `<${command.argumentHint}>`,
+      skill: command,
+    }))
+}
+
+/**
+ * The whole `/` line menu: the chat's own commands, then the reader's skills (#349, K7).
+ *
+ * One list, so a skill is found, filtered, completed and suggested exactly as `/compact` is —
+ * and a typo near a skill name gets the skill named back rather than sent to the model. The
+ * built-ins come first because they always exist, and a skill may not take one of their names
+ * (`RESERVED_SKILL_NAMES`, enforced by the import).
+ */
+export function menuCommands(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null = null,
+): readonly ChatCommand[] {
+  return [...CHAT_COMMANDS, ...skillCommands(skills, override)]
+}
 
 /**
  * What the prompt and the screen bind, for `/help` and for `oh --help` — one list, printed
@@ -219,6 +288,11 @@ export type ChatInput =
   | { readonly kind: 'message'; readonly text: string }
   /** A command, with what followed its name. */
   | { readonly kind: 'command'; readonly command: ChatCommand; readonly args: string }
+  /**
+   * A skill invocation (#349, K7): the line names one of the reader's skills, so it is sent as
+   * an ordinary message whose text is what they typed, carrying `skill`.
+   */
+  | { readonly kind: 'skill'; readonly invocation: SlashInvocation }
   /** A `/` line that named nothing; `suggestion` is the closest command, if any. */
   | {
       readonly kind: 'unknown'
@@ -234,6 +308,10 @@ export type ChatInput =
  *   is special: the message keeps every other character, whitespace included.
  * - **`/name args` is a command** when `name` — up to the first whitespace — is one of the
  *   registry's, by name or by alias. The rest of the line is its arguments, trimmed.
+ * - **A skill's name is a skill invocation** (#349, K7): the line names one of the reader's
+ *   skills, so it is an ordinary message whose text is what they typed, carrying `skill` —
+ *   read by the client's own `parseSlashCommand`, so `oh` and the web app parse a line the
+ *   same way.
  * - **`/name` that is nobody's is unknown**: the screen names the mistake and offers the
  *   closest match, and nothing goes to the model. A command that is *nearly* right is the
  *   one case where sending it would be worse than refusing: the model would answer about it.
@@ -242,6 +320,9 @@ export type ChatInput =
  * The command is the whole line: `/model` must start it. That is the menu's rule too (it
  * opens on a buffer that starts with `/`), so what the menu offers and what submitting does
  * cannot disagree. A trailing `\n` or space is still `/model` — the name ends at whitespace.
+ *
+ * `commands` is the whole menu ({@link menuCommands}), skills included, so a typo near a skill
+ * is corrected by name and a skill line is recognised by the same lookup a command is.
  */
 export function parseChatInput(text: string, commands: readonly ChatCommand[]): ChatInput {
   if (text.startsWith('//')) {
@@ -255,6 +336,14 @@ export function parseChatInput(text: string, commands: readonly ChatCommand[]): 
   const name = rest.split(/\s/u)[0] ?? ''
   const command = findCommand(name, commands)
   if (command !== undefined) {
+    if (command.skill !== undefined) {
+      // The parse is the client's, over the one skill row this line named: the same rule that
+      // decides what a skill line is on the web decides it here, down to the arguments.
+      const invocation = parseSlashCommand(text, [command.skill])
+      return invocation === null
+        ? { kind: 'unknown', name, suggestion: undefined }
+        : { kind: 'skill', invocation }
+    }
     return { kind: 'command', command, args: rest.slice(name.length).trim() }
   }
   return { kind: 'unknown', name, suggestion: closestCommand(name, commands) }

@@ -1,7 +1,8 @@
+import { makeSkill } from '@openharness/protocol/fixtures'
 import { cleanup, render } from 'ink-testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import type { ChatCommand } from '../chat/commands'
+import { menuCommands, parseChatInput, type ChatCommand } from '../chat/commands'
 import type { PromptHistory } from '../history'
 import {
   frameOf,
@@ -611,16 +612,27 @@ describe('PromptInput command menu', () => {
     expect(prompt.submitted).toEqual(['/new'])
   })
 
-  it('runs the highlighted command on Enter, not the half-typed name', async () => {
+  it('completes the highlighted command on Enter, and runs it on the next', async () => {
     const prompt = renderMenuPrompt()
     await waitForScreen(prompt, '❯')
 
     typeText(prompt, '/ne')
     await waitForFrame(prompt, 'start a new chat')
-    pressKey(prompt, 'enter')
 
+    // Enter fills the highlighted row into the buffer (`/new `) rather than submitting the
+    // half-typed `/ne` (#354): the completion is the menu's part, and a command is not run from
+    // it until its name is the whole line. Nothing has been sent.
+    pressKey(prompt, 'enter')
+    await waitFor(() => !frameOf(prompt).includes('start a new chat'), {
+      describe: () => frameOf(prompt),
+    })
+    expect(prompt.submitted).toEqual([])
+    expect(promptLine(prompt)).toBe('❯ /new')
+
+    // The full name is the command, so Enter now runs it.
+    pressKey(prompt, 'enter')
     await waitFor(() => prompt.submitted.length === 1)
-    expect(prompt.submitted).toEqual(['/new'])
+    expect(prompt.submitted).toEqual(['/new '])
   })
 
   it('closes once the typed name is a command in its own right', async () => {
@@ -783,5 +795,102 @@ describe('PromptInput with the keyboard taken (#310)', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(frameOf(instance)).not.toContain('pasted')
     expect(submitted).toEqual([])
+  })
+})
+
+describe('PromptInput command menu with skills (#349, K7; #354)', () => {
+  /** The reader's skills as the chat screen passes them: the chat's commands, then the skills. */
+  const SKILLS = [
+    makeSkill({ name: 'release-notes', frontmatter: { 'argument-hint': 'version' } }),
+    makeSkill({
+      name: 'helper',
+      description: 'Helps with things.',
+      enabled: false,
+      frontmatter: {},
+    }),
+  ]
+
+  it('offers the reader’s enabled, user-invocable skills with their argument hint', async () => {
+    const prompt = renderPrompt(undefined, menuCommands(SKILLS))
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+
+    const frame = frameOf(prompt)
+    // The built-in first, then the skill, with the hint the client's own menu spells (K7).
+    expect(frame).toContain('/release-notes <version>')
+    expect(frame).toContain('Writes the release notes')
+    // A skill that is off is not offered (K8), and the menu's filter finds either by name.
+    expect(frame).not.toContain('/helper')
+  })
+
+  it('runs a built-in named in full on one Enter (#354)', async () => {
+    const prompt = renderPrompt(undefined, menuCommands(SKILLS))
+    await waitForScreen(prompt, '❯')
+
+    // `/compact` is a command the line already names, so the menu is closed — and Enter runs it
+    // at once rather than filling the buffer a second time first.
+    typeText(prompt, '/compact')
+    pressKey(prompt, 'enter')
+    expect(prompt.submitted).toEqual(['/compact'])
+  })
+
+  it('completes a skill into the buffer on Enter, then sends it with its arguments (#354)', async () => {
+    const prompt = renderPrompt(undefined, menuCommands(SKILLS))
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+    typeText(prompt, 'release')
+
+    await waitForFrame(prompt, '❯ /release-notes')
+    await waitFor(() => !frameOf(prompt).includes('pick a model'), {
+      describe: () => frameOf(prompt),
+    })
+
+    // Enter on a skill row fills `/name ` for its arguments rather than sending it (K7; #354):
+    // the menu's part is the name, and the screen sends the message the line becomes.
+    pressKey(prompt, 'enter')
+    await waitFor(() => !frameOf(prompt).includes('Tab to complete'), {
+      describe: () => frameOf(prompt),
+    })
+    expect(prompt.submitted).toEqual([])
+
+    // The arguments and a second Enter send the line as the invocation it is.
+    typeText(prompt, 'v1.2')
+    pressKey(prompt, 'enter')
+    expect(prompt.submitted).toEqual(['/release-notes v1.2'])
+  })
+
+  it('completes a skill into the buffer with a space for its arguments', async () => {
+    const prompt = renderPrompt(undefined, menuCommands(SKILLS))
+    await waitForScreen(prompt, '❯')
+
+    typeText(prompt, '/')
+    await waitForFrame(prompt, '❯ /model')
+    typeText(prompt, 'release')
+    await waitForFrame(prompt, '❯ /release-notes')
+
+    // Tab completes the name and leaves a space after it (the skill names an `argument-hint`),
+    // so the arguments land separated from the name rather than glued to it: the buffer is
+    // `/release-notes `, which closes the menu (a space ends the command word).
+    pressKey(prompt, 'tab')
+    await waitFor(() => !frameOf(prompt).includes('Tab to complete'), {
+      describe: () => frameOf(prompt),
+    })
+    typeText(prompt, 'v1.2')
+    pressKey(prompt, 'enter')
+    expect(prompt.submitted).toEqual(['/release-notes v1.2'])
+  })
+
+  it('lists a skill’s name among the ones “did you mean” may suggest', () => {
+    // A near miss of a skill name suggests the skill: `parseChatInput` is given the whole menu,
+    // so a typo is corrected by name rather than sent to the model.
+    const parsed = parseChatInput('/release-nots', menuCommands(SKILLS))
+    expect(parsed.kind).toBe('unknown')
+    if (parsed.kind === 'unknown') {
+      expect(parsed.suggestion?.name).toBe('release-notes')
+    }
   })
 })

@@ -1,6 +1,10 @@
 import type { SkillProvider } from '@openharness/brain'
 import type { EventInput, ModeId, ModeToolOverride, Skill, UserId } from '@openharness/protocol'
-import { EVENT_TYPES, skillSettingsOf } from '@openharness/protocol'
+import {
+  EVENT_TYPES,
+  skillsInForce as applySkillsInForce,
+  skillSettingsOf,
+} from '@openharness/protocol'
 import type { SessionStore, SkillStore } from '@openharness/session'
 
 import { invalidRequest } from './http/errors'
@@ -47,7 +51,10 @@ export function skillsInForce(
   skills: readonly Skill[],
   override: ModeToolOverride | null,
 ): Skill[] {
-  return skills.filter((skill) => override?.skills?.[skill.id] ?? skill.enabled)
+  // The rule itself is the protocol's, and the `/` menu on both frontends applies the same
+  // function: a menu row the server refuses, or a missing one it would accept, cannot happen
+  // because there is only one rule to read (K8).
+  return applySkillsInForce(skills, override)
 }
 
 /**
@@ -133,8 +140,9 @@ export function createSkillProvider(deps: SkillProviderDeps): SkillProvider {
     const inForce = await listSkillsInForce({ skills: deps.skills }, ownerId, override)
     return inForce.map((skill) => ({
       skill,
-      readFile: async (path: string) =>
-        (await deps.skills.getFile(skill.id, { ownerId }, path))?.content ?? null,
+      // The whole file, encoding included: the tools report a binary file by its size and
+      // encoding rather than handing a model base64 text (K2, K4).
+      readFile: async (path: string) => deps.skills.getFile(skill.id, { ownerId }, path),
     }))
   }
 }

@@ -44,6 +44,7 @@ import {
   type SessionTaskNotificationEvent,
   type Skill,
   type SkillFileContent,
+  type SkillFileEncoding,
   type SkillId,
   type StoredEvent,
   type Supersedes,
@@ -2342,11 +2343,18 @@ export class InMemorySkillStore implements SkillStore {
 
   getFile(skillId: SkillId, options: OwnerScope, path: string): Promise<SkillFileContent | null> {
     const record = this.#skills.get(skillId)
-    const content = record === undefined ? undefined : record.files.get(path)
-    if (record === undefined || !matchesOwner(record, options) || content === undefined) {
+    const file = record === undefined ? undefined : record.files.get(path)
+    if (record === undefined || !matchesOwner(record, options) || file === undefined) {
       return resolved(null)
     }
-    return resolved(deepFreeze({ path, size: skillFileSize(content), content }))
+    return resolved(
+      deepFreeze({
+        path,
+        size: skillFileSize(file.content, file.encoding),
+        encoding: file.encoding,
+        content: file.content,
+      }),
+    )
   }
 
   replaceSnapshot(
@@ -2414,12 +2422,20 @@ export interface InMemorySkillStoreOptions {
  * of them hold.
  */
 type SkillRecord = Omit<Skill, 'files'> & {
-  readonly files: ReadonlyMap<string, string>
+  readonly files: ReadonlyMap<string, StoredSkillFile>
 }
 
-/** The snapshot's files as the record keeps them: a path → content map, in the input's order. */
-function filesOf(files: readonly SkillFileInput[]): ReadonlyMap<string, string> {
-  return new Map(files.map((file) => [file.path, file.content]))
+/** One stored file: its content in the spelling it was written with. */
+interface StoredSkillFile {
+  readonly content: string
+  readonly encoding: SkillFileEncoding
+}
+
+/** The snapshot's files as the record keeps them: a path → file map, in the input's order. */
+function filesOf(files: readonly SkillFileInput[]): ReadonlyMap<string, StoredSkillFile> {
+  return new Map(
+    files.map((file) => [file.path, { content: file.content, encoding: file.encoding ?? 'utf8' }]),
+  )
 }
 
 /**
@@ -2436,7 +2452,7 @@ function skillOf(record: SkillRecord): Skill {
     frontmatter: structuredClone(record.frontmatter),
     source: { ...record.source },
     files: [...record.files]
-      .map(([path, content]) => ({ path, size: skillFileSize(content) }))
+      .map(([path, file]) => ({ path, size: skillFileSize(file.content, file.encoding) }))
       .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)),
     enabled: record.enabled,
     imported_at: record.imported_at,

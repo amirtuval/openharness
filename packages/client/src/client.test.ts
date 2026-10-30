@@ -937,7 +937,12 @@ describe('skills (#349, K4/K5; #353)', () => {
         ? jsonResponse({ data: [skill] })
         : call === 1
           ? jsonResponse({ ...skill, content: '---\nname: release-notes\n---\n\nWrite them.' })
-          : jsonResponse({ path: 'reference/tone.md', size: 380, content: 'Be plain.' }),
+          : jsonResponse({
+              path: 'reference/tone.md',
+              size: 9,
+              encoding: 'utf8',
+              content: 'Be plain.',
+            }),
     )
 
     expect(await client.skills.list()).toEqual({ data: [skill] })
@@ -953,7 +958,9 @@ describe('skills (#349, K4/K5; #353)', () => {
     expect(file).toMatchObject({ path: 'reference/tone.md', content: 'Be plain.' })
     expect(mock.urlOf(2)).toBe(`${BASE_URL}/v1/me/skills/${skill.id}/files/reference/tone.md`)
 
-    const encoded = clientWith(() => jsonResponse({ path: 'a b#c.md', size: 1, content: 'x' }))
+    const encoded = clientWith(() =>
+      jsonResponse({ path: 'a b#c.md', size: 1, encoding: 'utf8', content: 'x' }),
+    )
     await encoded.client.skills.file(skill.id, 'a b#c.md')
     expect(encoded.mock.urlOf(0)).toBe(`${BASE_URL}/v1/me/skills/${skill.id}/files/a%20b%23c.md`)
   })

@@ -1,8 +1,8 @@
-import type { MessagePart, TranscriptMessage } from '@openharness/client'
+import type { MessagePart, TranscriptMessage, TranscriptMessageSkill } from '@openharness/client'
 import { Text, useStdout } from 'ink'
 
 import { markdownLines, type RenderLayout } from '../markdown/render'
-import { messageBand, paint, type TerminalTheme } from '../markdown/theme'
+import { messageBand, paint, PALETTE, type TerminalTheme } from '../markdown/theme'
 import { spanWidth, textSpans, wrapSpans, type Line, type Span } from '../markdown/text'
 import { useTerminalTheme } from './theme'
 
@@ -121,7 +121,14 @@ export function messageLayout(
   // room for it — otherwise the mark is what the terminal wraps.
   const reserved = Math.max(CURSOR_COLUMNS, spanWidth(trail))
   const layout: RenderLayout = { width: Math.max(1, columns - reserved), theme }
-  const body = message.parts.flatMap((part) => PART_RENDERERS[part.type](part, message, layout))
+  const chip =
+    message.role === 'user' && message.skill !== undefined
+      ? userSkillChip(message.skill, theme)
+      : null
+  const body = [
+    ...(chip === null ? [] : [chip]),
+    ...message.parts.flatMap((part) => PART_RENDERERS[part.type](part, message, layout)),
+  ]
   const band = message.role === 'user' ? messageBand(theme) : undefined
 
   const lines = body.map((line, index) => {
@@ -235,6 +242,27 @@ export function MessageView({
       {user && <Text> </Text>}
     </>
   )
+}
+
+/**
+ * The **slash-invocation chip** (#349, K7): the skill a user's message ran, and its arguments.
+ *
+ * A skill is a slash command, so `/release-notes v1.2` is an ordinary message whose text is what
+ * the reader typed — and the log also records the `skill` it named (`TranscriptMessage.skill`).
+ * The web app draws that as a chip on the message; a terminal has no badge, so it is one dim line
+ * at the top of the message, inside its band: the skill's name, then the arguments the invocation
+ * carried. It is read from the log rather than parsed back out of the text, so a reload and a
+ * replay draw the same chip a live view drew.
+ */
+export function userSkillChip(skill: TranscriptMessageSkill, theme: TerminalTheme): Span[] {
+  const spans: Span[] = [
+    { text: '⟡ ', color: paint(theme, PALETTE.link) },
+    { text: skill.name, color: paint(theme, PALETTE.link) },
+  ]
+  if (skill.arguments !== null) {
+    spans.push({ text: ` ${skill.arguments}`, dim: true })
+  }
+  return spans
 }
 
 /** The two marks a message still on the move carries at its end. */

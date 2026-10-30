@@ -1,6 +1,7 @@
-import { skillSettingsOf } from '@openharness/protocol'
+import { skillsInForce, skillSettingsOf } from '@openharness/protocol'
 import type {
   MessageSkill,
+  ModeToolOverride,
   RefreshSkillPreviewResponse,
   ReservedSkillName,
   Skill,
@@ -95,18 +96,30 @@ export interface SlashCommand {
 /**
  * The whole `/` menu: the built-in commands, then the reader's own usable skills (K7).
  *
- * A skill is offered when it is **on** (K8) and **user-invocable** (K1) — a skill whose
- * frontmatter says `user-invocable: false` is one only the model uses, so it is not a command
- * the reader can type and never appears here. `disable-model-invocation` is the other way
- * round and does not filter a row out: a command only the reader runs is exactly what the menu
- * is for.
+ * A skill is offered when it is **on in this chat** and **user-invocable** (K1, K8) — a skill
+ * whose frontmatter says `user-invocable: false` is one only the model uses, so it is not a
+ * command the reader can type and never appears here. `disable-model-invocation` is the other
+ * way round and does not filter a row out: a command only the reader runs is exactly what the
+ * menu is for.
+ *
+ * **"On" is the effective answer**, not the stored switch: when the chat follows a mode, the
+ * mode's `tools.skills` patch applies over the user's `enabled` — the same rule the server's
+ * `assertInvocableSkills` and `listSkillsInForce` apply, read from
+ * `@openharness/protocol`'s `skillsInForce` so a menu row and the server cannot disagree. A
+ * menu built from `skill.enabled` alone offers a skill the server answers 400 for (the mode
+ * turned it off) and hides one the server would accept (the mode turned it on).
  *
  * The skills are listed in the order the caller passes them (the API's own order, oldest
  * first), so two screens reading the same list build the same menu.
  *
- * @param skills the reader's skills, as `GET /v1/me/skills` answered
+ * @param skills the reader's skills, as `GET /v1/me/skills` answered — the stored `enabled`
+ * @param override the tool override of the mode the chat follows (`Mode.tools`), or `null`/absent
+ *   for a chat that follows none
  */
-export function slashCommands(skills: readonly Skill[]): readonly SlashCommand[] {
+export function slashCommands(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null = null,
+): readonly SlashCommand[] {
   return [
     ...BUILTIN_COMMANDS.map((command): SlashCommand => ({
       name: command.name,
@@ -116,23 +129,30 @@ export function slashCommands(skills: readonly Skill[]): readonly SlashCommand[]
       argumentHint: null,
       skillId: null,
     })),
-    ...skills.filter(isInvocableSkill).map((skill): SlashCommand => {
-      const hint = skillSettingsOf(skill).argumentHint
-      return {
-        name: skill.name,
-        kind: 'skill',
-        description: skill.description,
-        usage: hint === null ? `/${skill.name}` : `/${skill.name} <${hint}>`,
-        argumentHint: hint,
-        skillId: skill.id,
-      }
-    }),
+    ...skillsInForce(skills, override)
+      .filter(isInvocableSkill)
+      .map((skill): SlashCommand => {
+        const hint = skillSettingsOf(skill).argumentHint
+        return {
+          name: skill.name,
+          kind: 'skill',
+          description: skill.description,
+          usage: hint === null ? `/${skill.name}` : `/${skill.name} <${hint}>`,
+          argumentHint: hint,
+          skillId: skill.id,
+        }
+      }),
   ]
 }
 
-/** Whether a skill is one the reader can type: on (K8) and `user-invocable` (K1, K7). */
+/**
+ * Whether a skill is one the reader can type: `user-invocable` (K1, K7).
+ *
+ * The on/off half is already answered by {@link skillsInForce} — and must be, because a mode
+ * may turn a stored-off skill on (K8), so reading `skill.enabled` here would undo the override.
+ */
 function isInvocableSkill(skill: Skill): boolean {
-  return skill.enabled && skillSettingsOf(skill).userInvocable
+  return skillSettingsOf(skill).userInvocable
 }
 
 /**
@@ -175,6 +195,63 @@ export function filterSlashCommands(
 ): readonly SlashCommand[] {
   const needle = query.toLowerCase()
   return commands.filter((command) => command.name.toLowerCase().startsWith(needle))
+}
+
+/** The part of a `/` menu row {@link slashEnterAction} reads: its name and what kind of row it is. */
+export interface SlashMenuRow {
+  /** The name without its slash: what a line's first token is matched against. */
+  readonly name: string
+  /** Whether this row is a client action or one of the reader's skills. */
+  readonly kind: 'builtin' | 'skill'
+}
+
+/** What pressing Enter means for the line in a `/` menu's box. */
+export type SlashEnterAction =
+  /** Run the built-in command now — the line names it in full and has nothing else to type. */
+  | { readonly kind: 'run'; readonly name: string }
+  /** Fill the box with `/name `, so the command's arguments can be typed next. */
+  | { readonly kind: 'complete'; readonly name: string }
+  /** Send the line: it is arguments (`/name args`), an ordinary message, or a miss. */
+  | { readonly kind: 'send' }
+
+/**
+ * Decide what Enter does with the line a reader has typed in a `/` menu's box (K7; #354).
+ *
+ * The one rule both frontends use, so `oh` and the web app cannot disagree about what a keypress
+ * does:
+ *
+ * - a **built-in** the box names **in full** is a command with nothing left to type (`/compact`,
+ *   and `/new`, `/mode` as their rows land), so Enter **runs** it rather than filling the box a
+ *   second time;
+ * - a **skill** is never run from the menu — `/name arguments` is sent as an ordinary message
+ *   carrying `skill` (K7) — so a row the reader is looking at is **completed** to `/name `, which
+ *   is what makes its `argument-hint` the box's placeholder and lets the arguments follow;
+ * - anything else — arguments already typed (`/name args`), a name nothing offers, or an ordinary
+ *   message — is **sent**, the behaviour the box always had.
+ *
+ * A line that only *starts* a name completes to the row the reader is on — the `highlighted`
+ * row, the one the arrows moved to — rather than to the first match.
+ *
+ * @param value the box's current text
+ * @param commands the whole menu, from {@link slashCommands}
+ * @param highlighted the row the menu is on, when it is up
+ */
+export function slashEnterAction(
+  value: string,
+  commands: readonly SlashMenuRow[],
+  highlighted?: SlashMenuRow,
+): SlashEnterAction {
+  const query = slashCommandQuery(value)
+  // Arguments are being typed, or the line is not a command line: Enter sends, as it always has.
+  if (query === null) {
+    return { kind: 'send' }
+  }
+  const exact = commands.find((command) => command.name === query)
+  if (exact !== undefined && exact.kind === 'builtin') {
+    return { kind: 'run', name: exact.name }
+  }
+  const row = highlighted ?? exact
+  return row === undefined ? { kind: 'send' } : { kind: 'complete', name: row.name }
 }
 
 /**
