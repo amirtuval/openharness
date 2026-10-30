@@ -6,22 +6,33 @@ import {
   ListSkillsResponseSchema,
   MAX_SKILL_FILES,
   MAX_SKILLS_PER_USER,
+  PreviewSkillImportRequestSchema,
+  PreviewSkillImportResponseSchema,
   RESERVED_SKILL_NAMES,
+  RefreshSkillPreviewResponseSchema,
+  RefreshSkillRequestSchema,
   SKILL_CLONE_MAX_BYTES,
   SKILL_DESCRIPTION_MAX_LENGTH,
   SKILL_FILE_MAX_BYTES,
+  SKILL_IMPORT_FAILURES,
+  SKILL_IMPORT_MESSAGES,
   SKILL_MAX_BYTES,
   SKILL_MD_FILENAME,
   SKILL_MD_MAX_BYTES,
   SKILL_NAME_MAX_LENGTH,
   SkillFileContentSchema,
+  SkillImportCandidateSchema,
+  SkillImportRequestSchema,
   SkillNameSchema,
   SkillSchema,
   UpdateSkillRequestSchema,
   isReservedSkillName,
   isSkillName,
+  skillBody,
   skillFileSize,
+  skillSettingsOf,
 } from './skill'
+import type { Skill } from './skill'
 
 /** One fixed id for the fixture, so two builds of it are the same value. */
 const SKILL_ID = newSkillId(1_700_000_000_000)
@@ -161,7 +172,12 @@ describe('the skill endpoints’ shapes', () => {
   })
 
   it('reads one file with its path, its size and its content', () => {
-    const file = { path: 'reference/tone.md', size: 6, content: 'terse\n' }
+    const file = {
+      path: 'reference/tone.md',
+      size: 6,
+      encoding: 'utf8' as const,
+      content: 'terse\n',
+    }
     expect(SkillFileContentSchema.parse(file)).toEqual(file)
   })
 
@@ -206,5 +222,240 @@ describe('skillFileSize', () => {
     expect(skillFileSize('—')).toBe(3)
     expect(skillFileSize('🙂')).toBe(4)
     expect(skillFileSize('héllo')).toBe(6)
+  })
+})
+
+describe('the import request shapes (K3)', () => {
+  it('take a URL alone, or with a ref and a path', () => {
+    const bare = PreviewSkillImportRequestSchema.parse({ url: 'https://github.com/a/b' })
+    expect(bare).toEqual({ url: 'https://github.com/a/b' })
+    const full = PreviewSkillImportRequestSchema.parse({
+      url: 'https://github.com/a/b',
+      ref: 'main',
+      path: 'skills',
+    })
+    expect(full.ref).toBe('main')
+    expect(full.path).toBe('skills')
+  })
+
+  it('carry the previewed commit and the picked names on the import itself', () => {
+    const body = SkillImportRequestSchema.parse({
+      url: 'https://github.com/a/b',
+      commit_sha: 'abc123',
+      names: ['release-notes'],
+    })
+    expect(body.names).toEqual(['release-notes'])
+    // An import that picks nothing says nothing: there is no batch to store.
+    expect(
+      SkillImportRequestSchema.safeParse({
+        url: 'https://github.com/a/b',
+        commit_sha: 'a',
+        names: [],
+      }).success,
+    ).toBe(false)
+    // The commit is what makes the second step the one that was previewed.
+    expect(
+      SkillImportRequestSchema.safeParse({ url: 'https://github.com/a/b', names: ['x'] }).success,
+    ).toBe(false)
+  })
+
+  it('answer a preview with the commit and the candidates', () => {
+    const answer = PreviewSkillImportResponseSchema.parse({
+      url: 'https://github.com/a/b',
+      ref: null,
+      path: 'skills',
+      commit_sha: 'abc123',
+      candidates: [
+        {
+          name: 'release-notes',
+          folder: 'skills/release-notes',
+          description: 'Writes the release notes.',
+          files: [{ path: 'SKILL.md', size: 120 }],
+          skill_md: '---\nname: release-notes\n---\n\nbody\n',
+          problems: [],
+          name_taken: false,
+        },
+      ],
+    })
+    expect(answer.candidates[0]?.name_taken).toBe(false)
+    // A name that could not be read out of the frontmatter is `null`, and the folder's name
+    // still says what the candidate is.
+    const broken = PreviewSkillImportResponseSchema.parse({
+      url: 'https://github.com/a/b',
+      ref: 'main',
+      path: null,
+      commit_sha: 'abc123',
+      candidates: [
+        {
+          name: 'broken',
+          folder: 'broken',
+          description: null,
+          files: [],
+          skill_md: 'no frontmatter here',
+          problems: [{ code: 'invalid-frontmatter', message: 'no frontmatter' }],
+          name_taken: true,
+        },
+      ],
+    })
+    expect(broken.candidates[0]?.description).toBeNull()
+  })
+
+  it('refuse a problem code the protocol does not have', () => {
+    const parsed = SkillImportCandidateSchema.safeParse({
+      name: 'x',
+      folder: 'x',
+      description: 'd',
+      files: [],
+      skill_md: 'x',
+      problems: [{ code: 'made-up', message: 'no' }],
+      name_taken: false,
+    })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('name every failure, and say something for each', () => {
+    for (const failure of SKILL_IMPORT_FAILURES) {
+      expect(SKILL_IMPORT_MESSAGES[failure].length).toBeGreaterThan(10)
+      expect(SKILL_IMPORT_MESSAGES[failure].endsWith('.')).toBe(true)
+    }
+    // The codes are the ones the issue names, one each — plus the one that says the repository
+    // was read and the *skill* could not be stored.
+    expect([...SKILL_IMPORT_FAILURES]).toEqual([
+      'unreachable',
+      'not_a_repository',
+      'authentication_required',
+      'ref_not_found',
+      'path_not_found',
+      'no_skills_found',
+      'skill_not_importable',
+      'over_limit',
+      'refused_address',
+    ])
+  })
+})
+
+describe('the refresh shapes (K5)', () => {
+  it('confirm a refresh by naming the commit the preview resolved', () => {
+    expect(RefreshSkillRequestSchema.parse({ commit_sha: 'abc123' })).toEqual({
+      commit_sha: 'abc123',
+    })
+    expect(RefreshSkillRequestSchema.safeParse({}).success).toBe(false)
+  })
+
+  it('answer a preview with the three file lists, the diff and the problems', () => {
+    const answer = RefreshSkillPreviewResponseSchema.parse({
+      commit_sha: 'def456',
+      changed: true,
+      files_added: ['reference/new.md'],
+      files_removed: ['reference/old.md'],
+      files_changed: ['SKILL.md'],
+      skill_md_diff: '--- a/SKILL.md\n+++ b/SKILL.md\n',
+      problems: [],
+    })
+    expect(answer.changed).toBe(true)
+    // An unchanged skill is a `false` and no diff, and the lists are empty rather than absent.
+    const same = RefreshSkillPreviewResponseSchema.parse({
+      commit_sha: 'def456',
+      changed: false,
+      files_added: [],
+      files_removed: [],
+      files_changed: [],
+      skill_md_diff: null,
+      problems: [],
+    })
+    expect(same.skill_md_diff).toBeNull()
+  })
+})
+
+describe('skillSettingsOf', () => {
+  const parsed = (frontmatter: Record<string, unknown>): Skill =>
+    SkillSchema.parse(skill({ frontmatter }))
+
+  it('defaults to a skill the model may use and the user may run', () => {
+    expect(skillSettingsOf(parsed({}))).toEqual({
+      disableModelInvocation: false,
+      userInvocable: true,
+      argumentHint: null,
+    })
+  })
+
+  it('reads the three honoured fields', () => {
+    expect(
+      skillSettingsOf(
+        parsed({
+          'disable-model-invocation': true,
+          'user-invocable': false,
+          'argument-hint': '[version]',
+        }),
+      ),
+    ).toEqual({ disableModelInvocation: true, userInvocable: false, argumentHint: '[version]' })
+  })
+
+  it('honours only the shapes the format documents', () => {
+    // The frontmatter is open and untyped, so a value a hand-written file got wrong is an
+    // ignored field rather than a skill that behaves differently from what it says.
+    expect(
+      skillSettingsOf(parsed({ 'disable-model-invocation': 'true' })).disableModelInvocation,
+    ).toBe(false)
+    expect(skillSettingsOf(parsed({ 'user-invocable': 'false' })).userInvocable).toBe(true)
+    expect(skillSettingsOf(parsed({ 'argument-hint': '' })).argumentHint).toBe(null)
+    expect(skillSettingsOf(parsed({ 'argument-hint': 42 })).argumentHint).toBe(null)
+    // A hint is trimmed, and a padding-only one names nothing.
+    expect(skillSettingsOf(parsed({ 'argument-hint': '  [version] ' })).argumentHint).toBe(
+      '[version]',
+    )
+    expect(skillSettingsOf(parsed({ 'argument-hint': '   ' })).argumentHint).toBe(null)
+  })
+
+  it('renders the format’s bracket spelling back when YAML parsed it as a sequence', () => {
+    // `argument-hint: [version]` is a YAML flow sequence, so a snapshot stored before the import
+    // kept the raw line carries an array here — and the hint the file meant is what it renders.
+    expect(skillSettingsOf(parsed({ 'argument-hint': ['version'] })).argumentHint).toBe('[version]')
+    expect(skillSettingsOf(parsed({ 'argument-hint': ['a', 'b'] })).argumentHint).toBe('[a, b]')
+    // A hint the format can only mean as text, and nothing else: bad items, and none at all.
+    expect(skillSettingsOf(parsed({ 'argument-hint': [] })).argumentHint).toBe(null)
+    expect(skillSettingsOf(parsed({ 'argument-hint': ['', ' '] })).argumentHint).toBe(null)
+    expect(skillSettingsOf(parsed({ 'argument-hint': ['ok', 1] })).argumentHint).toBe(null)
+    expect(skillSettingsOf(parsed({ 'argument-hint': { a: 1 } })).argumentHint).toBe(null)
+  })
+
+  it('reads the fields by the names the format uses, and nothing else', () => {
+    expect(skillSettingsOf(parsed({ disableModelInvocation: true })).disableModelInvocation).toBe(
+      false,
+    )
+    expect(skillSettingsOf(parsed({ userInvocable: false })).userInvocable).toBe(true)
+  })
+})
+
+describe('skillBody', () => {
+  it('strips a frontmatter block and keeps the instructions', () => {
+    const file = '---\nname: release-notes\ndescription: Writes them.\n---\n\nWrite the notes.\n'
+    expect(skillBody(file)).toBe('Write the notes.')
+  })
+
+  it('ends the block at either marker the format allows', () => {
+    expect(skillBody('---\nname: a\n...\nbody\n')).toBe('body')
+  })
+
+  it('is the whole file when there is no frontmatter to strip', () => {
+    expect(skillBody('Just instructions.\n')).toBe('Just instructions.')
+    // A thematic break is not a frontmatter fence: the file does not *open* with one.
+    expect(skillBody('Intro.\n\n---\n\nMore.\n')).toBe('Intro.\n\n---\n\nMore.')
+    // A block that never closes is not a block.
+    expect(skillBody('---\nname: a\nbody\n')).toBe('---\nname: a\nbody')
+  })
+
+  it('tolerates a byte-order mark, and trims the blank lines between the two halves', () => {
+    expect(skillBody('﻿---\nname: a\n---\n\n  body  \n')).toBe('body')
+  })
+
+  it('answers an empty body for a file that is only frontmatter', () => {
+    expect(skillBody('---\nname: a\n---\n')).toBe('')
+  })
+
+  it('does not parse YAML: the body starts where the marker says', () => {
+    // A `---` inside the body is left alone, and a field whose value looks like a fence is a
+    // field's problem rather than the body's.
+    expect(skillBody('---\nname: a\n---\nbody\n\n---\nmore\n')).toBe('body\n\n---\nmore')
   })
 })

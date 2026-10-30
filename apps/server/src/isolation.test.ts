@@ -167,6 +167,14 @@ describe('user isolation (A4)', () => {
       ['GET', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}/files/${SKILL_MD_FILENAME}`],
       ['POST', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}`, { enabled: false }],
       ['DELETE', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}`],
+      // A refresh is a re-clone of A's skill's own source (#351), so B's preview reads nothing
+      // and B's confirm writes nothing: both are the same 404 as the reads above.
+      ['POST', `${API_VERSION_PREFIX}/me/skills/${a.skill.id}/refresh/preview`, {}],
+      [
+        'POST',
+        `${API_VERSION_PREFIX}/me/skills/${a.skill.id}/refresh`,
+        { commit_sha: a.skill.source.commit_sha },
+      ],
     ]
 
     for (const [method, path, request] of routes) {

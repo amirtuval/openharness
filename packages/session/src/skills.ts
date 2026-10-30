@@ -2,6 +2,7 @@ import {
   SKILL_MD_FILENAME,
   type Skill,
   type SkillFileContent,
+  type SkillFileEncoding,
   type SkillFrontmatter,
   type SkillId,
   type SkillSource,
@@ -66,17 +67,25 @@ import type { OwnerScope } from './store'
 
 /**
  * One file of a snapshot, as a caller writes it: the path inside the skill folder and the
- * content.
+ * content, in the spelling the caller holds it.
  *
- * The content is the file's text and the only thing that crosses this boundary — the store
- * computes the size it reports from it. A binary file of a skill is stored the same way, as
- * the text it was read as; running or interpreting one is not this epic's (K2).
+ * The content and its encoding are the only things that cross this boundary — the store
+ * computes the size it reports from them. A text file is `utf8` (the default, and what every
+ * caller that predates the field writes); a file whose bytes are not text — an image, a font,
+ * a `.docx` — is `base64`, because a string cannot carry a NUL faithfully and Postgres' `text`
+ * refuses one outright. `size` is the original byte length either way, so K4's limits count the
+ * real file. Running or interpreting a file is not this epic's (K2).
  */
 export interface SkillFileInput {
   /** The file's path, relative to the skill folder and forward-slashed (`SKILL.md`, `a/b.md`). */
   readonly path: string
   /** The file's content, exactly as it should be stored and handed back. */
   readonly content: string
+  /**
+   * How `content` is spelled: its text (`utf8`, the default), or its bytes base64-encoded
+   * (`base64`). A caller that stores a binary file must say so.
+   */
+  readonly encoding?: SkillFileEncoding
 }
 
 /**

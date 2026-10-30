@@ -355,7 +355,11 @@ describe('App', () => {
     expect(frameOf(app)).toContain('/help')
     expect(frameOf(app)).toContain('/exit (/quit)')
 
-    // `/model` is the first row, so a bare `/` and Enter is the picker.
+    // `/model` is the first row: Enter completes it into the prompt (`/model `), and the next
+    // Enter is the one that opens the picker — a command the menu shows is filled, not run, so
+    // the reader sees which one they took (#354).
+    pressKey(app, 'enter')
+    await waitForFrame(app, '❯ /model')
     pressKey(app, 'enter')
     await waitForScreen(app, 'Which model?')
   })

@@ -51,6 +51,16 @@ import {
 } from './mcp/service'
 import { registerMcpOAuthCallbackRoute, registerMcpServerRoutes } from './routes/mcp-servers'
 import { registerSkillRoutes } from './routes/skills'
+import {
+  SkillImportFailureError,
+  SkillSourceRefusalError,
+  InvalidSkillSelectionError,
+  StaleSkillCommitError,
+  createSkillImportService,
+  skillImportFailureMessage,
+  type CloneRepository,
+  type SkillImportService,
+} from './skills-import'
 import { registerMeRoutes } from './routes/me'
 import { registerToolSettingsRoutes } from './routes/tool-settings'
 import { registerModeRoutes } from './routes/modes'
@@ -125,6 +135,13 @@ export interface AppOptions {
    * durable one.
    */
   readonly skills?: SkillStore
+  /**
+   * How a repository is read when a skill is imported or refreshed (epic #349, K3/K5).
+   * Omitted, the real clone is built here over {@link AppOptions.skills}, with the deployment's
+   * self-host setting; `main.ts` passes the same flag the MCP client and the custom-endpoint
+   * credential read, and a test passes a clone pointed at its own repository fixture.
+   */
+  readonly skillImport?: SkillImportAppOptions
   /**
    * The model catalogue (epic #92): what `GET /v1/models` answers, and the per-provider cache
    * entry the credential PUT/DELETE routes drop (C4). `main.ts` builds it with the real
@@ -242,6 +259,31 @@ export interface McpServersAppOptions {
 }
 
 /**
+ * How the skill import and refresh routes are wired (epic #349, K3/K5).
+ */
+export interface SkillImportAppOptions {
+  /**
+   * The service, when the caller already built one. Absent, it is built here over the app's
+   * skill store, which is what a test wants.
+   */
+  readonly service?: SkillImportService
+  /**
+   * How a repository is read; the real clone when omitted. The one seam a test replaces, so the
+   * import routes can be driven against a repository on loopback rather than the internet.
+   */
+  readonly clone?: CloneRepository
+  /**
+   * `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether an import may reach a private, loopback
+   * or link-local address — the same setting a remote MCP server reads (#249; #303, X10).
+   */
+  readonly allowPrivateUrls?: boolean
+  /** The clone's total download cap; K4's 20 MB by default. */
+  readonly maxBytes?: number
+  /** The clone's deadline; 60 s by default, `null` for none. */
+  readonly timeoutMs?: number | null
+}
+
+/**
  * What `GET /ready` asks (#151): can this instance take traffic right now?
  *
  * A readiness answer is two questions, and both have to be "yes": the process is not on its
@@ -321,6 +363,10 @@ function socketAddress(c: Context<AppEnv>): string | null {
  */
 export function createApp(options: AppOptions): Hono<AppEnv> {
   const logger = options.logger ?? consoleLogger
+  // The skill store the routes read and the import writes, built once so the service and the
+  // resource routes cannot end up over two different stores.
+  const skills = options.skills ?? new InMemorySkillStore()
+
   const app = new Hono<AppEnv>()
   const trustedProxyHops = options.trustedProxyHops ?? 0
   const readiness = options.readiness ?? alwaysReady
@@ -480,7 +526,20 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
         ...(options.mcpServers?.now === undefined ? {} : { now: options.mcpServers.now }),
         logger: options.mcpServers?.logger ?? logger,
       }),
-    skills: options.skills ?? new InMemorySkillStore(),
+    skills,
+    skillImport:
+      options.skillImport?.service ??
+      createSkillImportService({
+        skills,
+        ...(options.skillImport?.clone === undefined ? {} : { clone: options.skillImport.clone }),
+        ...(options.skillImport?.allowPrivateUrls === true ? { allowPrivateUrls: true } : {}),
+        ...(options.skillImport?.maxBytes === undefined
+          ? {}
+          : { maxBytes: options.skillImport.maxBytes }),
+        ...(options.skillImport?.timeoutMs === undefined
+          ? {}
+          : { timeoutMs: options.skillImport.timeoutMs }),
+      }),
     catalog: options.catalog,
     // The automatic default model (epic #116, U4) is built here, per app: the record of who
     // the server has picked for lives as long as this app does (see `default-model.ts`).
@@ -568,6 +627,23 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       // the cap (#245, M6; #303, X10; #349, K4). All are conflicts with the resource's current
       // state, and the store's messages say which — `conflict_error` is the protocol's type for
       // exactly that.
+      return errorResponse(c, 'conflict_error', error.message)
+    }
+    if (error instanceof SkillImportFailureError) {
+      // A repository that could not be read, or a skill that cannot be imported (epic #349, K3):
+      // the protocol's `skill_import_error`, whose message is the failure's own sentence — plus
+      // a candidate's problems when that is what it was.
+      return errorResponse(c, 'skill_import_error', skillImportFailureMessage(error))
+    }
+    if (error instanceof SkillSourceRefusalError || error instanceof InvalidSkillSelectionError) {
+      // The caller's own input was wrong — a URL that is not a public `https://` git URL, a
+      // folder path that climbs, a name no candidate has or one picked twice. That is the 400
+      // every bad parameter gets, not a repository that could not be read.
+      return errorResponse(c, 'invalid_request_error', error.message)
+    }
+    if (error instanceof StaleSkillCommitError) {
+      // The ref moved between a preview and its confirm: the request conflicts with the
+      // repository's state and can simply be made again, which is what the message says.
       return errorResponse(c, 'conflict_error', error.message)
     }
     if (error instanceof RangeError) {

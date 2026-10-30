@@ -49,7 +49,7 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `PORT`                              | the port to listen on; `3000` by default                         |
  * | `OPENHARNESS_TEST_MODEL`            | `mock` swaps in the deterministic test model (see `mock-model.ts`) |
  * | `OPENHARNESS_WEB_DIR`               | a built web app to serve at `/`                                  |
- * | `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | `1` lets a **custom OpenAI-compatible** credential reach a private address (e.g. Ollama on localhost); off by default, never Azure (#249, M4) |
+ * | `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS` | `1` lets a **custom OpenAI-compatible** credential, a **remote MCP server** or a **skill import's clone** reach a private address (e.g. Ollama on localhost); off by default, never Azure (#249, M4; #303, X10; #349, K3) |
  * | `OPENHARNESS_TRUSTED_PROXY_HOPS`    | how many proxies append to `x-forwarded-for`; `0` trusts none (#151) |
  * | `OPENHARNESS_CORS_ORIGINS`          | comma-separated origins to allow; unset means no CORS at all     |
  * | `OPENHARNESS_MAX_CONCURRENT_SESSIONS` | how many sessions may run at once; `4` by default               |
@@ -176,10 +176,11 @@ export interface ServerConfig {
   /** A directory of built web assets to serve at `/`. */
   readonly webDir: string | undefined
   /**
-   * `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether a **custom OpenAI-compatible**
-   * credential may reach a private, loopback or link-local address (epic #245, M4). Off by
-   * default; staging and production stay off. It applies to that one credential type — Azure
-   * OpenAI, whose endpoint is a public hosted service, never reads it.
+   * `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`: whether a **user-supplied URL** may reach a
+   * private, loopback or link-local address (epic #245, M4). Off by default; staging and
+   * production stay off. It is read by the three paths whose address a user chooses: a custom
+   * OpenAI-compatible credential (#249), a remote MCP server (#303, X10) and a skill import's
+   * clone (#349, K3). Azure OpenAI, whose endpoint is a public hosted service, never reads it.
    */
   readonly allowPrivateProviderUrls: boolean
   /**
@@ -582,12 +583,13 @@ export function describeConfig(config: ServerConfig): string[] {
   )
   lines.push(config.webDir === undefined ? 'web assets: none' : `web assets: ${config.webDir}`)
   if (config.allowPrivateProviderUrls) {
-    // Only when it is on: this is a self-host opt-in that weakens the SSRF guard for one
-    // credential type, so a deployment that set it should see that it did (#249, M4).
+    // Only when it is on: this is a self-host opt-in that weakens the SSRF guard wherever a
+    // user chooses the address, so a deployment that set it should see that it did (#249, M4;
+    // #303, X10; #349, K3).
     lines.push(
-      `custom provider URLs: PRIVATE ADDRESSES ALLOWED ` +
-        `(${ENV_VARS.allowPrivateProviderUrls}=1; custom OpenAI-compatible credentials and ` +
-        'remote MCP servers)',
+      `user-supplied URLs: PRIVATE ADDRESSES ALLOWED ` +
+        `(${ENV_VARS.allowPrivateProviderUrls}=1; custom OpenAI-compatible credentials, ` +
+        'remote MCP servers and skill imports)',
     )
   }
   // Observability (#158): which shape the output is in, and whether spans are exported — the

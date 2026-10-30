@@ -1,4 +1,4 @@
-import { WEB_FETCH_TOOL_NAME } from '@openharness/hands'
+import { SKILL_READ_TOOL_NAME, SKILL_TOOL_NAME, WEB_FETCH_TOOL_NAME } from '@openharness/hands'
 import type { ToolRegistry } from '@openharness/hands'
 import {
   AGENT_MESSAGE_TOOL_NAME,
@@ -64,6 +64,18 @@ function turnTools(
   return { names: turn.tools.tools.map((tool) => tool.name), turn, store }
 }
 
+/**
+ * The two decisions a settings listing owes for the skill tools (#352): they are built per
+ * request from the owner's own skills, so a deployment's registry never holds them, and their
+ * declaration is `allow` — a skill is the user's own instructions in their own chat.
+ */
+function skillDecisions(): Record<string, { enabled: boolean; permission: string }> {
+  return {
+    [SKILL_TOOL_NAME]: { enabled: true, permission: 'allow' },
+    [SKILL_READ_TOOL_NAME]: { enabled: true, permission: 'allow' },
+  }
+}
+
 describe('createTurnRegistry and createTurnTools', () => {
   it('offers the built-ins, ask_user and the subagent tools to every deployment', () => {
     const { names, turn } = turnTools({})
@@ -119,12 +131,15 @@ describe('createTurnRegistry and createTurnTools', () => {
 
     // `web_search` is in the answer too, without being in the registry: it is a provider's own
     // tool, and the settings are where a user's choice about it lives (#335). It follows its
-    // declaration — `allow`, offered — for a user who has chosen nothing.
+    // declaration — `allow`, offered — for a user who has chosen nothing. `skill` and
+    // `skill_read` are listed the same way (#352): the loop builds them per request from the
+    // owner's own skills, so a deployment's registry never holds them.
     expect(await turn.toolSettings?.('user_a', null)).toEqual({
       [ASK_USER_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TOOL_NAME]: { enabled: false, permission: 'deny' },
       [TEST_TASK_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [WEB_SEARCH_TOOL_NAME]: { enabled: true, permission: 'allow' },
+      ...skillDecisions(),
     })
     // A user who has saved nothing gets each tool's own declaration: offered, and allowed.
     expect(await turn.toolSettings?.('user_b', null)).toEqual({
@@ -132,6 +147,7 @@ describe('createTurnRegistry and createTurnTools', () => {
       [TEST_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [TEST_TASK_TOOL_NAME]: { enabled: true, permission: 'allow' },
       [WEB_SEARCH_TOOL_NAME]: { enabled: true, permission: 'allow' },
+      ...skillDecisions(),
     })
   })
 

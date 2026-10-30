@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { TimestampSchema } from '../common'
 import { SkillIdSchema } from '../ids'
+import { modeItemInForce, type ModeToolOverride } from './mode'
 import { UserIdSchema } from './user'
 
 /**
@@ -108,6 +109,171 @@ export const SKILL_DESCRIPTION_MAX_LENGTH = 1024
 export const SKILL_MD_FILENAME = 'SKILL.md'
 
 /**
+ * The most characters a slash invocation's arguments may carry (K7).
+ *
+ * The arguments ride the `user.message` as typed and are substituted into the body the model is
+ * given, so they are part of a request's size like anything else; the cap keeps a paste from
+ * becoming a message the protocol stores without bound. It is generous — a skill invocation is a
+ * sentence, not a document.
+ */
+export const SKILL_ARGUMENTS_MAX_LENGTH = 10_000
+
+/**
+ * The honoured frontmatter fields, as a `Skill` states them (epic #349, K1).
+ *
+ * Three of the format's fields change what a skill *is* to this build, and every consumer that
+ * has to know — the listing (K6), the `/` menu (K7), the settings screens (#353) — reads them
+ * through {@link skillSettingsOf} rather than off `frontmatter` itself, so "what does
+ * `user-invocable` default to?" has one answer. The rest of the frontmatter is stored and shown
+ * and otherwise ignored.
+ */
+export interface SkillSettings {
+  /**
+   * `disable-model-invocation: true`: a command only the **user** runs (K6).
+   *
+   * The model is not told the skill exists — it is out of the listing — and `skill` refuses it
+   * if the model asks for it anyway by name.
+   */
+  readonly disableModelInvocation: boolean
+  /**
+   * `user-invocable: false`: a skill only the **model** uses (K7), refused as a slash command.
+   *
+   * Absent means `true`: a skill is something its user can run, which is the format's own
+   * reading and the one that makes importing a skill do something.
+   */
+  readonly userInvocable: boolean
+  /** `argument-hint`: shown beside the command in a `/` menu, or `null` when the file names none. */
+  readonly argumentHint: string | null
+}
+
+/**
+ * The three honoured fields of a skill's snapshot (K1), read one way by every consumer.
+ *
+ * A field is honoured only in the shape the format documents — a real `true` for
+ * `disable-model-invocation`, a real `false` for `user-invocable`, a string for `argument-hint`
+ * (or the flow-sequence array the format's own `[version]` spelling parses to, rendered back as
+ * written) — because the frontmatter is open and untyped ({@link SkillFrontmatterSchema}): a
+ * value a hand-written file got wrong is an ignored field rather than a skill that behaves
+ * differently from what it says. The lookup is case-sensitive to the field names the format uses.
+ */
+export function skillSettingsOf(skill: Skill): SkillSettings {
+  const frontmatter = skill.frontmatter
+  return {
+    disableModelInvocation: frontmatter['disable-model-invocation'] === true,
+    userInvocable: frontmatter['user-invocable'] !== false,
+    argumentHint: argumentHintOf(frontmatter['argument-hint']),
+  }
+}
+
+/**
+ * Whether one skill is **on** for a request, given the mode's override (epic #349, K8).
+ *
+ * The rule is the one every reader must apply: **a mode that names the skill wins; a skill it
+ * does not name follows {@link ModeToolOverride.skills_default} — `follow` (the user's
+ * `enabled`), `off` (an allowlist, so a skill imported later stays off in this mode) or `on`
+ * (every skill except the ones the mode turns off)**. A map entry naming a skill the user no
+ * longer has never matches anything, so a mode that named a deleted skill is simply ignored.
+ * It is exported from the protocol — rather than written once in the server and once in each
+ * frontend — because the server's `assertInvocableSkills` and the `/` menu have to answer with
+ * the same effective set: a menu row the server refuses, or a missing row the server would
+ * accept, is a bug that only one shared rule can prevent.
+ *
+ * A mode default cannot bring back a skill a **hard rule** removes: `disable-model-invocation`
+ * still keeps the skill out of the model's listing, and `resolveSkills` applies that beside this
+ * function.
+ *
+ * @param skill the skill as the store lists it (its stored `enabled`, never an effective one)
+ * @param override the resolved mode's `tools` patch, or `null` for no override
+ */
+export function skillInForce(skill: Skill, override: ModeToolOverride | null): boolean {
+  return modeItemInForce(override?.skills?.[skill.id], skill.enabled, override?.skills_default)
+}
+
+/**
+ * The effective skills of a list, in its own order (K8) — {@link skillInForce} applied to
+ * every one of them.
+ *
+ * The order is deliberately the input's (the store lists a user's skills oldest first), so a
+ * frontend that shows the effective set and one that shows the stored list agree on
+ * everything but the on/off answer.
+ */
+export function skillsInForce(
+  skills: readonly Skill[],
+  override: ModeToolOverride | null,
+): Skill[] {
+  return skills.filter((skill) => skillInForce(skill, override))
+}
+
+/**
+ * `argument-hint` as the text a `/` menu shows, or `null` for a value that is not one.
+ *
+ * A string is the hint itself, trimmed; an empty one names nothing. An **array** is the
+ * format's own bracket spelling read as YAML — `argument-hint: [version]` is a flow sequence,
+ * not a string — and it is still the hint the file meant, so it is rendered back the way the
+ * line wrote it (`[version]`, `[a, b]`). A snapshot imported since the import keeps the raw
+ * line (see `apps/server`'s discovery), so this half is for one stored before that: the shape
+ * the file has never changes the hint a reader sees.
+ */
+function argumentHintOf(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const hint = value.trim()
+    return hint.length === 0 ? null : hint
+  }
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    const items = value.map((item) => item.trim()).filter((item) => item !== '')
+    return items.length === 0 ? null : `[${items.join(', ')}]`
+  }
+  return null
+}
+
+/**
+ * A `SKILL.md` file's **body**: everything after its YAML frontmatter (K1, K6).
+ *
+ * The one reading of where the frontmatter ends, so the body a model is handed is the same in
+ * the tool that serves it, the context builder that renders a slash invocation and any client
+ * that shows a skill. The rules are the format's own:
+ *
+ * - the file opens with a line that is exactly `---` (a leading byte-order mark is tolerated);
+ * - the frontmatter runs to the next line that is exactly `---` or `...`;
+ * - everything after it is the body, trimmed of the blank lines that separate the two.
+ *
+ * A file that does not open a frontmatter block has no frontmatter to strip and is its own body,
+ * and so is one whose block never closes — the markers are what make a block, and a file without
+ * them is not one. Nothing here parses YAML: the parsed frontmatter is the resource's own field
+ * ({@link Skill.frontmatter}), and this helper only knows where the text it came from begins.
+ */
+export function skillBody(content: string): string {
+  const text = content.startsWith(BOM) ? content.slice(BOM.length) : content
+  const lines = text.split('\n')
+  if (!isFrontmatterFence(lines[0])) {
+    return text.trim()
+  }
+  for (let index = 1; index < lines.length; index += 1) {
+    if (isClosingFence(lines[index])) {
+      return lines
+        .slice(index + 1)
+        .join('\n')
+        .trim()
+    }
+  }
+  return text.trim()
+}
+
+/** The byte-order mark a file saved by a Windows editor may open with. */
+const BOM = '\uFEFF'
+
+/** Whether a line opens a `SKILL.md`'s frontmatter block. */
+function isFrontmatterFence(line: string | undefined): boolean {
+  return line?.trim() === '---'
+}
+
+/** Whether a line closes one: the format's ending marker, or YAML's own document end. */
+function isClosingFence(line: string | undefined): boolean {
+  const trimmed = line?.trim()
+  return trimmed === '---' || trimmed === '...'
+}
+
+/**
  * The size limits of K4, in bytes.
  *
  * They bound what one import may store, and they are enforced by the store's callers — the
@@ -146,15 +312,58 @@ export const MAX_SKILLS_PER_USER = 50
 export const SKILL_CLONE_MAX_BYTES = 20 * 1024 * 1024
 
 /**
+ * Largest total of **unpacked** blob bytes one clone may read: 100 MB.
+ *
+ * The download cap above bounds the compressed pack, and a pack of highly compressible content
+ * can inflate to orders of magnitude more than its download size — `SKILL_CLONE_MAX_BYTES` of
+ * zeros is gigabytes once read. The clone therefore also caps the sum of the blobs it really
+ * inflates, and refuses past it with `over_limit`.
+ *
+ * The number is the most a legitimate import could need: fifty skills (§
+ * {@link MAX_SKILLS_PER_USER}) each at the whole-skill limit (§ {@link SKILL_MAX_BYTES}). A
+ * caller that reads only a folder's own blobs — the import passes its `path` to the clone —
+ * therefore cannot reach it with skills that pass K4, while a repository whose content unpacks
+ * past it is refused rather than left to exhaust the process.
+ */
+export const SKILL_INFLATE_MAX_BYTES = SKILL_MAX_BYTES * MAX_SKILLS_PER_USER
+
+/**
  * The size of a file's content in bytes — what {@link SkillFile.size} counts.
  *
  * Bytes rather than characters, because a limit of "20 KB" has to mean the same thing for a
  * file of ASCII and a file of CJK or emoji: `TextEncoder` counts what would really be stored,
  * and it is a Web API both a browser and Node 24 have, so this package stays browser-safe.
+ *
+ * A base64 file's `size` is the number of bytes it decodes to, not the length of the base64
+ * text: the limits of K4 count the file itself, and a base64 string is a third larger than the
+ * bytes it carries. The arithmetic below is exact for the canonical base64 the import writes
+ * (including a final group padded with `=` or `==`), and requires no `atob` — which keeps this
+ * function usable in `@openharness/protocol`'s browser-safe program.
  */
-export function skillFileSize(content: string): number {
+export function skillFileSize(content: string, encoding: SkillFileEncoding = 'utf8'): number {
+  if (encoding === 'base64') {
+    const padding = content.endsWith('==') ? 2 : content.endsWith('=') ? 1 : 0
+    return Math.floor((content.length * 3) / 4) - padding
+  }
   return new TextEncoder().encode(content).length
 }
+
+/**
+ * How a file's content is spelled in storage (K4).
+ *
+ * A skill's files are not all text: a folder may ship an icon, a font or a `.docx`, and the
+ * import stores those losslessly rather than decoding them into mojibake. `utf8` is the
+ * ordinary case — `content` is the file's text; `base64` is a non-text file — `content` is the
+ * file's bytes, base64-encoded — and `size` is the original byte length either way.
+ *
+ * The encoding is what Postgres needs: its `text` type rejects a NUL byte outright, so a
+ * binary file cannot be stored as text at all (`invalid byte sequence for encoding "UTF8":
+ * 0x00`), and a file that is not valid UTF-8 cannot be kept faithfully as a string. Base64 is
+ * the lossless spelling every store accepts.
+ */
+export const SkillFileEncodingSchema = z.enum(['utf8', 'base64'])
+
+export type SkillFileEncoding = z.infer<typeof SkillFileEncodingSchema>
 
 /**
  * // extension: the frontmatter fields besides `name` and `description`, as parsed.
@@ -272,9 +481,15 @@ export type Skill = z.infer<typeof SkillSchema>
 export const SkillFileContentSchema = z.object({
   /** The file's path inside the skill folder, the one that was asked for. */
   path: z.string().min(1),
-  /** The content's size in bytes (see {@link skillFileSize}). */
+  /** The content's size in bytes (see {@link skillFileSize}) — the original file's, in bytes. */
   size: z.number().int().min(0),
-  /** The file's content, as the snapshot holds it. */
+  /**
+   * How `content` is spelled: the file's text (`utf8`), or its bytes base64-encoded
+   * (`base64`). Required, because a reader that assumed text would show mojibake for a
+   * binary file — and a model that read one as base64 would be told nothing useful.
+   */
+  encoding: SkillFileEncodingSchema,
+  /** The file's content, as the snapshot holds it — see `encoding`. */
   content: z.string(),
 })
 
@@ -323,3 +538,304 @@ export const UpdateSkillRequestSchema = z.object({
 })
 
 export type UpdateSkillRequest = z.infer<typeof UpdateSkillRequestSchema>
+
+/**
+ * The distinct ways an import can fail (K3), as stable codes.
+ *
+ * Every one of them is a **request the server understood** and could not carry out — the URL
+ * is fine as a URL, but it is not a repository, or not this one's branch, or the deployment
+ * refuses to dial the address it names. They are deliberately apart from one another rather
+ * than one generic refusal, because a user who pasted a URL is owed the difference between
+ * *their* mistake (a path that is not there, a branch that does not exist), *the
+ * repository's* state (empty, or not a repository at all), and *this deployment's* policy (a
+ * private address, no credentials to send); only the last two are the server's to explain,
+ * and all three are the caller's to act on differently.
+ *
+ * The code does not travel on its own — the error envelope has room for a type and a message
+ * and nothing else — so {@link SKILL_IMPORT_MESSAGES} is the one spelling of each sentence,
+ * shared by the server that raises it and the client that shows it.
+ */
+export const SKILL_IMPORT_FAILURES = [
+  /** The host could not be reached at all: DNS failed, or the connection did not open. */
+  'unreachable',
+  /** Something answered, but it is not a git repository — an HTML page, a 404, a proxy. */
+  'not_a_repository',
+  /** The repository is private, or the server demanded credentials this deployment never sends. */
+  'authentication_required',
+  /** The repository exists, but it has no such branch, tag or commit. */
+  'ref_not_found',
+  /** The repository exists, but it holds no such folder. */
+  'path_not_found',
+  /** The path holds no `SKILL.md` at all, so there is nothing to import (K1). */
+  'no_skills_found',
+  /**
+   * The repository was read, and a skill the caller picked cannot be imported as it stands:
+   * its frontmatter does not parse, its name is not the folder's, or it breaks a limit of K4
+   * ({@link SKILL_PROBLEM_CODES}). The distinction from the failures above is which side is at
+   * fault — the repository read worked and the skill is the problem.
+   */
+  'skill_not_importable',
+  /** The clone broke one of the limits of K4 — the 20 MB download, or its deadline. */
+  'over_limit',
+  /** The address the URL names is private, loopback, link-local or metadata — refused (K3). */
+  'refused_address',
+] as const
+
+/** One of the ways an import can fail ({@link SKILL_IMPORT_FAILURES}). */
+export type SkillImportFailure = (typeof SKILL_IMPORT_FAILURES)[number]
+
+/**
+ * What each import failure says to the user, as a sentence.
+ *
+ * One spelling per code, so the server that raises the error, the tests that pin it and a
+ * client that shows it cannot drift apart. A failure whose message needs a detail — which
+ * ref, which path — takes the sentences below and appends it, which is what the server's
+ * import does; the detail is always the caller's own input, never anything the server knows.
+ */
+export const SKILL_IMPORT_MESSAGES: Record<SkillImportFailure, string> = {
+  unreachable: 'The repository could not be reached.',
+  not_a_repository: 'That URL is not a public git repository.',
+  authentication_required:
+    'That repository is private or requires credentials, and openharness imports public repositories only.',
+  ref_not_found: 'That branch, tag or commit is not in the repository.',
+  path_not_found: 'That folder is not in the repository.',
+  no_skills_found: 'That folder holds no SKILL.md, so there is no skill to import.',
+  skill_not_importable: 'That skill cannot be imported as it stands.',
+  over_limit: 'That repository is larger than the import limit.',
+  refused_address: 'That address is not a public one, so this deployment will not fetch it.',
+}
+
+/**
+ * One thing wrong with a candidate skill an import found (K1, K4).
+ *
+ * A **candidate** is a folder holding a `SKILL.md`; a problem is a reason it cannot be
+ * imported as it stands, and a candidate carries every problem it has rather than the first,
+ * so a preview can show a user the whole story of a folder at once. Nothing here fails the
+ * preview: a repository holding one good skill and one broken one offers the good one, and the
+ * broken one with its reasons.
+ *
+ * `code` is the stable half a client branches on, `message` the sentence it shows.
+ */
+export const SKILL_PROBLEM_CODES = [
+  /** The `SKILL.md` has no frontmatter, or the YAML does not parse, or `name`/`description` are missing or malformed (K1). */
+  'invalid-frontmatter',
+  /** The frontmatter's `name` is not the folder's name (K1). */
+  'name-mismatch',
+  /** The name is a built-in slash command's ({@link RESERVED_SKILL_NAMES}, K7). */
+  'reserved-name',
+  /** Two candidates under the path would import under the same name. */
+  'duplicate-name',
+  /** One of the limits of K4 is broken: the `SKILL.md`, a file, the whole skill, or the file count. */
+  'over-limit',
+] as const
+
+/** One of the reasons a candidate skill cannot be imported ({@link SKILL_PROBLEM_CODES}). */
+export type SkillProblemCode = (typeof SKILL_PROBLEM_CODES)[number]
+
+/** One reason a candidate cannot be imported as it stands. */
+export const SkillProblemSchema = z.object({
+  /** The stable code; see {@link SKILL_PROBLEM_CODES}. */
+  code: z.enum(SKILL_PROBLEM_CODES),
+  /** The sentence to show, naming the field or the limit it is about. */
+  message: z.string(),
+})
+
+export type SkillProblem = z.infer<typeof SkillProblemSchema>
+
+/**
+ * One folder holding a `SKILL.md` that an import found, as a **preview** reports it (K3).
+ *
+ * Nothing has been stored: this is what the server would import, so the user can read the
+ * `SKILL.md` and the file list and decide. `name` is the **folder's** name — the identity a
+ * candidate is picked by, and the name the frontmatter has to agree with (K1) — while
+ * `description` is the frontmatter's, or `null` when the frontmatter did not parse (`name`
+ * then carries the folder's name alone, and what the frontmatter said is in its problems).
+ *
+ * `skill_md` is the **whole** `SKILL.md` — frontmatter and body — because that is what a
+ * reader reviews before approving an import, and `files` is a listing (paths and sizes,
+ * never contents) exactly as a stored skill's is.
+ */
+export const SkillImportCandidateSchema = z.object({
+  /** The folder's name (K1) — the key an import picks this candidate by. */
+  name: z.string(),
+  /**
+   * The folder's path in the repository, from the repository's root, forward-slashed.
+   *
+   * `""` is the repository's own root: a `SKILL.md` sitting there is a candidate like any other,
+   * named (its `name`) for the repository rather than for a folder that does not exist.
+   */
+  folder: z.string(),
+  /** The frontmatter's `description` (K1), or `null` when the frontmatter did not parse. */
+  description: z.string().nullable(),
+  /** The folder's files, relative to it, each with its size — never its content. */
+  files: z.array(SkillFileSchema),
+  /** `SKILL.md` as it is in the repository: the frontmatter, then the Markdown body. */
+  skill_md: z.string(),
+  /** Everything wrong with this candidate ({@link SkillProblemSchema}); empty when it is importable. */
+  problems: z.array(SkillProblemSchema),
+  /**
+   * Whether the caller already has a skill by this name.
+   *
+   * A preview carries it — rather than leaving the client to diff two reads — because it is
+   * the one reason a candidate a user picked will be refused on the import that follows, and
+   * the store's rule is per user (K4). It is a separate field and not a {@link SkillProblem}:
+   * nothing is wrong with the skill, and the answer a user wants is "you already have one of
+   * these", which is not a shape a code could carry without naming the other skill.
+   */
+  name_taken: z.boolean(),
+})
+
+export type SkillImportCandidate = z.infer<typeof SkillImportCandidateSchema>
+
+/**
+ * Where an import is to read from: the repository, and the optional ref and path inside it.
+ *
+ * The three fields a user types, and the three `SkillSource` records. `ref` and `path` are
+ * optional rather than nullable because a body names only what the user said — a browse URL
+ * (`…/tree/<ref>/<path>`) fills them in server-side, and a repository's default branch is what
+ * an absent `ref` means (K3).
+ */
+export const SkillImportSourceSchema = z.object({
+  /** A public `https://` git URL, or a GitHub/GitLab browse URL (`…/tree/<ref>/<path>`). */
+  url: z.string(),
+  /** The branch, tag or commit to read, or absent for the repository's default branch. */
+  ref: z.string().optional(),
+  /** The folder inside the repository to look in, or absent for its root. */
+  path: z.string().optional(),
+})
+
+export type SkillImportSource = z.infer<typeof SkillImportSourceSchema>
+
+/**
+ * Body of `POST /v1/me/skills/import/preview`. Response: {@link PreviewSkillImportResponseSchema}.
+ *
+ * The first of the import's two steps (K3): nothing is stored, and the answer is what a
+ * repository holds under the path. The same body is the second step's, plus the commit the
+ * preview resolved and the names the user picked — see {@link SkillImportRequestSchema}.
+ */
+export const PreviewSkillImportRequestSchema = SkillImportSourceSchema
+
+export type PreviewSkillImportRequest = z.infer<typeof PreviewSkillImportRequestSchema>
+
+/**
+ * Response of `POST /v1/me/skills/import/preview`: the commit the clone landed on and every
+ * candidate it found (K3).
+ *
+ * `url`, `ref` and `path` are the server's reading of the request — a browse URL arrives as
+ * one string and leaves split in three — and `commit_sha` is the commit that reading landed
+ * on. The three are echoed because they are what a following
+ * {@link SkillImportRequestSchema} has to name, together with that commit, for the import to
+ * be the one that was previewed.
+ */
+export const PreviewSkillImportResponseSchema = z.object({
+  /** The `https://` git URL the clone was made from, with a browse URL split apart. */
+  url: z.string(),
+  /** The ref the clone was made at, or `null` for the repository's default branch. */
+  ref: z.string().nullable(),
+  /** The folder that was looked in, or `null` for the repository's root. */
+  path: z.string().nullable(),
+  /** The commit the clone landed on; an import naming this commit is the one that was previewed. */
+  commit_sha: z.string(),
+  /** Every `SKILL.md` under the path, each with its problems; empty only when there are none. */
+  candidates: z.array(SkillImportCandidateSchema),
+})
+
+export type PreviewSkillImportResponse = z.infer<typeof PreviewSkillImportResponseSchema>
+
+/**
+ * Body of `POST /v1/me/skills/import`. Response: {@link ImportSkillsResponseSchema}.
+ *
+ * The second step (K3): the same source, the commit the preview resolved, and the **names** of
+ * the candidates the user picked. The server clones again — it holds nothing between the two
+ * calls — and refuses the import when the ref no longer resolves to `commit_sha`, so what is
+ * stored is what was reviewed rather than whatever the branch has become. `names` is
+ * deliberately the candidates' names and not their folders: a name is what a skill is
+ * identified by among its owner's skills (K4), and a candidate whose name is `null` could not
+ * be stored under one anyway.
+ */
+export const SkillImportRequestSchema = SkillImportSourceSchema.extend({
+  /** The commit the preview resolved; the clone must land on it again or the import is refused. */
+  commit_sha: z.string(),
+  /** The names of the candidates to import, at least one, as the preview spelled them. */
+  names: z.array(z.string()).min(1),
+})
+
+export type SkillImportRequest = z.infer<typeof SkillImportRequestSchema>
+
+/**
+ * Response of `POST /v1/me/skills/import`: the skills that were stored, in the order asked for.
+ *
+ * The same envelope {@link ListSkillsResponseSchema} uses — a `data` array, no pagination —
+ * because the answer is the resources themselves, so a client can draw the new rows without a
+ * second read.
+ *
+ * The whole batch is stored or nothing is (the same rule every other write here follows): a
+ * picked name that is not a candidate is the 400 `invalid_request_error`, a picked candidate
+ * that still has a problem is the 422 `skill_import_error` carrying that candidate's own
+ * problems, and a name the caller already has is the 409 `conflict_error` the store raises —
+ * each of them before the first skill is written.
+ */
+export const ImportSkillsResponseSchema = z.object({
+  data: z.array(SkillSchema),
+})
+
+export type ImportSkillsResponse = z.infer<typeof ImportSkillsResponseSchema>
+
+/**
+ * Body of `POST /v1/me/skills/{skill_id}/refresh`. Response: {@link SkillSchema}.
+ *
+ * A refresh is by hand and always previewed first (K5): the preview clones the skill's stored
+ * source again and answers what changed, and this confirms it by naming the commit the preview
+ * resolved. As with an import, a ref that has moved since the preview is refused, so what a
+ * user confirmed is what gets stored.
+ */
+export const RefreshSkillRequestSchema = z.object({
+  /** The commit the refresh preview resolved. */
+  commit_sha: z.string(),
+})
+
+export type RefreshSkillRequest = z.infer<typeof RefreshSkillRequestSchema>
+
+/**
+ * Response of `POST /v1/me/skills/{skill_id}/refresh/preview`: what a re-clone found (K5).
+ *
+ * The clone is of the skill's **stored** source — the same URL, ref and path it was imported
+ * from — and the comparison is against the stored snapshot, so nothing here depends on the
+ * caller remembering anything. `changed` is the whole answer in one boolean (a client that
+ * only wants to offer a button reads it and skips the rest); the three lists are the file
+ * story, and `skill_md_diff` is the unified diff of the one file a skill is really read by.
+ *
+ * The lists hold **paths** (relative to the skill folder) rather than listings, because what a
+ * reader wants from a diff is which files moved; the sizes are on the snapshot the skill
+ * already carries.
+ */
+export const RefreshSkillPreviewResponseSchema = z.object({
+  /** The commit the re-clone landed on. */
+  commit_sha: z.string(),
+  /**
+   * Whether anything at all is different from the stored snapshot — the three lists empty and
+   * no diff. `false` is the "already up to date" answer, and it is still a commit: a refresh
+   * preview of an unchanged skill names the commit it is unchanged at, so a confirm is
+   * still possible (and is a no-op on the snapshot but moves `refreshed_at`).
+   */
+  changed: z.boolean(),
+  /** Files the new snapshot has and the stored one does not. */
+  files_added: z.array(z.string()),
+  /** Files the stored snapshot has and the new one does not. */
+  files_removed: z.array(z.string()),
+  /** Files both hold with different content. */
+  files_changed: z.array(z.string()),
+  /** The unified diff of `SKILL.md`, or `null` when that file is unchanged. */
+  skill_md_diff: z.string().nullable(),
+  /**
+   * Everything wrong with the new snapshot (K1, K4).
+   *
+   * A refresh is not refused by a preview: a repository that has since grown a `SKILL.md` over
+   * the limit is shown as such, and whether to keep the snapshot the user has is the user's
+   * answer to give. A confirm of a snapshot with a problem is the one thing the route refuses
+   * — replacing a working skill with a broken one is not a refresh.
+   */
+  problems: z.array(SkillProblemSchema),
+})
+
+export type RefreshSkillPreviewResponse = z.infer<typeof RefreshSkillPreviewResponseSchema>

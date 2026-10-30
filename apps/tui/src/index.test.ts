@@ -368,6 +368,66 @@ describe('run: sessions delete (#114)', () => {
   })
 })
 
+describe('run: skills (#349; #354)', () => {
+  const fakeEnv = FAKE_ENV
+
+  it('lists the account’s skills, and says how to add one when there are none', async () => {
+    const { code, out } = await runCaptured(['skills'], fakeEnv)
+
+    // The dev fake seeds no skills, which is the account that has never imported one.
+    expect(code).toBe(0)
+    expect(out).toContain('No skills yet')
+  })
+
+  it('reads a repository and imports what --all names', async () => {
+    // The dev fake offers no candidates, so the preview is empty — which is the refusal a
+    // reader with a folder that holds no SKILL.md gets, with exit 1 rather than a silent no-op.
+    const { code, out, err } = await runCaptured(
+      ['skills', 'add', 'https://github.com/example/skills', '--all'],
+      fakeEnv,
+    )
+
+    expect(code).toBe(1)
+    expect(out).toContain('Nothing under that path holds a SKILL.md')
+    expect(err).toContain('nothing in that repository can be imported')
+  })
+
+  it('needs a terminal to pick, and says so with exit 2 on a pipe', async () => {
+    const { code, err } = await runCaptured(
+      ['skills', 'add', 'https://github.com/example/skills'],
+      fakeEnv,
+      { stdin: PIPED_STDIN },
+    )
+
+    expect(code).toBe(2)
+    expect(err).toContain('--all')
+  })
+
+  it('names the skills it has when a name is not one of them', async () => {
+    const { code, err } = await runCaptured(['skills', 'enable', 'nope'], fakeEnv)
+
+    expect(code).toBe(1)
+    expect(err).toContain('no skill named nope')
+    expect(err).toContain('you have no skills')
+  })
+
+  it('refuses a refresh of a skill that is not there, exit 1', async () => {
+    const { code, err } = await runCaptured(['skills', 'refresh', 'nope'], fakeEnv)
+
+    expect(code).toBe(1)
+    expect(err).toContain('no skill named nope')
+  })
+
+  it('documents the command and its flags in --help', async () => {
+    const { out } = await runCaptured(['--help'], fakeEnv)
+
+    expect(out).toContain('oh skills add <url>')
+    expect(out).toContain('--ref <ref>')
+    expect(out).toContain('--name <n>')
+    expect(out).toContain('Skills:')
+  })
+})
+
 describe('run: auth', () => {
   let directory: string
 

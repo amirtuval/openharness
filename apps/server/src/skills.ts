@@ -1,5 +1,13 @@
-import type { ModeToolOverride, Skill, UserId } from '@openharness/protocol'
-import type { SkillStore } from '@openharness/session'
+import type { SkillProvider } from '@openharness/brain'
+import type { EventInput, ModeId, ModeToolOverride, Skill, UserId } from '@openharness/protocol'
+import {
+  EVENT_TYPES,
+  skillsInForce as applySkillsInForce,
+  skillSettingsOf,
+} from '@openharness/protocol'
+import type { SessionStore, SkillStore } from '@openharness/session'
+
+import { invalidRequest } from './http/errors'
 
 /**
  * Which of a user's skills are on for one request (epic #349, K8).
@@ -43,7 +51,10 @@ export function skillsInForce(
   skills: readonly Skill[],
   override: ModeToolOverride | null,
 ): Skill[] {
-  return skills.filter((skill) => override?.skills?.[skill.id] ?? skill.enabled)
+  // The rule itself is the protocol's, and the `/` menu on both frontends applies the same
+  // function: a menu row the server refuses, or a missing one it would accept, cannot happen
+  // because there is only one rule to read (K8).
+  return applySkillsInForce(skills, override)
 }
 
 /**
@@ -98,4 +109,131 @@ export type SkillSettingsResolver = (
 /** The {@link SkillSettingsResolver} a deployment with skills hands its turns. */
 export function createSkillSettingsResolver(deps: SkillSettingsDeps): SkillSettingsResolver {
   return (ownerId, override) => listSkillsInForce(deps, ownerId, override)
+}
+
+/**
+ * What the brain's skill tools need (epic #349, K6; #352): the listing a user's skills are read
+ * from, and one file of a snapshot.
+ *
+ * A superset of {@link SkillSettingsDeps} on purpose — the same read, plus the file read the two
+ * tools answer from — so a caller that already holds the store passes it to both.
+ */
+export interface SkillProviderDeps {
+  /** The user's own skills, and the files of each snapshot. */
+  readonly skills: Pick<SkillStore, 'list' | 'getFile'>
+}
+
+/**
+ * The {@link SkillProvider} a deployment hands its turns: the skills in force for a request, each
+ * with a way to read one file of its snapshot (epic #349, K6; #352).
+ *
+ * The same read {@link createSkillSettingsResolver} makes — one `list` per request, with the
+ * mode's override applied — because the listing a request carries and the skills its tools can
+ * answer from have to be one answer. `readFile` is a closure rather than the files themselves: a
+ * request listings a user's skills must not read every snapshot, and a file is read only when a
+ * model asks for it. It answers the store's own contract — `null` for a path the snapshot does
+ * not hold, and for another owner's skill alike — and the tools turn that into an `is_error`
+ * listing the files that are there.
+ */
+export function createSkillProvider(deps: SkillProviderDeps): SkillProvider {
+  return async (ownerId, override) => {
+    const inForce = await listSkillsInForce({ skills: deps.skills }, ownerId, override)
+    return inForce.map((skill) => ({
+      skill,
+      // The whole file, encoding included: the tools report a binary file by its size and
+      // encoding rather than handing a model base64 text (K2, K4).
+      readFile: async (path: string) => deps.skills.getFile(skill.id, { ownerId }, path),
+    }))
+  }
+}
+
+/**
+ * What the slash-invocation check needs (epic #349, K7): the skills, and the modes an override
+ * comes from.
+ *
+ * The modes are here because which skills are in force depends on the mode the chat follows (K8),
+ * and the check has to answer for the state the batch **leaves the session in** — the same state
+ * the next request's resolver will see.
+ */
+export interface SkillInvocationDeps extends SkillSettingsDeps {
+  /** The mode store, for the override the batch's chat will run under. */
+  readonly modes: Pick<SessionStore, 'getMode'>
+}
+
+/**
+ * The tool override of the mode a batch leaves a session on (epic #349, K8), or `null`.
+ *
+ * Read through the owner scope like every other resource: a mode the caller does not own is not
+ * theirs to follow, and a mode that says nothing about skills answers `null`. A mode that has been
+ * deleted since answers `null` too, exactly as the brain's own resolver treats it — the session
+ * lands on the model it last ran, and nothing overrides the user's own switches.
+ */
+export async function modeToolOverride(
+  deps: SkillInvocationDeps,
+  ownerId: UserId,
+  modeId: ModeId | null,
+): Promise<ModeToolOverride | null> {
+  if (modeId === null) {
+    return null
+  }
+  return (await deps.modes.getMode(modeId, { ownerId }))?.tools ?? null
+}
+
+/**
+ * Refuse a slash invocation this chat cannot run, before anything is stored (epic #349, K7).
+ *
+ * `/name arguments` is a `user.message` naming one of the user's skills, and the server is what
+ * decides whether it may land. Two refusals, both the protocol's 400 `invalid_request_error` and
+ * neither storing anything:
+ *
+ * - **Unknown or off.** The name is not among the skills in force for this chat, which is the
+ *   user's `enabled` with the mode's override applied — the same answer the next request's
+ *   resolver will give. A skill turned off, deleted, or one a mode stopped naming reads exactly
+ *   as a name that never existed, which is what stops a client from using the route to probe for
+ *   one.
+ * - **Not user-invocable.** The skill is on, but its frontmatter says `user-invocable: false`:
+ *   it is a skill only the **model** uses, and `/name` is not a way to run it.
+ *
+ * `disable-model-invocation: true` is deliberately **accepted** here — that is the field's whole
+ * point: a skill the model may not invoke is one the user runs by hand.
+ *
+ * The check is on the batch rather than on one event because a batch is one append: a message
+ * that named a skill the chat does not have refuses the whole thing, so the log never holds a
+ * message whose invocation the brain would then have to skip.
+ *
+ * @param modeId the mode the batch leaves the session on, or `null` for a chat following none —
+ *   resolved here, and only when there is an invocation to check
+ * @throws HttpError 400 `invalid_request_error` naming the skill and what is wrong with it
+ */
+export async function assertInvocableSkills(
+  deps: SkillInvocationDeps,
+  ownerId: UserId,
+  modeId: ModeId | null,
+  events: readonly EventInput[],
+): Promise<void> {
+  const invocations = events.flatMap((event) =>
+    event.type === EVENT_TYPES.userMessage && event.skill !== undefined ? [event.skill] : [],
+  )
+  if (invocations.length === 0) {
+    // The common case, and the reason the mode is read here rather than by the caller: a batch
+    // that invokes nothing costs one pass over its events and no store read at all.
+    return
+  }
+  const override = await modeToolOverride(deps, ownerId, modeId)
+  const inForce = await listSkillsInForce({ skills: deps.skills }, ownerId, override)
+  for (const invocation of invocations) {
+    const skill = inForce.find((candidate) => candidate.name === invocation.name)
+    if (skill === undefined) {
+      throw invalidRequest(
+        `no skill named "${invocation.name}" is available to this chat: it is not one of your ` +
+          'skills, or it is turned off here',
+      )
+    }
+    if (!skillSettingsOf(skill).userInvocable) {
+      throw invalidRequest(
+        `the "${invocation.name}" skill is not user-invocable: its frontmatter says the model ` +
+          'uses it and only the model does',
+      )
+    }
+  }
 }

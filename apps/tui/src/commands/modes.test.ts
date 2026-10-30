@@ -1,6 +1,7 @@
 import { type Client } from '@openharness/client'
 import { createFakeClient } from '@openharness/client/testing'
-import { makeMode } from '@openharness/protocol/fixtures'
+import { newSkillId } from '@openharness/protocol'
+import { makeMode, makeSkill } from '@openharness/protocol/fixtures'
 import { describe, expect, it } from 'vitest'
 
 import { formatModes, runModes, SUBAGENT_TYPE_HINT, SUBAGENT_TYPE_MARK } from './modes'
@@ -91,5 +92,75 @@ describe('runModes (#245, M6)', () => {
 
     expect(await runModes(failing, io)).toBe(1)
     expect(err.join('\n')).toContain('the server is down')
+  })
+})
+
+describe('formatModes, and a mode’s skills (#349, K8; #354)', () => {
+  it('shows which skills a mode turns on or off, read-only, by name', () => {
+    const skill = makeSkill({ name: 'release-notes' })
+    const other = makeSkill({ name: 'helper' })
+    const lines = formatModes(
+      [
+        makeMode({
+          name: 'smart',
+          tools: { builtin: {}, skills: { [skill.id]: false, [other.id]: true } },
+        }),
+      ],
+      [skill, other],
+    )
+
+    // `oh` does not edit modes, so the override is shown rather than offered (K8).
+    expect(lines[0]).toContain('smart')
+    expect(lines[0]).toContain('skills: release-notes off, helper on')
+  })
+
+  it('shows the three section defaults a mode carries (B8)', () => {
+    const lines = formatModes([
+      makeMode({
+        name: 'allowlist',
+        tools: { skills_default: 'off', mcp_servers_default: 'on' },
+      }),
+    ])
+    // Every default is named, `follow` included, so a reader comparing modes sees all three.
+    expect(lines[0]).toContain('not listed: tools follow · mcp on · skills off')
+  })
+
+  it('names an id it cannot resolve as the id, and says nothing for a mode that overrides none', () => {
+    const gone = newSkillId()
+    const lines = formatModes(
+      [
+        makeMode({ name: 'smart', tools: { builtin: {}, skills: { [gone]: false } } }),
+        makeMode({ name: 'plain' }),
+      ],
+      [],
+    )
+    expect(lines[0]).toContain(`${gone} off`)
+    expect(lines[1]).not.toContain('skills:')
+  })
+})
+
+describe('runModes and the skills read (#354)', () => {
+  it('reads the skills to name a mode’s override, best effort', async () => {
+    const skill = makeSkill({ name: 'release-notes' })
+    const fake = createFakeClient({
+      modes: [makeMode({ name: 'smart', tools: { builtin: {}, skills: { [skill.id]: false } } })],
+      skills: [skill],
+    })
+    const { io, out } = recorder()
+
+    expect(await runModes(fake, io)).toBe(0)
+    expect(out.join('\n')).toContain('skills: release-notes off')
+  })
+
+  it('still lists the modes when the skills cannot be read', async () => {
+    const working = createFakeClient({ modes: [makeMode({ name: 'smart' })] })
+    const failing: Client = {
+      ...working,
+      skills: { ...working.skills, list: () => Promise.reject(new Error('no skills for you')) },
+    }
+    const { io, out } = recorder()
+
+    expect(await runModes(failing, io)).toBe(0)
+    expect(out.join('\n')).toContain('smart')
   })
 })

@@ -337,6 +337,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     tools: turnRegistry,
     store,
     mcp: { service: mcpServers, fetch: mcpFetch },
+    // The skills a chat has, and the two tools that read one (epic #349, K6; #352): the same
+    // store the `/v1/me/skills` routes read, so what a settings screen shows and what a chat can
+    // read are one set of snapshots.
+    skills,
     subagents: subagentTypes,
     signal: signalToScheduler,
     logger,
@@ -400,6 +404,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     // Where users' imported skills live (epic #349, K4): the routes over `/v1/me/skills` read
     // them, and so does the settings resolver a turn is handed (#352).
     skills,
+    // How an import reads a repository (epic #349, K3/K5): the real guarded clone, with the
+    // one setting that decides whether a private address may be dialled — the same flag a
+    // remote MCP server and a custom OpenAI-compatible endpoint read (#249; #303, X10).
+    skillImport: { allowPrivateUrls: config.allowPrivateProviderUrls },
     credentialRoutes: {
       credentials,
       vault,

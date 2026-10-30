@@ -87,6 +87,9 @@ src/
   redact.ts             redactSecret: scrubbing a provider key out of error text
   errors.ts             classifyModelError: retryable or terminal, and which session.error
   retry.ts              RetryPolicy, backoff, and the injectable sleep
+  skills.ts             the loop's skills half (epic #349, K6/K7): which skills a request has,
+                        the two tools that read one, the `$ARGUMENTS` a slash invocation fills
+                        in, and the reading of `session.skill_loaded` every later request uses
   tools.ts              the loop's tool half: what a request offers, what the settings say, how
                         one step's calls are stored, run and answered (epic #303, #304; the
                         per-user settings and the mode's override: #307; `ask` and the
@@ -120,6 +123,10 @@ emits what that reaches.
 | `runTurn(sessionId, options)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | run one turn; resolves to a `TurnOutcome`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `RunTurnOptions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | `{ store, model, resolveCredential, now?, signal?, fence?, contextStrategy?, reasoningSupportFor?, resolveMode?, retry?, tools?, toolSettings?, toolSupportFor?, resolveToolSecrets?, maxToolSteps?, clearThreshold?, todoNudge?, subagents? }`                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `McpToolProvider`, `McpToolOffer`, `McpOfferedTool`, `McpListingFailure`, `McpFailureKind`, `resolveMcpTools()`, `ResolvedMcpTools`, `McpToolRef`, `combineTools()`, `NO_MCP_TOOLS`                                                                                                                                                                                                                                                                                                                               | the remote MCP half of the loop (#312): where a request's remote tools come from (asked per request with the owner and the mode's override), the one registry the deployment's and the remote tools share, the pair behind each offered name, and the servers that could not be listed                                                                                                                                                                                                                                                                                                                                                                                       |
+| `SkillProvider`, `ResolvedSkills`, `resolveSkills(provider, ownerId, override, base?, userLoadedSkills?)`, `userLoadedSkillNames(events)`, `NO_SKILLS`                                                                                                                                                                                                                                                                                                                                                            | the skills a request has and the two tools that read them (epic #349, K6; #352): the injected resolver (`(ownerId, modeOverride) => readonly OfferedSkill[]`, the same seam as `mcpTools`), the one registry built over the answer, the set the slash path is looked up in, and the names the log says the **user** ran (K7) — a `disable-model-invocation` skill in that set may be read by the model without being listed                                                                                                                                                                                                                                                  |
+| `SKILL_TOOL_DECLARATIONS`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | the two names a **settings** listing adds beside `web_search` (#335), because the loop builds them per request and no deployment registry holds them: `skill` and `skill_read`, both `allow`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `SKILL_ARGUMENTS_PLACEHOLDER`, `skillInvocationBody(body, args)`                                                                                                                                                                                                                                                                                                                                                                                                                                                  | K7's substitution: every `$ARGUMENTS` replaced, or the arguments appended after a body that has none — the text `session.skill_loaded.content` stores, verbatim                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `skillInvocationText(loaded)`, `skillTextsByMessage(events)`, `skillsInUse(events, coversTo)`, `unloadedSkillMessages(events, messageIds)`                                                                                                                                                                                                                                                                                                                                                                        | the readings of `session.skill_loaded` (K7/K9): the frame a loaded message is sent with (K10 — the user's own instructions, named as theirs), the text each invoked message carries by its `seq`, the skills a summarized span used, and the messages a turn has yet to load for                                                                                                                                                                                                                                                                                                                                                                                             |
 | `runToolStep(options)`, `ToolStepOptions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | one step's tool calls (epic #303, X2; #307; a non-interactive session's `ask` denial: #341): the permission read off the request's settings, the calls stored, run concurrently through the registry and answered in call order                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `repairLostExecutions(events, append)`, `lostExecutions(events)`, `pendingToolUse(events)`                                                                                                                                                                                                                                                                                                                                                                                                                        | the crash rule (X3): the calls the log holds with no answer **and no user waiting on them**, and the `execution lost` results a brain that inherited them writes — never running them again                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `awaitingUser(events)`, `answeredWaiting(events)`, `confirmationsByCall(events)`, `sessionApprovedTools(events)`, `waitsForUser(permission, registered, name)`, `malformedQuestion(call)`                                                                                                                                                                                                                                                                                                                         | the pause, read off the log (epic #303, X6; #309): the calls with no result that wait on the user, the ones the user has answered, the newest confirmation per call, the tools this chat has been told to allow, whether a call is one the user must answer, and what is wrong with an `ask_user` call's questions                                                                                                                                                                                                                                                                                                                                                           |
@@ -336,6 +343,12 @@ LOOP — once per model request
                                                              the log is re-read; a summarizer
                                                              that failed is recorded on its
                                                              span and changes nothing else
+  4c2. a claimed message carrying a `skill` ................ ​session.skill_loaded (K7): the
+                                                             skill's body with the arguments
+                                                             substituted, written once, and the
+                                                             log re-read — the prompt, the size
+                                                             accounting and the summary below all
+                                                             see the text the model was given
   4b. the turn has made OPENHARNESS_MAX_TOOL_STEPS requests .... STEPS EXHAUSTED (below)
   4c. a call the log holds with no answer .................. EXECUTION LOST (below)
   5. ... span.model_request_start { consumes: the queued user.message ids,
@@ -782,6 +795,53 @@ why the loop has no second tool path.
   MCP tool — and one whose server has since been removed is answered by the registry's own
   `No tool named … is registered.`
 
+### Skills (epic #349, K6/K7; issue #352)
+
+A **skill** is a folder of instructions one user imported from a public git repository and
+reviewed (K1, K3, K4). Three things about it are the loop's, and `./skills` holds all three.
+
+- **Which skills a request has is the host's answer, asked once per request** (K8).
+  `RunTurnOptions.skills` is a `SkillProvider` — `(ownerId, modeOverride) => readonly
+OfferedSkill[]` — the same injected-resolver seam as `toolSettings` and `mcpTools`, asked with
+  the same owner and the same mode override. What comes back is each skill's resource and a
+  **closure** that reads one file of its snapshot, so a request listings fifty skills never reads
+  fifty folders and this package never holds 2 MB of somebody's. Per request, so a skill switched
+  off, deleted, or a mode edited applies from the next request on.
+- **`skill` and `skill_read` are built from that answer** (`@openharness/hands`, K6). No skill
+  the model may invoke means **neither tool is in the offer at all** — not a tool that refuses,
+  but no tool — and the `skill` tool's description is the listing itself. The two are combined
+  into the request's registry beside the deployment's tools and the remote ones, which is what
+  makes the per-user settings' on/off and a mode's `builtin.skill` override apply to them like
+  anything else; `SKILL_TOOL_DECLARATIONS` is what a settings listing adds, because no registry
+  a deployment builds holds them. The turn reads the log **before** resolving them and passes
+  `userLoadedSkillNames(read)` (plus the names the batch is about to load) into `resolveSkills`:
+  a `disable-model-invocation` skill the user has run in this chat is readable by the model —
+  its body is in the request, and the files its instructions name are what `skill_read` is for —
+  while it stays out of the listing, so the model still cannot _choose_ it (K1, K6, K7). A child
+  session applies its own log's answer exactly as a top-level chat does.
+- **A slash invocation is loaded once, into the log** (K7). A `user.message` carrying a `skill`
+  is one the user ran as `/name arguments`, and the brain that **first** handles it —
+  `unloadedSkillMessages` is that reading — writes a `session.skill_loaded` whose `content` is
+  the skill's body (`skillBody`, protocol) with the arguments substituted
+  (`skillInvocationBody`: every `$ARGUMENTS` replaced, or the arguments appended when the body
+  has none). The write happens at the request boundary, before the request is measured and built,
+  so the manual compaction, the threshold trigger, the prompt and the reply all see the same
+  text. A brain that inherits a turn loads nothing twice: the event the dead one wrote is in the
+  log, and the chat it produced is what this one carries on from.
+- **What the model is given is the stored event, never the snapshot** (K5). The context
+  strategy renders an invoked message from `session.skill_loaded` — `skillTextsByMessage` is the
+  one reading, shared by the request the strategy builds and the size the loop measures, so the
+  two cannot disagree — and the frame it adds (`skillInvocationText`) names the text as the
+  user's own request, made through a skill they chose (K10). A refresh under a chat, or an edit
+  of the skill, changes what the _next_ `/name` loads and nothing about a conversation that
+  already ran. `skillsInUse` is the same reading for the summary: the skills a covered span used,
+  named in the prompt so the summary can say where an instruction came from.
+
+A message whose skill is no longer in force — the narrow race against a delete, a toggle or a
+mode edit between the append and the turn, since the server checks the same rule when it stores
+the message — loads nothing and is sent as the text the user typed, which is what the log holds
+either way.
+
 ### Provider-native web search (epic #303, X14; issue #335)
 
 `web_search` is offered like any other tool and runs like none of them. #305 built it as a tool
@@ -1210,6 +1270,7 @@ arguments only when the turn died before it could write the pause at all.
 | how the log becomes messages         | `contextStrategy` on `runTurn`; the default reads the latest summary (#277 K1), trims to a token budget per model, and caps an oversized newest item (K6)                                                                                                                                        |
 | when history is summarized           | `compaction` on `runTurn`: one config, or a per-owner `ContextCompactionResolver` the loop asks at each request boundary — the threshold, the summary model, the pass limit, the per-model budgets and output ceilings, and the cut rule (#279; per-user controls: #282)                         |
 | which tools a turn may call          | `tools` on `runTurn`: a `ToolRegistry` from `@openharness/hands`, or none at all (epic #303, X4); it is also the registry an approved call runs through once the user answers (#309)                                                                                                             |
+| which skills a turn has              | `skills` on `runTurn`: a `SkillProvider` the loop asks once per request with the owner and the mode's override (epic #349, K8; #352), whose answer is the two tools the offer carries and the set a slash invocation is loaded from                                                              |                                                                                        |
 | what the settings say about a tool   | `toolSettings` on `runTurn`: the resolver #307's per-user settings and a mode's override live behind, asked per request with the owner and the override; each tool's own declaration when absent (X4). `ask` pauses the turn, and a `remember: session` approval is read back off the log (#309) |
 | which models may call tools          | `toolSupportFor` on `runTurn`: models.dev's `tool_call`, `false` meaning no tools are offered to that model (X2)                                                                                                                                                                                 |
 | what a tool is handed besides input  | `resolveToolSecrets` on `runTurn`: the per-user values the host resolved for the step (X4; #311's MCP tokens — the operator's search key of #305 went with #335)                                                                                                                                 |
@@ -1318,7 +1379,7 @@ compaction is this one, its event is a `session.context_summary`, and nothing is
   is attempted too and answers `'skipped'` only when there is genuinely nowhere to cut. The
   request's `instructions` become `SummarizeContextOptions.guidance`, folded into the
   summarizer's instructions as the user's own; the base prompt is unchanged, so
-  `SUMMARY_PROMPT_VERSION` — `context-summary-v2` since #306 added the tool-work section — is
+  `SUMMARY_PROMPT_VERSION` — `context-summary-v3` since #352 added the skills line — is
   unchanged by guidance. `runTurn` writes the `session.compaction`
   outcome after the run — `summarized` (with `summary_seq`), `nothing_to_summarize` or `failed` —
   which is both the clear outcome a client shows and what makes the request no longer pending. An
@@ -1384,6 +1445,15 @@ compaction is this one, its event is a `session.context_summary`, and nothing is
   `span.model_request_start` names onto itself ("the model this chat last ran", #245 M6), so the
   span of a summary request is the one exception — see `@openharness/session` — or the chat would
   continue on the summarizer.
+
+- **A summary names the skills its span used** (epic #349, K9). The prompt's instructions gain
+  one line — `Skills in use: …` — listing the skills the covered history invoked, read off the
+  log's own `session.skill_loaded` events at or before the cut (`skillsInUse`). It is a
+  **provenance** line rather than a summary of the skill: the instructions a skill loaded are
+  ordinary messages the summarizer folds like any other, and what a summary that folded them away
+  would lose is which skill they came from. A chat that never ran a slash command is summarized
+  with the prompt it always was — the line is absent, not empty — and the prompt version is
+  `context-summary-v3` for both, because the base prompt's meaning changed either way.
 
 Compaction is **off unless a host asks for it**: `runTurn`'s `compaction` option absent means no
 trigger and no overflow handling, which is what the brain's own tests run with. The server always
@@ -2047,7 +2117,7 @@ retries run on an injected `sleep`, the clock is a `TestClock` from
   falls between them; and, at the loop, clearing the old results _instead of_ summarizing when
   that is enough (no summary, the placeholder in the request, `cleared` on the span, the stored
   answer whole) and summarizing when it is not (with the tool-work section in the prompt and
-  `context-summary-v2` on the event). Its #334 case is the one thing an entry needs from the
+  `context-summary-v3` on the event). Its #334 case is the one thing an entry needs from the
   engine: nothing — the parts never reach the summarizer's prompt, and the event stays exactly
   where it was, inside the turn the summary's range covers.
 - `manual.test.ts` — manual compaction (#283): `pendingManualCompaction` as a rule (nothing,
@@ -2114,6 +2184,24 @@ Bearer` with a decoy environment, **no** `Authorization` header for a keyless en
   malformed call answered instead of paused), a message and an interrupt resolving the waiting
   calls, a resumed brain keeping waiting, and an approval nobody finished answered `execution
 lost`.
+- `skills.test.ts` — the loop's skills half on its own (epic #349, K6/K7/K9): the substitutions
+  `skillInvocationBody` makes (once, several times, appended when the body has no placeholder, and
+  none at all for a command with no arguments), the frame a loaded message is sent with, the
+  readings (`skillTextsByMessage` leaving an empty body out, `skillsInUse` folding duplicates and
+  stopping at the covered range, `unloadedSkillMessages` skipping what a brain has already
+  loaded, and `userLoadedSkillNames`), and `resolveSkills`: the registry built over a request's
+  skills, a chat whose only skill is the user's own command getting neither tool, a user-loaded
+  one getting both, and the provider asked with the owner and the mode's override.
+- `skills-loop.test.ts` — the same through `runTurn`: the `session.skill_loaded` a slash
+  invocation writes (its `content` substituted, its `message_seq` the message, written before the
+  request that answers it) and the instructions the request really carried; a log that already
+  holds one loading nothing and the chat staying the one it built; a snapshot replaced between
+  two invocations reaching only the second; a message whose skill is no longer in force going as
+  the text the user typed; the two tools offered and read through a scripted model; and a chat
+  with no skill the model may invoke offered neither (nor the native search tool, because a
+  request that offers no registry at all offers nothing); and a `disable-model-invocation` skill
+  the user ran being readable — the tools are offered, the span records them, `skill_read`
+  answers its reference file — while one they never ran leaves the tools unoffered.
 - `non-interactive.test.ts` — the flag (epic #340, S1; #341), driven through `runTurn`: a
   non-interactive session is offered no `ask_user` in the request **or** on the span while an
   interactive one is (the control), a call to `ask_user` is answered as one naming no tool, an

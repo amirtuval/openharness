@@ -1,7 +1,8 @@
-import type { McpServer, Mode } from '@openharness/protocol'
+import type { McpServer, Mode, Skill } from '@openharness/protocol'
 import { useState } from 'react'
 
 import type { ModesView } from '../../hooks/use-modes'
+import type { SkillsView } from '../../hooks/use-skills'
 import { useMcpServers } from '../../hooks/use-mcp-servers'
 import type { ModelsView } from '../../hooks/use-models'
 import { useTools } from '../../hooks/use-tools'
@@ -22,10 +23,21 @@ import { ModeFormDialog } from './mode-form-dialog'
  *
  * Since #307 a mode may also override **which built-in tools are on** for the chats that follow
  * it, so this card reads the deployment's tool list once (the same `GET /v1/me/tools` the Tools
- * card reads) and hands it to the editor. The panel beside the modes is where those overrides
- * are made.
+ * card reads) and hands it to the editor. A mode may also turn a whole remote MCP server
+ * (#311/#313) or a whole imported skill (epic #349, K8; #353) on or off, so the editor gets
+ * those two lists — the reader's servers and the shell's skills — as well. The panel beside the
+ * modes is where all of those overrides are made.
  */
-export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: ModelsView }) {
+export function ModesCard({
+  modes,
+  catalog,
+  skills,
+}: {
+  modes: ModesView
+  catalog: ModelsView
+  /** The shell's skills (epic #349, K8; #353): a mode may turn a whole skill on or off. */
+  skills: SkillsView
+}) {
   const client = useClient()
   const { tools } = useTools(client)
   // A mode may also turn a whole remote MCP server on or off (#311; #313), so the editor needs
@@ -131,7 +143,7 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
                 )}
                 {mode.tools === null ? null : (
                   <p className="truncate text-xs text-muted-foreground" data-slot="mode-tools">
-                    tools: {describeModeTools(mode, servers)}
+                    tools: {describeModeTools(mode, servers, skills.skills)}
                   </p>
                 )}
               </div>
@@ -188,6 +200,7 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
         catalog={catalog}
         tools={tools?.data ?? []}
         mcpServers={servers}
+        skills={skills.skills}
         onSaved={() => setDialogOpen(false)}
         onClose={() => setDialogOpen(false)}
       />
@@ -199,22 +212,47 @@ export function ModesCard({ modes, catalog }: { modes: ModesView; catalog: Model
  * What a mode's tool override says, as the row's one-line summary: "web_search on · todo_write
  * off · notes on".
  *
- * Both halves are named: a built-in tool by its own name, and a remote MCP server by the name
- * the reader gave it (#311; #313) — a patch keyed by an opaque `mcps_` id is not something a row
- * can show, and a mode that says something about servers must not read as one that "follows your
- * settings". A server the mode names and the reader has since deleted is called what it is
- * rather than dropped: the patch still names it, and the server ignores it.
+ * Every half is named: a built-in tool by its own name, and a remote MCP server (#311/#313) or
+ * an imported skill (epic #349, K8; #353) by the name the reader gave it — a patch keyed by an
+ * opaque `mcps_`/`skl_` id is not something a row can show, and a mode that says something about
+ * one must not read as one that "follows your settings". An entry the mode names and the reader
+ * has since deleted is called what it is rather than dropped: the patch still names it, and the
+ * server ignores it.
  *
  * @param mode the mode whose override is described
  * @param servers the reader's servers, for the names
+ * @param skills the reader's skills, for the names
  */
-function describeModeTools(mode: Mode, servers: readonly McpServer[]): string {
+function describeModeTools(
+  mode: Mode,
+  servers: readonly McpServer[],
+  skills: readonly Skill[],
+): string {
   const builtin = mode.tools?.builtin ?? {}
-  const parts = Object.entries(builtin).map(([name, on]) => `${name} ${on ? 'on' : 'off'}`)
-  for (const [id, on] of Object.entries(
-    (mode.tools?.mcp_servers ?? {}) as Record<string, boolean>,
-  )) {
-    const name = servers.find((server) => server.id === id)?.name ?? 'a removed server'
+  // The section defaults (epic #349, B8) come first, because they say what every item the
+  // patch does not name does — which is the fact a map of exceptions cannot show.
+  const parts: string[] = []
+  for (const [label, value] of [
+    ['tools not listed', mode.tools?.builtin_default],
+    ['MCP servers not listed', mode.tools?.mcp_servers_default],
+    ['skills not listed', mode.tools?.skills_default],
+  ] as const) {
+    if (value !== undefined && value !== 'follow') {
+      parts.push(`${label} ${value}`)
+    }
+  }
+  parts.push(...Object.entries(builtin).map(([name, on]) => `${name} ${on ? 'on' : 'off'}`))
+  const ids: Record<string, boolean> = {
+    ...(mode.tools?.mcp_servers ?? {}),
+    ...(mode.tools?.skills ?? {}),
+  }
+  for (const [id, on] of Object.entries(ids)) {
+    // One lookup across both id-keyed halves: a server and a skill are told apart by their id
+    // prefix (`mcps_` against `skl_`), so a name cannot be read from the wrong list.
+    const name =
+      servers.find((server) => server.id === id)?.name ??
+      skills.find((skill) => skill.id === id)?.name ??
+      (id.startsWith('skl_') ? 'a removed skill' : 'a removed server')
     parts.push(`${name} ${on ? 'on' : 'off'}`)
   }
   return parts.length === 0 ? 'follow your settings' : parts.join(' · ')
