@@ -122,6 +122,10 @@ describe('a LocalScheduler that stops mid-turn', () => {
     // — finishes the request instead of storing a partial reply and an idle.
     const slow = Array.from({ length: 30 }, (_, index) => `part ${index + 1} `)
     const { context: test, sessionId } = await fixture({
+      // The reply (about 1.5 s) outlives the drain (200 ms), so the stop reaches the hard
+      // handoff this test is about. A drain that lets the step finish is #378 P2's other
+      // half — `scheduler.test.ts`'s "stopping softly" block covers that.
+      drainTimeoutMs: 200,
       replies: [{ text: slow, delayMs: 50 }],
     })
     await test.scheduler.start()
@@ -565,7 +569,9 @@ describe('stopping', () => {
     // next process — so what the drain waits for is the pass reaching its safe point, not an
     // idle event. The old behaviour (a partial reply, an `interrupted` span, an idle) is what
     // turned every deploy into a cut-off reply.
-    const test = createTestApp({ drainTimeoutMs: 2000 })
+    // The reply (about 160 ms) outlives the drain (40 ms), so the shutdown reaches the hard
+    // handoff: the step that could not finish inside the deadline is left open.
+    const test = createTestApp({ drainTimeoutMs: 40 })
     context = test
     test.model.push({ text: ['one ', 'two ', 'three', ' four'], delayMs: 40 })
     const agent = await test.store.createAgent(

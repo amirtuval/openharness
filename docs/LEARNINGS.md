@@ -251,6 +251,27 @@ instance at once and their shares grow, and releases every lease; an acquire alr
 cannot be cancelled, so the scan that holds it releases it the moment it sees the instance stopped,
 and a stopping instance never leaves a live lease behind.
 
+**A drain is a level of stop, not a longer interrupt, and it must be checked after the natural
+end.** A pod has a grace period, so a scheduler's first move is a **soft** signal: the model
+request or tool step in flight finishes and stores its result, and the loop writes nothing at the
+next step boundary. A second signal is what that cannot be — the request's own abort is how a
+request is cut off — so `RunTurnOptions.drain` is separate from `signal`, and its check sits
+_after_ "nothing left to answer": a turn whose last step completed must write its own
+`session.status_idle`, not be left open for a peer to close. Only the hard `TurnHandoff` abort at
+the deadline writes nothing from a step that was running (#378, P2;
+`packages/brain/src/turn.ts`, `apps/server/src/runner.ts`).
+
+**A release that drains inside the heartbeat buys a correctness constraint it never needed.**
+The old surplus release waited for its turns inside one heartbeat cycle, so the lease TTL had to
+outlast the drain timeout — otherwise the instance's own still-nursing leases expired and a peer
+took the very partition it was releasing, turning a deliberate handoff into a `FencedError`. The
+fix is not a bigger TTL: start the release in the background, keep renewing the partition while it
+drains (it is still ours until `releasePartition`), release each partition the moment its own
+passes are done, and do not count draining partitions toward the share. The heartbeat then never
+waits on a drain, a 3 s TTL works against a 40 s drain, and an idle partition goes back at once
+instead of behind a busy sibling (#378, P2; `apps/server/src/partition-scheduler.ts`;
+`e2e/src/rolling-restart.test.ts` keeps the short TTL on purpose).
+
 **The runner is where "one turn at a time" and "keep going while there is work" live, and a session
 that vanishes is an answer rather than a failure.** It re-reads the log when a turn resolves, stops
 on `noop` but honours a `wake` that arrived during that `noop` turn (the brain reads the log before
@@ -271,6 +292,59 @@ them, and an interrupt on the wrong pod starts a second brain (#378). The chart 
 template helper refuses to render `local` when `replicaCount > 1` or the HPA's `maxReplicas > 1`.
 Because Helm deep-merges a values file into the chart's defaults, a Terraform `env` map that omits
 `SCHEDULER` can no longer fall through to the server's unsafe default.
+
+**A rolling update's join is a leave waiting to happen, so balancing on the join is work undone.**
+With `maxSurge: 1, maxUnavailable: 0`, the surge pod's arrival shrinks every share and makes the
+old members release surplus; a moment later the pod it replaces is terminated and the shares grow
+straight back. Measured over three replacements on 64 partitions, that cost **92–94 partition
+moves, up to three per partition** — each move a drain, and for a long step a re-run. Waiting
+until the membership has been unchanged for a window (`OPENHARNESS_BALANCE_STABILITY_MS`, 30 s)
+before giving surplus up took it to **66 moves: 62 partitions once, 2 twice**. The residual two
+are capacity, not churn: when the first original leaves, a _surviving_ original that is one
+partition under its share can take one of the released partitions, and is itself replaced later.
+Removing those would need the newcomer to have priority on released leases; every simple version
+of that either delays crash/scale-down takeover (an expired lease must still be taken at once) or
+needs a lease-transfer API (#378, P3; `apps/server/src/partition-scheduler.ts`;
+`e2e/src/rolling-restart.test.ts` counts the moves off `partition_leases`).
+
+**A test that resumes a paused instance re-joins the membership, and a peer can rebalance under
+it.** The lease-loss tests pause an instance, let a survivor take its partition, then resume it so
+its renewal is refused. Under the old immediate balancing, the resumed instance's announcement
+made the survivor over its share, and the survivor could give up the very partition whose turn it
+was recovering — the turn then moved to the resumed instance, whose scripted model had already
+spent its reply, and the assertion saw no reply (or the wrong one). It was a test interleaving,
+not a product race, but it was real under load; running those two tests with a deployment-sized
+stability window removes it, and a separate `stop()` race — a heartbeat's scan still adopting a
+lease when the caller began truncating/ closing the store — is closed by awaiting the refresh in
+flight before `stop()` answers (#378, P3; `apps/server/src/partition-scheduler.test.ts`).
+
+**Crash recovery needs a count, and the count has to be cause-agnostic.** A turn whose owner dies
+is closed `brain_lost` and re-run by the next owner — and since the handoff work, a graceful deploy
+leaves exactly the same closure. So "count crashes" would be wrong twice: it would miss a turn that
+keeps being handed off without finishing a step, and it would need a reason the log does not carry.
+Counting the run of `brain_lost` span closures for the open turn, reset by any completed request,
+is one rule for both and reads entirely off the log. The cap (3, `OPENHARNESS_MAX_RECOVERY_ATTEMPTS`)
+is per turn, and the idle event that ends an exhausted turn **claims the queued user input** — leave
+it queued and the scheduler finds the poison message and runs the same turn again, which is the loop
+the cap exists to stop (#378, P4; `packages/brain/src/turn.ts`,
+`packages/brain/src/log.ts`'s `consecutiveRecoveryClosures`).
+
+**A crash stall is a client problem, not only a server one.** The lease TTL bounds when a peer can
+take over, but the screen shows nothing while it waits: the transcript just stops moving, which is
+indistinguishable from a slow model. The stall indicator is deliberately a pure rule over an
+arrival clock the frontend keeps — the transcript reducer stays replayable — with a threshold equal
+to the server's SSE keep-alive cadence (15 s) and a separate "Reconnecting…" state for the moment
+the client's own stream loop knows the socket is gone. It is also why a keep-alive must not reset
+the clock: it proves the connection is alive, not that the turn is (#378, P4;
+`packages/client/src/stall.ts`, `packages/client/src/events/stream.ts`).
+
+**The end-to-end crash tests need deterministic crash shapes, not timing guesses.** Two mock-model
+fixtures make them reliable: one that `SIGKILL`s its own process on a marker (a poison input that
+takes every owner down), and one that calls a slow test tool which appends a line to a file per
+execution (so "the recovering brain did not re-run the call" is counted, not inferred). Both live
+behind `OPENHARNESS_TEST_MODEL=mock`; a deployment never reaches them. Without them a crash test
+is a race between a `kill` and a reply, and the recovery-cap test has no way to keep killing the
+new owner (#378, P4; `apps/server/src/mock-model.ts`, `e2e/src/crash.test.ts`).
 
 ## Authentication and identity providers
 
@@ -1716,6 +1790,18 @@ uses ([`e2e/AGENTS.md`](../e2e/AGENTS.md)).
 ([#79](https://github.com/amirtuval/openharness/issues/79)) and once again through environment
 inheritance, which is the general lesson — an escape hatch meant for a test runner leaks into
 anything the test spawns.
+
+**A test tool registered "under the mock model" is registered for every mock server.** P4's
+`echo_slow` was added for the crash suite's `__delayed_tool__` fixture but pushed whenever
+`OPENHARNESS_TEST_MODEL=mock`, so every e2e test that asserts a request's exact offer — `tools`,
+`tool-settings` — started failing on the extra `{ name: 'echo_slow', source: 'builtin' }`, and
+the in-process tests that enumerate the registry had the same hidden change. The fix is to gate
+the fixture tool on the variable the fixture already needs
+(`OPENHARNESS_TEST_TOOL_EXECUTION_LOG`, which also names its execution log): a tool no test can
+call should not be in the offer that test asserts. The general rule is that the mock model is a
+**shared** test surface, so anything one suite adds to it must be opt-in, not implied by a
+setting every suite has set ([#378](https://github.com/amirtuval/openharness/issues/378), P4;
+`apps/server/src/tools.ts`).
 
 **An assertion that cannot fail is worse than no assertion, because it is counted as coverage.** A
 test review of every package found them everywhere: `expect(p.partitionOf(id)).toBe(p.partitionOf(id))`,
