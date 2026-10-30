@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_CLEAR_THRESHOLD,
   DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_RECOVERY_ATTEMPTS,
   DEFAULT_MAX_TOOL_STEPS,
 } from '@openharness/brain'
 import {
@@ -18,7 +19,12 @@ import { MAX_DESCENDANT_DEPTH } from '@openharness/session'
 import { DEFAULT_KEY_CACHE_TTL_MS } from '@openharness/vault'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
-import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
+import {
+  DEFAULT_BALANCE_STABILITY_MS,
+  DEFAULT_HEARTBEAT_MS,
+  DEFAULT_LEASE_TTL_MS,
+  DEFAULT_SWEEP_MS,
+} from './partition-scheduler'
 
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
@@ -83,12 +89,14 @@ describe('readServerConfig', () => {
       github: undefined,
       microsoft: undefined,
       testModel: undefined,
+      testToolExecutionLog: undefined,
       webDir: undefined,
       allowPrivateProviderUrls: false,
       trustedProxyHops: DEFAULT_TRUSTED_PROXY_HOPS,
       corsOrigins: [],
       maxConcurrentSessions: DEFAULT_MAX_CONCURRENT_SESSIONS,
       maxToolSteps: DEFAULT_MAX_TOOL_STEPS,
+      maxRecoveryAttempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
       maxAgentDepth: DEFAULT_MAX_AGENT_DEPTH,
       maxLiveTasks: DEFAULT_MAX_LIVE_TASKS,
       drainTimeoutMs: DEFAULT_DRAIN_TIMEOUT_MS,
@@ -97,6 +105,7 @@ describe('readServerConfig', () => {
       leaseTtlMs: DEFAULT_LEASE_TTL_MS,
       heartbeatMs: DEFAULT_HEARTBEAT_MS,
       sweepMs: DEFAULT_SWEEP_MS,
+      balanceStabilityMs: DEFAULT_BALANCE_STABILITY_MS,
       deltaRetentionMs: DEFAULT_DELTA_RETENTION_MS,
       compactIntervalMs: DEFAULT_COMPACT_INTERVAL_MS,
       compactionThreshold: DEFAULT_COMPACTION_THRESHOLD,
@@ -136,6 +145,7 @@ describe('readServerConfig', () => {
         OPENHARNESS_CORS_ORIGINS: 'http://a.test, http://b.test',
         OPENHARNESS_MAX_CONCURRENT_SESSIONS: '12',
         OPENHARNESS_MAX_TOOL_STEPS: '7',
+        OPENHARNESS_MAX_RECOVERY_ATTEMPTS: '4',
         OPENHARNESS_MAX_AGENT_DEPTH: '2',
         OPENHARNESS_MAX_LIVE_TASKS: '4',
         OPENHARNESS_DRAIN_TIMEOUT_MS: '250',
@@ -145,6 +155,7 @@ describe('readServerConfig', () => {
         OPENHARNESS_LEASE_TTL_MS: '900',
         OPENHARNESS_HEARTBEAT_MS: '300',
         OPENHARNESS_SWEEP_MS: '450',
+        OPENHARNESS_BALANCE_STABILITY_MS: '1200',
         OPENHARNESS_DELTA_RETENTION_MS: '120000',
         OPENHARNESS_COMPACT_INTERVAL_MS: '60000',
         OPENHARNESS_KEY_PROVIDER: 'local',
@@ -171,12 +182,14 @@ describe('readServerConfig', () => {
       github: { clientId: 'gh-id', clientSecret: 'gh-secret' },
       microsoft: { clientId: 'ms-id', clientSecret: 'ms-secret', tenantId: 'contoso' },
       testModel: 'mock',
+      testToolExecutionLog: undefined,
       webDir: '/srv/web',
       allowPrivateProviderUrls: true,
       trustedProxyHops: 2,
       corsOrigins: ['http://a.test', 'http://b.test'],
       maxConcurrentSessions: 12,
       maxToolSteps: 7,
+      maxRecoveryAttempts: 4,
       maxAgentDepth: 2,
       maxLiveTasks: 4,
       drainTimeoutMs: 250,
@@ -185,6 +198,7 @@ describe('readServerConfig', () => {
       leaseTtlMs: 900,
       heartbeatMs: 300,
       sweepMs: 450,
+      balanceStabilityMs: 1_200,
       deltaRetentionMs: 120_000,
       compactIntervalMs: 60_000,
       compactionThreshold: 0.7,
@@ -335,6 +349,19 @@ describe('readServerConfig', () => {
     }
   })
 
+  it('defaults the balance-stability window, and treats zero as "release at once" (#378, P3)', () => {
+    expect(readServerConfig(env()).balanceStabilityMs).toBe(DEFAULT_BALANCE_STABILITY_MS)
+    // Zero is a value, not an absence: the pre-P3 release on the next heartbeat.
+    expect(
+      readServerConfig(env({ OPENHARNESS_BALANCE_STABILITY_MS: '0' })).balanceStabilityMs,
+    ).toBe(0)
+    for (const value of ['-1', 'one', '1.5']) {
+      expect(() => readServerConfig(env({ OPENHARNESS_BALANCE_STABILITY_MS: value }))).toThrow(
+        /OPENHARNESS_BALANCE_STABILITY_MS/,
+      )
+    }
+  })
+
   it('treats an empty variable as unset', () => {
     const config = readServerConfig(
       env({
@@ -370,6 +397,17 @@ describe('readServerConfig', () => {
     expect(() => readServerConfig(env({ OPENHARNESS_MAX_TOOL_STEPS: 'many' }))).toThrow(
       /OPENHARNESS_MAX_TOOL_STEPS/,
     )
+  })
+
+  it('refuses a recovery cap below one (#378, P4)', () => {
+    // Zero would end every inherited turn before it could make a single step of progress.
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_RECOVERY_ATTEMPTS: '0' }))).toThrow(
+      /OPENHARNESS_MAX_RECOVERY_ATTEMPTS/,
+    )
+    expect(() => readServerConfig(env({ OPENHARNESS_MAX_RECOVERY_ATTEMPTS: 'often' }))).toThrow(
+      /OPENHARNESS_MAX_RECOVERY_ATTEMPTS/,
+    )
+    expect(readServerConfig(env({})).maxRecoveryAttempts).toBe(3)
   })
 
   it('bounds the nesting depth at the tree walk’s own ceiling (#361)', () => {
@@ -819,6 +857,7 @@ describe('describeConfig', () => {
           OPENHARNESS_LEASE_TTL_MS: '900',
           OPENHARNESS_HEARTBEAT_MS: '300',
           OPENHARNESS_SWEEP_MS: '450',
+          OPENHARNESS_BALANCE_STABILITY_MS: '1200',
         }),
       ),
     )
@@ -829,6 +868,7 @@ describe('describeConfig', () => {
     expect(line).toContain('lease 900ms')
     expect(line).toContain('heartbeat 300ms')
     expect(line).toContain('sweep 450ms')
+    expect(line).toContain('balance stability 1200ms')
   })
 
   it('says how often superseded chunks are compacted, and when that is off', () => {

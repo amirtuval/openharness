@@ -259,11 +259,20 @@ export function denied(message: string | undefined): string {
   return message === undefined ? 'The user denied this.' : `The user denied this: ${message}`
 }
 
-/** What a call whose turn died before running it is answered with (X3). */
+/**
+ * What a call whose turn died before running it is answered with (X3; #378, P4).
+ *
+ * The model is the reader, so the sentence says what happened, that the outcome is unknown,
+ * and what it may do about it. The call is still **never re-run automatically** — it may have
+ * had an effect nobody recorded — but a retry the model chooses, knowing the risk, is exactly
+ * the decision this result exists to let it make. "execution lost" stays in the text because
+ * every client reads a call's status from that phrase (`@openharness/client`'s
+ * `toolCallStatus`), and it is the log's own name for this outcome.
+ */
 export function executionLost(name: string): string {
   return (
-    `Tool ${name}: execution lost. The turn that started this call did not finish, ` +
-    'so it was not run again.'
+    `Tool ${name}: execution lost — The server running this tool stopped before it returned; ` +
+    'it may or may not have taken effect. You may retry it if that is safe.'
   )
 }
 

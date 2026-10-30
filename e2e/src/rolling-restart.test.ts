@@ -20,6 +20,7 @@ import {
   isPreviewDelta,
   modelRequestEnds,
   readLog,
+  sleep,
   textOf,
   typesOf,
   waitFor,
@@ -37,6 +38,14 @@ import {
  * a time — the order a `maxSurge: 1, maxUnavailable: 0` rollout uses — a fresh replacement
  * process is **started while the turns are still streaming**; it boots, migrates and joins the
  * membership, and once it holds partitions the original it replaces is `SIGTERM`ed.
+ *
+ * What P3 (#378) changes is how many times a partition moves. A rolling update is a join (the
+ * surge pod, which shrinks every share) followed a moment later by a leave (the pod it
+ * replaces, which grows the share back). The scheduler waits for the membership to be stable
+ * before an instance gives up surplus, so the join moves nothing; each partition moves once,
+ * when its original owner terminates, and at most two of them move twice (a surviving original
+ * had a free slot for one, and is replaced later). The audit below counts those moves off
+ * `partition_leases`.
  *
  * What changed with P2 (#378, P4) is what "handed off" means. A shutdown now **drains** first:
  * every turn in flight finishes its model request or tool step — storing the reply and the
@@ -86,6 +95,10 @@ const PARTITION_ENV = {
   // The sweep is a safety net, not a way to find work: with it out of the way, a turn that is
   // finished after a handoff can only have been found by the acquire scan.
   OPENHARNESS_SWEEP_MS: '600000',
+  // A rolling update is a join followed a moment later by a leave (#378, P3). Ten heartbeats
+  // of stability are far more than the gap between the surrogate pod joining and the original
+  // it replaces receiving SIGTERM below, so no member gives up surplus for the join.
+  OPENHARNESS_BALANCE_STABILITY_MS: '3000',
 }
 
 /** Longer than a slow reply (about ten seconds) plus its follow-up: the step finishes. */
@@ -116,19 +129,88 @@ async function startInstance(id: string, env: Record<string, string>): Promise<I
   }
 }
 
-/** How many partitions an instance holds, read from the lease table. */
-async function heldPartitions(id: string): Promise<number> {
+/** Whether an instance has joined the live membership — the rollout's readiness signal. */
+async function isLiveMember(id: string): Promise<boolean> {
   const database = await harness.database()
   return await withDatabaseClient(
     async (client) => {
-      const result = await client.query<{ held: string }>(
-        'select count(*) as held from partition_leases where owner = $1',
+      const result = await client.query(
+        'select 1 from scheduler_instances where instance_id = $1',
         [id],
       )
-      return Number(result.rows[0]?.held ?? '0')
+      return result.rowCount === 1
     },
     { database: database.name },
   )
+}
+
+/**
+ * Make "how many times did a partition move" a read.
+ *
+ * A move is an acquisition by a **different owner than the tenure before it**: the lease row's
+ * owner changing from one instance to another, or from free to owned. A renewal (owner
+ * unchanged) and a release (owner becomes `null`) are not moves. `partition_leases` keeps only
+ * the current tenure, so the test installs this audit for the rollout and reads it afterwards;
+ * the server has no such table, and nothing in it reads one.
+ */
+async function countMovesFromNow(): Promise<void> {
+  const database = await harness.database()
+  await withDatabaseClient(
+    async (client) => {
+      await client.query(
+        `create table if not exists partition_moves (
+           partition integer not null,
+           owner text not null,
+           epoch integer not null,
+           moved_at timestamptz not null default clock_timestamp()
+         )`,
+      )
+      await client.query('truncate partition_moves')
+      await client.query(
+        `create or replace function record_partition_move() returns trigger language plpgsql as $$
+         begin
+           if new.owner is not null and new.owner is distinct from old.owner then
+             insert into partition_moves (partition, owner, epoch)
+             values (new.partition, new.owner, new.epoch);
+           end if;
+           return new;
+         end
+         $$`,
+      )
+      await client.query('drop trigger if exists partition_moves_after_update on partition_leases')
+      await client.query(
+        `create trigger partition_moves_after_update after update on partition_leases
+         for each row execute function record_partition_move()`,
+      )
+    },
+    { database: database.name },
+  )
+}
+
+/** The moves recorded since {@link countMovesFromNow}, per partition. */
+async function movesPerPartition(): Promise<Map<number, number>> {
+  const database = await harness.database()
+  const moves = new Map<number, number>()
+  await withDatabaseClient(
+    async (client) => {
+      const result = await client.query<{ partition: number; moves: string }>(
+        'select partition, count(*) as moves from partition_moves group by partition',
+      )
+      for (const row of result.rows) {
+        moves.set(row.partition, Number(row.moves))
+      }
+    },
+    { database: database.name },
+  )
+  return moves
+}
+
+/** The per-partition counts as `3×2, 5×1`, for an assertion message. */
+function describeMoves(moves: ReadonlyMap<number, number>): string {
+  return [...moves.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([partition, count]) => `${partition}×${count}`)
+    .join(', ')
 }
 
 /** Which instance owns each session's partition, right now. */
@@ -155,43 +237,77 @@ async function ownersOf(sessions: readonly Session[]): Promise<Map<string, numbe
 }
 
 /**
- * Wait until every partition of the space has an owner — one of `ids`, when the test names the
- * instances it means.
+ * Wait until the named instances own the whole space at their fair shares, and it has stopped
+ * changing hands.
  *
- * The second scenario runs after the first's servers have stopped, and a lease a stopping
- * process could not release expires with the TTL rather than at once. Naming the expected
- * owners makes "the space is covered" mean "by the servers this scenario started", instead of
- * counting a dead instance's row as coverage.
+ * Coverage alone is not enough, and neither is a count at the share. The instances boot one at
+ * a time here (the first claims the whole space, the second makes it rebalance, the third makes
+ * it rebalance again), and a surplus release runs in the background after the membership has
+ * been stable for `OPENHARNESS_BALANCE_STABILITY_MS`. Starting the rollout while that is still
+ * happening would count the boot's own moves as the rollout's. So this waits for the shares,
+ * then for a whole heartbeat in which no partition's owner or epoch moved.
  */
-async function waitForTheWholeSpace(ids?: readonly string[]): Promise<void> {
+async function waitForSettledSpace(ids: readonly string[]): Promise<void> {
+  const share = Math.ceil(DEFAULT_PARTITION_COUNT / ids.length)
   const database = await harness.database()
   await waitFor(
-    ids === undefined ? 'every partition to have an owner' : 'the new instances to own the space',
+    'the instances to settle at their fair shares',
     async () => {
-      const owned = await withDatabaseClient(
+      const counts = await withDatabaseClient(
         async (client) => {
-          const result =
-            ids === undefined
-              ? await client.query<{ owned: string }>(
-                  'select count(*) as owned from partition_leases where owner is not null',
-                )
-              : await client.query<{ owned: string }>(
-                  'select count(*) as owned from partition_leases where owner = any($1)',
-                  [ids],
-                )
-          return Number(result.rows[0]?.owned ?? '0')
+          const result = await client.query<{ owner: string; held: string }>(
+            'select owner, count(*) as held from partition_leases where owner = any($1) group by owner',
+            [ids],
+          )
+          return new Map(result.rows.map((row) => [row.owner, Number(row.held)]))
         },
         { database: database.name },
       )
-      return owned === DEFAULT_PARTITION_COUNT ? true : undefined
+      const owned = [...counts.values()].reduce((total, count) => total + count, 0)
+      const fair = ids.every((id) => (counts.get(id) ?? 0) <= share)
+      return owned === DEFAULT_PARTITION_COUNT && fair ? true : undefined
+    },
+    { timeoutMs: RESTART_WAIT_MS },
+  )
+  const snapshot = async (): Promise<string> =>
+    await withDatabaseClient(
+      async (client) => {
+        const result = await client.query<{
+          partition: number
+          owner: string | null
+          epoch: number
+        }>('select partition, owner, epoch from partition_leases order by partition')
+        return result.rows
+          .map((row) => `${row.partition}:${row.owner ?? '-'}:${row.epoch}`)
+          .join(',')
+      },
+      { database: database.name },
+    )
+  let previous = await snapshot()
+  await waitFor(
+    'the partition space to stop changing hands',
+    async () => {
+      // Longer than the 300 ms heartbeat: a release in flight, or a scan about to run, would
+      // show up as an owner or epoch change inside this window.
+      await sleep(500)
+      const current = await snapshot()
+      const stable = current === previous
+      previous = current
+      return stable ? true : undefined
     },
     { timeoutMs: RESTART_WAIT_MS },
   )
 }
 
 /**
- * Run the rollout in Kubernetes' order: one replacement, wait for it to hold partitions, then
- * take out the original it replaces.
+ * Run the rollout in Kubernetes' order: one replacement, wait for it to be ready and part of
+ * the membership, then take out the original it replaces.
+ *
+ * Readiness is the membership row, not "it holds partitions". A pod is Ready (and Kubernetes
+ * replaces the old one) once it can serve and has joined; it may legitimately hold no
+ * partition yet, because since P3 a newcomer does not take a share from a live member — the
+ * pod being replaced is the one that releases its own. Waiting for partitions would deadlock
+ * the rollout: nobody releases until somebody leaves.
  */
 async function replaceOneByOne(
   order: readonly Instance[],
@@ -204,8 +320,8 @@ async function replaceOneByOne(
     const replacement = await startInstance(`${prefix}-replacement-${index}`, env)
     replacements.push(replacement)
     await waitFor(
-      'the replacement to hold partitions',
-      async () => ((await heldPartitions(replacement.id)) > 0 ? true : undefined),
+      'the replacement to join the membership',
+      async () => ((await isLiveMember(replacement.id)) ? true : undefined),
       { timeoutMs: RESTART_WAIT_MS },
     )
     await old.server.kill('SIGTERM')
@@ -314,7 +430,7 @@ describe('a rolling restart while turns are streaming', () => {
     for (const id of ['graceful-a', 'graceful-b', 'graceful-c']) {
       originals.push(await startInstance(id, env))
     }
-    await waitForTheWholeSpace(originals.map((instance) => instance.id))
+    await waitForSettledSpace(originals.map((instance) => instance.id))
 
     const first = originals[0]
     if (first === undefined) {
@@ -375,11 +491,21 @@ describe('a rolling restart while turns are streaming', () => {
       throw new Error('the rollout had no servers to stop')
     }
     expect(counts.get(busiest.id) ?? 0, 'no in-flight turn ran on an original').toBeGreaterThan(0)
+
+    // From here on, every acquisition that changes a partition's owner is recorded. The
+    // originals have already settled into their shares, so this counts the rollout's moves and
+    // nothing else.
+    await countMovesFromNow()
     const replacements = await replaceOneByOne(order, env, 'graceful')
     const last = replacements[replacements.length - 1]
     if (last === undefined) {
       throw new Error('the rollout had no replacement to end on')
     }
+    // The last original's released partitions are taken over as the replacements' scans
+    // reach them, which can be after the turns the test waits on have finished. Give the new
+    // membership the same fair-share-and-quiet check the originals got, so the move count is
+    // the whole rollout's and not a snapshot in the middle of its last handover.
+    await waitForSettledSpace(replacements.map((instance) => instance.id))
 
     // Every turn ends on the surviving instances, from the log's own record.
     const finalClient: Client = clientFor(last.server, signedIn)
@@ -417,6 +543,37 @@ describe('a rolling restart while turns are streaming', () => {
     expect(requests).toBe(SLOW_SESSIONS * 1 + TOOL_SESSIONS * 2)
     expect(reRuns, 'a request was re-run during a drain that should have been invisible').toBe(0)
 
+    // How far the partitioning moved while the versions changed (#378, P3). On the P2 base
+    // every join made the old members give up surplus that the leave a moment later gave back,
+    // so a partition moved as many as three times (92-94 moves over the rollout). Waiting for
+    // membership stability means the join moves nothing: each partition moves once, when its
+    // original owner is terminated, and a replacement takes it.
+    //
+    // The residual bound is two, and the second move is capacity, not churn: when the first
+    // original leaves, a *surviving* original that is one partition under its share can take
+    // one of the released partitions. That survivor is itself replaced later, so that one
+    // partition moves again. At 64 partitions and three members the slack is 44 − (64 − 22) = 2,
+    // so at most two partitions can do this. (Preferring the newcomer for released leases would
+    // remove it, but every way to do that either delays crash/scale-down takeover or needs a
+    // lease-transfer API; it is a follow-up, not worth that risk for two partitions.)
+    const moves = await movesPerPartition()
+    const moved = [...moves.values()]
+    const mostMoved = Math.max(0, ...moved)
+    const totalMoved = moved.reduce((total, count) => total + count, 0)
+    const slack = order.length - 1
+    expect(
+      mostMoved,
+      `a partition moved more than once during the rollout: ${describeMoves(moves)}`,
+    ).toBeLessThanOrEqual(slack)
+    expect(
+      totalMoved,
+      `partition moves during the rollout: ${describeMoves(moves)}`,
+    ).toBeGreaterThanOrEqual(DEFAULT_PARTITION_COUNT)
+    expect(
+      totalMoved,
+      `partition moves during the rollout: ${describeMoves(moves)}`,
+    ).toBeLessThanOrEqual(DEFAULT_PARTITION_COUNT + slack)
+
     // A graceful release is not a race with the lease: no pass was ever refused a write —
     // including while a surplus partition was draining across several three-second TTLs.
     for (const instance of [...originals, ...replacements]) {
@@ -435,7 +592,7 @@ describe('a rolling restart while turns are streaming', () => {
     for (const id of ['hard-a', 'hard-b']) {
       originals.push(await startInstance(id, env))
     }
-    await waitForTheWholeSpace(originals.map((instance) => instance.id))
+    await waitForSettledSpace(originals.map((instance) => instance.id))
 
     const first = originals[0]
     if (first === undefined) {
@@ -480,8 +637,8 @@ describe('a rolling restart while turns are streaming', () => {
     }
     const replacement = await startInstance('hard-replacement-0', env)
     await waitFor(
-      'the replacement to hold partitions',
-      async () => ((await heldPartitions(replacement.id)) > 0 ? true : undefined),
+      'the replacement to join the membership',
+      async () => ((await isLiveMember(replacement.id)) ? true : undefined),
       { timeoutMs: RESTART_WAIT_MS },
     )
     await owner.server.kill('SIGTERM')

@@ -64,6 +64,12 @@ import type { SessionScheduler, StopSchedulerOptions, StopSessionOptions } from 
  *   in it first, then releasing, so the peer that takes it over starts from a closed turn
  *   rather than a half-written one. Released partitions are left alone by this instance for a
  *   heartbeat, so the peer has a chance to take them instead of watching them bounce back.
+ * - Surplus is given up only after the membership has been **stable for a window** (#378, P3,
+ *   `balanceStabilityMs`, 30 s by default). A rolling update is a join followed a moment later
+ *   by a leave: the surge pod's join shrinks every share and the replaced pod's leave grows it
+ *   back, so releasing on the join moves partitions the leave would have left in place — twice
+ *   for nothing. A newcomer still takes free and expired partitions immediately; a scale-up
+ *   with nobody leaving converges when the window passes and the holders release.
  * - The membership ages out on its own: an instance that stops heartbeating is dropped from
  *   the count at the instant its leases stop being renewed — both windows are one lease TTL —
  *   so the survivors' shares grow and their scans take over what the dead instance held. An
@@ -102,6 +108,22 @@ export const DEFAULT_HEARTBEAT_MS = 10_000
 /** How often owned partitions are re-scanned for missed work; 60 seconds by default. */
 export const DEFAULT_SWEEP_MS = 60_000
 
+/**
+ * How long the live membership must be unchanged before a surplus is given up; 30 seconds by
+ * default — three heartbeats at the default 10 s.
+ *
+ * A rolling update (`maxSurge: 1`, `maxUnavailable: 0`) is a join followed a moment later by a
+ * leave: the surge pod starting shrinks every old member's share, and the pod it replaces being
+ * terminated grows it back. Releasing on the join moves partitions the leave would have left
+ * where they were, so the partition moves twice for nothing (#378, P3). The scheduler therefore
+ * waits for the membership to be stable before giving surplus up. The window has to cover the
+ * Kubernetes gap between the replacement becoming ready (which is when the join is visible) and
+ * the old pod receiving `SIGTERM`; 30 s is comfortable for the chart's probes and can be raised
+ * for a deployment whose readiness takes longer. A newcomer still takes free and expired
+ * partitions immediately, so a scale-up with nobody leaving converges once the window passes.
+ */
+export const DEFAULT_BALANCE_STABILITY_MS = 30_000
+
 /** What {@link PostgresPartitionScheduler} is built from. */
 export interface PostgresPartitionSchedulerOptions {
   /** The store the leases live in, and the log every turn reads and writes. */
@@ -126,6 +148,13 @@ export interface PostgresPartitionSchedulerOptions {
   readonly heartbeatMs?: number
   /** How often owned partitions are re-scanned for missed work; 60 seconds by default. */
   readonly sweepMs?: number
+  /**
+   * How long the membership must go unchanged before surplus is given up (#378, P3); defaults
+   * to {@link DEFAULT_BALANCE_STABILITY_MS}. `0` gives surplus up on the first heartbeat after
+   * a join, which is the pre-P3 behaviour and what the balancing tests that are not about the
+   * window ask for.
+   */
+  readonly balanceStabilityMs?: number
   /**
    * The runner to run passes with. Omitted, one is built from `store`, `model` and
    * `resolveCredential`; a host that runs several schedulers against the same store passes its
@@ -156,6 +185,8 @@ export interface PostgresPartitionSchedulerOptions {
   /** The clearing threshold and the todo nudge (#331), passed to every turn. */
   readonly clearThreshold?: number
   readonly todoNudge?: boolean
+  /** How many takeovers one turn may survive before recovery gives up (#378, P4). */
+  readonly maxRecoveryAttempts?: number
   /**
    * Called when a pass rejects, and when a background tick fails. Never throws.
    *
@@ -201,6 +232,8 @@ export class PostgresPartitionScheduler implements SessionScheduler {
 
   readonly #sweepMs: number
 
+  readonly #balanceStabilityMs: number
+
   readonly #drainTimeoutMs: number
 
   readonly #onError: ((error: unknown, sessionId: SessionId | undefined) => void) | undefined
@@ -243,6 +276,18 @@ export class PostgresPartitionScheduler implements SessionScheduler {
    */
   #liveMembers = 1
 
+  /**
+   * The membership last seen, as a stable key, and when it last changed (#378, P3).
+   *
+   * A rolling update makes the membership change twice in quick succession — the surge pod's
+   * join and the replaced pod's leave — and the first change alone is not a reason to move
+   * partitions. `#releaseSurplus` holds the surplus until this pair says the membership has
+   * been unchanged for `#balanceStabilityMs`.
+   */
+  #memberKey: string | null = null
+
+  #membersStableSince = 0
+
   /** Where a scan starts, so instances do not all walk the space in the same order. */
   #cursor: number
 
@@ -268,6 +313,7 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     this.#ttlMs = options.ttlMs ?? DEFAULT_LEASE_TTL_MS
     this.#heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
     this.#sweepMs = options.sweepMs ?? DEFAULT_SWEEP_MS
+    this.#balanceStabilityMs = options.balanceStabilityMs ?? DEFAULT_BALANCE_STABILITY_MS
     this.#drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS
     this.#onError = options.onError
     this.#onNotice = options.onNotice
@@ -279,6 +325,11 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     }
     if (!Number.isFinite(this.#heartbeatMs) || this.#heartbeatMs <= 0) {
       throw new RangeError(`heartbeatMs must be a positive number, got ${this.#heartbeatMs}`)
+    }
+    if (!Number.isFinite(this.#balanceStabilityMs) || this.#balanceStabilityMs < 0) {
+      throw new RangeError(
+        `balanceStabilityMs must be a non-negative number, got ${this.#balanceStabilityMs}`,
+      )
     }
     if (this.#heartbeatMs >= this.#ttlMs) {
       // A heartbeat slower than the lease means the lease lapses between two renewals, which
@@ -309,6 +360,9 @@ export class PostgresPartitionScheduler implements SessionScheduler {
             ? {}
             : { clearThreshold: options.clearThreshold }),
           ...(options.todoNudge === undefined ? {} : { todoNudge: options.todoNudge }),
+          ...(options.maxRecoveryAttempts === undefined
+            ? {}
+            : { maxRecoveryAttempts: options.maxRecoveryAttempts }),
         }),
       ...(options.maxConcurrentSessions === undefined
         ? {}
@@ -505,6 +559,16 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     // has just announced itself, so the list contains it, and the share divides by at least
     // the one member there always is.
     this.#liveMembers = Math.max(1, members.length)
+    // A join or a leave restarts the stability window (#378, P3). Comparing the whole list —
+    // `listLiveInstances` answers it in instance-id order — is what makes "same members" mean
+    // the same *set*, not merely a count: one pod replacing another with the same count is
+    // still a change. The clock is the same wall clock the release cooling uses; a timestamp is
+    // enough here, because a window is what is being measured, not an instant anybody reads.
+    const memberKey = members.join('\u0000')
+    if (memberKey !== this.#memberKey) {
+      this.#memberKey = memberKey
+      this.#membersStableSince = Date.now()
+    }
   }
 
   /** Extend every lease; one that cannot be extended is not ours any more. */
@@ -645,6 +709,15 @@ export class PostgresPartitionScheduler implements SessionScheduler {
   #releaseSurplus(): void {
     let surplus = this.#kept() - this.#share()
     if (surplus <= 0) {
+      return
+    }
+    // A join is not yet a reason to move partitions (#378, P3). In a rolling update the surge
+    // pod's join shrinks every old member's share and the replaced pod's leave a moment later
+    // grows it back; releasing on the join would move those partitions twice, the first time
+    // for nothing. Wait until the membership has been unchanged for the stability window. A
+    // newcomer still takes free and expired partitions at once, so the leave's released
+    // partitions go to it without waiting for this.
+    if (!this.#membershipStable()) {
       return
     }
     // Newest first: the partitions this instance took last are the ones it needs least.
@@ -813,6 +886,15 @@ export class PostgresPartitionScheduler implements SessionScheduler {
     return Math.max(1, Math.ceil(this.#partitions / this.#liveMembers))
   }
 
+  /**
+   * Whether the membership has gone unchanged long enough to trust a surplus (#378, P3).
+   *
+   * `0` disables the debounce: the first heartbeat after a join releases, exactly as P2 did.
+   */
+  #membershipStable(): boolean {
+    return Date.now() - this.#membersStableSince >= this.#balanceStabilityMs
+  }
+
   /** The fence and stop signal a pass for `sessionId` runs under — right now, not at request. */
   #contextFor(sessionId: SessionId): PassContext {
     const partition = this.partitionOf(sessionId)
@@ -910,6 +992,12 @@ export class PostgresPartitionScheduler implements SessionScheduler {
       })
     }, this.#heartbeatMs)
     renew.unref?.()
+    // A heartbeat's scan may already be in flight, with an `acquirePartition` or a recovery
+    // round trip still to land. `#adopt` releases anything a stopping instance acquired, but
+    // only once it gets control — and `stop()`'s caller closes the store (or, in a test,
+    // empties the tables) as soon as it answers. Let the scan finish first, so "stopped" means
+    // no scheduler statement is still running.
+    await this.#refreshing?.catch(() => {})
     const held = [...this.#held.values()]
     try {
       // The membership row goes first: peers stop counting this instance the moment it is

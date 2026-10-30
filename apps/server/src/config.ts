@@ -5,6 +5,7 @@ import { hostname } from 'node:os'
 import {
   DEFAULT_CLEAR_THRESHOLD,
   DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_MAX_RECOVERY_ATTEMPTS,
   DEFAULT_MAX_TOOL_STEPS,
 } from '@openharness/brain'
 import {
@@ -19,7 +20,12 @@ import type { TracingMode } from './observability/tracing'
 
 import { DEFAULT_COMPACT_INTERVAL_MS, DEFAULT_DELTA_RETENTION_MS } from './compaction'
 import { MOCK_MODEL_ENV_VALUE } from './mock-model'
-import { DEFAULT_HEARTBEAT_MS, DEFAULT_LEASE_TTL_MS, DEFAULT_SWEEP_MS } from './partition-scheduler'
+import {
+  DEFAULT_BALANCE_STABILITY_MS,
+  DEFAULT_HEARTBEAT_MS,
+  DEFAULT_LEASE_TTL_MS,
+  DEFAULT_SWEEP_MS,
+} from './partition-scheduler'
 import { DEFAULT_DRAIN_TIMEOUT_MS } from './runner'
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
 
@@ -59,11 +65,13 @@ import { DEFAULT_MAX_CONCURRENT_SESSIONS } from './scheduler'
  * | `OPENHARNESS_LEASE_TTL_MS`          | how long a partition lease lasts; `30000` by default             |
  * | `OPENHARNESS_HEARTBEAT_MS`          | how often leases are renewed; `10000` by default                 |
  * | `OPENHARNESS_SWEEP_MS`              | how often owned partitions are re-scanned; `60000` by default    |
+ * | `OPENHARNESS_BALANCE_STABILITY_MS`  | how long membership must be unchanged before surplus is released; `30000` (#378, P3) |
  * | `OPENHARNESS_DELTA_RETENTION_MS`    | how long superseded chunks are kept before compaction deletes them; `3600000` |
  * | `OPENHARNESS_COMPACT_INTERVAL_MS`   | how often compaction runs; `300000` by default, `0` disables it  |
  * | `OPENHARNESS_COMPACTION_THRESHOLD`  | the share of the chat model's context budget at which history is summarized; `0.7` (epic #277, C2) |
  * | `OPENHARNESS_CLEAR_THRESHOLD`       | the share of the chat model's budget at which old tool results are cleared; `0.5` (#331)       |
  * | `OPENHARNESS_TODO_NUDGE`            | `1` nudges the model to write a todo list before its first tool call; off by default (#331)     |
+ * | `OPENHARNESS_MAX_RECOVERY_ATTEMPTS` | how many times a crashed/handed-off turn may be taken over before it fails; `3` (#378, P4)       |
  * | `OPENHARNESS_LOG_FORMAT`            | `text` (default, the readable one-line format) or `json` (Cloud Logging) (#158) |
  * | `OPENHARNESS_TRACING`               | `off` (default) or `cloud-trace`: export spans to Cloud Trace (#158) |
  * | `OPENHARNESS_TRACE_SAMPLE_RATE`     | the fraction of traces kept when tracing is on; `0.1` (#158)      |
@@ -107,6 +115,7 @@ export const ENV_VARS = {
   microsoftTenantId: 'MICROSOFT_TENANT_ID',
   port: 'PORT',
   testModel: 'OPENHARNESS_TEST_MODEL',
+  testToolExecutionLog: 'OPENHARNESS_TEST_TOOL_EXECUTION_LOG',
   webDir: 'OPENHARNESS_WEB_DIR',
   allowPrivateProviderUrls: 'OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS',
   trustedProxyHops: 'OPENHARNESS_TRUSTED_PROXY_HOPS',
@@ -118,12 +127,14 @@ export const ENV_VARS = {
   leaseTtlMs: 'OPENHARNESS_LEASE_TTL_MS',
   heartbeatMs: 'OPENHARNESS_HEARTBEAT_MS',
   sweepMs: 'OPENHARNESS_SWEEP_MS',
+  balanceStabilityMs: 'OPENHARNESS_BALANCE_STABILITY_MS',
   deltaRetentionMs: 'OPENHARNESS_DELTA_RETENTION_MS',
   compactIntervalMs: 'OPENHARNESS_COMPACT_INTERVAL_MS',
   compactionThreshold: 'OPENHARNESS_COMPACTION_THRESHOLD',
   clearThreshold: 'OPENHARNESS_CLEAR_THRESHOLD',
   todoNudge: 'OPENHARNESS_TODO_NUDGE',
   maxToolSteps: 'OPENHARNESS_MAX_TOOL_STEPS',
+  maxRecoveryAttempts: 'OPENHARNESS_MAX_RECOVERY_ATTEMPTS',
   maxAgentDepth: 'OPENHARNESS_MAX_AGENT_DEPTH',
   maxLiveTasks: 'OPENHARNESS_MAX_LIVE_TASKS',
   logFormat: 'OPENHARNESS_LOG_FORMAT',
@@ -173,6 +184,17 @@ export interface ServerConfig {
     | undefined
   /** The value of `OPENHARNESS_TEST_MODEL`, if any. */
   readonly testModel: string | undefined
+  /**
+   * `OPENHARNESS_TEST_TOOL_EXECUTION_LOG`: a file the mock model's slow test tool appends one
+   * line to per execution — and the variable that **registers** that tool.
+   *
+   * A test hook and nothing else — it exists so an e2e test can prove a tool whose owner was
+   * killed was **not** run a second time by the recovering brain. Setting it is what puts
+   * `echo_slow` in the process's registry, so only the crash suite's mock servers offer it;
+   * every other mock server's offer is unchanged. It is only read when
+   * `OPENHARNESS_TEST_MODEL=mock`, and a deployment never sets it.
+   */
+  readonly testToolExecutionLog: string | undefined
   /** A directory of built web assets to serve at `/`. */
   readonly webDir: string | undefined
   /**
@@ -207,6 +229,13 @@ export interface ServerConfig {
   readonly heartbeatMs: number
   /** How often owned partitions are re-scanned for work a signal may have missed. */
   readonly sweepMs: number
+  /**
+   * How long the live membership must be unchanged before surplus partitions are released
+   * (#378, P3). The default covers the gap between a surge pod becoming ready and the old pod
+   * receiving `SIGTERM` in a rolling update, so the join's share shrink is undone by the leave
+   * instead of moving partitions twice; `0` releases on the next heartbeat.
+   */
+  readonly balanceStabilityMs: number
   /** How long superseded chunks are kept before compaction deletes them. */
   readonly deltaRetentionMs: number
   /** How often the compaction job runs; `0` disables it. */
@@ -251,6 +280,18 @@ export interface ServerConfig {
    * short of a runaway — and a value below 1 fails the boot.
    */
   readonly maxToolSteps: number
+  /**
+   * `OPENHARNESS_MAX_RECOVERY_ATTEMPTS`: how many times one turn may be taken over and re-run
+   * before recovery gives up (#378, P4).
+   *
+   * A crashed turn is closed `brain_lost` and re-run by whichever instance takes its partition
+   * over. A turn that takes every owner down with it — a poison input — would otherwise loop
+   * for ever. Past this many takeovers with no completed step in between, the brain writes a
+   * terminal `recovery_exhausted_error` and the session goes idle, so the user sees the failure
+   * and can send a new message. The default is the brain's (`DEFAULT_MAX_RECOVERY_ATTEMPTS`,
+   * 3); a value below 1 fails the boot, because it would make every inherited turn fail at once.
+   */
+  readonly maxRecoveryAttempts: number
   /**
    * `OPENHARNESS_MAX_AGENT_DEPTH`: how deep a tree of helpers may get (epic #340, S6; #344).
    *
@@ -444,6 +485,7 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     github,
     microsoft,
     testModel: readString(env, ENV_VARS.testModel),
+    testToolExecutionLog: readString(env, ENV_VARS.testToolExecutionLog),
     webDir: readString(env, ENV_VARS.webDir),
     allowPrivateProviderUrls: readFlag(env, ENV_VARS.allowPrivateProviderUrls),
     // Zero is meaningful — forwarding headers not trusted at all — so the bound is what
@@ -466,6 +508,15 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     leaseTtlMs,
     heartbeatMs,
     sweepMs: readInteger(env, ENV_VARS.sweepMs, DEFAULT_SWEEP_MS, { min: 1 }),
+    // Zero is meaningful: release surplus on the first heartbeat after a join, the pre-P3
+    // behaviour — useful for a deployment that deliberately wants the fastest possible
+    // rebalance and does not run rolling updates.
+    balanceStabilityMs: readInteger(
+      env,
+      ENV_VARS.balanceStabilityMs,
+      DEFAULT_BALANCE_STABILITY_MS,
+      { min: 0 },
+    ),
     // Zero is meaningful for both: no retention window at all (delete as soon as the range is
     // superseded), and no compaction job at all.
     deltaRetentionMs: readInteger(env, ENV_VARS.deltaRetentionMs, DEFAULT_DELTA_RETENTION_MS, {
@@ -494,6 +545,15 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     // The tool loop's budget (epic #303, X2): how many model requests one turn may make. At
     // least one — a turn that may make no request could not answer a message at all.
     maxToolSteps: readInteger(env, ENV_VARS.maxToolSteps, DEFAULT_MAX_TOOL_STEPS, { min: 1 }),
+    // The recovery cap (#378, P4): how many takeovers one turn may survive before it is ended
+    // with a terminal error. At least one, because zero would fail every inherited turn before
+    // giving it a single chance to make progress.
+    maxRecoveryAttempts: readInteger(
+      env,
+      ENV_VARS.maxRecoveryAttempts,
+      DEFAULT_MAX_RECOVERY_ATTEMPTS,
+      { min: 1 },
+    ),
     // The subagent limits (epic #340, S6; #344). A depth of at least one keeps the tools on the
     // chat a person started, and a live cap of at least one lets a chat start a helper at all.
     // The depth is capped at the tree walks' own ceiling (#361): a deployment allowed to build a
@@ -538,7 +598,8 @@ export function describeConfig(config: ServerConfig): string[] {
     config.scheduler === 'postgres'
       ? `scheduler: postgres partitions (instance ${config.instanceId}, ` +
           `${config.partitions} partitions, lease ${config.leaseTtlMs}ms, ` +
-          `heartbeat ${config.heartbeatMs}ms, sweep ${config.sweepMs}ms)`
+          `heartbeat ${config.heartbeatMs}ms, sweep ${config.sweepMs}ms, ` +
+          `balance stability ${config.balanceStabilityMs}ms)`
       : 'scheduler: local (this process owns every session)',
   )
   // Which key provider wraps users' credentials (#150): a name, and for Cloud KMS the key's

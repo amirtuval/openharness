@@ -456,6 +456,36 @@ describe('resuming after a disconnect', () => {
     expect(mock.requests.length).toBeGreaterThanOrEqual(2)
   })
 
+  it('reports the connection transitions a screen draws “Reconnecting…” from (#378, P4)', async () => {
+    vi.useFakeTimers()
+    const { client } = clientWith((_request, call) =>
+      call === 0 ? sseResponse(sseLines(TURN.slice(0, 1))) : sseResponse(sseLines(TURN.slice(1))),
+    )
+    const controller = new AbortController()
+    const states: { state: string; attempt?: number }[] = []
+
+    const iterating = (async () => {
+      for await (const event of client.sessions.events.stream(SESSION_ID, {
+        signal: controller.signal,
+        onConnection: (connection) => {
+          states.push(connection)
+        },
+      })) {
+        if (event.type === EVENT_TYPES.sessionStatusIdle) {
+          controller.abort()
+        }
+      }
+    })()
+    await vi.advanceTimersByTimeAsync(1000)
+    await iterating
+
+    // One stream opened, then it ended and the loop reported the reconnect before backing off;
+    // the second connection opened. No transition after the abort.
+    expect(states[0]).toEqual({ state: 'connected' })
+    expect(states[1]).toEqual({ state: 'reconnecting', attempt: 0 })
+    expect(states.at(-1)).toEqual({ state: 'connected' })
+  })
+
   it('keeps retrying while the server is unavailable', async () => {
     vi.useFakeTimers()
     const { client, mock } = clientWith((_request, call) =>

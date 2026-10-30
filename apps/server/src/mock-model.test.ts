@@ -20,12 +20,15 @@ import type { RetryPolicy } from '@openharness/brain'
 
 import { createBundledRegistry } from './catalog/registry'
 import { LocalScheduler } from './scheduler'
-import { createTurnTools, TEST_TOOL_NAME } from './tools'
+import { createTurnTools, TEST_SLOW_TOOL_NAME, TEST_TOOL_NAME } from './tools'
 import {
   MESSAGE_PARENT_MARKER,
   MOCK_AGENT_MARKER,
   MOCK_AGENT_MESSAGE_MARKER,
   MOCK_AGENT_STOP_MARKER,
+  MOCK_CRASH_MARKER,
+  MOCK_CRASH_TEXT,
+  MOCK_DELAYED_TOOL_MARKER,
   MOCK_ECHO_CHUNKS,
   MOCK_HOLD_MARKER,
   MOCK_HOLD_TEXT,
@@ -267,6 +270,31 @@ describe('__slow_tool__', () => {
     // the ordering, so what a test sees is a slow turn that calls a tool.
     expect(planFor(MOCK_SLOW_TOOL_MARKER, 1).toolCalls).toHaveLength(1)
     expect(planFor(MOCK_SLOW_MARKER, 1).toolCalls).toBeUndefined()
+  })
+})
+
+describe('__delayed_tool__ (#378, P4)', () => {
+  it('calls the slow test tool with the delay it names', () => {
+    const plan = planFor(`${MOCK_DELAYED_TOOL_MARKER} 1234 keep me`, 1)
+    expect(plan.toolCalls).toEqual([
+      { name: TEST_SLOW_TOOL_NAME, input: { text: 'keep me', delay_ms: 1234 } },
+    ])
+  })
+
+  it('falls back to the default delay and the whole argument when no number is given', () => {
+    const plan = planFor(`${MOCK_DELAYED_TOOL_MARKER} keep me`, 1)
+    expect(plan.toolCalls?.[0]?.input).toEqual({ text: 'keep me' })
+  })
+})
+
+describe('__crash_owner__ (#378, P4)', () => {
+  it('is a plan that streams one chunk and then kills the process', () => {
+    const plan = planFor(`${MOCK_CRASH_MARKER} anything`, 1)
+    expect(plan.chunks).toEqual([MOCK_CRASH_TEXT])
+    expect(plan.crash).toBe(true)
+    // Its output is deliberately not a provider error: the process dies before the request can
+    // report one, which is what leaves the span open for the next owner to close.
+    expect(plan.error).toBeUndefined()
   })
 })
 
