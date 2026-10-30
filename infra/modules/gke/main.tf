@@ -3,8 +3,7 @@
 
 # A custom, least-privilege node service account per cluster, rather than the
 # Compute Engine default account. Its email is predictable
-# (<id>@<project>.iam.gserviceaccount.com), which is how staging takes
-# production's account by name to grant it registry read.
+# (<id>@<project>.iam.gserviceaccount.com).
 resource "google_service_account" "nodes" {
   project      = var.project_id
   account_id   = var.node_service_account_id
@@ -49,6 +48,27 @@ resource "google_container_cluster" "cluster" {
   # SecretProviderClass it creates (epic #148 D5).
   secret_manager_config {
     enabled = true
+  }
+
+  # Free system metrics only. Left unset, Autopilot also turns on the
+  # kube-state-metrics packages (pods, deployments, HPA, storage, …), cAdvisor,
+  # kubelet, DCGM and advanced datapath observability — all of them Managed
+  # Prometheus samples, billed per sample: about 300M samples, ~$20, a month on
+  # one idle two-pod cluster. Nothing reads them: the alert policies in
+  # infra/modules/monitoring use kubernetes.io/, cloudsql.googleapis.com/,
+  # load-balancer and uptime metrics only, and the HPA reads metrics-server.
+  # Managed collection itself stays on — it costs nothing without samples.
+  monitoring_config {
+    enable_components = ["SYSTEM_COMPONENTS"]
+
+    managed_prometheus {
+      enabled = true
+    }
+
+    advanced_datapath_observability_config {
+      enable_metrics = false
+      enable_relay   = false
+    }
   }
 
   # Gateway API (#159). The chart renders a Gateway, HTTPRoutes and the

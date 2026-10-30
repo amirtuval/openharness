@@ -490,13 +490,11 @@ migration: KMS keeps old versions for `Decrypt` and the next `Encrypt` picks the
 are turned on _between_ deploys.** The `helm` and `kubernetes` providers are configured from a
 cluster endpoint that does not exist on a first plan, so the workflow targets the services, VPC,
 cluster and registry first — the registry because the image push needs it and Terraform creates it
-— and then runs the full apply; every later deploy is a single apply. Production's first apply is
-**expected** to fail with `ImagePullBackOff`: its node service account does not exist until that
-apply and staging has not yet granted it registry read, so the release rolls itself back and the
-remaining steps finish the bootstrap, with `TF_PRODUCTION_NODE_SA` staying empty until then because
-naming a member GCP does not know yet fails the apply. Staging must be applied before production
-for a real dependency: staging's zone exports the name servers production writes, and staging holds
-the one Artifact Registry repository every environment pulls from. All three provider secret
+— and then runs the full apply; every later deploy is a single apply. (With two environments, a
+second project pulling the first one's images could not be granted registry read until its own
+node service account existed — GCP rejects an IAM member that does not exist — so its first deploy
+was expected to fail with `ImagePullBackOff`; that bootstrap went away with the second
+environment.) All three provider secret
 containers are created unconditionally and empty on the first deploy — doing it the other way round
 meant the turning-on deploy created an _empty_ secret, and a secret with no version blocks the pod,
 so that deploy failed and rolled back
@@ -504,13 +502,13 @@ so that deploy failed and rolled back
 
 **`atomic = true, cleanup_on_fail = true` changes how you debug a failed deploy, and a rollback does
 not revert Terraform state.** A failed install is uninstalled and a failed upgrade returns to the
-last good revision, so "look at the pods" is no longer a diagnosis — they are gone. Both deploy
-workflows therefore run a Rollout diagnostics step on failure that prints `helm history`, pods,
+last good revision, so "look at the pods" is no longer a diagnosis — they are gone. The deploy
+workflow therefore runs a Rollout diagnostics step on failure that prints `helm history`, pods,
 events (which survive about an hour) and Cloud Logging (which outlives the rollback entirely),
-never a secret value. In the release train the `production` tag is a moving pointer that rollback
-re-points at an earlier SHA, and a schema migration is not undone by an older image — so a rollback
-means "run the previous server build" and a migration fix has to go forward. Production's GCP
-project **ID** is `openharness-510710`; `openharness` is only its display name.
+never a secret value. A rollback is a deploy of an earlier SHA, and a schema migration is not
+undone by an older image — so a rollback means "run the previous server build" and a migration fix
+has to go forward. The domain's project **ID** is `openharness-510710`; `openharness` is only its
+display name.
 
 **Some cloud-side values are dictated by somebody else's validation rules, and a smoke test that
 asserts "not 200" proves nothing.** GitHub rejects an Actions configuration variable whose name
@@ -519,12 +517,46 @@ budget's amount is in the **billing account's** currency (ILS here) because the 
 any other with a 400, and `TF_BILLING_ACCOUNT_ID` is the bare ID with no `billingAccounts/` prefix,
 which the provider adds itself. Every Terraform workflow value is repository-level, because the
 plan job runs outside any GitHub environment and cannot read the environment-scoped copies — the
-`_STAGING`/`_PRODUCTION` suffix is an environment marker, not a scope. The deploy smoke test asserts
+`_STAGING` suffix is an environment marker, not a scope. The deploy smoke test asserts
 `/v1/sessions` returns exactly **401**, because `/health` is served whether or not the database is
 reachable: a deployment whose `database-url` secret is wrong passes `/health` and fails
 `/v1/sessions`. `curl -k` is deliberately absent, so a certificate that does not validate is a
-failure this catches, and a first production deploy that fails this way is the bootstrap rather
-than a broken release — the workflow prints the exact `gh variable set TF_PRODUCTION_NODE_SA` fix.
+failure this catches.
+
+**A demo's GCP bill is mostly fixed cost, and two environments double the fixed part while the
+free tier covers only one of them.** Two environments cost about $300 a month while serving almost
+no traffic: each had a GKE cluster fee ($73 — the billing account's monthly free-tier credit covers
+exactly one Autopilot or zonal cluster), a global load balancer ($18 in forwarding rules), two
+in-use external IPs, Cloud NAT and a database. Production was retired and the staging root took over
+`app.oharness.dev`, which by itself makes the remaining cluster free; the rest came from sizing
+(October 2026, [`DEPLOYMENT.md`](./DEPLOYMENT.md#cost)). The domain's registration and parent zone
+stay in the old project — moving a Cloud Domains registration's zone is a DNS migration for nothing
+— and the host is delegated to the environment's own zone with one NS record.
+
+**Autopilot bills metrics you never asked for.** Left unset, an Autopilot cluster's
+`monitoring_config` turns on the kube-state-metrics packages, cAdvisor, kubelet, DCGM and advanced
+datapath observability — Managed Prometheus samples, about 300 million a month (~$20) on one idle
+two-pod cluster, read by nothing here. They show up only in `monitoring.googleapis.com/billing/
+samples_ingested` under the `prometheus.googleapis.com` domain, not as a line anyone would
+recognise. `infra/modules/gke` now pins `enable_components = ["SYSTEM_COMPONENTS"]` (free) and turns
+datapath metrics off; the alert policies use only `kubernetes.io/`, Cloud SQL, load-balancer and
+uptime metrics, and the HPA reads metrics-server.
+
+**"250m / 512Mi is Autopilot's floor" stopped being true, and the chart said it anyway.** On a
+cluster that supports bursting (created on 1.29+ — these run 1.35) Autopilot's minimum is 50m / 52Mi
+per **pod**, and requests are billed as written: the 100m Cloud SQL proxy sidecar was never rounded
+up (no `autopilot.gke.io/resource-adjustment` annotation). The pods idled at ~2m CPU and ~130Mi
+against 350m / 640Mi requested, two of them; one pod at 150m / 448Mi costs a quarter as much. A
+single replica also needs the PodDisruptionBudget off — `minAvailable: 1` over one pod forbids every
+voluntary eviction, so a node drain waits out GKE's one-hour PDB grace instead of moving the pod.
+
+**A resource another resource refers to by a generated id has to be replaced create-before-destroy,
+or the replacement is refused.** Moving the host to `app.oharness.dev` replaced the uptime check
+(its host is immutable), and Terraform's default order deletes first — which Cloud Monitoring
+rejects with a bare 400, "please ensure all associated Alert Policies are deleted", because the
+uptime alert policy's filter names the check's id. Everything else in that apply had already
+landed, so the deploy failed on the last resource. The check is now `create_before_destroy`, so the
+policy moves to the new check before the old one is deleted ([#397](https://github.com/amirtuval/openharness/issues/397)).
 
 **An alert that is too broad is an alert nobody reads, and an empty alert email is a supported
 state.** Autopilot's `OPTIMIZE_UTILIZATION` profile replaces nodes often and GKE's own DaemonSet
@@ -544,8 +576,8 @@ ADC and refreshes its own OAuth token, which is what keeps a long-running pod ex
 header cannot be refreshed. Load-balancer request logging is deliberately off — the most expensive
 thing in the picture, and the server's own logs already carry path and status joined to the trace.
 And the self-host escape hatch, `OPENHARNESS_ALLOW_PRIVATE_PROVIDER_URLS`, is set nowhere in the
-infrastructure on purpose: it applies only to the `openai_compatible` credential type, and staging
-and production run behind a public load balancer with open sign-in, where the SSRF guard is doing
+infrastructure on purpose: it applies only to the `openai_compatible` credential type, and the
+deployment runs behind a public load balancer with open sign-in, where the SSRF guard is doing
 its job ([#249](https://github.com/amirtuval/openharness/issues/249)).
 
 ## Providers and models

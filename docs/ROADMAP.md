@@ -27,8 +27,8 @@ _Last updated: 2026-10-17._
   are done (closed 2026-10-04): New chat picks a model, sessions carry their own model, and
   agents are optional.
 - **Deployment and CI/CD** ([epic #148](https://github.com/amirtuval/openharness/issues/148)) is
-  done (closed 2026-10-07): staging at <https://staging.oharness.dev> deploys from `main`,
-  production at <https://app.oharness.dev> deploys from the `production` tag, and the CLI is on
+  done (closed 2026-10-07): <https://app.oharness.dev> deploys from `main` (one environment
+  since October 2026 — staging and production were merged to cut cost), and the CLI is on
   npm as [`@openh/cli`](https://www.npmjs.com/package/@openh/cli).
 - **Flaky server tests** ([#43](https://github.com/amirtuval/openharness/issues/43)) are fixed.
 - **Chat and TUI UX, pass 1** ([epic #201](https://github.com/amirtuval/openharness/issues/201)) is
@@ -122,30 +122,31 @@ is in [`DEPLOYMENT.md`](./DEPLOYMENT.md) and [`RELEASING.md`](./RELEASING.md).
 
 **What shipped:**
 
-- **One GCP project per environment** (staging and production), with Terraform modules and a
-  Helm chart (`infra/`, `charts/openharness`). Each project has an Autopilot GKE cluster,
+- **One environment, in one GCP project,** serving `app.oharness.dev`, with Terraform modules
+  and a Helm chart (`infra/`, `charts/openharness`). It was built as two — staging and
+  production — and production was retired in October 2026 to cut cost
+  ([`DEPLOYMENT.md`](./DEPLOYMENT.md#one-environment-and-why)). The project has an Autopilot GKE cluster,
   Cloud SQL for Postgres behind the Cloud SQL Auth Proxy, Secret Manager, and Cloud KMS for
   the vault's master key. The app is exposed through a GKE Gateway with Certificate Manager
   and Cloud CDN.
 - **CI identity through Workload Identity Federation,** with least-privilege deploy and plan
   accounts and no service-account keys.
-- **Deploys:** staging deploys from `main` after CI passes; production deploys from the
-  `production` tag and reuses the image staging built. PRs that touch the infrastructure run
-  `terraform plan`.
+- **Deploys:** every commit on `main` deploys after CI passes. PRs that touch the
+  infrastructure run `terraform plan`.
 - **Behind the load balancer:** the client IP is resolved from the trusted hop of
   `x-forwarded-for`, so the sign-in rate limit keys per client; there are readiness probes, and
   CDN cache headers (immutable assets, `no-store` on everything dynamic).
 - **Observability:** JSON logs, Cloud Trace, uptime checks and alerts, and a budget.
-- **OAuth apps per environment** for Google, GitHub and Microsoft.
+- **OAuth apps** for Google, GitHub and Microsoft.
 - **The CLI on npm** as `@openh/cli` (npm refused the unscoped `openharness` as too close to
   `open-harness`), published by a manual workflow through trusted publishing with provenance.
-  It defaults to production and updates itself in the background.
+  It defaults to `app.oharness.dev` and updates itself in the background.
 
 **Follow-ups:**
 
-- run the e2e and QA suites (`e2e/qa`) against staging;
+- run the e2e and QA suites (`e2e/qa`) against the deployment;
 - Cloud Armor in front of the load balancer;
-- Cloud SQL high availability for production;
+- Cloud SQL high availability;
 - a preview environment per PR;
 - shared rate-limit storage: the counters are per instance today, so the effective limit grows
   with the replica count.

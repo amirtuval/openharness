@@ -21,7 +21,7 @@
 #                       different failure and must not pass.
 #
 # Usage:
-#   .github/scripts/smoke-test.sh https://staging.oharness.dev [timeout-seconds]
+#   .github/scripts/smoke-test.sh https://app.oharness.dev [timeout-seconds]
 #
 # Exit status: 0 once every probe passes, 1 on the deadline. Writes a table of the last
 # attempt to the GitHub step summary when it runs under Actions.

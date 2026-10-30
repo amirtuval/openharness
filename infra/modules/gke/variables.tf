@@ -36,7 +36,7 @@ variable "services_range_name" {
 }
 
 variable "node_service_account_id" {
-  description = "Account ID of the custom node service account. Its email is <id>@<project>.iam.gserviceaccount.com — staging names production's account with exactly this value."
+  description = "Account ID of the custom node service account. Its email is <id>@<project>.iam.gserviceaccount.com."
   type        = string
   default     = "gke-nodes"
 
@@ -75,7 +75,7 @@ variable "master_ipv4_cidr_block" {
 }
 
 variable "deletion_protection" {
-  description = "Block Terraform from destroying the cluster. false in staging, true in production."
+  description = "Block Terraform from destroying the cluster."
   type        = bool
   default     = true
 }
