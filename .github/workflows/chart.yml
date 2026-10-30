@@ -43,9 +43,11 @@ jobs:
       - name: Lint the chart
         run: helm lint charts/openharness
 
-      # The chart runs 2–4 pods, so SCHEDULER=local — the server's own default — is safe only
-      # where one pod can run. `values.yaml` defaults it to postgres; this proves the template
-      # helper still refuses to render local with the chart's default replicaCount/HPA (#378).
+      # The chart's own defaults run more than one pod (replicaCount 2, HPA to 4), and
+      # openharness's environment runs one replica with the HPA allowed to reach two — so
+      # SCHEDULER=local, the server's own default, is safe only where one pod can run.
+      # `values.yaml` defaults it to postgres; this proves the template helper still refuses to
+      # render local with the chart's default replicaCount/HPA (#378).
       - name: Refuse SCHEDULER=local on more than one pod
         run: |
           if helm template openharness charts/openharness \
