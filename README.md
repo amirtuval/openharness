@@ -252,6 +252,23 @@ breadcrumb back up. Helpers may start helpers, bounded by a nesting depth and a 
 deployment sets. The four subagent calls take **allow** or **deny** and never `ask` — a task is
 drawn as a card, so there is no call line for a client to pause on.
 
+**A chat can use skills you import from git** (epic #349). A **skill** is a folder of
+instructions in the open Agent Skills format. Point the import at a public git URL — a
+collection repository, or a folder URL inside one, with an optional branch, tag or commit —
+and a preview lists every `SKILL.md` it finds with its description, its files and its whole
+text, so you pick the ones to import; nothing is read from git afterwards, because a skill is
+a snapshot. **Refresh** clones the same source again and shows what changed — files added,
+removed and changed, and the `SKILL.md` diff — and replaces the snapshot only when you
+confirm. The model sees a listing of the skills the chat has, by name and description, and
+loads one on demand, reading its reference files as it needs them; scripts are visible as
+text and nothing runs them. A skill is also a `/` command in the web app and in `oh` —
+`/name arguments`, with `$ARGUMENTS` substituted and the result stored in the chat's log —
+and `oh skills` lists, imports, refreshes, enables and removes them. A mode turns skills on
+or off for the chats that follow it, with a per-mode default for the ones it does not name
+(`follow`, `off` as an allowlist, or `on`), so a subagent type can carry only certain skills.
+A skill is your own guidance and never grants a permission: `allowed-tools` is shown, not
+obeyed.
+
 The web app and `oh` speak to the server through the same client
 ([`packages/client`](./packages/client/AGENTS.md)), so a behaviour one of them has, the other
 has too.
