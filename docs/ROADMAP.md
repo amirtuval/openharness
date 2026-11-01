@@ -7,7 +7,7 @@ plan between phases.
 For a survey of what other harnesses offer (Claude Code, Managed Agents, OpenCode, Codex, pi),
 see the [harness feature inventory](./research/harness-features.md).
 
-_Last updated: 2026-10-17._
+_Last updated: 2026-11-01._
 
 ## Where we are
 
@@ -29,7 +29,10 @@ _Last updated: 2026-10-17._
 - **Deployment and CI/CD** ([epic #148](https://github.com/amirtuval/openharness/issues/148)) is
   done (closed 2026-10-07): <https://app.oharness.dev> deploys from `main` (one environment
   since October 2026 — staging and production were merged to cut cost), and the CLI is on
-  npm as [`@openh/cli`](https://www.npmjs.com/package/@openh/cli).
+  npm as [`@openh/cli`](https://www.npmjs.com/package/@openh/cli). A deploy now hands a
+  running turn to another server instead of interrupting it
+  ([#378](https://github.com/amirtuval/openharness/issues/378);
+  [docs/DEPLOYMENT.md](./DEPLOYMENT.md)).
 - **Flaky server tests** ([#43](https://github.com/amirtuval/openharness/issues/43)) are fixed.
 - **Chat and TUI UX, pass 1** ([epic #201](https://github.com/amirtuval/openharness/issues/201)) is
   done (closed 2026-10-08, PR #225).
@@ -434,8 +437,9 @@ and they arrive with the sandbox.
   - SDKs in more languages.
 - **Session features:** rename, archive or delete, fork or branch (#46 does not assume a linear
   log), export and share.
-- **Extensibility:** skills (epic #349; they replace custom slash commands), custom agents, hooks,
-  plugins.
+- **Extensibility:** skills — **done**
+  ([epic #349](https://github.com/amirtuval/openharness/issues/349)), replacing custom slash
+  commands; custom agents, hooks and plugins.
 - **Multiple agents:** subagents and background tasks — **done**
   ([epic #340](https://github.com/amirtuval/openharness/issues/340)); the kind a task is beyond
   `subagent` (a sandboxed subprocess, a scheduled job) waits for the sandbox.
